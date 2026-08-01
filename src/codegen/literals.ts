@@ -1213,7 +1213,10 @@ export function objectLiteralTakesStandaloneAnyObjectPath(
   expr: ts.ObjectLiteralExpression,
 ): boolean {
   if (
-    !ctx.standalone ||
+    // (#2542) `ctx.wasi` admitted so the PURE string-index arm below can fire on
+    // the other host-free target; the #1901 any-context arm stays standalone-only,
+    // enforced at the return.
+    !(ctx.standalone || ctx.wasi) ||
     expr.properties.length === 0 ||
     ts.isParameter(expr.parent) ||
     // only data props / spreads / plain-named method shorthand we can build onto
@@ -1276,7 +1279,9 @@ export function objectLiteralTakesStandaloneAnyObjectPath(
   // so diverting its literal to `$Object` would mismatch that struct local.
   const strIndex = ctxTypeNonEmpty ? ctx.checker.getIndexInfoOfType(ctxTypeNonEmpty, ts.IndexKind.String) : undefined;
   const isPureStringIndexContext = !!strIndex && !!ctxTypeNonEmpty && ctxTypeNonEmpty.getProperties().length === 0;
-  return isAnyContextNonEmpty || isPureStringIndexContext;
+  // #1901's any-context arm stays standalone-only (widening it would change every
+  // any-typed literal's lowering under wasi); #2542's index arm covers both.
+  return (ctx.standalone && isAnyContextNonEmpty) || isPureStringIndexContext;
 }
 
 export function compileObjectLiteral(
@@ -1394,10 +1399,11 @@ export function compileObjectLiteral(
     // mutated by runtime string key (`o[k] = v`). Build it as an open `$Object`
     // (same `__new_plain_object` as the any-context arm) so the binding — which
     // resolveWasmType lowers to externref (#2542) — is a real `$Object` the native
-    // `__extern_set`/`__extern_get` service. Standalone-only (the open-object
-    // runtime is emitted only there); gc/host/wasi keep their existing lowering.
+    // `__extern_set`/`__extern_get` service. Host-free targets (standalone AND
+    // wasi — see the #2542-follow-up note in index.ts's resolveWasmType guard);
+    // gc/host keeps its existing lowering, since a JS host services `o[k]` there.
     const isPureStringIndexEmpty =
-      ctx.standalone &&
+      (ctx.standalone || ctx.wasi) &&
       !!ctxType &&
       ctxType.getProperties().length === 0 &&
       !!ctx.checker.getIndexInfoOfType(ctxType, ts.IndexKind.String);
