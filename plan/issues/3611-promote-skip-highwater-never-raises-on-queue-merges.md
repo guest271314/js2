@@ -162,6 +162,87 @@ without this issue the same drift resumes on the next queue merge.)
 7. The README / landing-page standalone number derives from the promoted
    measurement, never from an in-PR estimate.
 
+## Verification 2026-08-01 — still true, and it is 30/30, not intermittent
+
+Re-verified before touching anything. Two of the three claims hold exactly; the third
+(the stated root cause) is **disproved**, and the correct one is different.
+
+### 1. The skip is universal, not occasional — 30 of 30
+
+Audited every `push:main` `Test262 Sharded` run available (30 runs, 2026-07-30 18:17Z →
+2026-07-31 23:47Z, `.tmp/promote-audit.sh`):
+
+| jobs                                         | outcome across all 30 runs |
+| -------------------------------------------- | -------------------------- |
+| `probe merge_group baseline artifact`        | `success` ×30              |
+| `merge shard reports`                        | `success` ×30              |
+| **`promote merged report to main baseline`** | **`skipped` ×30**          |
+
+Actor was `github-merge-queue[bot]` on all 30. So this is not a rate — **the
+high-water raise has not executed on a queue merge in the entire observable window.**
+
+### 2. `refresh-baseline.yml` is STILL `disabled_manually` — the backstop is still gone
+
+`gh api repos/loopdive/js2/actions/workflows/265204741` → `state=disabled_manually`, and
+it is **the only non-active workflow in the repo**. Corroborated independently from the
+record rather than the API: `git log origin/main --grep="scheduled baseline refresh"` is
+**empty** since at least 2026-07-20.
+
+Both rows of this issue's original table are therefore unchanged, seven days on.
+
+### 3. The stated root cause is WRONG — the `if:` is provably TRUE
+
+This issue attributes the skip to the job's `success()`-over-`needs` assumption failing.
+Both direct `needs` are `success` on all 30 runs, so that is not it. Nor is the actor
+guard, and there is a **positive control in the same run** that settles it:
+
+```yaml
+# promote-baseline (SKIPS)
+if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    && github.actor != 'github-actions[bot]' && !(… && inputs.ir_first)
+
+# promote root baseline + cache per-SHA (RUNS, success ×30)
+if: github.event_name == 'push' && github.actor == 'github-merge-queue[bot]'
+```
+
+The second job **runs**, which proves `github.actor == 'github-merge-queue[bot]'` in this
+context — so `github.actor != 'github-actions[bot]'` is TRUE, `event_name == 'push'` is
+TRUE, and the `inputs.ir_first` clause is TRUE on a push. **Every conjunct of
+`promote-baseline`'s `if:` holds, and it skips anyway.** Reading the two `if:`s side by
+side is what settles this; reasoning about either one alone does not.
+
+The timing says where the skip comes from:
+
+```
+23:47:53Z  run created
+23:47:57Z  test262-shard            skipped   (HIT path — matrix green-skipped)
+23:47:58Z  mg-artifact-probe        success
+23:48:04Z  merge shard reports      success   ← ran only because of its own always()
+23:48:04Z  promote merged report    SKIPPED   ← same second, 0 steps, started==completed
+```
+
+`promote-baseline` is skipped in the **same second** `merge-report` resolves, having run
+zero steps. `merge-report` itself only ran because it carries
+`if: always() && …` (line ~932) over a `needs` set whose shards were **skipped**.
+So the skip **propagates through** the `always()` job to any dependent that does not
+itself use a status-check function — the implicit `success()` on `promote-baseline` is
+satisfied and it is skipped regardless.
+
+**Correcting the record matters here**, because acceptance criterion 2 as written
+("correct the `needs`/`if` gating so the documented `success()`-over-`needs` assumption
+holds") points at an assumption that is not the defect. The gating that needs to change
+is the **absence of a status-check function** on `promote-baseline`, and the fix has an
+in-file precedent: `merge-report`, the job directly above it in the same chain, already
+does exactly this and is exactly why it survives.
+
+### Why nothing caught it
+
+The failure is silent **in the permissive direction** — a floor that is too low never
+fires. Combined with the two jobs having confusingly similar names
+(`promote root baseline …` vs `promote merged report to main baseline`), a reader
+skimming the run sees a green `promote …` job and moves on. **One of them succeeded on
+all 30 runs; the other one is the one that carries the raise.**
+
 ## Notes
 
 - Do **not** reach for `refresh-baseline.yml` EMERGENCY mode for this class of
