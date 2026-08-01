@@ -45,6 +45,93 @@ export const RUNTIME_EVAL_PROVIDER_COMPILE_OPTIONS = Object.freeze({
   target: "standalone",
 });
 
+/**
+ * (#2928 E7) The message the REFUSAL provider reports. Deliberately worded as
+ * the same #2960 Tier-3 contract the direct-eval fallback already throws, so a
+ * build without the interpreter and a direct-eval call site refuse identically.
+ */
+export const RUNTIME_EVAL_REFUSAL_MESSAGE =
+  "dynamic code evaluation is not supported in this standalone build " +
+  "(no js2wasm:runtime-eval interpreter linked — tracking: #2928)";
+
+/**
+ * (#2928 E7) The REFUSAL provider: the same `js2wasm:runtime-eval` ABI as the
+ * real provider (canonical rec-groups, `[ok, value]` envelope), with zero
+ * capability — every entry point returns `[false, TypeError]`.
+ *
+ * Why this exists. The provider import is MODULE-LEVEL: a standalone module
+ * that mentions dynamic `new Function` / indirect eval anywhere carries the
+ * import, so with no namespace supplied the module cannot even INSTANTIATE
+ * ("Import #0 \"js2wasm:runtime-eval\": module is not an object or function").
+ * Every assertion in such a file is then lost, including the majority that
+ * never reach the dynamic call at all — §20.2.1.1.1 ToString coercion of the
+ * arguments happens AOT at the call site, so e.g. a throwing `toString` throws
+ * before the provider is ever consulted.
+ *
+ * Linking this refusal module restores the honest Tier-3 behaviour: the file
+ * runs, and ONLY the dynamic-code call itself throws a typed, catchable
+ * TypeError. It injects no JS-host capability — it is a js2wasm-compiled,
+ * zero-import core-Wasm module like the real provider, just an empty one.
+ */
+const REFUSAL_PROVIDER_SOURCE = `
+      function runtimeEvalResult(ok: boolean, value: any): any {
+        const result: any[] = [ok, value];
+        return result;
+      }
+
+      function refuse(): any {
+        return runtimeEvalResult(
+          false,
+          new TypeError(${JSON.stringify(RUNTIME_EVAL_REFUSAL_MESSAGE)})
+        );
+      }
+
+      export function __runtime_new_function(
+        paramString: any,
+        bodyString: any,
+        globalObject: any
+      ): any {
+        return refuse();
+      }
+
+      export function __runtime_indirect_eval(
+        source: any,
+        globalObject: any
+      ): any {
+        return refuse();
+      }
+    `;
+
+/**
+ * (#2928 E7) Cross-module positive control for the refusal provider: a tiny
+ * standalone user module that takes the DYNAMIC `new Function` route and
+ * reports what it caught. Returns 21 only when the refusal envelope surfaced
+ * as a real, catchable `TypeError` carrying the refusal message — i.e. the
+ * envelope ABI actually round-trips, not merely that the module linked.
+ */
+export const RUNTIME_EVAL_REFUSAL_CANARY_SOURCE = `
+      var suffix = 1;
+      var body = "return a + " + suffix;
+      var code = 0;
+      try {
+        var fn = new Function("a", body);
+        code = 100 + fn(41);
+      } catch (err) {
+        if (err instanceof TypeError) {
+          code = 2;
+          if (typeof err.message === "string" && err.message.length > 0) {
+            code = 20 + (err.message.indexOf("standalone") >= 0 ? 1 : 0);
+          }
+        } else {
+          code = 3;
+        }
+      }
+      export function probe(): number { return code; }
+    `;
+
+/** Expected `probe()` value for RUNTIME_EVAL_REFUSAL_CANARY_SOURCE. */
+export const RUNTIME_EVAL_REFUSAL_CANARY_EXPECTED = 21;
+
 /** Import-clean interpreter sources, in initializer order. */
 const INTERP_FILES = [
   "types.ts",
@@ -193,6 +280,15 @@ export function buildRuntimeEvalProviderSource() {
 }
 
 /**
+ * (#2928 E7) Assemble the refusal-provider source. Standalone by construction:
+ * no Acorn, no interpreter, no imports — it compiles in seconds, which is what
+ * makes it affordable in every CI shard (the real provider takes minutes).
+ */
+export function buildRuntimeEvalRefusalProviderSource() {
+  return REFUSAL_PROVIDER_SOURCE;
+}
+
+/**
  * Compiler-bundle hash, mirroring the worker's cache-key discipline (#1521):
  * TEST262_BUNDLE_HASH env first, then sha256 of the built compiler bundle.
  * The provider cache key folds this in so a provider compiled by an older
@@ -231,9 +327,19 @@ export function runtimeEvalProviderCachePath(cacheDir, key) {
   return join(cacheDir, `runtime-eval-provider-${key}.wasm`);
 }
 
+/**
+ * (#2928 E7) Cache path for the REFUSAL provider. A distinct filename prefix
+ * (not just a distinct key) so CI can glob/upload the two artifacts
+ * independently — the refusal one is built in every standalone shard, the real
+ * one is not.
+ */
+export function runtimeEvalRefusalCachePath(cacheDir, key) {
+  return join(cacheDir, `runtime-eval-refusal-${key}.wasm`);
+}
+
 /** Read the cached provider binary, or null when absent. */
-export function readCachedRuntimeEvalProvider(cacheDir, key) {
-  const path = runtimeEvalProviderCachePath(cacheDir, key);
+export function readCachedRuntimeEvalProvider(cacheDir, key, pathOf = runtimeEvalProviderCachePath) {
+  const path = pathOf(cacheDir, key);
   try {
     return readFileSync(path);
   } catch {
@@ -242,9 +348,9 @@ export function readCachedRuntimeEvalProvider(cacheDir, key) {
 }
 
 /** Atomically (tmp + rename) publish a provider binary into the cache. */
-export function writeCachedRuntimeEvalProvider(cacheDir, key, binary) {
+export function writeCachedRuntimeEvalProvider(cacheDir, key, binary, pathOf = runtimeEvalProviderCachePath) {
   mkdirSync(cacheDir, { recursive: true });
-  const path = runtimeEvalProviderCachePath(cacheDir, key);
+  const path = pathOf(cacheDir, key);
   const tmp = `${path}.tmp-${process.pid}`;
   writeFileSync(tmp, binary);
   try {
