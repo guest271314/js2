@@ -1412,8 +1412,13 @@ export function compileReceiverMethodCall(
       ) {
         recvType = { kind: "ref_null", typeIdx: (recvType as { typeIdx: number }).typeIdx };
       }
-      // If receiver is externref but the method expects a struct ref, coerce
-      if (recvType && recvType.kind === "externref") {
+      // If receiver is externref but the method expects a struct ref, coerce —
+      // and ONLY then. (#2620 gc/host arm) A callee taking `externref` self is a
+      // host import: casting to the class struct there always fails (the
+      // instance is a real host Map/Set from `__new_Map`), yields null, and the
+      // null-guard below silently DROPS the call. Full analysis + the measured
+      // rows are on plan/issues/2620-*.md ("the gc/host lane was NOT fine").
+      if (recvType && recvType.kind === "externref" && getFuncParamTypes(ctx, funcIdx)?.[0]?.kind !== "externref") {
         const structTypeIdx = ctx.structMap.get(receiverClassName);
         if (structTypeIdx !== undefined) {
           // Check for null BEFORE the guarded cast — only genuine null should throw TypeError

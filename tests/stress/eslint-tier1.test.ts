@@ -117,13 +117,20 @@ describe.skipIf(ESLINT_LINTER === null)(
      * was *zero* automated signal on ESLint compilation, which is worse than a
      * red rung.
      *
-     * Measured frontier: exactly two diagnostics, one of which is the hard
-     * codegen abort for `LazyLoadingRuleMap extends Map` (reduced to a six-line
-     * fixture in `tests/issue-3672.test.ts`). Resolution is otherwise complete
-     * — #3654 landed and there is not a single `Cannot find module` left on
-     * this entry. #3656's dynamic-destructuring invariant is gone too.
+     * Frontier as of 2026-07-31, AFTER the builtin-subclass inherited-alias fix
+     * in `src/codegen/program-abi-class-callable-planning.ts`. The previous rung
+     * here was the hard codegen abort for `LazyLoadingRuleMap extends Map`
+     * (`inherited class callable ... has no exact defined function for handle
+     * 590`); that is retired, and the guard for it now lives in
+     * `tests/issue-3672.test.ts`. The package entry now walks past every
+     * `extends Map` in ESLint and stops on the NEXT structural blocker — a
+     * `function validate` whose inventory unit is neither `top-level-function`
+     * nor `synthetic-support`. Both this entry and the direct `linter.js` entry
+     * reach the identical new diagnostic. Resolution is otherwise complete —
+     * #3654 landed and there is not a single `Cannot find module` left on this
+     * entry. #3656's dynamic-destructuring invariant is gone too.
      */
-    it('Tier 1a — package entry reaches the #3672 frontier for `import { Linter } from "eslint"`', async () => {
+    it('Tier 1a — package entry reaches the current frontier for `import { Linter } from "eslint"`', async () => {
       const r = await compileTier1Entry();
       const diagnostics = r.errors.map((error) => error.message).join("\n");
       expect(r.success).toBe(false);
@@ -131,16 +138,21 @@ describe.skipIf(ESLINT_LINTER === null)(
       expect(diagnostics).not.toContain("Cannot find module");
       expect(diagnostics).not.toContain("object destructuring source must be IrType.object or IrType.class");
 
-      // Pin the frontier: one hard codegen abort, and it is the builtin-subclass
-      // inherited-alias defect. When that is fixed this rung goes red on
+      // Pin the frontier: one hard codegen abort, and it is the source-callable
+      // inventory-owner invariant. When that is fixed this rung goes red on
       // purpose — advance the ladder, do not relax the assertion.
       const codegenErrors = r.errors.filter((error) => error.message.startsWith("Codegen error:"));
       expect(
         codegenErrors.map((error) => error.message),
         "the ESLint package-entry frontier moved — advance this rung",
       ).toHaveLength(1);
-      expect(codegenErrors[0]?.message).toContain("inherited class callable");
-      expect(codegenErrors[0]?.message).toContain("has no exact defined function for handle");
+      expect(codegenErrors[0]?.message).toContain("source callable validate");
+      expect(codegenErrors[0]?.message).toContain(
+        "has no consistent exact top-level or compiler-support inventory owner",
+      );
+
+      // The retired rung must not come back.
+      expect(diagnostics).not.toContain("inherited class callable");
     }, 180_000);
 
     /**

@@ -1831,44 +1831,6 @@
       "perf": null,
       "knownBugs": [],
       "weeklyDownloads": 6829692
-    },
-    {
-      "name": "crypto",
-      "version": "1.0.1",
-      "issue": null,
-      "entryFile": "index.js",
-      "shape": "cjs-project",
-      "compile": {
-        "success": false,
-        "durationMs": 0,
-        "timedOut": false,
-        "timeoutMs": 30000,
-        "errorCount": 1,
-        "binaryBytes": 0,
-        "categories": {
-          "compiler-diagnostic": {
-            "count": 1,
-            "sample": "published tarball does not contain its declared entry package/index.js"
-          }
-        },
-        "errors": [
-          {
-            "message": "published tarball does not contain its declared entry package/index.js"
-          }
-        ]
-      },
-      "validation": {
-        "validates": false,
-        "firstError": "compile probe failed: published tarball does not contain its declared entry package/index.js"
-      },
-      "tests": {
-        "kind": "upstream-suite",
-        "status": "not-integrated",
-        "reason": "not shipped in npm tarball; adapter pending"
-      },
-      "perf": null,
-      "knownBugs": [],
-      "weeklyDownloads": 1479290
     }
   ]
 }
