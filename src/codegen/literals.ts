@@ -2154,8 +2154,19 @@ export function compileObjectLiteralForStruct(
     for (const src of spreadSources) spreadByPropIndex.set(src.propIndex, src.srcFields);
     const insertionOrder: string[] = [];
     const seen = new Set<string>();
-    const pushName = (n: string | undefined): void => {
-      if (n === undefined || n.startsWith("$") || n.startsWith("__")) return;
+    // `written` = the key appears literally in this object literal's source, so
+    // it is unambiguously a USER property even when it starts with `$` / `__`
+    // (`{ $$typeof: … }` — React tags every element that way, and jQuery-style
+    // `$`-prefixed keys are common generally). The compiler's own hidden slots
+    // (`$shape`, `$arity`, `__tag`) never come through this path.
+    //
+    // Spread sources are different: their name list is the SOURCE STRUCT's slot
+    // names, which do mix user keys with those hidden slots. There is no way to
+    // tell them apart here, so the prefix heuristic is kept for that path —
+    // conservative, and exactly the previous behaviour.
+    const pushName = (n: string | undefined, written: boolean): void => {
+      if (n === undefined) return;
+      if (!written && (n.startsWith("$") || n.startsWith("__"))) return;
       if (seen.has(n)) return;
       seen.add(n);
       insertionOrder.push(n);
@@ -2164,14 +2175,14 @@ export function compileObjectLiteralForStruct(
       const prop = expr.properties[pi]!;
       if (ts.isSpreadAssignment(prop)) {
         const srcFields = spreadByPropIndex.get(pi);
-        if (srcFields) for (const f of srcFields) pushName(f.name);
+        if (srcFields) for (const f of srcFields) pushName(f.name, false);
         continue;
       }
       if (ts.isMethodDeclaration(prop) || ts.isGetAccessorDeclaration(prop) || ts.isSetAccessorDeclaration(prop)) {
-        if (prop.name) pushName(resolveAccessorPropName(ctx, prop.name));
+        if (prop.name) pushName(resolveAccessorPropName(ctx, prop.name), true);
         continue;
       }
-      pushName(resolvePropertyNameText(ctx, prop));
+      pushName(resolvePropertyNameText(ctx, prop), true);
     }
     if (insertionOrder.length > 0) ctx.structInsertionOrder.set(typeName, insertionOrder);
   }

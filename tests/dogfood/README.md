@@ -26,16 +26,17 @@ package, following the existing Acorn/React precedent.
 The original package-specific harnesses, plus the deeper Acorn conformance
 check, are:
 
-| package                                 | issue | entry file          | oracle diff                                                                 |
-| --------------------------------------- | ----- | ------------------- | --------------------------------------------------------------------------- |
-| **acorn** (JS parser)                   | #1710 | `dist/acorn.mjs`    | structural AST diff (`ast-diff.mjs`)                                        |
-| **marked** (Markdown→HTML)              | #3716 | `lib/marked.esm.js` | plain string equality (HTML output)                                         |
-| **acorn official suite**                | #3729 | `dist/acorn.mjs`    | acorn's own real `test/tests*.js` (~3,500 cases)                            |
-| **clsx** (className joiner)             | #3748 | `dist/clsx.mjs`     | per-op string equality (see below — driver epilogue, not a raw export call) |
-| **cookie** (RFC-6265 parser/serializer) | #3751 | `dist/index.js`     | per-op JSON-normalized equality (direct export calls, no epilogue)          |
-| **eslint** (JavaScript linter)          | #1400 | `lib/api.js`        | bounded full-package compile/validate; runtime diff pending                 |
-| **prettier** (code formatter)           | —     | `standalone.mjs`    | bounded package-entry compile/validate; runtime diff pending                |
-| **react** (UI library)                  | —     | `index.js`          | pinned source-attributed public-API vectors                                 |
+| package                                 | issue | entry file                | oracle diff                                                                 |
+| --------------------------------------- | ----- | ------------------------- | --------------------------------------------------------------------------- |
+| **acorn** (JS parser)                   | #1710 | `dist/acorn.mjs`          | structural AST diff (`ast-diff.mjs`)                                        |
+| **marked** (Markdown→HTML)              | #3716 | `lib/marked.esm.js`       | plain string equality (HTML output)                                         |
+| **acorn official suite**                | #3729 | `dist/acorn.mjs`          | acorn's own real `test/tests*.js` (~3,500 cases)                            |
+| **clsx** (className joiner)             | #3748 | `dist/clsx.mjs`           | per-op string equality (see below — driver epilogue, not a raw export call) |
+| **cookie** (RFC-6265 parser/serializer) | #3751 | `dist/index.js`           | per-op JSON-normalized equality (direct export calls, no epilogue)          |
+| **eslint** (JavaScript linter)          | #1400 | `lib/api.js`              | bounded full-package compile/validate; runtime diff pending                 |
+| **prettier** (code formatter)           | —     | `standalone.mjs`          | bounded package-entry compile/validate; runtime diff pending                |
+| **react** (UI library)                  | —     | `index.js`                | bounded package-entry compile/validate                                      |
+| **react upstream suite**                | —     | `cjs/react.production.js` | React's own real `packages/react/src/__tests__` unit tests                  |
 
 ## acorn (#1710)
 
@@ -187,15 +188,42 @@ DOGFOOD_REACT_UPSTREAM=1 pnpm exec vitest run tests/dogfood/react-upstream-suite
 ```
 
 The current Prettier entry exposes a compile blocker. React's package entry
-compiles to valid Wasm, but that alone is not reported as runtime correctness.
-React's npm tarball omits its unit-test sources, so `react-upstream-suite.mjs`
-clones React's matching pinned tag and verifies the immutable commit before it
-runs five public-API vectors traced to React's own create-element and
-clone-element tests. This is deliberately not labelled as React's full Jest
-suite: that suite depends on React's private build and test infrastructure.
-At the current compiler frontier the driver compiles and validates, but all
-five vectors trap in Wasm; the npm-compat card reports that 0/5 result rather
-than treating validation as API correctness.
+compiles to valid Wasm, but that alone is not reported as runtime correctness —
+`react-upstream-suite.mjs` is what actually tests it, by running **React's own
+unit tests**.
+
+### How React's suite is reached
+
+React's npm tarball omits its unit-test sources, so the harness clones React's
+matching pinned tag and verifies the immutable commit before anything is
+attributed to upstream React. Unlike acorn — whose `test/driver.js` is
+deliberately decoupled from any acorn build — React's suite is welded to Jest,
+`internal-test-utils`, ReactDOM and a jsdom document, and there is no upstream
+entry point that can be handed a `React` and asked to run. So
+`react-upstream-extract.mjs` reads the upstream test FILES verbatim, transpiles
+their JSX with the classic runtime (`<div/>` → `React.createElement('div',
+null)`, exactly what React's own jest transform does), and lifts each `it(...)`
+out with its enclosing `describe` scope and `beforeEach` prelude. Test names,
+bodies and assertions are upstream's — nothing is transcribed or reworded.
+
+Three rules keep the number honest:
+
+1. **Admission is conservative and counted.** A test is admitted only if it
+   needs nothing but React itself. Anything reaching for ReactDOM, `act`, the
+   console-assertion helpers, `jest.*`, a `document`, `__DEV__` or async
+   scheduling is rejected _with its reason recorded_, and the rejection tally is
+   reported next to the pass count — so the admitted slice is never mistaken for
+   the whole suite.
+2. **The `expect` shim implements only the matchers the admitted tests use**
+   (`SUPPORTED_MATCHERS`); a test using anything else is rejected rather than
+   scored against an approximation of Jest. The same shim source runs on both
+   sides, so a divergence is always the compiler.
+3. **A test the harness cannot reproduce natively is not evidence about the
+   compiler.** It is excluded from the score under its own
+   `harness-incompatible` bucket instead of being counted as a compiler bug.
+
+Failures stay in the corpus. The vitest wrapper enforces a pass FLOOR, not a
+target, so a regression is caught while the remaining frontier stays visible.
 
 ## acorn official suite (#3729)
 
