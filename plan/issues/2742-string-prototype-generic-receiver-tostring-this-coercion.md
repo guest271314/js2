@@ -479,6 +479,119 @@ not later misread as a regression:
 regresses nothing, and leaves P2/P3 exactly as broken as they already are. It is
 not a tradeoff.
 
+### P3 sized against the CORPUS — it is the biggest of the three
+
+In the 28-row micro matrix P3 reads as "one spelling of four". That badly
+understates it, because the uncurried spelling is how test262 reaches these
+methods **at corpus scale**: `harness/propertyHelper.js` builds the uncurryThis
+bindings at include time, so every file that includes it routes through the
+shape #3254's syntactic override cannot see.
+
+Provenance first, so the sizing is not vacuous — the bindings actually exist in
+the harness on disk (4 found):
+
+```
+__join                 = Function.prototype.call.bind(Array.prototype.join)
+__push                 = Function.prototype.call.bind(Array.prototype.push)
+__hasOwnProperty       = Function.prototype.call.bind(Object.prototype.hasOwnProperty)
+__propertyIsEnumerable = Function.prototype.call.bind(Object.prototype.propertyIsEnumerable)
+```
+
+Rows floored: all **48,088** standalone jsonl rows scanned against the corpus on
+disk.
+
+| metric                                       | n         |
+| -------------------------------------------- | --------- |
+| corpus files including `propertyHelper.js`   | **4,898** |
+| standalone PASS                              | 1,494     |
+| standalone FAIL                              | 3,404     |
+| …of those, host PASSES (standalone-only)     | **1,810** |
+| ≤ES5 subset                                  | 803 files, 282 fail, **119** host-pass |
+
+For scale: the **entire** ≤ES5 `String/prototype` non-RegExp failure population
+— the whole lever this issue was opened on — is **167 files, 119 host-pass**. So
+the P3 seam gates roughly **11×** more standalone-only failures corpus-wide than
+P1+P2 combined.
+
+⚠️ **1,810 is a population GATED, not a predicted flip count, and the proxy is
+weaker here than elsewhere in this issue.** `includes: [propertyHelper.js]` is
+evidence the file *routes through* the uncurried shape; it is **not** evidence
+that the uncurried shape is *why* that file fails. Many of the 3,404 will fail
+for unrelated reasons. Treat 1,810 as an upper bound on what fixing the seam
+could reach, and measure the real ratio on a sample before sizing any work off
+it. Do not quote this number without this paragraph.
+
+This is the same seam **#3571** documents; its own S1 analysis (`66ab19f84`)
+records the host arm landed via #3635 and the **standalone arm is still open**.
+
+## Scoped test262 A/B — the measured flip, and why it is 10 and not 46
+
+Same box, same run, same file list, both arms from one working tree. Scope: the
+≤ES5 files under every member directory the switch can touch, **plus 65
+`substring/` + `charAt/` files carried as an in-sweep CONTROL** (their bodies are
+untouched by the switch, so they must not move).
+
+**Rows floored:** 265 requested / 265 ran on BOTH arms, **0 timeouts, 0 harness
+errors** on either arm — so nothing here is contention noise (this mattered: the
+box sat at load 15–26 throughout). Arm A independently agrees with the fresh
+standalone baseline **264/265**.
+
+| | |
+| --- | --- |
+| arm A (wiring ON) | **220** / 265 pass |
+| arm B (wiring refused) | **230** / 265 pass |
+| **fail → pass** | **10** |
+| **pass → fail** | **0** |
+| **net** | **+10** |
+| in-sweep control (65 files) | **0 moved** |
+
+Per directory:
+
+| dir           | n   | A-pass | B-pass | Δ      |
+| ------------- | --- | ------ | ------ | ------ |
+| trim          | 126 | 114    | 124    | **+10** |
+| charAt        | 24  | 19     | 19     | 0      |
+| charCodeAt    | 19  | 13     | 13     | 0      |
+| indexOf       | 34  | 28     | 28     | 0      |
+| lastIndexOf   | 21  | 15     | 15     | 0      |
+| substring     | 41  | 31     | 31     | 0      |
+
+### The honest reading: gated 46, flipped 10 (21.7 %)
+
+**Every flip is in `trim/`.** `charCodeAt`, `indexOf` and `lastIndexOf` move by
+**zero**, even though the micro matrix showed their `.call()` shape going
+fail → pass. That is not a contradiction — it is P1-vs-P2 doing exactly what
+this issue predicts:
+
+- the `trim` ≤ES5 tests are written `String.prototype.trim.call(obj)` — the
+  **literal P1 shape**, which the removal fixes;
+- the `charCodeAt`/`indexOf`/`lastIndexOf` ≤ES5 tests are written
+  `__instance.M = String.prototype.M; __instance.M(…)` — the **P2 transferred
+  shape**, which the removal does not touch and never claimed to.
+
+So the micro matrix was a correct statement about *shapes* and a bad predictor
+of *file counts*, because the corpus does not exercise the shapes uniformly.
+**46 was the population gated in this scope; 10 flipped.** Quote the 10.
+
+### This also closes the loop on #3254's reopening
+
+#3254 was reopened 2026-07-31 as false-`done` specifically because it *"left
+`trim` itself on the pre-fix `[object Object]` terminal."* The 10 flips are
+exactly the `trim` tests. So #3254's fix was **not** incomplete for `trim` — it
+was **masked**: the #2875 wiring intercepts ahead of it, so `trim` never reached
+the corrected path. Removing the superseded wiring is therefore the same repair
+#3254 was reopened for, and the two should be sequenced as one change rather
+than fixed twice.
+
+### Residual risk NOT covered by this sweep (state before shipping)
+
+`at` / `codePointAt` / `includes` / `startsWith` / `endsWith` are wired today and
+the switch unwires them, but they carry **no `es5id:` tests**, so this ≤ES5-scoped
+sweep says nothing about them. Their non-ES5 files must be measured before the
+removal ships. Members never wired (`toUpperCase`, `toLowerCase`, `slice`,
+`concat`, `split`, `replace`, …) are unaffected by construction — they already
+route to `emitProtoMemberBodyRefusal`.
+
 ## Adjacent, separate: the `__bindfn` invalid-Wasm cluster
 
 The 15 "invalid Wasm binary" files are corpus-wide **28 files, 25 host-pass**,
