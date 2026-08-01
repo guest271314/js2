@@ -76,6 +76,11 @@ import { allocLocal } from "./context/locals.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
 import { addFuncType } from "./registry/types.js";
 import { analyzeReceiverFlow, receiverClassOf } from "./receiver-flow-analysis.js";
+// (#3685 step 2) presence bits — reused rather than hand-rolled so the proven-
+// receiver inline read tests presence exactly the way `emitNullGuardedStructGet`
+// does for the same closed structs.
+import { type PresenceSlot, presenceSlotOf, presenceTestInstrs } from "./fnctor-presence-bits.js";
+import { undefinedExternInstrs } from "./any-helpers.js";
 // (#3685 step 1) decline census — inert unless JS2WASM_PROVEN_RECEIVER_STATS=1
 import { noteProvenReceiver, noteProvenReceiverPhase, provenReceiverStatsEnabled } from "./proven-receiver-stats.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
@@ -1368,18 +1373,39 @@ export function tryEmitProvenReceiverFieldGet(
     return undefined;
   }
   const field = fields[fieldIdx]!;
-  // Presence-tracked ⇒ absence is semantic (`undefined`), which a bare
-  // struct.get cannot express.
-  if (field.presenceTracked) {
-    noteProvenReceiver(`presence:${cls}.${propName}:${field.type.kind}`);
-    return undefined;
-  }
   // A method-typed access keeps its closure lowering (S3 devirtualizes calls;
-  // S2 must not box the callee).
+  // S2 must not box the callee). Ordered BEFORE the presence decision below:
+  // the presence arm answers `undefined` for an absent slot, which must never
+  // shadow a name that actually resolves to a prototype method.
   const accessType = ctx.checker.getTypeAtLocation(expr);
   if (accessType.getCallSignatures && accessType.getCallSignatures().length > 0) {
     noteProvenReceiver(`callsig:${cls}.${propName}`);
     return undefined;
+  }
+  // (#3685 step 2) Presence-tracked ⇒ absence is semantic (`undefined`). That
+  // is true of a BARE `struct.get` and false of the compiler:
+  // `emitNullGuardedStructGet` already lowers exactly this shape for closed
+  // structs (`presenceTestInstrs` → `if` → `struct.get` : `undefined`), and the
+  // inline read below nests it inside the existing `ref.test` then-arm.
+  //
+  // HARD CORRECTNESS CONDITION — **externref slots only.** `undefined` has an
+  // externref-plane representation (the #2106 `$undefined` singleton, or
+  // `ref.null.extern` with that regime off). It has NONE in an f64/i32/i64
+  // slot, where the absent arm would have to fall back to `defaultValueInstrs`
+  // and silently substitute `0` for a value whose semantics are `undefined`. A
+  // non-externref presence-tracked field is therefore still refused outright.
+  let presenceSlot: PresenceSlot | undefined;
+  if (field.presenceTracked) {
+    if (field.type.kind !== "externref") {
+      noteProvenReceiver(`presence-nonextern:${cls}.${propName}:${field.type.kind}`);
+      return undefined;
+    }
+    presenceSlot = presenceSlotOf(fields, propName);
+    if (presenceSlot === undefined) {
+      // Tracked but with no resolvable bit/word — no test to emit, so decline.
+      noteProvenReceiver(`presence-noslot:${cls}.${propName}`);
+      return undefined;
+    }
   }
 
   const externGetIdx = ctx.funcMap.get("__extern_get");
@@ -1413,18 +1439,48 @@ export function tryEmitProvenReceiverFieldGet(
   const elseArm = fctx.body;
   fctx.body = savedBody;
 
+  // The inlined read, shared by both the guarded and the measurement lane. For
+  // an always-present slot it is the plain cast + `struct.get`; for a
+  // presence-tracked externref slot the cast result is teed into a typed local
+  // (so the cast is paid once) and the presence bit selects value vs
+  // `undefined` — the same shape `emitNullGuardedStructGet` emits.
+  const castInstrs: Instr[] = [
+    { op: "local.get", index: tmp },
+    { op: "any.convert_extern" },
+    { op: "ref.cast", typeIdx: structTypeIdx },
+  ];
+  let inlineRead: Instr[];
+  if (presenceSlot === undefined) {
+    inlineRead = [...castInstrs, { op: "struct.get", typeIdx: structTypeIdx, fieldIdx }];
+  } else {
+    const castLocal = allocLocal(fctx, `__prfs_${propName}_${fctx.locals.length}`, {
+      kind: "ref_null",
+      typeIdx: structTypeIdx,
+    });
+    inlineRead = [
+      ...castInstrs,
+      { op: "local.tee", index: castLocal },
+      ...presenceTestInstrs(structTypeIdx, presenceSlot),
+      {
+        op: "if",
+        blockType: { kind: "val", type: field.type },
+        then: [
+          { op: "local.get", index: castLocal },
+          { op: "struct.get", typeIdx: structTypeIdx, fieldIdx },
+        ],
+        // Absent ⇒ semantic `undefined`, never the slot's raw contents.
+        else: undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" }],
+      },
+    ];
+  }
+
   // (#3685 S4 measurement) `JS2WASM_PROVEN_FIELDS=unguarded` drops the
   // `ref.test` and casts directly. UNSOUND as a shipping mode — an imprecise
   // verdict traps — and refused unless explicitly asked for. It exists to price
   // the guard: S4 (hoist one test per binding) is only worth building if the
   // gap between this and the guarded form is real. Mirrors `JS2WASM_TYPED_THIS=shim`.
   if (process.env.JS2WASM_PROVEN_FIELDS === "unguarded") {
-    fctx.body.push(
-      { op: "local.get", index: tmp },
-      { op: "any.convert_extern" },
-      { op: "ref.cast", typeIdx: structTypeIdx },
-      { op: "struct.get", typeIdx: structTypeIdx, fieldIdx },
-    );
+    for (const instr of inlineRead) fctx.body.push(instr);
     provenFieldStats.gets++;
     noteProvenReceiverPhase("inlined");
     noteProvenReceiver(`ok-unguarded:${cls}.${propName}`);
@@ -1438,18 +1494,13 @@ export function tryEmitProvenReceiverFieldGet(
     {
       op: "if",
       blockType: { kind: "val", type: field.type },
-      then: [
-        { op: "local.get", index: tmp },
-        { op: "any.convert_extern" },
-        { op: "ref.cast", typeIdx: structTypeIdx },
-        { op: "struct.get", typeIdx: structTypeIdx, fieldIdx },
-      ],
+      then: inlineRead,
       else: elseArm,
     },
   );
   provenFieldStats.gets++;
   noteProvenReceiverPhase("inlined");
-  noteProvenReceiver(`ok:${cls}.${propName}:${field.type.kind}`);
+  noteProvenReceiver(`ok:${cls}.${propName}:${field.type.kind}${presenceSlot === undefined ? "" : ":presence"}`);
   return field.type;
 }
 

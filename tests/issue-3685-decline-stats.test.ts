@@ -15,11 +15,14 @@ import { provenReceiverStats, resetProvenReceiverStats } from "../src/codegen/pr
 // `y` is assigned only under a condition, so it is presence-tracked; `x` is
 // unconditional, so it is a plain slot. `p` is a never-reassigned binding
 // initialized from `new P(...)`, which the S1 receiver-flow analysis proves.
+// `nope` is never assigned anywhere, so it is not a declared field at all —
+// the one decline reason this shape still produces after step 2 admitted the
+// presence-tracked slot (see issue-3685-presence-tracked-proven-reads).
 const SOURCE = `
 function P(a) { this.x = a; if (a > 1) { this.y = a + 1; } }
 export function test() {
   var p = new P(2);
-  return p.x + p.y;
+  return p.x + p.y + (p.nope === undefined ? 0 : 1);
 }`;
 
 async function build(): Promise<void> {
@@ -45,7 +48,7 @@ describe("#3685 step 1 — proven-receiver decline census", () => {
     expect(provenReceiverStats.reasons.size).toBe(0);
   });
 
-  it("attributes an inlined read and a presence-tracked decline separately", async () => {
+  it("attributes an inlined read and a not-a-declared-field decline separately", async () => {
     process.env.JS2WASM_PROVEN_RECEIVER_STATS = "1";
     resetProvenReceiverStats();
     await build();
@@ -54,9 +57,12 @@ describe("#3685 step 1 — proven-receiver decline census", () => {
     const keys = [...provenReceiverStats.reasons.keys()];
     // `p.x` — plain slot on a proven receiver — is inlined.
     expect(keys.some((k) => k.startsWith("ok:P.x:"))).toBe(true);
-    // `p.y` — presence-tracked — is declined by that carve-out and by no other.
-    expect(keys.some((k) => k.startsWith("presence:P.y:"))).toBe(true);
-    expect(keys.some((k) => k.startsWith("nofield:"))).toBe(false);
+    // `p.y` — presence-tracked externref — is ALSO inlined since step 2, and
+    // the census tags it so the two admissions stay distinguishable.
+    expect(keys.some((k) => k === "ok:P.y:externref:presence")).toBe(true);
+    expect(keys.some((k) => k.startsWith("presence:P.y:"))).toBe(false);
+    // `p.nope` is not a declared field of the struct — a real decline.
+    expect(keys.some((k) => k.startsWith("nofield:P.nope"))).toBe(true);
 
     // The aggregate counters must account for every proven receiver: an
     // inlined read or exactly one decline reason, never both and never neither.

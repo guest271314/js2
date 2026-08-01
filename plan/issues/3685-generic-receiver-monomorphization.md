@@ -652,6 +652,70 @@ attribution table above says the two hot twins
 `__extern_get` bucket ≈ 2.8 % of parse time) are the plausible payer, but
 nothing in this step measured time.
 
+## Step-2 result (2026-08-01) — the presence carve-out is removed: 88 → 232 inlined
+
+The over-broad carve-out identified by step 1 is gone.
+`tryEmitProvenReceiverFieldGet` now admits presence-tracked fields by nesting
+the presence test inside its existing `ref.test` then-arm, reusing
+`presenceSlotOf` / `presenceTestInstrs` from `fnctor-presence-bits.ts` — the
+same shape `emitNullGuardedStructGet` already emits for closed-struct reads:
+
+```
+local.get tmp ; any.convert_extern ; ref.test $F
+if (result <fieldType>)
+  then  local.get tmp ; any.convert_extern ; ref.cast $F ; local.tee c
+        ; <presence test on c>
+        ; if (result <fieldType>)
+            then  local.get c ; struct.get $F <idx>
+            else  <undefined>                     ; #2106 singleton
+  else  __extern_get(tmp, "<name>")               ; unchanged dynamic arm
+```
+
+The cast result is teed into a `(ref null $F)` local so the guarded arm pays
+one `ref.cast`, not two.
+
+**Hard correctness condition, explicit in the code**: only **externref**
+presence-tracked slots are admitted (`presence-nonextern:` decline otherwise).
+`undefined` has an externref-plane representation; it has none in an f64/i32/i64
+slot, where the absent arm could only substitute `0`. Also reordered: the
+call-signature check now runs *before* the presence decision, so a name that
+resolves to a prototype method can never be answered `undefined` by the absent
+arm.
+
+**Census, same instrumented standalone acorn 8.16.0 compile as step 1**
+(prediction stated before the run: 232 / 12 — confirmed exactly):
+
+| | asked | proven | inlined | declinedAfterProof |
+| --- | ---: | ---: | ---: | ---: |
+| step 1 (before) | 4002 | 244 | 88 | 156 |
+| **step 2 (after)** | 4002 | 244 | **232** | **12** |
+
+All 144 `presence:Node.<f>` sites converted to `ok:Node.<f>:externref:presence`.
+The residue is exactly the 12 `reserved:Node.name` sites (`RESERVED_PROPS`,
+deliberately untouched — `name` has a dedicated lowering). **Zero
+`presence-nonextern:` entries**: every presence-tracked slot in acorn is
+already externref, which is also why the emitter widens a conditionally
+assigned numeric field (`P.y` in the pins) to `externref` rather than `f64`.
+
+Pinned by `tests/issue-3685-presence-tracked-proven-reads.test.ts`: a
+presence-tracked field read **before** it is ever assigned yields `undefined`
+(not `null`, not `0`, not a trap) and after assignment yields the value, both
+checked against the same source evaluated as plain JS; plus the census
+assertion that the read takes the inline path, and the structural pin that a
+`:presence` admission always carries an externref slot type. Paired control
+run: with `src/codegen/typed-this.ts` reverted the census assertion FAILS
+(the semantics assertions pass either way — the dynamic `__extern_get` arm
+answers the same values, which is precisely why the path assertion is the
+load-bearing one). `tests/issue-3685-decline-stats.test.ts` updated: its
+`p.y` case is now an admission, and a never-assigned `p.nope` supplies the
+`nofield:` decline it needs.
+
+**No wall-clock measurement was taken** — the box was not verified idle, and at
+this effect size a contended timing is worse than none. The payer named by the
+attribution table (`__closure_571__typed_this` + `__closure_347__typed_this`,
+28.5 % of the `__extern_get` bucket) remains a hypothesis until someone runs
+#3673's interleaved duplicate-baseline control arm on an idle box.
+
 ## Cross-box caveat on this issue's ranking (#3780 round 4, 2026-07-31)
 
 Every share quoted in this issue comes from a profile of the standalone acorn
