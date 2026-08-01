@@ -286,6 +286,26 @@ Option 2 (batching) is dominated by option 1: same failure mode at a lower rate.
 - `test262-sharded.yml`'s inline #1951 gate is **deliberately left alone** — it works, and
   `promote-baseline` is the most load-bearing promote path in the repo.
 
+> **Correction, verified 2026-08-01 while starting #3611 — do not read this as "two live
+> holes closed".** `refresh-baseline.yml` is **`disabled_manually`**
+> (`gh api repos/loopdive/js2/actions/workflows/265204741` → `state=disabled_manually`;
+> it is the only non-active workflow in the repo). It has landed **nothing** since at
+> least 2026-07-20 — `git log origin/main --grep="scheduled baseline refresh"` is empty.
+>
+> So the **only live un-gated pusher was `benchmark-refresh`**, and the gate added to
+> `refresh-baseline` is **pre-emptive: correct once that workflow is re-enabled, inert
+> until then.** Two things follow, and both are worth more than the tidier claim:
+>
+> 1. **It explains the 0 in the evidence table** rather than leaving it as luck. That row
+>    read "gated pushers caused 0, and so did `refresh-baseline`" — the honest reason for
+>    the third 0 is that the workflow never ran. The `benchmark-refresh`-vs-#1951
+>    comparison is untouched by this; that is where all the signal was.
+> 2. **#3611 owns the disposition** (its acceptance criterion 5: re-enable, or record why
+>    the repo runs without that backstop). Whichever it decides, the gate is already in
+>    place, so re-enabling cannot silently re-introduce the rebuild tax. That is the
+>    right order — but it means this issue did not, by itself, remove a second live
+>    source of discarded validations, and should not be cited as having done so.
+
 ### What this costs, stated plainly
 
 Deferral is not free, and the costs are all in artifact **freshness**, never in correctness:
