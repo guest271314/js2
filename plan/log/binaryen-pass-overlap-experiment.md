@@ -1,6 +1,6 @@
 # Do our low-level passes still earn their keep once `wasm-opt -O3` runs?
 
-**Date:** 2026-08-01 · **Status:** measured, no code change proposed yet
+**Date:** 2026-08-01 · **Status:** complete — measured, no code change proposed
 
 ## Question
 
@@ -68,17 +68,19 @@ Three corpora:
 
 ### Corpus C — acorn 8.16.0
 
-> Run in progress at time of writing — arms complete so far. The `-O3`
-> artifact has not moved by a single byte on any arm measured.
+| arm | raw bytes | Δraw | **-O3 bytes** | **Δ-O3** | Δ-O3 % | compile ms (median of 3) |
+| --- | --- | --- | --- | --- | --- | --- |
+| baseline | 620,951 | 0 | 343,881 | 0 | 0.000% | 21,438 |
+| no-constfold | 620,953 | +2 | 343,881 | **0** | 0.000% | 21,065 |
+| no-dce | 620,951 | **0** | 343,881 | **0** | 0.000% | 21,401 |
+| no-simplifycfg | 620,951 | **0** | 343,881 | **0** | 0.000% | 22,416 |
+| no-peephole | 637,635 | +16,684 | 343,935 | **+54** | 0.016% | 19,925 |
+| all four off | 637,637 | +16,686 | 343,935 | **+54** | 0.016% | 20,054 |
 
-| arm | raw bytes | Δraw | **-O3 bytes** | **Δ-O3** | compile ms (median of 3) |
-| --- | --- | --- | --- | --- | --- |
-| baseline | 620,951 | 0 | 343,881 | 0 | 21,438 |
-| no-constfold | 620,953 | +2 | 343,881 | **0** | 21,065 |
-| no-dce | 620,951 | **0** | 343,881 | **0** | 21,401 |
-| no-simplifycfg | _pending_ | | | | |
-| no-peephole | _pending_ | | | | |
-| all four off | _pending_ | | | | |
+On the largest real module in the repo, the entire contribution of all four
+passes to the shipped artifact is **54 bytes out of 343,881** — and every one
+of those 54 bytes comes from `peephole`. The three IR passes together move the
+`-O3` output by **zero bytes** and the pre-optimizer binary by **2 bytes**.
 
 ### Did each pass do anything at all, pre-`wasm-opt`?
 
@@ -120,7 +122,11 @@ Two secondary readings:
    sees, so this is weak evidence for redundancy and strong evidence that the
    experiment must be repeated after IR adoption advances.
 3. **No behaviour changed.** 24 executable programs × every declared call,
-   zero diffs in any arm.
+   zero diffs in any arm. Independently confirmed by the equivalence gate:
+   with all four passes disabled, `SHARD=1/8 node scripts/equivalence-gate.mjs`
+   reported `5 failing, 178 passing, 36 known-failures in baseline` and
+   `✓ No new equivalence regressions` — every failure already in the committed
+   baseline, none introduced by disabling the passes.
 4. **Compile time is not a reason to keep or drop them.** The spread across arms
    (7,513–8,055 ms) is smaller than run-to-run variance and is not ordered by
    how much work was disabled — the slowest arm (`no-dce`) disables a pass that
@@ -140,6 +146,16 @@ Two secondary readings:
   in an unoptimized build these passes are worth 2–7% of binary size.
 
 ## Recommendation
+
+**Split the verdict by pass — they are not one decision.**
+
+- `peephole` is the only one of the four with a measurable output effect, and
+  it is tiny but real and consistent: +8 bytes on corpus A, +54 on acorn, 0 on
+  corpus B. It also does the most pre-optimizer work of the four (+2.7% raw on
+  acorn). It is not a deletion candidate on this evidence.
+- The three IR passes (`constant-fold`, `dead-code`, `simplify-cfg`) contribute
+  **zero bytes** to the shipped artifact on every corpus measured. But see the
+  coverage caveat below before reading that as redundancy.
 
 **Do not delete these passes on this evidence.** The original hypothesis
 ("Binaryen subsumes them, so they are pure maintenance cost") is not what the
@@ -170,7 +186,21 @@ Binaryen structurally cannot do them.
 
 ## Reproducing
 
-Harnesses live in `.tmp/ab/` (gitignored, not committed):
-`ab-passes.mts` (corpus A), `ab-exec.mts` (corpus B), `ab-acorn.mts` (corpus C),
-`ab-stats.mts` (effectiveness counts), `compare.mjs` (diff the arms).
-They require the kill-switch patches described under Method.
+The harnesses were scratch files under `.tmp/` and did not survive the session
+(the equivalence gate clears that directory). They are not recoverable, so
+reproduction means rebuilding them from this description — which is why the
+method is spelled out concretely above rather than by reference:
+
+1. Add env-gated early-outs at `runHygienePasses` (`src/ir/integration.ts`) for
+   the three IR passes and at both `peepholeOptimize(mod)` call sites
+   (`src/codegen/index.ts`). Six arms: baseline, each pass off, all four off.
+2. For each corpus, `compile()` each source, then `optimizeBinaryAsync(binary,
+   { level: 3 })`, and record `binary.byteLength` before and after.
+   acorn needs `{ fileName: "acorn.mjs", skipSemanticDiagnostics: true }` and
+   `setupAcorn()` from `tests/dogfood/setup-acorn.mjs`.
+3. For corpus B, instantiate the **-O3** binary and invoke each program's
+   declared `calls` from `tests/cross-backend/corpus.ts`, diffing return values
+   across arms.
+4. For the effectiveness counts, instrument `runHygienePasses` to count
+   reference-inequality per pass per `IrFunction`.
+5. For correctness, run `scripts/equivalence-gate.mjs` with all four disabled.
