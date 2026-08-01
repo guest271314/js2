@@ -223,3 +223,52 @@ INVALID instruments** (a silent no-op, then a confounded one) — both recorded 
 `plan/probes/3976/NOTES.txt`. **The realised yield of slice 1 is therefore NOT
 yet measured.** Measure it against a real implementation before quoting a size;
 do not inherit the 826 or the 40/40.
+
+## Implementation plan (slice 1) — three in-tree precedents, not a new mechanism
+
+The shape this needs already exists three times over in the standalone lane:
+**reserve a native at emit time, fill it at finalize time once all metadata is
+registered, then prepend an early arm into the reflective natives.** See
+`fillBuiltinFnMeta` (#2896), `fillExternGetErrorProps` (#3130) and
+`fillObjVecReflectionHelpers` in `src/codegen/index.ts` (~4215-4245).
+
+`__hasOwnProperty` (`src/codegen/object-runtime.ts` ~3035) **already opens with
+exactly this kind of arm** — the `bfnGetMetaIdx` builtin-fn-metadata check that
+returns 1 early before the `$Object` cast. A class-proto arm goes in that same
+slot, ahead of the `ref.test $Object` bail-out that currently answers 0.
+
+Steps:
+
+1. **New native `__class_meta_find(obj, key) -> i32`** (standalone only),
+   reserved at emit time and filled by a new `fillClassProtoMeta(ctx)` after all
+   classes are registered. Body, per class with methods:
+   - identity-compare `obj` against the `__proto_<Class>` global ⇒ consult
+     `ctx.classMethodNames`;
+   - identity-compare against the `__class_<Class>` global ⇒ consult
+     `ctx.classStaticMethodNames`.
+
+   The identity compare is what keeps **instances** correct: `c` and
+   `C.prototype` are both `$ClassName` structs with the same `__tag`, but
+   `hasOwnProperty(c, "m")` must be **false** — only the prototype singleton
+   carries the method. Do **not** key this on `__tag`.
+
+2. **Prepend arms** into `__hasOwnProperty`/`__object_hasOwn` (return 1),
+   `__propertyIsEnumerable` (return **0** — class methods are non-enumerable),
+   and `__getOwnPropertyDescriptor` (synthesize
+   `{value, writable: true, enumerable: false, configurable: true}`; `value`
+   comes from the existing member read, which already works — see the value
+   table above).
+
+3. **Own-key enumeration** (`__getOwnPropertyNames`) should list the same names
+   so `Object.getOwnPropertyNames(C.prototype)` matches host. `Object.keys` must
+   NOT list them (non-enumerable).
+
+**Out of slice 1, deliberately**: `writable`/`configurable` are *behavioural* —
+`verifyProperty` probes them by writing and deleting. Making the synthesized
+descriptor claim `writable: true` without making the write actually take effect
+would trade a missing property for a **wrong** one, which is worse. Either
+implement the mutation path in the same slice or have `verifyProperty`'s probes
+fail honestly; do not fake the flags.
+
+**Private elements** (`#m`) must stay absent from all of the above — several
+tests in this cluster assert exactly that.
