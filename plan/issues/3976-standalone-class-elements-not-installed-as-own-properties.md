@@ -147,3 +147,79 @@ Object.getOwnPropertyDescriptor(C, "s");
 - The 217 receiver-nullish files are a **separate** root cause (builtin objects
   such as `Number`/`Date` not reified as values). Tracked in #3571; do not
   double-attribute.
+
+## Fix shape — measured, with the two dead ends that cost the most
+
+Probes: `plan/probes/3976/synt.mts` (syntactic vs dynamic) and `synt2.mts`
+(value reachability). Both carry controls that pass on **both** lanes, so the
+readings are load-bearing.
+
+### It is NOT a syntactic-reach problem — which is good news
+
+The natural fear (and the exact trap that stopped #3571's P1 shape-matrix wins
+from converting) is that a fix in the compile-time path can't see through
+`propertyHelper`'s function boundary, where `obj`/`name` are **parameters**. Not
+the case here — **even the fully syntactic form already fails**:
+
+| probe                                                | host | standalone |
+| ---------------------------------------------------- | ---- | ---------- |
+| `gOPD(C.prototype, "m")` — literal receiver + key    | pass | **fail**   |
+| `gOPD(o, n)` — via parameters                        | pass | **fail**   |
+| `gOPD(C, "s")` — static, literal                     | pass | **fail**   |
+| `hasOwnProperty.call(o, n)` — via parameters         | pass | **fail**   |
+
+Both spellings fail, so one representation-level fix serves both. There is no
+syntactic/dynamic split to design around.
+
+### Where the host/standalone asymmetry actually lives
+
+`C.prototype` is a **`$ClassName` WasmGC struct** with all fields defaulted,
+converted to externref and cached in a lazy global `__proto_<Class>`
+(`src/codegen/expressions/extern.ts::emitLazyProtoGet`, registered in
+`src/codegen/class-bodies.ts` ~922). The method names ARE collected —
+`ctx.classMethodNames` / `ctx.classStaticMethodNames` (`class-bodies.ts`
+~1375-1420) — but they are handed to the **host** as a CSV via the
+`__register_prototype` **host import**, which populates `_methodNames` /
+`_staticMethodNames` in `src/runtime.ts` (~5060). That is what makes the host
+lane's descriptor surface correct.
+
+**Standalone has no counterpart.** The native `__getOwnPropertyDescriptor` /
+`__hasOwnProperty` / `__propertyIsEnumerable` understand only `$Object` hash-map
+receivers (`src/codegen/object-runtime.ts` ~8342), and a class prototype is not
+one — so every own-property query answers "absent". The compile-time data needed
+is **already computed**; only the standalone consumer is missing.
+
+### The method IS reachable as a value — the gap is the own-property surface
+
+| probe                                     | host     | standalone |
+| ----------------------------------------- | -------- | ---------- |
+| `typeof C.prototype.m === "function"`     | pass     | **pass**   |
+| `typeof c.m` / `typeof C.s`               | pass     | **pass**   |
+| `c.m === C.prototype.m` (§15.7 identity)  | pass     | **pass**   |
+| `new C().m()` / `C.s()`                   | pass     | **pass**   |
+
+So the function object exists, is shared, and dispatches. Only its presence in
+the descriptor/own-property surface is missing. That bounds the change: it does
+**not** require materializing new function objects.
+
+### Adjacent defect found while probing — do NOT fold it in
+
+`o[n]` where both are parameters (`function read(o,n){return o[n];}`) fails on
+**BOTH** lanes for a class method, while the direct `C.prototype.m` read passes
+on both. That is #3642's family, not this issue, and it is a **cross-lane**
+defect. It matters here only because it **invalidated an instrument** (arm S,
+see `plan/probes/3976/NOTES.txt`), not because it blocks this fix.
+
+### Consequence for slicing — read before sizing
+
+`verifyProperty` does not stop at presence. After
+`assert(__hasOwnProperty(obj,name))` it **mutates**: it writes an unlikely value
+to probe `writable`, and deletes to probe `configurable`. So a
+presence-and-descriptor-only fix will **not** flip a file that reaches those
+probes. The 40/40 ceiling (arm U) skips all of it and is an upper bound only.
+
+**Attempting to measure the realised yield of a presence-only fix produced two
+INVALID instruments** (a silent no-op, then a confounded one) — both recorded in
+`plan/probes/3976/NOTES.txt`. **The realised yield of slice 1 is therefore NOT
+yet measured.** Measure it against a real implementation before quoting a size;
+do not inherit the 826 or the 40/40.
