@@ -4,7 +4,8 @@ title: "String.prototype methods: ToString(this) generic-receiver coercion, Requ
 status: ready
 sprint: current
 created: 2026-06-27
-updated: 2026-07-28
+updated: 2026-08-01
+assignee: ttraenkler/s78-dev2
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -22,7 +23,16 @@ depends_on: []
 # so the runtime must classify that source shape before exposing the closure.
 # PR #3753 keeps lastIndexOf's method-specific NaN fallback beside the shared
 # native-string integer-argument lowering.
+# (#2742 s78-dev2) The standalone arm of this issue lands in the reflective
+# String proto member-body dispatcher: the superseded #2875 wiring that
+# intercepts ahead of #3254's corrected borrowed-receiver path lives in
+# array-object-proto.ts, and the transferred-shape arms it composes with live
+# in char-at-transfer.ts / vec-props.ts / native-proto.ts.
 loc-budget-allow:
+  - src/codegen/array-object-proto.ts
+  - src/codegen/char-at-transfer.ts
+  - src/codegen/native-proto.ts
+  - src/codegen/vec-props.ts
   - src/runtime.ts
   - src/codegen/closure-exports.ts
   - src/codegen/closures/arrow-phases.ts
@@ -135,6 +145,16 @@ Before writing code I re-ran the **exact 22 files this issue lists** through
 expected to pass) and a negative control (a deliberately-wrong expectation) to
 prove the harness can report both outcomes. **Baseline: 10 pass / 12 fail.**
 Three of this issue's claims do not survive contact with the measurement.
+
+> ⚠️ **LANE CORRECTION (s78-dev2, 2026-08-01): everything in the section below
+> was measured on the DEFAULT (JS-host) lane ONLY.** `runTest262File` defaults
+> to the host target unless `"standalone"` is passed as its 4th argument. On
+> `--target standalone` these same group-(a) shapes still FAIL. So "group (a) is
+> essentially ALREADY FIXED" is true of one lane and false of the other, and
+> reading it unqualified is how this issue looked done while 157 ≤ES5
+> `String/prototype` files were failing standalone-only. Measured 2-lane numbers
+> are in "Two-lane decomposition" below. **Do not quote a claim from this
+> section without naming the lane it was measured on.**
 
 **1. Group (a) is essentially ALREADY FIXED — 8 of its 9 listed files pass on
 `main` today.** `charAt`/`charCodeAt`/`indexOf`/`lastIndexOf`/`slice` +
@@ -285,3 +305,182 @@ Exact local-vs-local Test262 A/B on base `c5bd4631724afa`:
 - Standalone directory: 15/25 → 17/25; ES5 subset: 11/21 → 13/21.
 - Fail→pass: `S15.5.4.8_A1_T10.js` and `S15.5.4.8_A4_T3.js`.
 - Pass→fail: none. Every remaining failure kept the same normalized signature.
+
+---
+
+# Standalone re-grounding (s78-dev2, 2026-08-01)
+
+Sprint 78 lever: raise ≤ES5 conformance in the **standalone** lane. Everything
+below is measured; where a hypothesis was refuted, the refutation is kept
+because it is the expensive part.
+
+## Two-lane decomposition — this is a LANE GAP, not "unimplemented"
+
+Scope: `built-ins/String/prototype/**` filtered to `es5id:` frontmatter.
+Sources: `.test262-cache/test262-standalone-current.jsonl` and
+`test262-current.jsonl`, same baselines run `20260801-010858`.
+**Rows floored:** 630 es5id files exist; 630 have a standalone row, 629 have a
+default row, so **629 are comparable**. The 1 missing row is reported, not
+silently dropped.
+
+| lane           | pass    | of 629 |
+| -------------- | ------- | ------ |
+| **standalone** | 412     | 65.5 % |
+| **default**    | 552     | 87.8 % |
+
+2×2 over the same 629 files:
+
+| bucket                                | n       |
+| ------------------------------------- | ------- |
+| pass in BOTH lanes                    | 395     |
+| fail in BOTH lanes                    | 60      |
+| **default passes, standalone fails**  | **157** |
+| standalone passes, default fails      | 17      |
+
+**157 vs 60 settles it**: the dominant failure mode is a standalone lane gap,
+not a feature nobody implemented. Excluding the 51 RegExp-engine codegen
+refusals (explicitly out of this issue's scope), 119 of 166 standalone failures
+pass on default (71.7 %).
+
+Causal buckets of the 218 standalone ≤ES5 failures (host-pass count in
+brackets — that is what turns "a failure" into "a standalone-only defect"):
+
+| n   | bucket                                   | host-pass |
+| --- | ---------------------------------------- | --------- |
+| 113 | assertion mismatch                       | 82        |
+| 51  | RegExp-engine refusal (OUT of scope)     | 38        |
+| 24  | null/undefined receiver deref            | 9         |
+| 15  | invalid Wasm binary (`__bindfn_*` locals) | 15        |
+| 9   | host-import leak                         | 8         |
+| 4   | unimplemented in standalone              | 3         |
+| 2   | misc                                     | 2         |
+
+## Instrument calibration (do not skip this when re-running)
+
+`runTest262File(file, cat, 60000, "standalone")` — **status only** is
+trustworthy (its error category and source location are artifacts; see
+`reference_runtest262file_not_ci_path_status_only`). Calibrated against the
+fresh standalone baseline on a 15-file subset: **14/14 agree, 0 disagreements**,
+and a known-passing file reports `pass`. All A/B below is same-box, same-run,
+same-file-list — never a local sweep diffed against a CI baseline.
+
+Two instrument bugs were caught by controls before they could mislead, both
+worth knowing:
+
+- `compile()` is **async**. An un-awaited call makes `r.success` `undefined`, so
+  **every** case — including a trivial positive control — reads as a compile
+  failure. The positive control is the only reason this was caught.
+- An ad-hoc "compile, instantiate, call the export, compare the value" harness
+  **fails on both lanes** (host needs a real import object; standalone string
+  returns do not marshal back naively). Its CONTROL failed, so the entire matrix
+  it produced was discarded rather than read. See
+  `project_wrapforhost_setexports_harness`.
+
+## REFUTED: "generalize the two hardcoded `charAt` transfer arms"
+
+The obvious fix shape, and it is wrong. `src/codegen/char-at-transfer.ts` holds
+two arms keyed on the **literal string `"charAt"`** —
+`buildTransferredCharAtMethodArm` (into `__extern_method_call`) and
+`buildTransferredCharAtApplyArm` (into `__apply_closure`). Generalizing them
+over the wired member set typechecks clean and flips **0 of 15** files.
+
+The diagnostic that killed it, rather than a rationalization of the zero:
+grep the emitted WAT for `__proto_method_\d+_<member>`. In the
+`__instance = new Object(42); __instance.charCodeAt = String.prototype.charCodeAt`
+shape **no proto-method closure is minted at all** — *not for `charCodeAt`, and
+not for `charAt` either*. Since those arms exist to serve `charAt`, they cannot
+be the mechanism by which anything works. The generalization was dead code and
+was reverted.
+
+(Also note: the first probe used `(String.prototype as any).charAt`. Per #3642
+the **declaration shape** changes the lowering, so an `as any` cast is a
+confound — re-probe with the exact untyped test262 spelling.)
+
+## ROOT CAUSE, proven by kill-switch removal
+
+Honest per-(shape, member) matrix, receiver `new Object(42)`, calibrated
+instrument, CONTROL (primitive-string receiver) green on every arm. The
+kill-switch forces `emitStringProtoMemberBody` to refuse, so the caller falls
+through to the legacy lowering:
+
+| arm                       | `String.prototype.M.call(obj)` | `obj.M = String.prototype.M; obj.M()` | total     |
+| ------------------------- | ------------------------------ | ------------------------------------- | --------- |
+| current `main`            | 5/14                           | 1/14                                  | 6/28      |
+| **String wiring refused** | **14/14**                      | 2/14                                  | **16/28** |
+
+The split is exact and inverts this issue's assumption. The members that FAIL
+`.call()` are precisely the ones **#2875 wired** (`charCodeAt`, `indexOf`,
+`lastIndexOf`, `trim`, `at`, `codePointAt`, `includes`, `startsWith`,
+`endsWith`). The ones that PASS are the ones **not** wired (`toUpperCase`,
+`slice`, `concat`) and therefore fall through to the legacy path — plus
+`substring`/`charAt`, which have bespoke bodies.
+
+**The reflective wiring is currently WORSE than the path it intercepts.**
+
+### Why — a superseded fix that was never removed
+
+- **#2875** added the wired bodies on this stated motivation: *"the reflective
+  path returns `undefined` and lands on a legacy `.call` that drops `thisArg`
+  and returns 0."* True when written.
+- **#3254** (status `done`, sprint 72, 2026-07-13) then added
+  `emitBorrowedStringReceiverToString` as a `receiverOverride` on the borrowed
+  dispatch, covering **every** method in `STANDALONE_STR_PROTO_METHODS`
+  (`calls.ts:6966`) — which contains every member the switch unwires.
+
+So #2875's motivating defect was fixed by #3254 in the legacy path, but the
+wiring that existed only to work around it stayed, and now intercepts *ahead* of
+the corrected path. This is a **revert of a superseded fix**, not a new feature.
+
+### The removal does NOT cost the descriptor surface (verified, not assumed)
+
+Descriptor/value-read callers pass `refusalBodyFallback: true`, so they still
+get a minted closure with correct metadata even when `emitMemberBody` refuses;
+only CALL dispatch falls through. Asserted empirically on both arms rather than
+read off the comment:
+
+| case                                                | baseline | wiring refused |
+| --------------------------------------------------- | -------- | -------------- |
+| `String.prototype.charCodeAt.name` / `.length`      | pass     | **pass**       |
+| `gOPD(String.prototype,"charCodeAt")` value/writable | pass     | **pass**       |
+| `charCodeAt.hasOwnProperty('length')`                | pass     | **pass**       |
+
+## THREE populations — do not conflate them in flip accounting
+
+Removing the wiring fixes exactly one of three. Naming them so the residual is
+not later misread as a regression:
+
+- **P1 — literal `String.prototype.M.call(obj)`.** Syntactic; #3254 covers it.
+  **Fixed by the removal** (5/14 → 14/14 on the micro matrix).
+- **P2 — transferred `obj.M = String.prototype.M; obj.M()`.** The single
+  largest sub-bucket (30 ≤ES5 files, 27 host-pass). Goes 1/14 → 2/14 — i.e.
+  **essentially untouched**. Legacy does not cover it either. This is a
+  genuinely separate second defect and needs its own root-cause pass.
+- **P3 — non-syntactic spellings.** `#3254`'s override fires only when
+  `typeName`/`methodName` are compile-time constants, so it cannot see:
+
+  | spelling                                             | baseline | wiring refused |
+  | ---------------------------------------------------- | -------- | -------------- |
+  | `var m = String.prototype.charCodeAt; m.call(o,0)`   | fail     | fail           |
+  | `String.prototype.charCodeAt.apply(o,[0])`           | fail     | fail           |
+  | `Function.prototype.call.bind(String.prototype.M)`   | fail     | fail           |
+
+  Unchanged by the removal — the wiring was not helping these either. The last
+  row is the propertyHelper/uncurryThis idiom and is the **#3571** seam; #3571's
+  own S1 analysis (`66ab19f84`) records that its host arm landed via #3635 and
+  only the standalone arm remains.
+
+**So the removal is strictly dominant on everything measured**: it fixes P1,
+regresses nothing, and leaves P2/P3 exactly as broken as they already are. It is
+not a tradeoff.
+
+## Adjacent, separate: the `__bindfn` invalid-Wasm cluster
+
+The 15 "invalid Wasm binary" files are corpus-wide **28 files, 25 host-pass**,
+one validation message (`call[N] expected type externref, found ref.null of
+type (ref null N)`), locals `__bindfn_tgt/__bindfn_arg/__bindfn_args` ⇒ the
+standalone arm of `compileFunctionBind` (`calls.ts:2277`). It is the
+propertyHelper family but a **compile-time** sub-mode, distinct from the runtime
+receiver-drop mode #3571 documents, so it does not double-attribute. A synthetic
+`Function.prototype.call.bind(...)` does **not** reproduce it (positive control
+green, so the instrument was live) — the trigger needs the full
+`propertyHelper`/`verifyNotWritable` shape. Keep it in its own PR.
