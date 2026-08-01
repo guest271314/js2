@@ -579,9 +579,25 @@ of *file counts*, because the corpus does not exercise the shapes uniformly.
 `trim` itself on the pre-fix `[object Object]` terminal."* The 10 flips are
 exactly the `trim` tests. So #3254's fix was **not** incomplete for `trim` — it
 was **masked**: the #2875 wiring intercepts ahead of it, so `trim` never reached
-the corrected path. Removing the superseded wiring is therefore the same repair
-#3254 was reopened for, and the two should be sequenced as one change rather
-than fixed twice.
+the corrected path.
+
+> ### 🚩 DO NOT WRITE A SECOND `trim` FIX
+>
+> **Whoever picks up #3254: `trim` is already repaired by removing the
+> superseded #2875 wiring described above. It is ONE repair, not two.**
+>
+> A second `trim` fix would be a redundant change against a path that is no
+> longer broken, and — because both changes target the same legacy borrowed
+> receiver path — the two would make each other's attribution unreadable.
+>
+> The evidence is the A/B directly above: with the wiring refused, **10 `trim`
+> files flip fail→pass and 0 files regress**, with a 65-file in-sweep control
+> that does not move. `trim`'s body was never the defect; its *dispatch* was
+> intercepted.
+>
+> If you believe a residual `trim` defect remains after this removal lands,
+> re-measure first and quote the file list — do not assume the reopening text
+> is still accurate, because it was written while the masking was in effect.
 
 ### Residual risk NOT covered by this sweep (state before shipping)
 
