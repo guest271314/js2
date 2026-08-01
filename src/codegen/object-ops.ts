@@ -3417,21 +3417,36 @@ export function compileObjectDefineProperties(
   // still read at the original call site, after all intervening mutations.
   const stableDescriptorMapEntries = (() => {
     if (!ctx.standalone || !ts.isIdentifier(descsArg)) return undefined;
-    if (
-      !ts.isPropertyAccessExpression(objArg) ||
-      objArg.name.text !== "prototype" ||
-      !ts.isIdentifier(objArg.expression)
-    ) {
-      return undefined;
-    }
-    const receiverDeclaration = ctx.oracle.valueDeclarationOf(objArg.expression);
-    const receiverIsFunction =
-      !!receiverDeclaration &&
-      (ts.isFunctionDeclaration(receiverDeclaration) ||
-        (ts.isVariableDeclaration(receiverDeclaration) &&
-          !!receiverDeclaration.initializer &&
-          ts.isFunctionExpression(unwrapTransparentExpression(receiverDeclaration.initializer))));
-    if (!receiverIsFunction) return undefined;
+    // (#3957) Receiver gate widened from "<fn>.prototype only" to "any
+    // re-evaluable-without-side-effects receiver", i.e. a bare identifier as
+    // well. The expansion below compiles `objArg` once PER KEY, so the gate's
+    // real job is to exclude receivers whose re-evaluation is observable
+    // (calls, element access with a computed index, `new`, …) — being a
+    // function prototype was never the load-bearing part. A bare identifier is
+    // the ordinary test262 / user spelling
+    // (`Object.defineProperties(obj, properties)`) and hits the same wall the
+    // #3782 comment describes: the native plural fallback cannot enumerate a
+    // statically-shaped WasmGC map as a dynamic `$Object`, so without the
+    // expansion the whole call is refused with "unsupported descriptor shape".
+    const receiverIsReEvaluable = (() => {
+      if (ts.isIdentifier(objArg)) return true;
+      if (
+        ts.isPropertyAccessExpression(objArg) &&
+        objArg.name.text === "prototype" &&
+        ts.isIdentifier(objArg.expression)
+      ) {
+        const receiverDeclaration = ctx.oracle.valueDeclarationOf(objArg.expression);
+        return (
+          !!receiverDeclaration &&
+          (ts.isFunctionDeclaration(receiverDeclaration) ||
+            (ts.isVariableDeclaration(receiverDeclaration) &&
+              !!receiverDeclaration.initializer &&
+              ts.isFunctionExpression(unwrapTransparentExpression(receiverDeclaration.initializer))))
+        );
+      }
+      return false;
+    })();
+    if (!receiverIsReEvaluable) return undefined;
 
     const declaration = ctx.oracle.variableDeclarationOf(descsArg);
     if (
