@@ -491,6 +491,13 @@ Two measurement traps found and fixed/recorded on the way:
 
 ## Official Test262 `eval-code` measurement (E6 wiring, 2026-07-27)
 
+> **⚠ These are LOCAL, INTERPRETER-LINKED numbers. They are NOT CI numbers and
+> must not be cited as a lane baseline.** CI never ran the prebuild, so the
+> branch arm's 117 passes and 11 attributable flips were never reproducible in
+> the standalone CI lane — see "Consequence: local eval numbers taken before
+> this change are not CI numbers" in the E7 findings below. Post-E7 the
+> equivalent run requires `TEST262_FULL_RUNTIME_EVAL=1`.
+
 Three same-session arms on the same machine, same authoritative command
 (TEST262_TARGET=standalone, TEST262_PATH_FILTER='language/eval-code/',
 COMPILER_POOL_SIZE=2, TEST262_WORKERS=2, --official-scope-only), all with
@@ -618,6 +625,43 @@ in both the runner and the worker. Before, a local sweep silently used any
 cached interpreter provider while CI could not — so the two lanes disagreed by
 exactly the interpreter's yield. Opt-in makes local and CI report the same
 standalone number by default.
+
+### ⚠ Consequence: local eval numbers taken before this change are not CI numbers
+
+This is a **measurement-validity** defect, not just an ergonomics one, and it is
+retroactive. Read it before citing any pre-E7 local eval figure as a baseline.
+
+**The mechanism.** Between E6 (2026-07-27) and E7 (2026-08-01), a local
+standalone sweep run through `scripts/run-test262-vitest.sh` prebuilt the real
+Acorn+interpreter provider and the worker linked it *unconditionally, with no
+flag and no log line saying which tier it got*. CI could never do either — it
+does not run that script, so its cache was always cold and the same files died
+at instantiate. The two lanes therefore diverged **silently**, and by a specific
+amount: **roughly the interpreter tier's yield**.
+
+**What that invalidates.** Any standalone eval-scope number measured *locally*
+on this repo in that window is an **interpreter-linked** number, and is
+**inflated relative to CI** — i.e. relative to the published baseline, the
+`#1897`/`#2097` standalone floor gates, and anything else fed from
+`loopdive/js2wasm-baselines`. Concretely this includes **the three-arm table in
+"Official Test262 `eval-code` measurement (E6 wiring, 2026-07-27)" above**: its
+117-pass branch arm and its 11 attributable flips are *local, interpreter-linked*
+results. E6 did disclose the mechanism in prose ("CI chunk shards see a cache
+miss and keep status-quo behavior"), but the disclosure never reached the
+headline table, which is exactly how such a figure gets re-quoted as a lane
+baseline later.
+
+**To be explicit about the direction:** those E6 numbers are not wrong *as
+measured* — the interpreter really did produce them, the kill-switch arm really
+was status-identical, and the attribution really does hold. They are wrong to
+use as a **CI/lane baseline**, because CI was never in that configuration.
+
+**The rule from here.** State the tier with every standalone eval figure. A
+number without `TEST262_FULL_RUNTIME_EVAL=1` is the refusal tier and is
+CI-comparable; a number with it is the interpreter tier and is **not**
+CI-comparable until the interpreter provider is actually published to CI (see
+"What is still owed"). The order of magnitude of the gap is the arm C delta
+above: ≥ +17 passes on a 262-file slice.
 
 ### Measurement (arms A/B, same machine, same HEAD, 2026-08-01)
 
