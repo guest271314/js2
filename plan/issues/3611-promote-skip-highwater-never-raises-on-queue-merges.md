@@ -1,17 +1,18 @@
 ---
 id: 3611
 title: "promote-baseline skips on the per-SHA-reuse path, so the #2097 standalone high-water never re-raises on queue merges — the floor drifts permissively, silently"
-status: ready
+status: done
+completed: 2026-08-01
 sprint: current
 created: 2026-07-25
-updated: 2026-07-25
+updated: 2026-08-01
 priority: high
 horizon: m
 feasibility: medium
 task_type: ci
 area: ci, merge-queue, test262
 goal: release-pipeline
-related: [2097, 3467, 3468, 3448, 3592, 2562, 1078, 3601]
+related: [2097, 3467, 3468, 3448, 3592, 2562, 1078, 3601, 3953]
 origin: "PR-queue shepherd verification of the #3601 (#3592 RC2) landing, 2026-07-25. Surfaced only because a deliberate ~5,000-test move was being watched."
 ---
 
@@ -140,6 +141,22 @@ without this issue the same drift resumes on the next queue merge.)
 
 ## Acceptance criteria
 
+> **Disposition, 2026-08-01.** The mechanism is fixed here (2, 6). The criteria that
+> **cannot be settled by a code diff** — the observable post-merge verification (1, 3)
+> and the loudness work (4) — are carried by **#3953** rather than left as unticked
+> boxes inside a `done` issue, because an unowned box is exactly how this defect
+> survived a week unnoticed. **AC5 is deliberately NOT done** — see the position below.
+>
+> | #   | criterion                                | status                                                            |
+> | --- | ---------------------------------------- | ----------------------------------------------------------------- |
+> | 1   | raise runs on a HIT-path landing         | **→ #3953** (needs a real merge + run id)                         |
+> | 2   | gating corrected                         | **done** — and the criterion itself was misdirected; see below    |
+> | 3   | mark left raised, verified on a merge    | **→ #3953**                                                       |
+> | 4   | the silent failure becomes loud          | **→ #3953** (not attempted here)                                  |
+> | 5   | `refresh-baseline.yml` disposition       | **open by design** — rationale unrecorded; escalated, not guessed |
+> | 6   | runbook stops naming a lever that 422s   | **done** — `docs/ci-policy.md`                                    |
+> | 7   | README derives from promoted measurement | untouched by this change                                          |
+
 1. A merge-queue landing that takes the per-SHA-reuse (HIT) path **runs** the
    high-water raise; the mark advances without manual intervention.
 2. The `needs`/`if` gating is corrected so the promote job's own documented
@@ -161,6 +178,18 @@ without this issue the same drift resumes on the next queue merge.)
    name a lever that would fail.
 7. The README / landing-page standalone number derives from the promoted
    measurement, never from an in-PR estimate.
+
+## The finding, stated first (2026-08-01)
+
+> **The standalone high-water mark has not risen at all in the observable window,
+> because BOTH paths that can raise it are dead** — `promote-baseline` skipped on
+> **30 of 30** available push:main runs, and `refresh-baseline.yml` has been
+> `disabled_manually` for over a week.
+
+That is the finding. The `always()`-skip propagation below is only the _mechanism_,
+and the title understates it: this is not "the mark drifts", it is "the mark cannot
+move." And because a floor that is too **low** never fires, the whole thing is
+invisible from the inside.
 
 ## Verification 2026-08-01 — still true, and it is 30/30, not intermittent
 
@@ -235,6 +264,35 @@ is the **absence of a status-check function** on `promote-baseline`, and the fix
 in-file precedent: `merge-report`, the job directly above it in the same chain, already
 does exactly this and is exactly why it survives.
 
+### What shipped, and how acceptance must be judged
+
+`promote-baseline`'s `if:` gains `!cancelled()` — the status-check function whose
+absence let the skip propagate — **plus explicit `needs.merge-report.result ==
+'success'` / `needs.mg-artifact-probe.result == 'success'` terms.** That second half
+is not decoration: `!cancelled()` alone re-enables the job unconditionally, so it
+would also promote a baseline **after `merge-report` FAILED** — a worse bug than the
+stale mark it fixes. The explicit terms restore exactly what the implicit `success()`
+was providing. `!cancelled()` rather than bare `always()` so a cancelled run still
+cancels.
+
+`tests/issue-3611-promote-baseline-runs-on-hit-path.test.ts` pins both halves, and
+each was **positive-controlled by injecting the corresponding defect**: dropping the
+`needs.*.result` terms fails only _"still refuses to promote when either dependency
+did not succeed"_; removing `!cancelled()` fails only _"does not use bare
+`always()`"_. 1 of 7 each, different tests — specific, not merely sensitive. (Writing
+that second test also caught a real slicing bug in the test itself: the job's own
+prose _explains_ `merge-report`'s `always()`, so a naive substring slice matched the
+comment rather than the condition. A substring assertion over YAML is only as good as
+its slice.)
+
+> **⚠️ Acceptance here must be OBSERVABLE, not structural.** The test above is a
+> **guard against regression**, not evidence the bug is fixed. It asserts the shape
+> of the `if:`, and a structural assertion would keep passing while some _other_
+> propagation path kept the job skipped. **Criterion 1/3 is satisfied only by a real
+> queue merge whose run shows `promote merged report to main baseline` with
+> conclusion `success`, cited by run id** — the same audit that produced the 30/30,
+> re-run after this lands (`.tmp/promote-audit.sh`). Do not tick it off the tests.
+
 ### Why nothing caught it
 
 The failure is silent **in the permissive direction** — a floor that is too low never
@@ -242,6 +300,49 @@ fires. Combined with the two jobs having confusingly similar names
 (`promote root baseline …` vs `promote merged report to main baseline`), a reader
 skimming the run sees a green `promote …` job and moves on. **One of them succeeded on
 all 30 runs; the other one is the one that carries the raise.**
+
+### AC5 — position: do NOT re-enable `refresh-baseline.yml` here, and the reason is UNRECORDED
+
+Searched `plan/`, `docs/` and `.claude/memory/` for why it was switched off. **Nothing
+states a rationale.** Recording that as _unknown_ rather than guessing, because the
+honest answer to "why is this off?" is load-bearing: a workflow someone deliberately
+disabled may have been disabled for a reason that still holds, and silently
+re-enabling a **main-pusher** is precisely the class #3915 just had to gate.
+
+Three reasons this issue should not flip it:
+
+1. **Repairing the PRIMARY beats re-enabling a BACKSTOP.** `promote-baseline` is the
+   mechanism; `refresh-baseline` is the safety net. Fixing the net while the
+   mechanism is broken hides the mechanism's failure again.
+2. **Re-enabling is a repo-config change with standing effect** — it restarts an
+   8-hourly cron — and it is not something a code PR can even express. It cannot be
+   reviewed as part of this diff.
+3. **Its rationale is unrecorded**, so re-enabling would be inferring permission.
+   ([[reference_untested_recovery_paths_rot_silently]] reaches the same conclusion
+   independently: _escalate, don't infer permission_.)
+
+**Proposal:** treat re-enablement as its own change with its own justification, after
+criterion 1/3 confirms the primary path works on a real merge. If nobody can state
+why it was disabled, that fact should be recorded in the re-enablement request rather
+than quietly resolved. #3915 already added the merge-queue gate to its main push, so
+whenever it _is_ re-enabled it cannot silently reintroduce the rebuild tax.
+
+### AC6 — the runbook is corrected here
+
+`docs/ci-policy.md` now states, at the point where it lists `refresh-baseline.yml`
+among the deploy-key promoters, that the workflow is `disabled_manually` and that a
+dispatch returns **HTTP 422 before doing anything** — so the historical "dispatch it
+in EMERGENCY mode" lever will not execute. Verified today, and the verification
+command is inline so a reader can re-check rather than trust the date.
+
+Two generalisations added alongside it, because the specific line will rot the same
+way the last one did:
+
+- **Check a lever is `state=active`, not merely that it exists**, before relying on
+  it — with the one-liner that lists every non-active workflow.
+- **`gh workflow list` OMITS disabled workflows**, so absence there is not evidence of
+  non-existence. That is exactly the false-empty shape that makes this class hard to
+  see.
 
 ## Notes
 
