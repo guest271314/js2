@@ -121,19 +121,20 @@ export function tryEmitNativeUserCtorInstanceOf(
   // Chain walk: `__isPrototypeOf(F.prototype, value)`. `emitFnctorProtoGet`
   // lazily materializes the per-fnctor prototype `$Object` — the same global the
   // #2660 S3a `new F()` reconstruct seeds `$proto` from, so object identity
-  // holds. It declines (emitting nothing) when the object runtime is
-  // unavailable, in which case we keep whatever the struct arm produced.
-  if (isProtoOfIdx !== undefined) {
-    const bodyLenBefore = fctx.body.length;
-    if (emitFnctorProtoGet(ctx, fctx, ctorName)) {
-      fctx.body.push({ op: "local.get", index: valueLocal });
-      // Re-read the index: the proto-get may have registered helpers.
-      fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__isPrototypeOf") ?? isProtoOfIdx });
-      if (pushedAnArm) fctx.body.push({ op: "i32.or" });
-      pushedAnArm = true;
-    } else {
-      fctx.body.length = bodyLenBefore;
-    }
+  // holds.
+  //
+  // This is NOT a speculative compile and needs no rollback (#1919): the helper's
+  // only failure point is its opening `ensureLateImport("__new_plain_object")`,
+  // which precedes every `body.push` it makes — so a `false` return has emitted
+  // nothing, exactly as its contract states. Truncating `body.length` here would
+  // be a *partial* rollback anyway (it would not undo locals, late imports or
+  // errors), which is the bug pattern the #1919 gate exists to catch.
+  if (isProtoOfIdx !== undefined && emitFnctorProtoGet(ctx, fctx, ctorName)) {
+    fctx.body.push({ op: "local.get", index: valueLocal });
+    // Re-read the index: the proto-get may have registered helpers.
+    fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__isPrototypeOf") ?? isProtoOfIdx });
+    if (pushedAnArm) fctx.body.push({ op: "i32.or" });
+    pushedAnArm = true;
   }
 
   if (!pushedAnArm) {
