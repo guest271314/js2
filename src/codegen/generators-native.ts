@@ -1387,22 +1387,50 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     }
     for (const el of elements) {
       const id = el.name as ts.Identifier;
-      // (#3386) FUNCTION-VALUED element defaults (`[g = function(){}]`,
-      // `[g = () => 1]`, `[g = function*(){}]`) still bail. The emit-site
-      // destructure compiles the default into a closure/native-gen-state ref
-      // whose wasm rep does not cleanly round-trip the spill field in every
-      // lane — the class-method lane in particular emits an "illegal cast" at
-      // runtime (the `#3164` host-mix fixture, `*method([gen = function*(){}]
-      // = [])`). This is the documented W3 "throwing / function-valued
-      // default" exclusion; the dominant `dflt-*` cohort uses numeric / object
-      // / call-expression defaults, which are admitted (throwing defaults are
-      // CallExpressions and lower correctly). A later slice can widen this
-      // once the closure-valued spill round-trip is proven in all lanes.
-      if (
-        el.initializer &&
+      // (#3386 → #3952) Element defaults that evaluate to a CLOSURE. #3386 bailed
+      // all three of arrow / function-expression / class-expression, and set the
+      // bar for widening: "once the closure-valued spill round-trip is proven in
+      // all lanes". #3952 ran that proof — each arm spills the closure, SUSPENDS,
+      // resumes, and CALLS it (import-freedom plus a plain value read would pass a
+      // module that stored a broken reference and never invoked it):
+      //
+      //   ARROW / plain FUNCTION-EXPRESSION  → round-trips. objlit, class and
+      //     array-pattern lanes all return the called closure's value across a
+      //     suspension, host-free, and `arrow.name` is still `"arrow"`
+      //     (NamedEvaluation, #1450/#1119/#1049). ADMITTED.
+      //   GENERATOR function expression (`[g = function*(){}]`) → objlit lane
+      //     traps at runtime. STILL BAILS.
+      //   CLASS expression (`{ K = class {…} }`) → "dereferencing a null pointer"
+      //     in BOTH the objlit and class lanes. STILL BAILS.
+      //
+      // Note #3386's cited evidence is stale: the shape it named — the #3164
+      // host-mix fixture `*method([gen = function*(){}] = [])` in the CLASS lane —
+      // now passes. The unsafe set is real but different from the recorded one,
+      // which is why this widening is driven by a fresh matrix rather than by
+      // relaxing the predicate to whatever the old comment blamed.
+      //
+      // The class lane also passes the generator-fn-expr arm today (32 rows), but
+      // admitting a shape that traps in a sibling lane on lane identity alone is
+      // how a leak gets traded for a silent wrong value — so `gen` stays bailed
+      // uniformly and is left as a measured, bounded follow-up on #3952.
+      //
+      // The generator FUNCTION-EXPRESSION host (`const g = function*({…} = {}){}`)
+      // keeps the bail for ALL closure defaults too, and the control is what
+      // justifies it: that lane already traps on an element default with a plain
+      // NUMERIC value (`{ n = 41 }`), with no closure anywhere. So its defect is
+      // pre-existing and closure-INDEPENDENT — admitting these 8 rows would swap a
+      // loud host-import leak for a runtime trap without proving anything. Tracked
+      // separately; do not fold it in here.
+      const closureDefault =
+        el.initializer !== undefined &&
         (ts.isFunctionExpression(el.initializer) ||
           ts.isArrowFunction(el.initializer) ||
-          ts.isClassExpression(el.initializer))
+          ts.isClassExpression(el.initializer));
+      if (
+        closureDefault &&
+        ((ts.isFunctionExpression(el.initializer!) && el.initializer!.asteriskToken !== undefined) ||
+          ts.isClassExpression(el.initializer!) ||
+          ts.isFunctionExpression(decl))
       ) {
         return null;
       }
