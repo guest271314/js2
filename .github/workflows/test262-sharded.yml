@@ -704,6 +704,21 @@ jobs:
           ./node_modules/.bin/esbuild src/runtime.ts --bundle --platform=node --format=esm \
             --outfile=scripts/runtime-bundle.mjs --external:typescript --external:binaryen
 
+      # (#2928 E7) Standalone only: build the REFUSAL runtime-eval provider.
+      # `js2wasm:runtime-eval` is a MODULE-LEVEL import, so with no namespace
+      # supplied a standalone file that merely mentions dynamic `new Function`
+      # / indirect eval cannot instantiate and loses every assertion it has —
+      # 361 files in the published standalone baseline die that way, most of
+      # them never reaching the dynamic call. The refusal provider is a
+      # js2wasm-compiled, zero-import core-Wasm module with the same envelope
+      # ABI and NO capability: files run, and only the dynamic-code call itself
+      # throws the #2960 Tier-3 TypeError. `--refusal-only` skips the real
+      # Acorn+interpreter provider, which takes MINUTES to compile and is not
+      # affordable per shard; this one takes seconds.
+      - name: Prebuild refusal runtime-eval provider (#2928)
+        if: matrix.target.test262_target == 'standalone'
+        run: node scripts/build-runtime-eval-provider.mjs --refusal-only
+
       - name: Run shard
         run: |
           mkdir -p vitest-blob
@@ -841,6 +856,14 @@ jobs:
           pnpm run build:compiler-bundle
           ./node_modules/.bin/esbuild src/runtime.ts --bundle --platform=node --format=esm \
             --outfile=scripts/runtime-bundle.mjs --external:typescript --external:binaryen
+
+      # (#2928 E7) Same refusal-provider prebuild as `test262-shard` — see the
+      # comment there. merge_group re-validation must see the same standalone
+      # linking behaviour the PR-level and push lanes see, or the two lanes
+      # would disagree by exactly these 361 files.
+      - name: Prebuild refusal runtime-eval provider (#2928)
+        if: matrix.test262_target == 'standalone'
+        run: node scripts/build-runtime-eval-provider.mjs --refusal-only
 
       - name: Run shard
         run: |
