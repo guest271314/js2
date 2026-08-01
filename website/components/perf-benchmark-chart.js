@@ -1312,13 +1312,22 @@ class PerfBenchmarkChart extends HTMLElement {
           this.style.display = "none";
           return;
         }
+        // (#3904) A strategy the benchmark deliberately skips produces no row
+        // at all and stays off the chart. A strategy that *failed* is recorded
+        // with `status: "failed"` and zero timings — render it as a named,
+        // zero-length "failed" bar so a broken lane is visible instead of
+        // silently indistinguishable from an inapplicable one.
         ratios = filtered
-          .filter((row) => row?.strategy && row.strategy !== "js" && row.medianMs > 0)
-          .map((row) => ({
-            name: row.strategy,
-            ratio: jsRow.medianMs / row.medianMs,
-            label: (jsRow.medianMs / row.medianMs).toFixed(1) + "x",
-          }));
+          .filter((row) => row?.strategy && row.strategy !== "js" && (row.medianMs > 0 || row.status === "failed"))
+          .map((row) =>
+            row.status === "failed"
+              ? { name: row.strategy, ratio: 0, label: "failed" }
+              : {
+                  name: row.strategy,
+                  ratio: jsRow.medianMs / row.medianMs,
+                  label: (jsRow.medianMs / row.medianMs).toFixed(1) + "x",
+                },
+          );
       } else if (mode === "runtime") {
         let rows = Array.isArray(json) ? json : [];
         if (benchmarkFilter) {

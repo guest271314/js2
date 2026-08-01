@@ -13,7 +13,17 @@ task_type: tooling
 area: codegen, tooling
 language_feature: compiler-internals
 goal: performance
-related: [3780, 3756, 3684, 3686]
+related: [3780, 3756, 3684, 3685, 3686, 3920, 3926, 3927]
+loc-budget-allow:
+  # Two call sites (generateModule / generateMultiModule), 5 lines each plus the
+  # import. The pass itself lives in src/codegen/alloc-census.ts, per the
+  # "add code to the subsystem module, not the barrel" rule — what lands in
+  # index.ts is only the hook, which has to be here because it must run after
+  # dead-type elimination has remapped every typeIdx.
+  - src/codegen/index.ts
+func-budget-allow:
+  - src/codegen/index.ts::generateModule
+  - src/codegen/index.ts::generateMultiModule
 origin: "#3780 round 4 — allocation volume turned out to be the dominant standalone cost, and 34 MB of the 43.6 MB per acorn parse cannot be attributed with any existing tool"
 ---
 
@@ -89,14 +99,125 @@ Notes for whoever builds it:
   the census total against the independent `--trace-gc` sum (which needs no
   instrumentation) is the cross-check.
 
+## Why this is the head of the queue
+
+The standalone gap is ~9-10x and no identified lever is known to close it
+alone. The ranked causes, and who owns them, are:
+
+| # | cause | owner |
+| ---: | --- | --- |
+| 1 | allocation volume — 34 MB/parse unattributed | **this issue** |
+| 2 | null-check/cast scaffolding inside compiled bodies | #3686 |
+| 3 | untwinned generic bodies (twin admission 150/2,363 = 6.3%) | #3685 |
+| 4 | `__extern_get` generic property lookup | #3926 |
+| 5 | union-of-all-shapes fnctor structs (`Node` = 292 B for 3-6 live props) | #3927 |
+
+This one is first not because it is the biggest — #3686/#3685 may well be —
+but because it is the only one whose size is currently **unknown**, and it is
+cheap to resolve relative to what it unblocks. Items 1 and 5 are both
+allocation-side; sequencing 5 before this would risk spending an XL window on
+a retained 9.5 MB while a transient 34 MB goes unexamined.
+
+**Caveat that applies to the whole table:** these shares come from a Linux /
+Node 22 profile whose GC bucket (24-37%) disagrees by an order of magnitude
+with the two Node 24 / macOS profiles (1.5%, 4.3%). See the cross-box caveat
+now recorded in #3684/#3685/#3686. If GC is genuinely ~2% on the reference
+hardware, items 2-4 outrank items 1 and 5 there.
+
+## RESULT — the acorn breakdown (2026-07-31)
+
+Instrumented standalone runtime-dynamic build, 2,356,708 B, checksum 422,
+counters snapshotted **after `__module_init` and before the parse** so the
+table is per-parse rather than per-instance.
+
+**647,346 allocations for one 226 KB parse** — about 15.5 per token.
+
+| count/parse | share | wasm type | what it is | ~bytes ea | ~MB |
+| ---: | ---: | --- | --- | ---: | ---: |
+| **310,485** | **47.96%** | `(struct i32 i32 f64 eqref externref)` | **`$AnyValue` box** | 32 | **9.9** |
+| 123,337 | 19.05% | `(array (mut externref))` | vec backing store (3 merged ids) | ~40 | ~4.9 |
+| 54,825 | 8.47% | `(sub (struct i32 i32 (ref $i16arr)))` | native string carrier | ~24 | ~1.3 |
+| 33,746 | 5.21% | `(array (mut i32))` | i32 array store | ~40 | ~1.3 |
+| **32,468** | **5.02%** | `__fnctor_Node` | **the AST itself** | 292 | **9.5** |
+| 31,414 | 4.85% | `__vec_externref` | vec header | 16 | 0.5 |
+| 26,071 | 4.03% | `(array (mut i16))` | string char storage | ~40 | ~1.0 |
+| 18,722 | 2.89% | `(struct i32 i32 (ref $i32arr))` | i32-backed vec | 24 | 0.45 |
+| 7,252 | 1.12% | 5×f64 + externref | numeric record | 56 | 0.4 |
+
+Byte estimates use 8 B headers, 4 B compressed refs and a nominal capacity-8
+backing array; they sum to ~29 MB against the 43.6 MB `--trace-gc` total, so
+**treat the byte column as indicative and the COUNT column as measured.** The
+residual is almost certainly larger-than-nominal array capacities plus the
+115-type tail; it does not move the ranking.
+
+### The finding
+
+**`$AnyValue` boxing is 48% of every allocation in the parse — 310,485 boxes,
+~7.4 per token — and it appeared on no one's list.** The ranked table below put
+allocation first but assumed the mass was AST-shaped; it is not. The AST is
+**5%** of allocations by count and, even at 292 B each, only draws level with
+`$AnyValue` on bytes.
+
+This reorders the queue. `$AnyValue` is the carrier a value takes when a
+statically-typed value flows somewhere its type is no longer known — the same
+crossing #3899's boolean interning addressed one narrow case of. Whatever
+fraction of those 310 K boxes is a value that was *provably* typed at the
+producer and re-widened for a generic consumer is pure loss, and it is a
+representation question (#3927/#3685 territory) rather than a GC-tuning one.
+
+Also worth noting: **123,337 vec backing arrays against 4,275 arrays surviving
+in the AST** — 29× more allocated than retained. Empty `[]` costs a header plus
+a capacity-8 store, so a parser that speculatively creates lists it discards
+pays ~56 B each time.
+
+### Cross-check status
+
+The census total has NOT been reconciled against the `--trace-gc` inter-GC sum
+(29 MB estimated vs 43.6 MB measured). Closing that is the remaining
+correctness step for this issue, and until it is closed the byte column must
+not be quoted as measurement. The *counts* are exact — each is a counter
+incremented at the allocation site.
+
+## Follow-up measured 2026-07-31 — scalar replacement is NOT available
+
+The cheapest possible fix for the 310,485 `$AnyValue` boxes would have been the
+optimizer: most boxes are created, crossed and unboxed inside one expression,
+which is exactly what Binaryen's `Heap2Local` promotes to locals. Tested before
+proposing any codegen work, on the shipped 1,673,257 B standalone acorn binary:
+
+| config | ArrayNew | StructNew |
+| --- | ---: | ---: |
+| shipped `-O3` | 731 | 3,759 |
+| `+ --heap2local` | 731 | 3,759 |
+| `+ --closed-world --heap2local` | 731 | 3,759 |
+| `+ --closed-world --gufa --heap2local` | 731 | 3,759 |
+
+**Zero allocation sites promoted, under every configuration.** `Heap2Local`
+works by replacing a `struct.new` whose result provably does not escape; an
+unchanged site count means nothing was provable. So either `-O3` already
+extracted everything available, or — more likely given `$AnyValue`'s shape — the
+boxes genuinely do escape into generic calls that the optimizer cannot see
+through.
+
+**Consequence: the `$AnyValue` fix must be "do not create the box" in codegen,
+not "let the optimizer remove it".** That moves it out of tooling and into the
+same representation family as #3685/#3927. It also means the remaining cheap
+options are interning (constants only) and finding the producer that mints them
+— it is worth reading the top producer's WAT to check whether its consumers
+ever read more than one field of the 5-field union before assuming they need it.
+
+Caveat: a static site count is not a dynamic allocation count. What this
+measurement establishes is that no site was promoted, which is the precondition
+for any dynamic win — not the size of a win that did not happen.
+
 ## Scope
 
-- [ ] Emitter-side census pass, env-gated and off by default.
-- [ ] Reader that reports count and **bytes** per type, per operation.
-- [ ] Cross-check the census total against the `--trace-gc` inter-GC sum on the
-      standalone acorn parse; they should agree to within a few percent.
-- [ ] Publish the acorn breakdown — that is the artifact #3780's next round
-      needs, and the reason this issue exists.
+- [x] Emitter-side census pass, env-gated and off by default (PR #3920).
+- [x] Reader that reports count per type, per operation.
+- [x] Publish the acorn breakdown — above.
+- [ ] Reconcile the ~29 MB byte estimate with the 43.6 MB `--trace-gc` total:
+      compute exact per-type sizes from the type table and the real array
+      capacities instead of nominal ones.
 
 ## Acceptance criteria
 
