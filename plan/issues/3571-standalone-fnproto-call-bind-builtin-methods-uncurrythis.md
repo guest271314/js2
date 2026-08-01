@@ -1,11 +1,11 @@
 ---
 id: 3571
-title: "standalone: Function.prototype.call/apply/bind on builtin methods (uncurryThis/propertyHelper blocker)"
-status: in-progress
+title: "standalone: builtin objects not reified as values (was: Function.prototype.call/apply/bind uncurryThis — MECHANISM REFUTED, see 2026-08-01 section)"
+status: ready
 created: 2026-07-24
-updated: 2026-07-26
-assignee: ttraenkler/opus-loop-c
-priority: high
+updated: 2026-08-01
+assignee: ttraenkler/sendev-p3-uncurry
+priority: medium
 feasibility: hard
 model: fable
 task_type: conformance
@@ -13,9 +13,14 @@ area: codegen
 language_feature: function-dispatch
 goal: standalone
 sprint: current
-horizon: l
+horizon: m
 parent: 2860
-related: [2773, 2984, 2744, 2175]
+related: [2773, 2984, 2744, 2175, 3976, 3642, 3603]
+# (2026-08-01) Priority high -> medium and horizon l -> m: the uncurryThis seam
+# is measured at 1.7% of the 1,810-file routing population it was scheduled on
+# (0% on a stratified sample of this issue's OWN signature). The corrected
+# standalone scope is "builtin objects are not reified as inspectable values",
+# bounded at 217 files. The dominant cause in that population is #3976.
 ---
 
 # standalone: `Function.prototype.call`/`apply`/`bind` on builtin methods (uncurryThis / propertyHelper blocker)
@@ -265,3 +270,113 @@ signature was a property of **where** the failure surfaced — a frame
 #3638's 43-row bucket that was ten different builtins, visible in about two
 minutes of reading the file list, and it turned a "43-row defect" into a 16-row
 one plus nine unrelated causes.
+
+---
+
+# MECHANISM CORRECTED — the standalone arm is NOT a receiver drop (sendev-p3-uncurry, 2026-08-01)
+
+> **The "P3 uncurryThis / propertyHelper seam" was scheduled as an XL target on
+> the figure "1,810 standalone-only failures route through `propertyHelper.js`".
+> Measured causally, the uncurryThis idiom is worth 1.7 % of that. The headline
+> diagnosis below — that `Function.prototype.call.bind` drops the explicit
+> receiver — is REFUTED for the standalone arm by 32/40 on a stratified sample of
+> this issue's OWN documented signature.**
+>
+> Everything here is measured with controls. **Do not re-derive it by reading.**
+
+## Instrument calibration (do this before trusting any number here)
+
+Standalone official rows **43,106 / 25,460 pass (59.1 %)** — exact match to
+baseline run `20260801-010858`. The propertyHelper population reproduces to the
+row: **1,494 pass / 1,810 fail-and-host-pass**.
+
+(My static include-scan finds **5,206** files vs the earlier 4,898. The gap is
+**743 files with no official standalone row**, reported rather than dropped. The
+two load-bearing numbers match exactly.)
+
+## Attribution instrument — a harness-level kill switch
+
+The four uncurried captures on `propertyHelper.js:29-32` are replaced in a
+**private per-worktree harness copy** (symlink restored on every exit path).
+`assembleOriginalHarness` caches sources in a module-private `Map`, so an
+in-process switch is impossible ⇒ **one arm per process**. Cross-process
+comparability was therefore an assumption, so it was **measured**: **arm A run
+twice gave 36/36 identical rows.**
+
+| arm    | what it does                                      | verdict                                                                                                                                                      |
+| ------ | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **B1** | drop only the `call.bind` layer, keep `.call`     | **INSTRUMENT INVALID** — broke all 6 positive controls                                                                                                       |
+| **B2** | remove ALL reflective dispatch from the captures  | valid — controls 6/6 in both arms                                                                                                                            |
+
+**B1 is reported despite being discarded**, because it teaches something:
+`Array.prototype.push.call(...)` is a **deliberate codegen refusal**
+(`src/codegen/array-prototype-borrow.ts:1144`, #1888 Slice 3/4). The stock
+uncurried spelling **evades that refusal syntactically**; rewriting it to the
+literal `.call` form makes it visible and the compile fails.
+
+B2's controls are load-bearing rather than decorative: `verifyProperty` asserts
+`__hasOwnProperty(obj,name)` is **true**, so a green control proves the
+*replacement itself* works and is not vacuously passing.
+
+## Result
+
+| sample                                                              | n       | fail→pass       | pass→fail | controls     |
+| ------------------------------------------------------------------- | ------- | --------------- | --------- | ------------ |
+| random, seeded, from the 1,810                                      | **120** | **2 (1.7 %)**   | 0         | 6/6 both arms |
+| stratified — the 217 files carrying THIS issue's documented signature | **40**  | **0 (0 %)**     | 0         | 6/6 both arms |
+
+95 % CI on 2/120 ≈ 0.2–5.9 % ⇒ projected **~30 files of 1,810 (CI ~4–107)**.
+95 % upper bound on the stratified 0/40 ≈ 8.8 %.
+
+## WHY it is zero — the mislabel, located
+
+A probe arm labels **where** the throw originates. This is decidable from the
+harness's own structure: `verifyProperty` reaches line 48
+`__getOwnPropertyDescriptor(obj, name)` **before** line 64's uncurried
+`__hasOwnProperty(obj, name)` — and line 27 captures gOPD **directly**
+(`var __getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor`), i.e. **not
+via uncurryThis at all**.
+
+On the 40 files carrying this issue's own signature (controls 6/6 valid):
+
+| n         | origin                                                     |
+| --------- | ---------------------------------------------------------- |
+| **32/40** | `obj` is **ALREADY nullish when `verifyProperty` is entered** |
+| 4         | threw at harness line 62                                    |
+| 3         | threw earlier still, before the probe                      |
+| 1         | threw at harness line 61                                    |
+
+**80 % never reach the uncurried captures.** The receiver is not *dropped* by
+`Function.prototype.call.bind` — it is *missing before the call is made*, because
+the builtin under test (`Number`, `Date`, `TypedArray.prototype.keys`, …) is
+**not reified as a value** in the standalone lane.
+
+⇒ **This is a missing VALUE, not a receiver DROP.** That relabel is the point:
+the wrong mechanism is why this issue's 109-test cluster figure never converted,
+and leaving it in place guarantees the next lane repeats the work.
+
+## Corrected scope for this issue
+
+- **The standalone arm is "builtin objects are not reified as inspectable
+  values"** — bounded at **217 files** (12 % of the 1,810), of which ~80 % show
+  the nullish-receiver origin above. Size it by sampling, not by the 217.
+- The **`__bindfn` invalid-Wasm cluster** (25 files here, 28 corpus-wide) is a
+  **compile-time** sub-mode and stays separate — see `compileFunctionBind`'s
+  standalone arm, `src/codegen/expressions/calls.ts:2249-2300`. A synthetic
+  `Function.prototype.call.bind(...)` does **not** reproduce it.
+- The **host arm remains DONE via #3635**, with the denominator caveat recorded
+  above (the `uncurry.mts` harness does not cover length-preserving mutation).
+  Nothing measured here contradicts the S1 analysis in `66ab19f84`; it is
+  carried forward in this branch rather than left to rot.
+- **The dominant cause in this population is NOT this issue** — it is
+  **#3976** (class elements not installed as own properties): 826 of the 1,810,
+  ~28× this issue's measured lever.
+
+## Method note — what actually generalises
+
+**A routing bound is not a causal bound.** "1,810 files *include* the harness
+that reports the failure" proves the files pass *through* the shape; it says
+nothing about whether the shape is *why* they fail. The distance between the two
+here was **1,810 vs ~30 — a factor of ~60**. The cheap instrument that settles it
+is a **kill switch on the suspected mechanism plus positive controls that
+exercise the replacement**, and it cost ~40 minutes against an XL estimate.
