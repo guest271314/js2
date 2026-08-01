@@ -91,7 +91,15 @@ describe("#3521 prepare-before-emit free-function routing", () => {
     expect((await instantiate(result)).flag!(0)).toBe(1);
   });
 
-  it("keeps fast-mode numeric ABI drift on the post-direct overlay", async () => {
+  // (#3907) There is no longer a fast-mode numeric ABI drift to keep off the
+  // overlay. The drift WAS the #3907 bug: legacy fast mode grounded every
+  // `number` to i32 while IR's semantic `number` is f64, so the two signatures
+  // disagreed and the IR patch was refused. Fast mode now carries the same f64
+  // representation, the signatures match, and the IR body legitimately patches
+  // over the direct one. This test therefore pins the OPPOSITE outcome to the
+  // one it was written for — the old expectation was recording a consequence of
+  // an unsound representation, not a property worth preserving.
+  it("fast-mode numeric bodies reach the IR patch now that the ABI no longer drifts", async () => {
     const result = await compile(`export function add(left: number, right: number): number { return left + right; }`, {
       fileName: "prepared-fast-number.ts",
       experimentalIR: true,
@@ -102,14 +110,19 @@ describe("#3521 prepare-before-emit free-function routing", () => {
     expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
     expect(result.irFirstSkipped ?? []).not.toContain("add");
     expect(outcome(result, "add")).toMatchObject({
-      kind: "unsupported",
+      kind: "emitted",
       legacyBodyEmitted: true,
-      irBodyEmitted: false,
+      irBodyEmitted: true,
     });
     expect((await instantiate(result)).add!(20, 22)).toBe(42);
+    // The point of the fix: the same body is correct past 2^31, which the i32
+    // ABI it used to be grounded to could not represent.
+    expect((await instantiate(result)).add!(4_000_000_000, 4_000_000_000)).toBe(8_000_000_000);
   });
 
-  it("keeps fast boolean callers with a numeric ABI-drift callee on the post-direct overlay", async () => {
+  // (#3907) Same reversal as above, one call edge deeper: the callee no longer
+  // drifts, so neither it nor its boolean caller is held off the IR patch.
+  it("fast boolean callers with a numeric callee also reach the IR patch", async () => {
     const result = await compile(
       `
       function numeric(value: number): number { return value + 1; }
@@ -129,9 +142,9 @@ describe("#3521 prepare-before-emit free-function routing", () => {
     expect(result.irFirstSkipped ?? []).not.toContain("numeric");
     expect(result.irFirstSkipped ?? []).not.toContain("positive");
     expect(outcome(result, "numeric")).toMatchObject({
-      kind: "unsupported",
+      kind: "emitted",
       legacyBodyEmitted: true,
-      irBodyEmitted: false,
+      irBodyEmitted: true,
     });
     expect(outcome(result, "positive")).toMatchObject({
       legacyBodyEmitted: true,

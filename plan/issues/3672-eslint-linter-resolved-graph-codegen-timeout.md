@@ -228,11 +228,80 @@ nothing beyond `--cpu-prof`.
   use) compiles successfully, so the failing rung is not passing for an
   unrelated reason.
 
+## Follow-up (2026-07-31, later the same day) — the inherited-alias defect is fixed, frontier advanced
+
+The builtin-subclass inherited-alias defect that this issue's measurement work
+isolated is now **fixed**, and the ESLint frontier has moved past it.
+
+**Root cause.** `ProgramAbiCallableRegistry.observeInheritedAlias`
+(`src/codegen/program-abi-class-callable-planning.ts`) used a single signal —
+`definedFuncAt(...) === undefined` — to mean "corrupt locator", collapsing two
+structurally distinct causes:
+
+1. the handle is an **import** handle — a host-import `funcMap` entry the
+   `${ancestor}_` prefix scan in `collectClassInfo`
+   (`src/codegen/class-bodies.ts`) matched by textual coincidence; and
+2. the handle is a **non-import** handle with no defined record — a genuinely
+   stale/never-pushed locator (the #2043 late-import-shift corruption class the
+   check was actually written for).
+
+Only (2) is an invariant violation. An import can never *be* a canonical class
+unit, so (1) is the same "nothing exact to observe" outcome the existing
+zero-canonical-owner branch already tolerates with `return undefined`.
+
+**Fix.** One guarded early return using the sanctioned `isImportFuncIdx`
+chokepoint (`src/codegen/func-space.ts`), placed ahead of the `definedFuncAt`
+check; the throw is retained unchanged for case (2).
+
+**Why this cannot regress a passing program.** Every input that reaches the new
+early return previously *threw*, aborting the whole compile. So the set of
+successfully-compiling programs can only grow. `setProgramAbiInheritedClassCallableAlias`
+still writes `ctx.funcMap` exactly as before, so sidecar-off modes — which never
+threw here because the call is optional-chained — are byte-for-byte unaffected.
+
+**Measured frontier advance** (8-core container, `--target gc`,
+`platform: node`):
+
+| entry                        | before                                                 | after                                                                                |
+| ---------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------ |
+| direct `lib/linter/linter.js` | `inherited class callable LazyLoadingRuleMap_has … 676` | `source callable validate has no consistent exact top-level or compiler-support inventory owner` |
+| package entry (`import { Linter }`) | `inherited class callable … 590`                | identical new diagnostic                                                             |
+
+Still one hard codegen error, 124 total errors, 10.6 s wall — so the compile
+still aborts early and the 2048 MB / 120 s budget is unchanged and still a
+budget on a compile that stops at the frontier.
+
+**Scope — what this does NOT fix.** Inherited builtin-collection members on a
+subclass are still not backed by real collection state in the JS-host lane.
+Measured on **unmodified `main`**, using the clean-compiling subclass-alone
+control (so this is pre-existing, not introduced here): `r.set("k", 2)` followed
+by `r.size` reads `0` and `r.get("k")` reads `undefined` — the module compiles
+and silently computes the wrong answer. That is the #2620 native-subclass
+substrate, tracked separately. This change only stops an unrelated `new Map()`
+elsewhere in the program from turning that already-wrong compile into a hard
+abort; it does not make builtin subclassing correct.
+
+**Test changes.** The repro block in `tests/issue-3672.test.ts` is inverted from
+pinning the defect to guarding the fix (plus an explicit
+`not.toContain("inherited class callable")` so the retired rung cannot come
+back); the real-graph rung and Tier 1a in `tests/stress/eslint-tier1.test.ts`
+are advanced to the new diagnostic. `tests/issue-3672.test.ts` 5 passed /
+5 attempted / 0 skipped; Tier 1a 1 passed / 1 attempted.
+
 ## Remaining work owned elsewhere
 
-- The builtin-subclass inherited-alias defect itself has **no issue on `main`**.
-  PR #3687 claims a fix for it on its branch (measured handle 615 vs
-  `numImportFuncs` 650). It needs a home issue; the repro above is ready for it.
+- **NEXT FRONTIER (unowned, no issue yet):** `source callable validate has no
+  consistent exact top-level or compiler-support inventory owner`, thrown from
+  `observeWithExpectedKind` in
+  `src/codegen/program-abi-source-callable-planning.ts:357`. A `function
+  validate` declaration whose inventory unit is neither `top-level-function` nor
+  `synthetic-support`. Not reduced yet — this is an inventory-modelling gap, a
+  different class of defect from the import-handle confusion fixed above.
+- The builtin-subclass inherited-alias defect never got its own issue id; it is
+  fixed and recorded here instead (the allocator's open-PR scan was offline, and
+  minting an id to close it in the same change is ceremony with collision risk).
+  PR #3687 also claims a fix for it on its branch (measured handle 615 vs
+  `numImportFuncs` 650) — that overlap still needs deciding.
 - `Cannot find module '../../package.json'` — #3655.
 - The CJS-interop shape diagnostics (`no default export`,
   `declares X locally, but it is not exported`) — #3654 follow-up.
