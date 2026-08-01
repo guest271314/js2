@@ -28,6 +28,7 @@ import { ensureObjectRuntime } from "../object-runtime.js";
 import { emitStandalonePromiseFromExecutor, emitStandalonePromiseFromExecutorValue } from "../promise-executor.js";
 import { emitStandaloneTest262Error, emitWasiErrorConstructor, isWasiErrorName } from "../registry/error-types.js";
 import { coerceType, compileExpression } from "../shared.js";
+import type { InnerResult } from "../shared.js";
 import { compileStringLiteral } from "../string-ops.js";
 import { coerceType as coerceTypeImpl } from "../type-coercion.js";
 import { ensureDateDaysFromCivilHelper, ensureDateStruct } from "./builtins.js";
@@ -1222,4 +1223,61 @@ export function tryCompileBuiltinGlobalNew(
     }
   }
   return NEW_GLOBAL_FALLTHROUGH;
+}
+
+/**
+ * The Error-family constructors, all of which §20.5.1.1 / §20.5.6.1.1 define to
+ * behave identically whether invoked with `new` or as a plain function: "When
+ * `Error` is called as a function rather than as a constructor, it creates and
+ * initializes a new Error object" — the [[Construct]] and [[Call]] behaviours
+ * are the same clause.
+ */
+const CALLABLE_ERROR_CTORS = new Set([
+  "Error",
+  "TypeError",
+  "RangeError",
+  "SyntaxError",
+  "URIError",
+  "EvalError",
+  "ReferenceError",
+  "AggregateError",
+  "SuppressedError",
+  "Test262Error",
+]);
+
+/**
+ * `Error(msg)` / `TypeError(msg)` / … called WITHOUT `new`.
+ *
+ * The `new` form is handled by {@link tryCompileBuiltinGlobalNew}; the bare-call
+ * form previously matched no arm at all and fell through to the generic builtin
+ * path, which yields `ref.null.extern`. The result was a silent, diagnostic-free
+ * `null` where an Error object belonged, so the very next `.message` read
+ * null-trapped. Real code hits this constantly: React's production bundle raises
+ * every one of its errors as `Error(formatProdErrorMessage(...))`, so a compiled
+ * React threw an opaque wasm exception instead of the real error for
+ * `Children.only`, `cloneElement(null)` and friends.
+ *
+ * Because the spec defines [[Call]] and [[Construct]] identically here, this
+ * delegates to the exact same emitter rather than duplicating it — a
+ * CallExpression and a NewExpression expose the same `.expression`/`.arguments`
+ * shape that emitter reads. A shadowed binding (`class Error {}`, a local, an
+ * import) is left alone: those are not the ambient global.
+ *
+ * Returns the emitter's result when it handles the call; `undefined` otherwise
+ * (caller continues its dispatch ladder).
+ */
+export function tryCompileErrorCtorCallWithoutNew(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+): InnerResult | undefined {
+  if (expr.questionDotToken) return undefined;
+  const callee = expr.expression;
+  if (!ts.isIdentifier(callee)) return undefined;
+  if (!CALLABLE_ERROR_CTORS.has(callee.text)) return undefined;
+  if (ctx.classSet.has(callee.text)) return undefined;
+  if (!resolvesToAmbientGlobal(ctx, callee)) return undefined;
+
+  const result = tryCompileBuiltinGlobalNew(ctx, fctx, expr as unknown as ts.NewExpression);
+  return result === NEW_GLOBAL_FALLTHROUGH ? undefined : result;
 }
