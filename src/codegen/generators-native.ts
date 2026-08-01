@@ -2065,17 +2065,42 @@ export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorD
       return false;
     }
   }
-  // (#2581) An OBJECT-LITERAL generator method with a DEFAULT or OPTIONAL param
-  // must bail to the host path. Object-literal methods are invoked through the
-  // closure trampoline (`emitObjectMethodAsClosure`), which forwards args but
-  // does NOT set the `__argc_default` global the param-default check reads — so
-  // the native factory would read the un-defaulted sentinel and yield the wrong
-  // value (`{ *m(d=5){yield d} }.m()` → 0 instead of 5). Class methods are called
-  // directly (argc set), so they keep defaults native. The eager-buffer host path
-  // applies defaults correctly for the object-literal case, so route there.
+  // (#2581 → #3948) The OBJECT-LITERAL generator method DEFAULT/OPTIONAL bail is
+  // LIFTED. #2581's diagnosis was right about the symptom and wrong about both
+  // the mechanism and the remedy, so the correction is recorded here rather than
+  // just deleted (see issue #3948 for the instrumented trace):
+  //
+  //   * The mechanism was NOT the `emitObjectMethodAsClosure` trampoline. A plain
+  //     `o.m()` is a direct call and does reach `maybeSetArgcForKnownCall`
+  //     (call-receiver-method.ts). What it found there was an EMPTY
+  //     `ctx.funcOptionalParams` — object-literal methods were the one method
+  //     form that never registered optional-param metadata (class bodies do it in
+  //     `registerClassOptionalParams`, free functions in declarations.ts). The
+  //     gate `!funcUsesArguments.has(n) && !funcOptionalParams.has(n)` therefore
+  //     returned early and `$__argc` kept its `-1` "unknown caller" sentinel.
+  //   * The remedy was NOT sound either: routing to the eager-buffer HOST path
+  //     does not apply the default correctly — measured on the host lane,
+  //     `{ *m(a = 5) }.m().next().value` is 0 there too. The bail bought no
+  //     correctness, only a `__gen_*` host-import leak in standalone (98 rows).
+  //
+  // #3948 fixes the real gap in literals.ts (register the optional params), which
+  // makes the argc-driven default fire for object-literal methods in BOTH lanes;
+  // this gate then has nothing left to protect against. Kill-switched both ways:
+  // restoring this bail turns the leak red again, and reverting the literals.ts
+  // registration alone leaves a host-free module that silently yields the inert 0.
+  //
+  // `questionToken` STILL bails, and that half was measured rather than inherited:
+  // with the argc registration in place, `{ *m(a?: number) { yield a === undefined
+  // ? 42 : a } }.m()` still yields 0, not 42 — an `a?: number` param lowers to a
+  // bare `f64` with no `undefined` inhabitant, so there is nothing for the missing
+  // -arg branch to bind. That is a value-representation gap (#3949's family), not
+  // an admission-gate one, and the same 0 comes out of a NON-generator
+  // `{ m(a?: number) }`. Admitting it here would trade a leak for a wrong value,
+  // so it keeps the host path until the rep gap is closed. #3893 made the same
+  // call for function expressions.
   if (ts.isMethodDeclaration(decl) && ts.isObjectLiteralExpression(decl.parent)) {
     for (const param of decl.parameters) {
-      if (param.initializer || param.questionToken) return false;
+      if (param.questionToken) return false;
     }
   }
   // (#2938) A generator METHOD whose emitted name is not unique within its

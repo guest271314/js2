@@ -37,7 +37,7 @@ import { emitStandaloneIterableMaterialize } from "./iterator-native.js"; // (#3
 import { popBody, pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
-import type { CodegenContext, FunctionContext } from "./context/types.js";
+import type { CodegenContext, FunctionContext, OptionalParamInfo } from "./context/types.js";
 import { isForeignEvalNode } from "./expressions/eval-source.js";
 import { emitUndefined, patchStructNewForAddedField } from "./expressions/late-imports.js";
 import { resolveStructName } from "./expressions/misc.js";
@@ -53,6 +53,7 @@ import {
   destructureParamArray,
   destructureParamObject,
   ensureStructForType,
+  extractConstantDefault,
   getOrRegisterTupleType,
   getTupleElementTypes,
   isTupleType,
@@ -2924,6 +2925,36 @@ export function compileObjectLiteralForStruct(
       // beyond the formal param count.
       if (prop.body && bodyUsesArguments(prop.body)) {
         ctx.funcUsesArguments.add(fullName);
+      }
+
+      // (#3948) Register optional/defaulted params for this object-literal
+      // method. Class bodies have always done this (class-bodies.ts
+      // `registerClassOptionalParams`), free functions too (declarations.ts);
+      // object literals were the one method form that never did — and
+      // `maybeSetArgcForKnownCall` is gated on exactly this map, so every
+      // `o.m()` call site silently skipped its `global.set $__argc`. The
+      // callee's param-default prologue then read the `-1` "unknown caller"
+      // sentinel, concluded no argument was missing, and used the raw
+      // (zero/null) incoming slot: `{ m(a = 5) }.m()` evaluated to 0 in BOTH
+      // lanes. `methodParams` leads with the receiver `this`, so the ValType
+      // for source parameter `i` is at `methodParams[i + 1]` — the same
+      // `paramTypeOffset = 1` the class path uses for instance methods.
+      const objMethodOptionalParams: OptionalParamInfo[] = [];
+      for (let pi = 0; pi < prop.parameters.length; pi++) {
+        const param = prop.parameters[pi]!;
+        if (!param.questionToken && !param.initializer) continue;
+        const paramValType = methodParams[pi + 1];
+        if (!paramValType) continue;
+        const info: OptionalParamInfo = { index: pi, type: paramValType };
+        if (param.initializer) {
+          const cd = extractConstantDefault(param.initializer, paramValType, ctx);
+          if (cd) info.constantDefault = cd;
+          else info.hasExpressionDefault = true;
+        }
+        objMethodOptionalParams.push(info);
+      }
+      if (objMethodOptionalParams.length > 0) {
+        ctx.funcOptionalParams.set(fullName, objMethodOptionalParams);
       }
 
       const methodTypeIdx = addFuncType(ctx, methodParams, methodResults, `${fullName}_type`);
