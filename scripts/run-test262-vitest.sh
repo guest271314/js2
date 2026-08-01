@@ -175,16 +175,32 @@ fi
 "$ESBUILD_BIN" src/runtime.ts --bundle --platform=node --format=esm \
   --outfile=scripts/runtime-bundle.mjs --external:typescript --external:binaryen 2>&1 | tail -1
 
-# ── Prebuild the standalone runtime-eval provider (#2928 E6) ─────
+# ── Prebuild the standalone runtime-eval provider (#2928 E6/E7) ──
 # Standalone modules that use dynamic eval / new Function link a core-Wasm
-# `js2wasm:runtime-eval` provider (Acorn + interpreter, compiled by js2wasm
-# itself). Build it ONCE here — the pool workers only load the cached binary
-# (compiling Acorn takes minutes; the per-test pool timeout is 30s). Idempotent:
-# cache hit exits in <1s. The cache lives in the shared .test262-cache, so
-# subsequent runs on the same compiler bundle skip the build entirely.
+# `js2wasm:runtime-eval` provider. Build it ONCE here — the pool workers only
+# load the cached binary (the per-test pool timeout is 30s). Idempotent: a
+# cache hit exits in <1s, and the cache lives in the shared .test262-cache.
+#
+# TWO tiers (#2928 E7):
+#   default            — the REFUSAL provider only. Seconds to compile, no
+#                        parser, no interpreter, no capability. It exists so an
+#                        eval-mentioning module can INSTANTIATE at all; without
+#                        it the module-level `js2wasm:runtime-eval` import is
+#                        unresolvable and the file loses every assertion it has.
+#                        This is what CI builds per standalone shard, so it is
+#                        also the local default — local and CI must report the
+#                        same standalone number.
+#   TEST262_FULL_RUNTIME_EVAL=1 — additionally build the real Acorn+interpreter
+#                        provider (MINUTES) and let the worker prefer it. This
+#                        is the interpreter measurement arm, not a default.
 if [ "$TEST262_TARGET" = "standalone" ]; then
-  echo "Prebuilding runtime-eval provider (#2928 E6)..."
-  NODE_OPTIONS="--max-old-space-size=3072" node scripts/build-runtime-eval-provider.mjs
+  if [ "${TEST262_FULL_RUNTIME_EVAL:-}" = "1" ]; then
+    echo "Prebuilding runtime-eval provider — refusal + FULL interpreter (#2928 E7)..."
+    NODE_OPTIONS="--max-old-space-size=3072" node scripts/build-runtime-eval-provider.mjs
+  else
+    echo "Prebuilding runtime-eval REFUSAL provider (#2928 E7; TEST262_FULL_RUNTIME_EVAL=1 for the interpreter)..."
+    NODE_OPTIONS="--max-old-space-size=3072" node scripts/build-runtime-eval-provider.mjs --refusal-only
+  fi
 fi
 
 # ── Prepare result files ─────────────────────────────────────────

@@ -36,6 +36,7 @@ import { ensureStrToCharVecHelper, stringConstantExternrefInstrs } from "./nativ
 import { emitStandaloneIterableMaterialize } from "./iterator-native.js"; // (#3100 S5)
 import { popBody, pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
+import { emptyBackingStoreInstrs } from "./empty-vec-store.js"; // (#3921) shared zero-length backing store
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext, OptionalParamInfo } from "./context/types.js";
 import { isForeignEvalNode } from "./expressions/eval-source.js";
@@ -2153,8 +2154,19 @@ export function compileObjectLiteralForStruct(
     for (const src of spreadSources) spreadByPropIndex.set(src.propIndex, src.srcFields);
     const insertionOrder: string[] = [];
     const seen = new Set<string>();
-    const pushName = (n: string | undefined): void => {
-      if (n === undefined || n.startsWith("$") || n.startsWith("__")) return;
+    // `written` = the key appears literally in this object literal's source, so
+    // it is unambiguously a USER property even when it starts with `$` / `__`
+    // (`{ $$typeof: … }` — React tags every element that way, and jQuery-style
+    // `$`-prefixed keys are common generally). The compiler's own hidden slots
+    // (`$shape`, `$arity`, `__tag`) never come through this path.
+    //
+    // Spread sources are different: their name list is the SOURCE STRUCT's slot
+    // names, which do mix user keys with those hidden slots. There is no way to
+    // tell them apart here, so the prefix heuristic is kept for that path —
+    // conservative, and exactly the previous behaviour.
+    const pushName = (n: string | undefined, written: boolean): void => {
+      if (n === undefined) return;
+      if (!written && (n.startsWith("$") || n.startsWith("__"))) return;
       if (seen.has(n)) return;
       seen.add(n);
       insertionOrder.push(n);
@@ -2163,14 +2175,14 @@ export function compileObjectLiteralForStruct(
       const prop = expr.properties[pi]!;
       if (ts.isSpreadAssignment(prop)) {
         const srcFields = spreadByPropIndex.get(pi);
-        if (srcFields) for (const f of srcFields) pushName(f.name);
+        if (srcFields) for (const f of srcFields) pushName(f.name, false);
         continue;
       }
       if (ts.isMethodDeclaration(prop) || ts.isGetAccessorDeclaration(prop) || ts.isSetAccessorDeclaration(prop)) {
-        if (prop.name) pushName(resolveAccessorPropName(ctx, prop.name));
+        if (prop.name) pushName(resolveAccessorPropName(ctx, prop.name), true);
         continue;
       }
-      pushName(resolvePropertyNameText(ctx, prop));
+      pushName(resolvePropertyNameText(ctx, prop), true);
     }
     if (insertionOrder.length > 0) ctx.structInsertionOrder.set(typeName, insertionOrder);
   }
@@ -3715,8 +3727,18 @@ export function compileArrayLiteral(
     }
 
     fctx.body.push({ op: "i32.const", value: 0 }); // length field (field 0)
-    fctx.body.push({ op: "i32.const", value: prealloc > 0 ? prealloc : 0 }); // size for array.new_default (#1001: preallocate if counted push loop detected)
-    fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx }); // data field (field 1)
+    // (#3921 follow-up) With no prealloc the backing store is zero-length and
+    // DEAD ON ARRIVAL — `push` grows on `capacity < length + argc`, which from
+    // capacity 0 always trips, so the first push replaces it. Share one
+    // immutable singleton per element type instead of allocating 31,414 of
+    // them per acorn parse. Prealloc'd literals keep their own store.
+    const sharedEmpty = prealloc > 0 ? undefined : emptyBackingStoreInstrs(ctx, arrTypeIdx);
+    if (sharedEmpty) {
+      for (const instr of sharedEmpty) fctx.body.push(instr);
+    } else {
+      fctx.body.push({ op: "i32.const", value: prealloc > 0 ? prealloc : 0 }); // size for array.new_default (#1001: preallocate if counted push loop detected)
+      fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx }); // data field (field 1)
+    }
     fctx.body.push({ op: "struct.new", typeIdx: vecTypeIdx }); // wrap in vec struct
     return { kind: "ref_null", typeIdx: vecTypeIdx };
   }

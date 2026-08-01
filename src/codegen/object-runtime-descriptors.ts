@@ -1117,6 +1117,9 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
       throwTypeError("TypeError: Invalid property descriptor in Object.defineProperties (#1906)");
     const throwAccessor = (): Instr[] =>
       throwTypeError("TypeError: Object.defineProperties get/set must be callable (#1906)");
+    // (#3957) ToObject(Properties) on null/undefined — §7.1.18 step 1/2.
+    const throwPropertiesNotCoercible = (): Instr[] =>
+      throwTypeError("TypeError: Cannot convert undefined or null to object");
 
     const readBooleanFlag = (key: string, specifiedBit: number, valueBit: number, marksData: boolean): Instr[] => [
       ...hasField(key),
@@ -1250,9 +1253,26 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
       { op: "ref.cast", typeIdx: objectTypeIdx },
       { op: "local.set", index: L_OBJ },
 
+      // `Properties` must be a native `$Object` for the key walk below.
+      //
+      // (#3957) This gate deliberately STAYS. Per §20.1.2.3.1 step 1 the
+      // argument only has to be object-COERCIBLE, so a RegExp/Date/Array/
+      // Function/Arguments/Error/boxed-wrapper `Properties` — or a
+      // closed-struct object literal that shape inference never widened — is
+      // legal and this refuses it. Widening the gate is NOT a local fix: the
+      // own-enumerable-key enumeration itself (`__object_keys`,
+      // object-runtime-enumeration.ts) carries the SAME `ref.test $Object`
+      // test and returns an EMPTY `$ObjVec` for every other receiver. Dropping
+      // this gate therefore trades a loud refusal for a SILENT no-op —
+      // `Object.defineProperties(o, new Boolean(true))` would define nothing
+      // and return normally. Measured directly (2026-08-01): with the gate
+      // removed, `Object.defineProperties(obj, {a:{value:100,…}})` on a
+      // closed-struct literal silently defined no properties. Fail-loud is a
+      // deliberate #1906 property; keep it until the exotic-receiver own-key
+      // MOP substrate lands (#2992 slice 2/5, #3251).
       { op: "local.get", index: 1 },
       { op: "ref.is_null" },
-      { op: "if", blockType: { kind: "empty" }, then: throwUnsupported() },
+      { op: "if", blockType: { kind: "empty" }, then: throwPropertiesNotCoercible() },
       { op: "local.get", index: 1 },
       { op: "any.convert_extern" },
       { op: "local.tee", index: L_DESCS_ANY },
@@ -1298,16 +1318,35 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
               { op: "ref.is_null" },
               { op: "br_if", depth: 1 },
 
-              // key = entry.key; rawDesc = entry.value.
+              // key = entry.key.
               { op: "local.get", index: L_ENTRY },
               { op: "ref.as_non_null" },
               { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 0 },
               { op: "extern.convert_any" },
               { op: "local.set", index: L_KEY },
-              { op: "local.get", index: L_ENTRY },
-              { op: "ref.as_non_null" },
-              { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 1 },
-              { op: "extern.convert_any" },
+
+              // (#3957) rawDesc = Properties.[[Get]](key) — NOT the raw
+              // `$PropEntry.value` SLOT the old code read.
+              //
+              // §20.1.2.3.1 step 3.b is a real `[[Get]]`, and the slot read was
+              // observably wrong two ways:
+              //   (1) an ACCESSOR entry has its value slot CLEARED TO NULL by
+              //       `__defineProperty_accessor` ("accessors hold no value" —
+              //       see the `struct.set fieldIdx 1 <- ref.null` above). So the
+              //       slot read produced null and the null-descriptor guard
+              //       below refused the whole call — even for a plain `{}`
+              //       Properties map. `Object.create({}, props)` therefore threw
+              //       "unsupported descriptor shape" whenever `props.prop` had
+              //       been defined through a getter, which is the single most
+              //       common way test262 builds a `Properties` map.
+              //   (2) a getter that must run for its SIDE EFFECTS never ran.
+              // `__extern_get` is the same accessor-aware [[Get]] the rest of
+              // the runtime uses, and it proto-walks — which is correct here:
+              // `__obj_ordered` already restricted the KEY set to own
+              // enumerable keys, so the walk can only re-find the own property.
+              { op: "local.get", index: 1 },
+              { op: "local.get", index: L_KEY },
+              { op: "call", funcIdx: externGetIdx },
               { op: "local.set", index: L_RAW_DESC },
 
               // (#3246) Per-property descriptor must be an OBJECT per
@@ -1387,9 +1426,8 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
               // $PropEntry layout as a compact descriptor-record carrier.
               { op: "local.get", index: L_GATHERED },
               { op: "local.get", index: L_M },
-              { op: "local.get", index: L_ENTRY },
-              { op: "ref.as_non_null" },
-              { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 0 },
+              { op: "local.get", index: L_KEY },
+              { op: "any.convert_extern" },
               { op: "local.get", index: L_VALUE },
               { op: "any.convert_extern" },
               { op: "local.get", index: L_FLAGS },
@@ -1521,7 +1559,6 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
     );
     void L_OBJ;
     void L_RAW_OBJ;
-    void L_KEY;
   }
 
   // ── __obj_define_from_desc (#1629b — native single dynamic-descriptor apply) ─
