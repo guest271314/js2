@@ -150,6 +150,27 @@ Two test262 workflows currently run on PRs:
     back. If GH013 recurs, first confirm the ruleset still lists the
     `DeployKey: always` bypass actor
     (`gh api /repos/loopdive/js2/rulesets/16700772 --jq .bypass_actors`).
+  - ⚠️ **`refresh-baseline.yml` is `state=disabled_manually` and CANNOT be
+    dispatched** (verified 2026-07-25 and again 2026-08-01:
+    `gh api repos/loopdive/js2/actions/workflows/265204741 --jq .state`; a
+    `workflow_dispatch` returns **HTTP 422 "Cannot trigger a
+    'workflow_dispatch' on a disabled workflow"** — it fails before doing
+    anything). It is the only non-active workflow in the repo. Any runbook
+    step that says "dispatch `refresh-baseline.yml` in EMERGENCY mode" —
+    historically the documented lever for a queue wedged on #1897 — **will
+    not execute today**. Treat that lever as unavailable until #3611 settles
+    its disposition, and do NOT re-enable it mid-incident: that restarts an
+    8-hourly cron and runs an unconditional, guard-ignoring promote, which is
+    the most dangerous available version of that action.
+    **Note `gh workflow list` simply OMITS disabled workflows**, so absence
+    there is not evidence of non-existence — query the API by id or path.
+  - **Before relying on ANY documented lever, check it is enabled**, not just
+    that it exists:
+    `gh api repos/loopdive/js2/actions/workflows --jq '.workflows[]|"\(.state) \(.path)"' | grep -v '^active'`.
+    Disabling a workflow silently invalidates every runbook line naming it and
+    nothing links the two, so an untested recovery path is indistinguishable
+    from a working one until the moment it is needed. When disabling a
+    workflow, grep the docs for its name **in the same change**.
   - The `check for test262 regressions` job is also required. It compares
     the merged PR report against the baseline and catches full pass→fail
     regressions even when the inline hard guards inside `merge shard reports`
