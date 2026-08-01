@@ -35,6 +35,7 @@ func-budget-allow:
   - src/codegen/index.ts::generateMultiModule
   - src/codegen/string-ops.ts::compileNativeStringMethodCall
 ---
+
 # #2742 — String.prototype generic-receiver `ToString(this)` coercion
 
 Every `String.prototype` method begins with `RequireObjectCoercible(this)` then
@@ -50,6 +51,7 @@ single clean root cause spanning ~50 tests.
 **(a) Non-string `this` must be `ToString`-coerced** (e.g.
 `__instance = new Object(42); __instance.charAt = String.prototype.charAt;
 __instance.charAt(0)`):
+
 - `test/built-ins/String/prototype/charAt/S15.5.4.4_A1_T1.js`
 - `test/built-ins/String/prototype/charCodeAt/S15.5.4.5_A1_T1.js`
 - `test/built-ins/String/prototype/indexOf/S15.5.4.7_A1_T1.js`
@@ -61,6 +63,7 @@ __instance.charAt(0)`):
 
 **(b) `null`/`undefined` `this` must throw a real `TypeError`
 (`RequireObjectCoercible`), not an internal null-deref:**
+
 - `test/built-ins/String/prototype/charAt/S15.5.4.4_A2.js`,
   `…/charAt/S15.5.4.4_A1.1.js`, `…/charAt/S15.5.4.4_A5.js`
 - `test/built-ins/String/prototype/charCodeAt/S15.5.4.5_A2.js`,
@@ -72,6 +75,7 @@ __instance.charAt(0)`):
 
 **(c) `this` whose `valueOf`/`toString` must run through `ToPrimitive`/`ToString`
 ordering (trim family):**
+
 - `test/built-ins/String/prototype/trimStart/this-value-object-tostring-meth-priority.js`
 - `test/built-ins/String/prototype/trimEnd/this-value-object-toprimitive-meth-priority.js`
 - `test/built-ins/String/prototype/trimStart/this-value-object-valueof-meth-priority.js`
@@ -79,6 +83,7 @@ ordering (trim family):**
 
 **(d) Each `String.prototype.X` must expose a `length` own data property
 (function arity):**
+
 - `test/built-ins/String/prototype/charAt/S15.5.4.4_A8.js`
 - `test/built-ins/String/prototype/charCodeAt/S15.5.4.5_A8.js`
 - `test/built-ins/String/prototype/indexOf/S15.5.4.7_A8.js`
@@ -115,6 +120,7 @@ no regressions in currently-passing tests.
 `ToString(this)` coercion). Tracked in this issue; assigned separately.
 
 ## Scope / out of scope
+
 - IN: charAt, charCodeAt, indexOf, lastIndexOf, slice, substring, concat,
   trim/trimStart/trimEnd generic-receiver + `ToString(this)` + `.length`.
 - OUT: regex-driven methods (`match`/`matchAll`/`replace`/`replaceAll`/`split`/
@@ -139,19 +145,19 @@ Three of this issue's claims do not survive contact with the measurement.
 **1. Group (a) is essentially ALREADY FIXED — 8 of its 9 listed files pass on
 `main` today.** `charAt`/`charCodeAt`/`indexOf`/`lastIndexOf`/`slice` +
 3× `substring` with a non-string `this` all pass. Only `concat/S15.5.4.6_A1_T10`
-fails, and for an unrelated reason (an *argument*'s `toString`, not the
+fails, and for an unrelated reason (an _argument_'s `toString`, not the
 receiver's). The issue's headline — "our implementations assume a string
 receiver" — is stale.
 
 **2. Group (b) is MISLABELLED.** It is described as `RequireObjectCoercible`
 (null/undefined `this`). It is not: genuine `String.prototype.charAt.call(undefined)`
 already throws a proper `TypeError` on `main` (probed directly). The 8 failing
-(b) files are two *different* mechanisms:
+(b) files are two _different_ mechanisms:
 
 - **6 files — "X is not a function".** Shape is
   `__FACTORY.prototype.charAt = String.prototype.charAt; new __FACTORY().charAt(…)`.
-  **This is NOT String-specific.** The decisive control: assigning a *plain user
-  function* to a user constructor's prototype (`F.prototype.m = function(){…}`)
+  **This is NOT String-specific.** The decisive control: assigning a _plain user
+  function_ to a user constructor's prototype (`F.prototype.m = function(){…}`)
   and calling it fails **identically** (`m is not a function`). The real defect is
   **dynamic `F.prototype.X = …` augmentation followed by an instance call** — a
   separate, broader issue that should not be filed under String.
@@ -163,7 +169,7 @@ already throws a proper `TypeError` on `main` (probed directly). The 8 failing
 
 ⚠️ **This also corrects the #3626 census's C1 `missing_builtin` classification.**
 The census reads the "`X` is not a function" signature (58 corpus-wide) as
-*"genuinely missing methods — add/repair the method"*. Measured here, the methods
+_"genuinely missing methods — add/repair the method"_. Measured here, the methods
 are **present and correct**; the failure is prototype-chain augmentation. Sizing
 any work off "add the missing method" would be sizing off a mislabel.
 
@@ -190,7 +196,7 @@ throws `"Cannot convert object to primitive value"`.
 **Fix** (`src/runtime.ts`): `_wrapAccessorGetterReturn` marshals an accessor
 getter's return through `_maybeWrapCallableUnknownArity`, which converts only
 values `__is_closure` positively identifies and passes everything else through.
-Deliberately confined to the **accessor** path — marshalling *generic* call exits
+Deliberately confined to the **accessor** path — marshalling _generic_ call exits
 was tried and reverted for regressing ~85 dstr files (#3123/#2835), which is also
 why `wasmClosureDynamicBridge` carves out the `new`-path only.
 
@@ -201,7 +207,7 @@ Post-fix, the receiver now matches V8 exactly on the encoded probe
 
 - **Regressions: 0** (22-file set re-run; equivalence suite green).
 - **test262 files flipped by this slice: 0 of 22.** The pass count is 10 → 10.
-  The 3 group-(c) files move *past* the spurious `TypeError` to a deeper
+  The 3 group-(c) files move _past_ the spurious `TypeError` to a deeper
   assertion, but do not flip.
 - **New coverage: 3 tests red on the merge base**, green with the fix
   (`tests/issue-2742.test.ts`, group (c) block), plus 2 narrowness/no-regression
@@ -215,7 +221,7 @@ it does **not** claim conformance flips it cannot demonstrate.
 1. **`@@toPrimitive` on the receiver is never consulted.** With a
    `get [Symbol.toPrimitive]()` present, the encoded probe returns `0` accesses
    where V8 gives `1` (`toString`/`valueOf` are now correct at 1/1). This is what
-   still blocks all 3 group-(c) test262 files — they assert the *access counters*,
+   still blocks all 3 group-(c) test262 files — they assert the _access counters_,
    not just the value. Symbol-keyed accessors are not reaching the host
    ToPrimitive path.
 2. **Dynamic `F.prototype.X = …` then instance call** (the 6 "not a function"
@@ -285,3 +291,118 @@ Exact local-vs-local Test262 A/B on base `c5bd4631724afa`:
 - Standalone directory: 15/25 → 17/25; ES5 subset: 11/21 → 13/21.
 - Fail→pass: `S15.5.4.8_A1_T10.js` and `S15.5.4.8_A4_T3.js`.
 - Pass→fail: none. Every remaining failure kept the same normalized signature.
+
+## Measured frontier (2026-07-31) — folded in from #3877 (closed as duplicate)
+
+#3877 was filed for this defect before its author found this issue; it is now
+`wont-fix / duplicate_of: 2742`. Its measured content is preserved here.
+
+### Per-method matrix
+
+Receiver `new Number(1234)` (`ToString` → `"1234"`), method assigned as an own
+property and invoked. Harness: `runTest262File(abs, cat, 60000)` and
+`(…, "standalone")` on the same file. **Controls
+`Object.keys({a:1,b:2}).length===2`, `"ab".toUpperCase()==="AB"`,
+`String(new Boolean(false))==="false"` all pass on both lanes** (#3885), so
+these readings are load-bearing.
+
+| method        | host    | standalone |
+| ------------- | ------- | ---------- |
+| `substring`   | `23`    | `23` OK    |
+| `charAt`      | `2`     | `2` OK     |
+| `toUpperCase` | `1234`  | **`null`** |
+| `toLowerCase` | `1234`  | **`null`** |
+| `slice`       | `23`    | **`null`** |
+| `charCodeAt`  | `49`    | **`null`** |
+| `indexOf`     | `1`     | **`null`** |
+| `lastIndexOf` | `1`     | **`null`** |
+| `trim`        | `1234`  | **`null`** |
+| `concat`      | `1234X` | **`null`** |
+| `split`       | `2`     | **`0`**    |
+
+**9 of 11 broken; `substring` and `charAt` already work** — a working in-tree
+reference for whatever the other nine are missing. `split` returning `0` is a
+wrong number rather than a `null` and is attributed to nothing yet.
+
+### The receiver round-trip is NOT the problem
+
+```
+standalone: typeof=function  identity=true  hasOwn=true
+            String(b)="false"  toUpperCase.call(b)="FALSE"  b.toUpperCase()=null
+```
+
+`typeof`, `===` identity, `hasOwnProperty`, and `ToString` on the receiver are
+all correct, and the `.call()` form works on the **identical receiver**. Only the
+assigned-method invocation fails — but see below, that is a test shape, not a
+second defect.
+
+### Dispatch is NOT the differentiator
+
+The per-method call helpers are structurally identical between a failing member
+and a working one — `call 120` (member lookup) then `call 171` (invoke), same
+shape, opposite outcomes. So `obj.m = String.prototype.m; obj.m()` versus
+`String.prototype.m.call(obj)` is a **test-shape** distinction, not a defect
+axis.
+
+### Located: the per-member `__proto_method_*` wrapper
+
+Found by diffing a working arm against a broken one, with a repro **verified to
+reproduce the matrix first** — an `any`-annotated receiver
+(`const a: any = new Number(1234)`) does **not** reproduce (`charAt` returns null
+there); the repro must be plain-JS shape `var a = new Number(1234)` with
+`{ target: "standalone", allowJs: true }`.
+
+- The emitted `$test` bodies for `charAt` vs `charCodeAt` differ by **one line**
+  (the argument constant). Both use the same generic dispatch. So the defect is
+  not at the call site.
+- `$__proto_method_<brand>_charAt` coerces the receiver
+  (`extern.convert_any` → `call 128` → `ref.cast` to `$AnyString`);
+  `$__proto_method_<brand>_charCodeAt` has no such step and reads `struct.get` on
+  the raw receiver.
+- Bodies come from `glue.emitMemberBody` in `createNativeProtoMember`
+  (`src/codegen/native-proto.ts` ~537), dispatched per-member by
+  `emitStringProtoMemberBody` (`src/codegen/array-object-proto.ts:812`).
+  `toUpperCase` / `toLowerCase` / `slice` / `concat` / `split` are in **no arm**
+  and fall to `emitProtoMemberBodyRefusal`.
+
+### Three attributions tried and EXCLUDED — do not re-derive by reading
+
+1. **`substring`-only bail-out** (`call-receiver-method.ts` ~2311) pins a
+   guarded-native-string bail-out to `substring` while
+   `sourceHasMethodReassignment` is already generic. Generalising it produced
+   **byte-identical** standalone output. Reverted.
+2. **Refusal return type** — `emitProtoMemberBodyRefusal` does
+   `emitThrowTypeError` then `return null`, and `createNativeProtoMember` bails
+   on `null`, which would discard the wrapper _including the throw_. Returning
+   `{ kind: "externref" }` instead produced **byte-identical** output. Reverted.
+3. **"The refusal is never reached"** — WRONG, and the probe was invalid: it
+   grepped emitted **WAT text** for the refusal's message, which lives in the
+   **string pool**, so zero was structurally guaranteed. The wrapper for
+   `toUpperCase` is six lines and its entire body IS the refusal, ending in
+   `throw 0`.
+
+**Use a marker bisect, not source reading**: put a unique sentinel constant in
+each candidate emitter, compile, dump the wrapper, and see which survives to WAT.
+Attribution by marking cannot be wrong; attribution by reading was wrong three
+times here.
+
+### Acceptance bar for this frontier
+
+- **11/11 correct on BOTH lanes**, not "the nine standalone nulls are gone" —
+  host is already correct for 8 of the 9, so any shared-prologue change risks
+  perturbing paths host depends on (the #3871 shape). Note the
+  `__proto_method_*` wrappers are **standalone-only** (host emits **0** of them),
+  which bounds that risk but does not remove it for other shared structures.
+- `charAt` / `substring` must still pass — if a change breaks them, the change is
+  wrong, not the references.
+- **Kill-switch seen to fail**: revert and confirm the nine `null`s return.
+- Report pass→fail, fail→pass and net from an actual standalone run; #3468's
+  notes say floor impact is mixed and not computable in advance. State it in the
+  PR description — a floor movement explained up front is a review conversation;
+  the same movement found in `merge_group` is a park.
+
+### Related
+
+- **#3254** — reopened 2026-07-31 as false-`done`: it claims to generalise beyond
+  `trim` and left `trim` itself on the pre-fix `"[object Object]"` terminal.
+- **#3887 / #3888** — "TypeError never raised" family, separate from this one.

@@ -4,6 +4,7 @@
   "src/codegen/extern-declarations.ts#resolveMethodDispatchTarget",
   "src/codegen/fallback-telemetry.ts#fallbackCountsToJson",
   "src/codegen/fallback-telemetry.ts#totalFallbackHits",
+  "src/codegen/proven-receiver-stats.ts#resetProvenReceiverStats",
   "src/codegen/regex/vm.ts#asciiFold",
   "src/codegen/regex/vm.ts#classMatch",
   "src/codegen/regex/vm.ts#isLineTerminator",

@@ -593,6 +593,129 @@ back to a dispatch that answers `undefined`. Fix and pins in
 `plan/issues/3719-new-assigned-to-binding-loses-fnctor-approval.md`.
 All five original matrix cases plus the untyped-only control now return 1000.
 
+## Step-1 result (2026-08-01) — the 156 are measured: 100 % presence-tracked
+
+The decline census the suspension note asked for is landed
+(`src/codegen/proven-receiver-stats.ts`, `JS2WASM_PROVEN_RECEIVER_STATS=1`,
+inert otherwise; pinned by `tests/issue-3685-decline-stats.test.ts`) and run
+over one standalone acorn 8.16.0 compile (226 KB dist + the
+`__npmCompatStandaloneBenchmark` inline driver, `target: "standalone"`,
+`optimize: 0`).
+
+```
+[proven-receiver] asked=4002 proven=244 inlined=88 declinedAfterProof=156
+```
+
+`proven=244` and `inlined=88` reproduce the audit's figures exactly. The 156
+break down as:
+
+| decline reason                        | sites   | share of 156 |
+| ------------------------------------- | ------: | -----------: |
+| `presence:Node.<f>` (externref field)  | **144** |    **92.3 %** |
+| `reserved:Node.name`                   |      12 |       7.7 % |
+| `nofield:` (name not a declared field) |   **0** |         0 % |
+| `accessor:` / `callsig:` / `no-struct` |       0 |         0 % |
+
+Sums to 156 exactly. Every one of the 144 presence declines is an **externref**
+field of `Node` (`loc`/`raw`/`local` 16 each, `key`/`argument` 12 each,
+`exported`/`imported`/`expressions`/`operator`/`value`/`property` 8 each,
+`id`/`body`/`static`/`quasis`/`properties`/`generator` 4 each). The 12
+`reserved:Node.name` sites are annotated `presence-tracked`, i.e. `name` **is**
+a declared, presence-tracked slot of `$__fnctor_Node` — so removing the
+`RESERVED_PROPS` carve-out alone would just move those 12 into the presence
+bucket. **Effectively 156/156 of the miss is the presence-tracked carve-out.**
+
+**Verdict against this issue's own decision rule: the `nofield:` bucket is
+ZERO, so the "dominated by not-a-declared-field ⇒ close this issue" branch is
+FALSIFIED.** The object-literal/expando story is still real for the 3,758
+*unproven* receivers (that is where `types$1` lives), but it explains none of
+the proven-but-not-inlined gap. A carve-out is over-broad, so there is a
+landable fix inside #3685.
+
+**What the fix is** (described, deliberately NOT implemented in the
+instrumentation pass): the carve-out's stated reason — "absence is semantic
+(`undefined`), which a bare `struct.get` cannot express" — is true of a bare
+`struct.get` and false of the compiler. `emitNullGuardedStructGet`
+(`src/codegen/property-access.ts` ~L1280-1297) already emits exactly the needed
+shape for a presence-tracked closed-struct read: `presenceTestInstrs` → `if`
+→ `struct.get` : `undefinedExternInstrs`. The proven-receiver emitter can nest
+that inside its existing `ref.test` then-arm; the `else` (dynamic
+`__extern_get`) arm is unchanged. All 144 sites are externref, so the absent
+value is a real `undefined` and no f64-default hazard arises — but the
+lowering must still refuse a non-externref presence-tracked field, where
+`defaultValueInstrs` would silently substitute `0` for `undefined`.
+
+Not measured here, and required before believing it pays: a wall-clock A/B with
+#3673's interleaved duplicate-baseline control arm on an idle box. The
+attribution table above says the two hot twins
+(`__closure_571__typed_this` + `__closure_347__typed_this`, 28.5 % of the
+`__extern_get` bucket ≈ 2.8 % of parse time) are the plausible payer, but
+nothing in this step measured time.
+
+## Step-2 result (2026-08-01) — the presence carve-out is removed: 88 → 232 inlined
+
+The over-broad carve-out identified by step 1 is gone.
+`tryEmitProvenReceiverFieldGet` now admits presence-tracked fields by nesting
+the presence test inside its existing `ref.test` then-arm, reusing
+`presenceSlotOf` / `presenceTestInstrs` from `fnctor-presence-bits.ts` — the
+same shape `emitNullGuardedStructGet` already emits for closed-struct reads:
+
+```
+local.get tmp ; any.convert_extern ; ref.test $F
+if (result <fieldType>)
+  then  local.get tmp ; any.convert_extern ; ref.cast $F ; local.tee c
+        ; <presence test on c>
+        ; if (result <fieldType>)
+            then  local.get c ; struct.get $F <idx>
+            else  <undefined>                     ; #2106 singleton
+  else  __extern_get(tmp, "<name>")               ; unchanged dynamic arm
+```
+
+The cast result is teed into a `(ref null $F)` local so the guarded arm pays
+one `ref.cast`, not two.
+
+**Hard correctness condition, explicit in the code**: only **externref**
+presence-tracked slots are admitted (`presence-nonextern:` decline otherwise).
+`undefined` has an externref-plane representation; it has none in an f64/i32/i64
+slot, where the absent arm could only substitute `0`. Also reordered: the
+call-signature check now runs *before* the presence decision, so a name that
+resolves to a prototype method can never be answered `undefined` by the absent
+arm.
+
+**Census, same instrumented standalone acorn 8.16.0 compile as step 1**
+(prediction stated before the run: 232 / 12 — confirmed exactly):
+
+| | asked | proven | inlined | declinedAfterProof |
+| --- | ---: | ---: | ---: | ---: |
+| step 1 (before) | 4002 | 244 | 88 | 156 |
+| **step 2 (after)** | 4002 | 244 | **232** | **12** |
+
+All 144 `presence:Node.<f>` sites converted to `ok:Node.<f>:externref:presence`.
+The residue is exactly the 12 `reserved:Node.name` sites (`RESERVED_PROPS`,
+deliberately untouched — `name` has a dedicated lowering). **Zero
+`presence-nonextern:` entries**: every presence-tracked slot in acorn is
+already externref, which is also why the emitter widens a conditionally
+assigned numeric field (`P.y` in the pins) to `externref` rather than `f64`.
+
+Pinned by `tests/issue-3685-presence-tracked-proven-reads.test.ts`: a
+presence-tracked field read **before** it is ever assigned yields `undefined`
+(not `null`, not `0`, not a trap) and after assignment yields the value, both
+checked against the same source evaluated as plain JS; plus the census
+assertion that the read takes the inline path, and the structural pin that a
+`:presence` admission always carries an externref slot type. Paired control
+run: with `src/codegen/typed-this.ts` reverted the census assertion FAILS
+(the semantics assertions pass either way — the dynamic `__extern_get` arm
+answers the same values, which is precisely why the path assertion is the
+load-bearing one). `tests/issue-3685-decline-stats.test.ts` updated: its
+`p.y` case is now an admission, and a never-assigned `p.nope` supplies the
+`nofield:` decline it needs.
+
+**No wall-clock measurement was taken** — the box was not verified idle, and at
+this effect size a contended timing is worse than none. The payer named by the
+attribution table (`__closure_571__typed_this` + `__closure_347__typed_this`,
+28.5 % of the `__extern_get` bucket) remains a hypothesis until someone runs
+#3673's interleaved duplicate-baseline control arm on an idle box.
+
 ## Cross-box caveat on this issue's ranking (#3780 round 4, 2026-07-31)
 
 Every share quoted in this issue comes from a profile of the standalone acorn
@@ -614,3 +737,48 @@ moves with it. If GC is really ~2% on the reference hardware, this issue's
 share is correspondingly *larger* there than the Linux profile suggests, and
 allocation-side work (#3921/#3927) is correspondingly smaller. Re-measure on
 the target hardware before using any of these shares to sequence work.
+
+## Allocation evidence for this issue (#3921 census, 2026-07-31)
+
+This issue has been argued on time shares. The allocation census adds an
+independent, deterministic measurement that points at the same place, and it
+reframes what "reduce allocation" means for the standalone lane.
+
+Per 226 KB acorn parse, 647,346 allocations. The two largest families:
+
+| family | count/parse | share | what it needs proven |
+| --- | ---: | ---: | --- |
+| `$AnyValue` box | 310,485 | 47.96% | the **value's type** at the producer |
+| generic-dispatch argument vectors | ~87,000 | 13.5% | the **callee** at the call site |
+
+Neither is an allocator defect. Both are the price of an unproven type:
+a value whose type is not known must be widened into a 5-field tagged carrier,
+and a call whose target is not known must marshal its arguments through the
+heap. **Roughly 61% of all allocation in the parse exists because something
+was not proven.** That is this issue's axis, measured from the allocation side
+rather than the timing side.
+
+Two attempts to attack the allocation directly were measured and both failed,
+which is why the work belongs here rather than in an allocator fix:
+
+- **Binaryen `Heap2Local` promotes ZERO sites** on the shipped binary, under
+  `--heap2local`, `--closed-world --heap2local` and `--closed-world --gufa
+  --heap2local` alike. The optimizer cannot see through the generic calls the
+  boxes escape into.
+- **Sharing one empty argument vector for zero-arity dispatch** removed only
+  840 allocations (0.13%) and was reverted. The zero-arity arm fires 420 times
+  per parse against 43,527 `__objvec_new` calls; the mass is genuine N-argument
+  marshalling, not wasted empty containers.
+
+Sizing note, so this is not over-sold: the whole dispatch family
+(`__call_m_*`, `__call_fn*`, `__extern_method_call`, `__apply_closure`,
+`__objvec*`, `__method_cache_lookup`) is **3.87% of parse self-time**, spread so
+thin that no single dispatcher exceeds 0.08%. So devirtualization's payoff is
+NOT mainly the dispatch time — it is the allocation and the downstream
+`$AnyValue` widening that the generic path forces. Anyone sizing this issue off
+the 3.87% alone will under-value it; anyone sizing it off the 61% will
+over-value it. The honest statement is that the two are coupled and neither has
+been measured in isolation.
+
+Current admission rate remains this issue's S1 figure: **150 of 2,363**
+non-`this` accesses (6.3%).
