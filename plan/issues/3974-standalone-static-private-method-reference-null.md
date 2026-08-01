@@ -64,6 +64,16 @@ The same four files also fail in the **host (gc)** lane with the identical
 messages, so unlike #3973 this is **not** standalone-specific — it is a
 private-static-member lowering defect that both lanes share.
 
+## Probe
+
+Reproduce with (standalone lane):
+
+- `test262/test/built-ins/Function/prototype/toString/private-static-method-class-statement.js`
+- `test262/test/built-ins/Function/prototype/toString/private-static-method-class-expression.js`
+
+A permanent `tests/issue-3974.test.ts` should be added by whoever fixes this;
+the two paths above are the authoritative repro until then.
+
 ## Acceptance criteria
 
 - `C.#f` (and `this.#f` inside a `static` method) evaluates to the actual method
