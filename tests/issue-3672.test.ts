@@ -127,15 +127,30 @@ describe.skipIf(ESLINT_LINTER === null)(
         expect(report.valid).toBe(false);
 
         // Exactly one hard codegen error stops the build. Pinning the count
-        // (not the diagnostic text of all 125 checker notes) makes both a new
+        // (not the diagnostic text of all 124 checker notes) makes both a new
         // codegen abort and the fix of this one visible.
         const codegenErrors = report.errors.filter((error) => error.message.startsWith("Codegen error:"));
         expect(
           codegenErrors.map((error) => error.message),
           "the ESLint graph frontier moved — re-measure the budget above and advance this rung",
         ).toHaveLength(1);
-        expect(codegenErrors[0]?.message).toContain("inherited class callable");
-        expect(codegenErrors[0]?.message).toContain("has no exact defined function for handle");
+        // Frontier as of 2026-07-31, AFTER the builtin-subclass inherited-alias
+        // fix in `program-abi-class-callable-planning.ts` retired the previous
+        // rung (`inherited class callable LazyLoadingRuleMap_has ... handle
+        // 676`). The graph now walks past every `extends Map` in ESLint and
+        // stops on the NEXT structural blocker: a `function validate` whose
+        // inventory unit is neither `top-level-function` nor
+        // `synthetic-support`. Re-measured wall clock 10.6 s / 124 errors —
+        // still an early abort, so the budget below is unchanged and remains a
+        // budget on a compile that stops at the frontier.
+        expect(codegenErrors[0]?.message).toContain("source callable validate");
+        expect(codegenErrors[0]?.message).toContain(
+          "has no consistent exact top-level or compiler-support inventory owner",
+        );
+
+        // The retired rung must not come back: a builtin-subclass abort is now
+        // a regression, not the expected frontier.
+        expect(diagnostics).not.toContain("inherited class callable");
 
         // #3656 stays fixed: no dynamic-object-destructuring invariant.
         expect(diagnostics).not.toContain("object destructuring source must be IrType.object or IrType.class");
@@ -209,9 +224,9 @@ describe.skipIf(ESLINT_LINTER === null)(
 );
 
 /**
- * The deterministic reduction of the frontier above. This is a REPRO, not a
- * fix — it pins the current defective behaviour so whoever owns the fix has an
- * executable six-line case instead of a 149-file npm graph.
+ * The deterministic reduction of the frontier above — now a REGRESSION GUARD
+ * for the fix, not a repro of the defect. Kept as an executable six-line case
+ * so the blocker cannot come back through the 149-file npm graph unnoticed.
  *
  * Root cause, read off `src/codegen/class-bodies.ts`: the inherited-member scan
  * walks `ctx.funcMap` for every key with the textual prefix `${parentName}_`
@@ -219,28 +234,40 @@ describe.skipIf(ESLINT_LINTER === null)(
  * prefix `Map_`). A separate, ordinary use of the builtin registers host-import
  * entries under exactly those keys, and the scan hands that IMPORT handle to
  * `setProgramAbiInheritedClassCallableAlias` →
- * `ProgramAbiCallableRegistry.observeInheritedAlias`, which requires a DEFINED
- * function (`definedFuncAt`) and throws `ProgramAbiInvariantError` when the
- * handle is in import index space.
+ * `ProgramAbiCallableRegistry.observeInheritedAlias`.
  *
  * Measured minimisation (2026-07-31, `origin/main`); the discriminator is the
  * *separate plain use of the builtin*, which is why `extends Map` on its own
  * never reproduced:
  *
- *   subclass + separate plain builtin use  → FAILS (Registry_set, handle 13)
- *   subclass alone, no separate plain use  → compiles clean
- *   `extends Set` + plain `Set` use        → FAILS (Bag_add, handle 13)
- *   plain JS/CJS flavour                   → FAILS identically
+ *   subclass + separate plain builtin use  → aborted (Registry_set, handle 54)
+ *   subclass alone, no separate plain use  → compiled clean
+ *   `extends Set` + plain `Set` use        → aborted (Bag_add)
+ *   plain JS/CJS flavour                   → aborted identically
  *   `--target standalone` / `--target wasi`→ a DIFFERENT, deliberate #2620
  *                                            "not yet supported" guard fires
  *                                            first, so the standalone lane is
  *                                            protected by design here.
  *
- * In the real ESLint graph the same defect appears as
- * `LazyLoadingRuleMap_has ... handle 676` (direct `linter.js`) and
- * `... handle 590` (package entry) — `LazyLoadingRuleMap extends Map`.
+ * THE FIX: `observeInheritedAlias` used `definedFuncAt(...) === undefined` as a
+ * single corruption signal, collapsing two structurally distinct causes. An
+ * IMPORT handle there is not a corrupt locator — it is a host-import entry the
+ * prefix scan matched by coincidence, and an import can never be a canonical
+ * class unit, so it is the same "nothing exact to observe" outcome the
+ * zero-canonical-owner branch already tolerates. It now returns undefined for
+ * import handles and still throws for a NON-import handle with no defined
+ * record (the #2043 late-import-shift corruption class the check was written
+ * for).
+ *
+ * SCOPE — what this fix does NOT do. Inherited builtin-collection members on a
+ * subclass are still not backed by real collection state in the JS-host lane:
+ * measured on unmodified `main` with the clean-compiling subclass-alone control,
+ * `r.set("k", 2)` then `r.size` reads 0 and `r.get("k")` reads undefined. That
+ * pre-existing runtime gap is the #2620 native-subclass substrate, tracked
+ * separately; this change only stops an unrelated `new Map()` elsewhere in the
+ * program from turning that (already wrong, silently) compile into a hard abort.
  */
-describe("#3672 — reduced repro of the builtin-subclass inherited-alias defect", () => {
+describe("#3672 — builtin-subclass inherited-alias regression guard", () => {
   const SUBCLASS_PLUS_PLAIN_USE = `
 class Registry extends Map<string, number> {}
 const plain = new Map<string, number>();
@@ -249,25 +276,23 @@ const r = new Registry();
 export function test(): number { return (plain.has("x") ? 1 : 0) + (r.has("a") ? 1 : 0); }
 `;
 
-  it("aborts codegen when a builtin subclass coexists with a plain use of that builtin", async () => {
+  it("compiles a builtin subclass coexisting with a plain use of that builtin", async () => {
     const entry = writeFixture("subclass-plus-plain-use.ts", SUBCLASS_PLUS_PLAIN_USE);
     const result = await compileProject(entry, COMPILE_OPTIONS);
 
     const codegenErrors = result.errors.filter((error) => error.message.startsWith("Codegen error:"));
     expect(
       codegenErrors.map((error) => error.message),
-      "the builtin-subclass inherited-alias defect is fixed — retire this repro and advance the ESLint frontier rung above",
-    ).toHaveLength(1);
-    expect(codegenErrors[0]?.message).toContain("inherited class callable Registry_set");
-    expect(codegenErrors[0]?.message).toContain("has no exact defined function for handle");
-    expect(result.success).toBe(false);
+      "the builtin-subclass inherited-alias abort is back — an import handle is reaching observeInheritedAlias again",
+    ).toEqual([]);
+    expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
   });
 
-  it("compiles cleanly without the separate plain use — isolating the trigger", async () => {
-    // Same subclass, same inherited call, no independent `new Map()`. This is
-    // the control that makes the rung above non-vacuous: it proves the failure
-    // is caused by the builtin's host-import funcMap entries and not merely by
-    // subclassing a builtin.
+  it("compiles cleanly without the separate plain use — the always-green control", async () => {
+    // Same subclass, same inherited call, no independent `new Map()`. This arm
+    // compiled clean both before and after the fix, so it isolates the trigger:
+    // if this one ever goes red, the cause is plain builtin subclassing, not
+    // the host-import funcMap entries the rung above is about.
     const entry = writeFixture(
       "subclass-only.ts",
       `

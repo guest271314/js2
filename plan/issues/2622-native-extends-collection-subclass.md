@@ -194,3 +194,78 @@ symmetricDifference/isSubsetOf/isSupersetOf/isDisjointFrom, ~7 rows):
    assert only the `instanceof Set === true` half).
 3. Validate on full `merge_group` (index-shift-sensitive + representation
    change; the Lane note's discipline stands).
+
+## Implementation plan (2026-07-31, traced against `main`)
+
+Verified substrate facts this plan rests on:
+
+- `$Map` is `struct { buckets, entries, entryCount(mut), liveCount(mut),
+  kind(imm i32) }` (`map-runtime.ts` `ensureMapRuntimeTypes`). It declares **no
+  `superTypeIdx`**, i.e. it is currently FINAL.
+- Set reuses the Map backing store — `__map_new` yields the `$Map` a Set wraps,
+  branded by the trailing immutable `kind` field (`COLLECTION_KIND`, #3171).
+- The native interception is gated on a literal constructor-NAME match:
+  `ctx.nativeStrings && ts.isIdentifier(expr.expression) && expr.expression.text === "Map"`
+  (`new-super.ts:3033`, and the `"Set"` twin at :3088). `new MySet()` cannot
+  match it, which is the ENTIRE reason a subclass falls to the host path.
+- #2605 (`x instanceof Set/Map/...` for native collections) is **done** and
+  keys off the `kind` brand — so the instanceof half of this issue's acceptance
+  criteria already has a working mechanism to extend.
+
+### Design: WasmGC subtyping, not composition
+
+Declare the subclass struct as a **subtype of `$Map`** with its own fields
+appended:
+
+    $MySet <: $Map   fields: [ ...$Map's 5 ..., ownField0, ownField1, … ]
+
+This is the load-bearing choice. `ref $MySet` is then a subtype of `ref $Map`,
+so **every existing `__map_*` / `__set_*` helper accepts a subclass instance
+unchanged** — no unwrapping at call sites, no per-method shim, no second
+representation to keep in sync. Composition (`$MySet { map: ref $Map, … }`)
+would require touching every helper call site and is rejected for that reason.
+
+Steps:
+
+1. **Make `$Map` extensible.** Set `superTypeIdx = -1` ("sub with no super")
+   when a subclass is present — the same marking `class-bodies.ts` already
+   applies to user parent structs. Check `MAP_LAYOUT` consumers first: the
+   `kind` field is documented as *trailing + immutable*, and subtype fields
+   append AFTER it, so any code assuming "kind is the last field" must move to
+   "kind is at index `M_KIND`" (it already is, via `MAP_LAYOUT`).
+2. **Widen the interception predicate.** Replace the `text === "Map"` /
+   `=== "Set"` name equality with "this constructor resolves to the Map/Set
+   builtin, directly or through a subclass chain" — `ctx.classParentMap` +
+   `isNativeCollectionBuiltin` already give the chain walk (#2620 uses it).
+   Emit `struct.new $MySet` with the `$Map` prefix initialised exactly as
+   `__map_new` does (same buckets/entries allocation, same `kind` brand), then
+   the subclass's own field initialisers.
+3. **Drop the #2620 standalone refusal** for the now-supported shapes, keeping
+   it as the fallback for anything the native path still cannot build.
+4. **`instanceof` discrimination.** `x instanceof Set` follows from the `kind`
+   brand (#2605, done). `x instanceof MySet` needs the subclass struct identity
+   — `ref.test $MySet` — which subtyping gives directly.
+5. **Own methods.** These stop being a problem for free: with the instance a
+   real `$MySet` struct, the struct `this` parameter that `class-bodies.ts`
+   already emits is CORRECT, so the pinned gc/host defect (see #2620's
+   correction section — `this.<inherited>()` dropped because self was a struct
+   the host instance could never satisfy) does not arise on this path.
+
+### Acceptance beyond the 7 rows
+
+The `subclass-receiver-methods.js` rows assert `union` reads `[[SetData]]`
+directly (`sizeCount/hasCount/keysCount === 0`), which the subtyping design
+satisfies by construction: the set-algebra helpers walk the `$Map` prefix and
+never dispatch through the subclass's overridden methods.
+
+### Explicitly NOT in scope
+
+Narrow typing of the entries. `$MapEntry` is `{key: anyref, value: anyref,
+next: i32, hash: i32}`, so a `Map<string, number>` boxes every value. That is a
+separate slice — it benefits BASE collections too, and #3921's acorn allocation
+census measured `$AnyValue` boxing at **48% of all allocations** (310,485 boxes,
+~7.4 per token), which is the same representation question at much larger
+scale. Fold it in and neither lands. Note also that #1103's original design
+specified per-key-type compiled hash functions; what shipped hashes by RUNTIME
+type dispatch (`__obj_hash` `ref.test`-ing `$HashedString`, plus #3673's cached
+FNV-1a). Compile-time hash specialisation is a further, smaller slice on top.

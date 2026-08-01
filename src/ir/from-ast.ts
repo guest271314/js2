@@ -59,6 +59,7 @@ import { isIncreasingStep, loopBodyMutatesIndexOrArray } from "../codegen/statem
 // (#3741) native-i32 slot storage for provably-int32 mutable locals
 import {
   COMPOUND_TO_BITWISE_TOKEN,
+  counterStepAssignment,
   I32_COMPARE_BINOPS,
   i32LiteralValue,
   isBitwiseToken,
@@ -2692,9 +2693,24 @@ function lowerBitwiseAsI32(expr: ts.BinaryExpression, cx: LowerCtx): IrValueId {
 }
 
 /** Invariant W — store `rhs` into an i32-promoted slot. */
-function writePromotedI32Slot(slotIndex: number, rhs: ts.Expression, cx: LowerCtx): void {
+function writePromotedI32Slot(slotIndex: number, rhs: ts.Expression, cx: LowerCtx, targetName?: string): void {
   const promoted = promotedI32Probe(cx);
   const exactI32 = (id: ts.Identifier): boolean => promoted(id) || cx.i32PureNames.has(id.text);
+  // (#3907) `i = i + <int literal>` — the desugared spelling of the `i += <lit>`
+  // counter step that `lowerPromotedI32CompoundAssignment` already emits. The
+  // planner admits it only for a `detectI32LoopVar`-proven counter, so it
+  // carries the same bounded-by-the-loop-condition proof; emit the same
+  // `i32.add`/`i32.sub` here rather than demoting the whole function. Before
+  // #3907 this never mattered because fast mode narrowed every `number`
+  // unconditionally; it is the spelling the benchmark suite actually uses.
+  const counterStep = targetName === undefined ? null : counterStepAssignment(rhs, targetName);
+  if (counterStep !== null) {
+    const lhs = cx.builder.emitSlotRead(slotIndex);
+    const stepValue = cx.builder.emitConst({ kind: "i32", value: counterStep.step }, IR_I32);
+    const binop: IrBinop = counterStep.negate ? "i32.sub" : "i32.add";
+    cx.builder.emitSlotWrite(slotIndex, cx.builder.emitBinary(binop, lhs, stepValue, IR_I32));
+    return;
+  }
   if (!isCanonI32Lowerable(rhs, exactI32)) {
     throw new IrUnsupportedError(
       "operand-coercion-unsupported",
@@ -8330,7 +8346,7 @@ function lowerIdentifierAssignment(id: ts.Identifier, rhs: ts.Expression, cx: Lo
   // (#3741) invariant W — an i32-promoted slot's RHS lowers DIRECTLY to an
   // exact i32; it is never an f64 that we then truncate.
   if (binding.i32Storage) {
-    writePromotedI32Slot(binding.slotIndex, rhs, cx);
+    writePromotedI32Slot(binding.slotIndex, rhs, cx, id.text);
     return;
   }
   // Slice 6 part 4 refactor (#1185): when the binding has an asType

@@ -7,7 +7,7 @@ import { ProgramAbiInvariantError } from "../ir/program-abi.js";
 import type { FuncHandle, FuncTypeDef, WasmFunction } from "../ir/types.js";
 import { ts } from "../ts-api.js";
 import type { CodegenContext } from "./context/types.js";
-import { definedFuncAt, definedFuncHandleOf, pushDefinedFunc } from "./func-space.js";
+import { definedFuncAt, definedFuncHandleOf, isImportFuncIdx, pushDefinedFunc } from "./func-space.js";
 import {
   planProgramAbiSupportCallable,
   planProgramAbiUnitCallable,
@@ -239,6 +239,24 @@ export class ProgramAbiClassCallableRegistry {
         `inherited class callable ${displayName} has no exact child class owner`,
       );
     }
+    // (#3672) An IMPORT handle here is not a corrupt locator — it is a
+    // host-import entry the caller's inherited-member scan matched by textual
+    // prefix coincidence. `class Registry extends Map {}` combined with a
+    // SEPARATE plain `new Map()` use registers host imports under exactly the
+    // `Map_set` / `Map_has` keys that `${ancestor}_` prefix-scans in
+    // `collectClassInfo` (src/codegen/class-bodies.ts) treat as inherited
+    // parent members. A host import can never BE a canonical class unit (units
+    // only ever observe defined functions), so this is the same "nothing exact
+    // to observe" outcome the zero-canonical-owner branch below already
+    // tolerates — return undefined rather than aborting the whole compile.
+    //
+    // The `!func` throw is kept for the case it was actually written for: a
+    // NON-import handle with no defined record, i.e. a genuinely stale or
+    // never-pushed locator (the #2043 late-import-shift corruption class).
+    // Collapsing both causes into one throw is what aborted every real-world
+    // program that subclasses a builtin collection — ESLint's
+    // `LazyLoadingRuleMap extends Map` among them.
+    if (isImportFuncIdx(this.ctx, funcIdx)) return undefined;
     const func = definedFuncAt(this.ctx, funcIdx);
     if (!func) {
       throw new ProgramAbiInvariantError(

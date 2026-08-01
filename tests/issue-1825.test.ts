@@ -28,16 +28,27 @@ describe("#1825 — i32 fast-mode modulo does not trap", () => {
     expect(await runFast(`export function test(): number { return -7 % 3; }`)).toBe(-1);
   });
 
-  it("modulo by zero does not trap (returns 0 in i32 mode)", async () => {
-    // JS yields NaN; i32 fast mode has no NaN, so the guard returns 0 instead
-    // of trapping the module.
+  // (#3907) These three used to assert the i32 APPROXIMATION and said so:
+  // "JS yields NaN; i32 fast mode has no NaN, so the guard returns 0 instead of
+  // trapping the module." Fast mode no longer narrows an unannotated `number`
+  // to i32, so it DOES have NaN and -0, and the spec value is now reachable.
+  // The assertions are updated to the spec values; the non-trapping property
+  // #1825 was filed for is still what is being tested (a trap fails the test
+  // just as loudly as a wrong value).
+  //
+  // The trapping-`i32.rem_s` guard itself is NOT removed: `type i32 = number`
+  // (#323/#3673) still lowers `%` to a native i32 remainder, and that path
+  // still needs the divide-by-zero and INT_MIN/-1 overflow guards.
+  it("modulo by zero yields NaN and does not trap", async () => {
     const src = `export function test(): number { let a = 10; let b = 0; return a % b; }`;
-    expect(await runFast(src)).toBe(0);
+    expect(await runFast(src)).toBeNaN();
   });
 
-  it("INT_MIN % -1 does not trap (overflow guard, result 0)", async () => {
+  it("INT_MIN % -1 yields -0 (spec) and does not trap", async () => {
     const src = `export function test(): number { let a = -2147483648; let b = -1; return a % b; }`;
-    expect(await runFast(src)).toBe(0);
+    // `Object.is(-2147483648 % -1, -0)` is true in JS — the sign of the
+    // dividend is preserved. An i32 local cannot represent -0 at all.
+    expect(await runFast(src)).toBe(-0);
   });
 
   it("modulo by zero with computed operands does not trap", async () => {
@@ -49,8 +60,18 @@ describe("#1825 — i32 fast-mode modulo does not trap", () => {
       }
       return total;
     }`;
-    // i=0: 10%-2=0 ; i=1: 10%-1=0 ; i=2: 10%0=0(guard) ; i=3: 10%1=0
-    expect(await runFast(src)).toBe(0);
+    // i=0: 10%-2=0 ; i=1: 10%-1=0 ; i=2: 10%0=NaN ; i=3: 10%1=0 → NaN total.
+    expect(await runFast(src)).toBeNaN();
+  });
+
+  // (#3907) The i32 remainder guards still exist for the explicit opt-in.
+  it("`type i32 = number` keeps the non-trapping i32 remainder guards", async () => {
+    const byZero = `type i32 = number;
+      export function test(): i32 { let a: i32 = 10; let b: i32 = 0; return a % b; }`;
+    expect(await runFast(byZero)).toBe(0);
+    const overflow = `type i32 = number;
+      export function test(): i32 { let a: i32 = -2147483648; let b: i32 = -1; return a % b; }`;
+    expect(await runFast(overflow)).toBe(0);
   });
 });
 
