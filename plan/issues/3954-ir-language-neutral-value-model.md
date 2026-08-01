@@ -1,6 +1,6 @@
 ---
 id: 3954
-title: "Prepare the IR for a second source language: factor the JS value model behind a tag-domain seam"
+title: "Name the IR's ambient ECMAScript assumptions: factor the JS value model behind a tag-domain seam"
 status: ready
 sprint: current
 created: 2026-08-01
@@ -15,14 +15,41 @@ language_feature: compiler-internals
 goal: backend-agnostic-ir
 ---
 
-# Prepare the IR for a second source language (Python first)
+# Name the IR's ambient ECMAScript assumptions
 
 ## Problem
 
-The IR is already language-neutral *downward* and JS-specific *upward*, but
-nothing in the tree records or enforces that line — so the JS-specific half is
-free to keep leaking into the neutral half, and the cost of a second producer
-rises silently with every commit.
+**The IR's ECMAScript assumptions are ambient rather than named.** `IrType` does
+not have "a dynamic value type" — it has *ECMAScript's* dynamic value type,
+spelled as a closed enum, and nothing in the tree marks it as such. The type
+lattice, the propagation rules, the truthiness and numeric-coercion predicates
+all encode ECMA-262 semantics as if they were facts about compilation in
+general.
+
+That is a maintainability defect in the JavaScript compiler, independently of
+whether a second front-end ever exists:
+
+- **You cannot tell a spec decision from an engineering decision by reading the
+  code.** When `dynTruthy` treats a value a particular way, is that ECMA-262
+  §7.1.2 or a lowering convenience? Today the only way to know is to already
+  know. Every future change to dynamic-value handling re-litigates that
+  question from scratch.
+- **There is no boundary to violate, so nothing can be reviewed against one.**
+  New JS-specific behaviour lands anywhere in the IR without friction, because
+  no rule says where it belongs. The neutral half and the ECMAScript half are
+  interleaved by accident of authorship.
+- **The two halves have different change rates and different owners.** The
+  neutral half (control flow, calls, closures, layout) is stable compiler
+  infrastructure; the ECMAScript half tracks spec conformance and moves with
+  test262. Interleaving them means conformance churn touches infrastructure and
+  vice versa.
+
+Naming the boundary is the deliverable. A second source language becomes
+*possible* as a side effect, but that is a secondary benefit and this issue
+should not be scheduled or descoped on it — see "Second front-end: honest
+scoping" below.
+
+### The boundary is already half-built
 
 **Downward, the boundary is real and deliberate.** `docs/ir/ir-contract.md`
 (frozen #3030-T1) consistently says **"producer"**, never "the TypeScript
@@ -78,12 +105,48 @@ expensive later:
 - Phase 1 alone is a **behaviour-neutral** change: JS stays the only tag domain,
   the emitted bytes must not move. That makes it safely interleavable with
   in-flight IR work in a way a later big-bang factoring would not be.
+- The ratchet is the durable part. Once the gate exists, the boundary stops
+  eroding whether or not anyone ever writes a second front-end — which is
+  precisely why the justification does not rest on one.
+
+### Second front-end: honest scoping
+
+The original framing of this issue led with "prepare for Python." That
+overstates the payoff and is not why it should be scheduled. For the record, so
+nobody picks this up expecting a bigger prize than there is:
+
+- **Python's structural fit is good.** PEP 484 type hints are to Python what
+  TypeScript is to JavaScript, which is exactly the precondition that makes
+  js2wasm's AOT bet tractable; mypyc already demonstrates the speedup is real.
+  The WasmGC precedents (Kotlin, Dart, Java, OCaml, Scheme) are all typed or
+  already-GC'd languages, and "typed Python" has that shape.
+- **But the addressable niche is narrow.** Essentially every existing
+  Python→Wasm effort (Pyodide, CPython wasm32, componentize-py, RustPython,
+  MicroPython, and py2wasm via Nuitka) ships an interpreter. They do that
+  because the C-extension ecosystem — numpy, scipy, pandas, torch — is written
+  against the CPython C API and a flat `PyObject*` heap. A WasmGC AOT compiler
+  **cannot** run those, not "cannot yet": the object representation is
+  incompatible by construction. For most people asking for Python-in-Wasm, the
+  answer they need is numpy.
+- **What is genuinely unoccupied** is typed Python → standalone WasmGC module,
+  no interpreter, no CPython: edge functions, plugin sandboxes, embedded
+  scripting. Real, but small, and entered behind Codon (LLVM/native-first) and
+  mypyc (needs CPython).
+- **Where the design does clearly beat the interpreter ports:** module size and
+  startup (no runtime to ship), and host-GC integration — WasmGC objects are
+  collected by the host, whereas a linear-memory Python heap is invisible to the
+  host collector, so cycles spanning the boundary leak. That is a structural tax
+  the interpreter ports cannot retrofit away.
+
+**A C++ front-end is not on this axis at all** and is a hard non-goal — see
+Non-goals.
 
 ## Non-goals
 
-- **Not** a Python front-end. This issue does not add `from-python.ts`, a Python
-  parser, or any Python runtime. It makes a second producer *possible*; building
-  one is separate work gated on this landing.
+- **Not** a Python front-end, and **not justified by one**. This issue adds no
+  `from-python.ts`, no Python parser, no Python runtime. It makes a second
+  producer *possible* as a side effect; do not schedule, descope, or cancel this
+  issue based on whether a Python front-end is wanted.
 - **Not** a C++ front-end, now or later. C++ needs value semantics,
   copy/move/destructors, RAII scope-exit lifetimes, raw pointers and pointer
   arithmetic, precise struct layout/ABI, unsigned integer types, and template
@@ -160,6 +223,9 @@ lookup on `dynMemberGet`; MRO / multiple inheritance vs single-inheritance
 - [ ] test262 host and standalone pass counts are unchanged (identical).
 - [ ] A test constructs a non-JS tag domain and lowers IR through the bytecode
       backend with it.
+- [ ] Every ECMA-262-derived predicate moved behind the seam cites its spec
+      clause, so a reader can tell a conformance decision from a lowering
+      convenience — this is the issue's primary deliverable, not a nicety.
 - [ ] `docs/architecture/codegen-axes.md` gains a short "producer axis" note
       naming the seam and stating the C++ non-goal, so the boundary is
       documented where the other axes are.
