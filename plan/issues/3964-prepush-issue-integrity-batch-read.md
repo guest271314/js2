@@ -71,22 +71,51 @@ it scanned zero files or parsed zero frontmatter blocks.
 
 ## Measurements
 
-Same pinned SHA `5824539805cb77`, same box, both read paths run back-to-back
-in one harness so they share conditions.
+Pinned SHA `5824539805cb77`, 3,410 issue files (25.1 MB of blob). Both read
+paths run **back-to-back in one process** so they share conditions.
 
-| Read path                                | Wall clock |
-| ---------------------------------------- | ---------- |
-| old — one `git show` per file (3,514×)   | see PR body |
-| new — one `git cat-file --batch`         | see PR body |
+| Read path                                | Wall clock       |
+| ---------------------------------------- | ---------------- |
+| old — one `git show` per file (3,410×)   | **1,215,256 ms** (20 min 15 s) |
+| new — one `git cat-file --batch`         | **2,437 ms**     |
+| speedup                                  | **499x**         |
+
+Full-script wall clock (includes node startup, `ls-tree`, and parsing) ranges
+~3–18 s depending on how many other agents are hammering the box; the box ran
+~20 agents throughout, and run-to-run noise is several-fold.
+
+Where the remaining time goes (profiled): the two git subprocesses. Parsing is
+negligible — framing the 25 MB buffer into 3,410 strings takes ~60–85 ms and
+frontmatter parsing ~6–9 ms.
+
+### Rejected: feeding blob OIDs instead of `<ref>:<path>`
+
+`ls-tree` already returns each blob's OID, so feeding OIDs would let
+`cat-file --batch` skip resolving a path through the tree per entry. A single
+warm/cold pair suggested a 10x win — but that was a **contention artifact**.
+A/B'd properly (7 alternating rounds, same process, minimum as the estimator
+least polluted by noise): **path min 2,928 ms vs OID min 2,347 ms — 1.25x**,
+and the *medians* actually favour the path form (4,657 vs 4,955 ms). Not a
+real effect. Rejected: it adds parsing complexity for no measured benefit.
+The two strategies produced **0 content differences**, which is a further
+parity data point.
 
 ## Acceptance
 
-- Byte-level content parity across all issue files between old and new read
-  paths (identical content ⇒ identical derived state by construction).
-- Positive control: a commit carrying a duplicate id, a filename/frontmatter
-  id mismatch, and a dangling `depends_on` is **detected by both** old and new,
-  with identical output.
-- Scan count printed on success.
+- **Parity** — byte-level content comparison across all 3,410 issue files
+  between old and new read paths: **0 mismatches**. Identical content implies
+  identical derived state, since the downstream logic is untouched.
+- **Positive control (real scale)** — a commit carrying a duplicate id, a
+  filename/frontmatter id mismatch, and a dangling `depends_on` is detected by
+  both implementations, with identical output.
+- **Positive control (unit)** — `tests/hooks/committed-issue-integrity.test.ts`
+  covers all three defect classes plus batch-stream framing and the
+  refuse-to-pass-vacuously floor.
+- **Instrument validated** — the framing tests were confirmed non-vacuous by
+  mutation: swapping the byte-count reader for a line-scanning one makes
+  exactly those two tests fail, and restoring it makes them pass.
+- **Floor** — the scan count is printed on success (`3,410 files scanned,
+  3,410 with frontmatter`).
 
 ## Also in this change
 
