@@ -195,7 +195,7 @@ cannot see what already happened, failing toward the reassuring answer.
 ### Superseding state
 
 The "Open at hand-off" list above is stale. Later in the session: **#3900 merged**
-(2026-07-31T16:05:32Z), putting `plan/issues/3915-*.md` and this summary on `main`; **#3901** was
+(2026-07-31T16:05:32Z), putting the #3915 issue file and this summary on `main`; **#3901** was
 found stranded with `quality` red on its current head for ~50 min behind an entirely benign
 surface (`BEHIND`, no `hold`, absent from queue), root-caused to two prettier-added blank lines
 in the `AUTO:conformance` block, fixed by the shepherd while its author was stopped, then
