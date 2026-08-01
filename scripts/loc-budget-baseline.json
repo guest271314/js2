@@ -1,7 +1,7 @@
 {
   "generated": "2026-08-01",
   "threshold": 1500,
-  "totalCeiling": 518199,
+  "totalCeiling": 518329,
   "files": {
     "src/codegen-linear/index.ts": 5614,
     "src/codegen-linear/runtime.ts": 4306,
@@ -19,7 +19,7 @@
     "src/codegen/closures.ts": 3391,
     "src/codegen/context/types.ts": 3250,
     "src/codegen/dataview-native.ts": 5892,
-    "src/codegen/declarations.ts": 2678,
+    "src/codegen/declarations.ts": 2682,
     "src/codegen/declarations/import-collector.ts": 2017,
     "src/codegen/destructuring-params.ts": 2405,
     "src/codegen/dyn-read.ts": 1679,
@@ -40,7 +40,7 @@
     "src/codegen/extern-declarations.ts": 1650,
     "src/codegen/fnctor-escape-gate.ts": 1709,
     "src/codegen/generators-native.ts": 4197,
-    "src/codegen/index.ts": 8907,
+    "src/codegen/index.ts": 8908,
     "src/codegen/iterator-native.ts": 3056,
     "src/codegen/json-codec-native.ts": 3567,
     "src/codegen/literals.ts": 4752,
