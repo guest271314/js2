@@ -1,10 +1,11 @@
 ---
 id: 3957
 title: "standalone Object.defineProperties: descriptor read must be [[Get]], and a statically-shaped Properties map must expand"
-status: in-progress
+status: done
 sprint: current
 created: 2026-08-01
 updated: 2026-08-01
+completed: 2026-08-01
 priority: high
 horizon: m
 complexity: M
@@ -66,10 +67,17 @@ DEFAULT lane:
 **57 % of the "standalone descriptor" lever is not standalone-specific at all.**
 Part B tests fail in _both_ lanes on the same descriptor semantics
 (`accessed !== true`, `writable` reading back wrong, `Expected a TypeError …`),
-so making standalone match the host lane cannot flip them — it would only
-convert one failure into the other. Those are the assigned population of
-#3661/#3662/#3663. Only **Part A (387)** is addressable by standalone-parity
-work, and that is the ceiling this issue is measured against — _not_ 835.
+which is why the _ownership_ split matters: Part B is the assigned population
+of #3661/#3662/#3663, and this issue deliberately stays off their ground by
+fixing only standalone-side mechanics.
+
+**But the partition is NOT a flippability predictor — measured, not assumed.**
+The natural prior ("if the default lane fails the same file, standalone can at
+best reach the same failure, so Part B cannot flip") predicted +0 on Part B. The
+census measured **+8 there vs +3 on Part A** — the prior was wrong, because a
+standalone _refusal_ and a default-lane _semantic_ failure can be independent
+defects in the same file. Neither 835 nor 387 is a flip forecast; only the
+measured census below is.
 
 ## Root causes (two, both in the plural gather path)
 
@@ -203,7 +211,46 @@ Two rules follow, and the final numbers below obey both:
 
 ## Measured result
 
-(filled in by the final back-to-back arm)
+**+11 flips, 0 regressions.** Every number below is a back-to-back same-box A/B
+with floored, identity-checked row sets and a 180 s compile timeout; the
+BASELINE arm is the removal control (the same worktree with both source files
+reverted by file copy, run minutes after the treatment arm).
+
+| stratum                                         | denominator         | n run | fail→PASS | pass→FAIL |
+| ----------------------------------------------- | ------------------- | ----: | --------: | --------: |
+| refusal signature, Part A (default lane passes) | **census** — all 26 |    26 |    **+3** |         0 |
+| refusal signature, Part B (default lane fails)  | **census** — all 41 |    41 |    **+8** |         0 |
+| Part-A non-refusal failures (collateral probe)  | 20 sampled of 361   |    20 |         0 |         0 |
+| currently-PASSING ≤ES5 `Object/*` (regression)  | 20 sampled of 1,892 |    20 |         0 |     **0** |
+
+- **Flip ratio on the targeted population: 11 / 67 = 16.4 %** — the population
+  is the complete `unsupported descriptor shape` refusal signature, run as a
+  CENSUS, not a sample, so this is the actual flip count for that signature and
+  needs no extrapolation.
+- Against the sprint's ≤ES5 standalone denominator (**8,115 run**), +11 is
+  **+0.14 pp**: 69.6 % → 69.7 %. Against the 835-test lever the dispatch brief
+  cited, it is **1.3 %** — 835 was the population GATED by the descriptor model,
+  never a flip forecast.
+- The collateral probe measured **0 / 20** flips outside the refusal signature.
+  The point estimate for the remaining 341 Part-A failures is therefore 0; no
+  positive extrapolation is claimed from a zero observation.
+- **Part B was expected to be unflippable and was not.** The prior — "if the
+  default lane fails the same file, standalone can at best reach the same
+  failure" — predicted +0 there and measured **+8**, more than Part A. Recorded
+  because it is a reusable correction: lane-partition is a good _ownership_
+  split (it keeps this work off #3661/#3662/#3663's ground) but a poor
+  _flippability_ predictor.
+
+### Vacuity audit of the 11 flips
+
+Every flipped test was re-read for the failure mode this issue already caught
+once: a test whose entire assertion is "nothing was defined" passes vacuously
+under a silent no-op. **All 11 carry at least one POSITIVE assertion** —
+`assert(newObj.hasOwnProperty("prop"))`, `assert(result)` (a getter side
+effect), `assert.sameValue(obj["a"], 100)`, or `verifyProperty(...)`. None is
+satisfiable by a no-op. `15.2.3.7-3-8` carries a negative assertion too, but
+its companion `assert(obj.hasOwnProperty("prop2"))` is positive, so it is a
+real flip.
 
 ## Files
 
