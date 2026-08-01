@@ -14,14 +14,19 @@
 // scripts/build-runtime-eval-provider.mjs
 
 import {
+  RUNTIME_EVAL_IMPORT_MODULE,
   RUNTIME_EVAL_PROVIDER_COMPILE_OPTIONS,
+  RUNTIME_EVAL_REFUSAL_CANARY_EXPECTED,
+  RUNTIME_EVAL_REFUSAL_CANARY_SOURCE,
   buildRuntimeEvalProviderSource,
+  buildRuntimeEvalRefusalProviderSource,
   computeCompilerBundleHash,
   defaultRuntimeEvalProviderCacheDir,
   instantiateRuntimeEvalNamespace,
   readCachedRuntimeEvalProvider,
   runtimeEvalProviderCacheKey,
   runtimeEvalProviderCachePath,
+  runtimeEvalRefusalCachePath,
   writeCachedRuntimeEvalProvider,
 } from "./runtime-eval-provider.mjs";
 
@@ -68,10 +73,87 @@ function verifyProvider(binary) {
   }
 }
 
-async function main() {
-  const cacheDir = defaultRuntimeEvalProviderCacheDir();
+/**
+ * (#2928 E7) Positive control for the REFUSAL provider, run BEFORE it is
+ * cached. Self-inspection is not enough here: what has to hold is that the
+ * `[false, TypeError]` envelope survives the module boundary and surfaces in
+ * the USER module as an ordinary catchable `TypeError`. So compile a throwaway
+ * standalone user module that takes the dynamic `new Function` route, link it
+ * against the candidate, and require the agreed probe code.
+ */
+async function verifyRefusalProvider(compile, binary) {
+  const module = new WebAssembly.Module(binary);
+  const imports = WebAssembly.Module.imports(module);
+  if (imports.length !== 0) {
+    throw new Error(
+      `refusal provider must have ZERO imports, found: ${imports.map((i) => `${i.module}::${i.name}`).join(", ")}`,
+    );
+  }
+  const canary = await compile(RUNTIME_EVAL_REFUSAL_CANARY_SOURCE, {
+    ...RUNTIME_EVAL_PROVIDER_COMPILE_OPTIONS,
+    fileName: "runtime-eval-refusal-canary.ts",
+  });
+  if (!canary.success || !canary.binary) throw new Error("refusal canary user module failed to compile");
+  const canaryModule = new WebAssembly.Module(canary.binary);
+  const linksProvider = WebAssembly.Module.imports(canaryModule).some((i) => i.module === RUNTIME_EVAL_IMPORT_MODULE);
+  if (!linksProvider) {
+    // The canary must actually exercise the provider seam; if the compiler
+    // ever compiles this body away, the check would pass vacuously.
+    throw new Error(`refusal canary does not import ${RUNTIME_EVAL_IMPORT_MODULE} — it would verify nothing`);
+  }
+  const instance = new WebAssembly.Instance(canaryModule, {
+    [RUNTIME_EVAL_IMPORT_MODULE]: instantiateRuntimeEvalNamespace(module),
+  });
+  const actual = instance.exports.probe();
+  if (actual !== RUNTIME_EVAL_REFUSAL_CANARY_EXPECTED) {
+    throw new Error(
+      `refusal canary returned ${actual}, expected ${RUNTIME_EVAL_REFUSAL_CANARY_EXPECTED} ` +
+        `(the [false, TypeError] envelope did not surface as a catchable TypeError)`,
+    );
+  }
+}
+
+/**
+ * (#2928 E7) Build + canary-verify + publish the REFUSAL provider. Cheap
+ * (seconds, ~50 KB) because it carries no parser and no interpreter, which is
+ * what lets every CI standalone shard afford it.
+ */
+async function buildRefusal(cacheDir, bundleHash) {
+  const source = buildRuntimeEvalRefusalProviderSource();
+  const key = runtimeEvalProviderCacheKey(source, bundleHash);
+  const path = runtimeEvalRefusalCachePath(cacheDir, key);
+  const cached = readCachedRuntimeEvalProvider(cacheDir, key, runtimeEvalRefusalCachePath);
+  if (cached) {
+    console.log(
+      `[runtime-eval-refusal] cache HIT — key ${key} (bundle ${bundleHash}), ${cached.length} bytes at ${path}`,
+    );
+    return;
+  }
+  const { compile, origin } = await loadCompile();
+  console.log(`[runtime-eval-refusal] cache MISS — compiling refusal provider (key ${key}, compiler: ${origin}) ...`);
+  const startMs = Date.now();
+  const result = await compile(source, {
+    ...RUNTIME_EVAL_PROVIDER_COMPILE_OPTIONS,
+    fileName: "runtime-eval-refusal.ts",
+  });
+  const compileMs = Date.now() - startMs;
+  if (!result.success || !result.binary || result.binary.length === 0) {
+    const detail = (result.errors ?? [])
+      .filter((e) => e.severity === "error" || e.severity === undefined)
+      .slice(0, 5)
+      .map((e) => e.message ?? String(e))
+      .join("; ");
+    throw new Error(`refusal provider compile FAILED after ${compileMs}ms: ${detail || "unknown"}`);
+  }
+  await verifyRefusalProvider(compile, result.binary);
+  const written = writeCachedRuntimeEvalProvider(cacheDir, key, result.binary, runtimeEvalRefusalCachePath);
+  console.log(
+    `[runtime-eval-refusal] built + canary-verified in ${compileMs}ms — ${result.binary.length} bytes at ${written}`,
+  );
+}
+
+async function buildFull(cacheDir, bundleHash) {
   const source = buildRuntimeEvalProviderSource();
-  const bundleHash = computeCompilerBundleHash();
   const key = runtimeEvalProviderCacheKey(source, bundleHash);
   const path = runtimeEvalProviderCachePath(cacheDir, key);
 
@@ -103,6 +185,19 @@ async function main() {
   console.log(
     `[runtime-eval-provider] built + canary-verified in ${compileMs}ms — ${result.binary.length} bytes at ${written}`,
   );
+}
+
+async function main() {
+  const refusalOnly = process.argv.includes("--refusal-only");
+  const cacheDir = defaultRuntimeEvalProviderCacheDir();
+  const bundleHash = computeCompilerBundleHash();
+
+  // The refusal provider is built FIRST and unconditionally: it is the floor
+  // that keeps eval-mentioning standalone modules instantiable even when the
+  // real interpreter is absent, and it costs seconds.
+  await buildRefusal(cacheDir, bundleHash);
+  if (refusalOnly) return;
+  await buildFull(cacheDir, bundleHash);
 }
 
 main().catch((err) => {

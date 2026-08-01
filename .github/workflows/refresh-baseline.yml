@@ -233,6 +233,14 @@ jobs:
           ./node_modules/.bin/esbuild src/runtime.ts --bundle --platform=node --format=esm \
             --outfile=scripts/runtime-bundle.mjs --external:typescript --external:binaryen
 
+      # (#2928 E7) Mirror test262-sharded.yml: the standalone lane links the
+      # refusal runtime-eval provider so eval-mentioning modules instantiate.
+      # An emergency-heal baseline measured WITHOUT it would publish a
+      # standalone number the ordinary lane can no longer reproduce.
+      - name: Prebuild refusal runtime-eval provider (#2928)
+        if: matrix.target.test262_target == 'standalone'
+        run: node scripts/build-runtime-eval-provider.mjs --refusal-only
+
       - name: Run shard
         run: |
           mkdir -p vitest-blob
