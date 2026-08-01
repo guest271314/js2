@@ -36,6 +36,7 @@ import { ensureStrToCharVecHelper, stringConstantExternrefInstrs } from "./nativ
 import { emitStandaloneIterableMaterialize } from "./iterator-native.js"; // (#3100 S5)
 import { popBody, pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
+import { emptyBackingStoreInstrs } from "./empty-vec-store.js"; // (#3921) shared zero-length backing store
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { isForeignEvalNode } from "./expressions/eval-source.js";
@@ -3678,8 +3679,18 @@ export function compileArrayLiteral(
     }
 
     fctx.body.push({ op: "i32.const", value: 0 }); // length field (field 0)
-    fctx.body.push({ op: "i32.const", value: prealloc > 0 ? prealloc : 0 }); // size for array.new_default (#1001: preallocate if counted push loop detected)
-    fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx }); // data field (field 1)
+    // (#3921 follow-up) With no prealloc the backing store is zero-length and
+    // DEAD ON ARRIVAL — `push` grows on `capacity < length + argc`, which from
+    // capacity 0 always trips, so the first push replaces it. Share one
+    // immutable singleton per element type instead of allocating 31,414 of
+    // them per acorn parse. Prealloc'd literals keep their own store.
+    const sharedEmpty = prealloc > 0 ? undefined : emptyBackingStoreInstrs(ctx, arrTypeIdx);
+    if (sharedEmpty) {
+      for (const instr of sharedEmpty) fctx.body.push(instr);
+    } else {
+      fctx.body.push({ op: "i32.const", value: prealloc > 0 ? prealloc : 0 }); // size for array.new_default (#1001: preallocate if counted push loop detected)
+      fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx }); // data field (field 1)
+    }
     fctx.body.push({ op: "struct.new", typeIdx: vecTypeIdx }); // wrap in vec struct
     return { kind: "ref_null", typeIdx: vecTypeIdx };
   }
