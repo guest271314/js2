@@ -36,8 +36,9 @@ import { ensureStrToCharVecHelper, stringConstantExternrefInstrs } from "./nativ
 import { emitStandaloneIterableMaterialize } from "./iterator-native.js"; // (#3100 S5)
 import { popBody, pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
+import { emptyBackingStoreInstrs } from "./empty-vec-store.js"; // (#3921) shared zero-length backing store
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
-import type { CodegenContext, FunctionContext } from "./context/types.js";
+import type { CodegenContext, FunctionContext, OptionalParamInfo } from "./context/types.js";
 import { isForeignEvalNode } from "./expressions/eval-source.js";
 import { emitUndefined, patchStructNewForAddedField } from "./expressions/late-imports.js";
 import { resolveStructName } from "./expressions/misc.js";
@@ -53,6 +54,7 @@ import {
   destructureParamArray,
   destructureParamObject,
   ensureStructForType,
+  extractConstantDefault,
   getOrRegisterTupleType,
   getTupleElementTypes,
   isTupleType,
@@ -1212,7 +1214,10 @@ export function objectLiteralTakesStandaloneAnyObjectPath(
   expr: ts.ObjectLiteralExpression,
 ): boolean {
   if (
-    !ctx.standalone ||
+    // (#2542) `ctx.wasi` admitted so the PURE string-index arm below can fire on
+    // the other host-free target; the #1901 any-context arm stays standalone-only,
+    // enforced at the return.
+    !(ctx.standalone || ctx.wasi) ||
     expr.properties.length === 0 ||
     ts.isParameter(expr.parent) ||
     // only data props / spreads / plain-named method shorthand we can build onto
@@ -1275,7 +1280,9 @@ export function objectLiteralTakesStandaloneAnyObjectPath(
   // so diverting its literal to `$Object` would mismatch that struct local.
   const strIndex = ctxTypeNonEmpty ? ctx.checker.getIndexInfoOfType(ctxTypeNonEmpty, ts.IndexKind.String) : undefined;
   const isPureStringIndexContext = !!strIndex && !!ctxTypeNonEmpty && ctxTypeNonEmpty.getProperties().length === 0;
-  return isAnyContextNonEmpty || isPureStringIndexContext;
+  // #1901's any-context arm stays standalone-only (widening it would change every
+  // any-typed literal's lowering under wasi); #2542's index arm covers both.
+  return (ctx.standalone && isAnyContextNonEmpty) || isPureStringIndexContext;
 }
 
 export function compileObjectLiteral(
@@ -1393,10 +1400,11 @@ export function compileObjectLiteral(
     // mutated by runtime string key (`o[k] = v`). Build it as an open `$Object`
     // (same `__new_plain_object` as the any-context arm) so the binding — which
     // resolveWasmType lowers to externref (#2542) — is a real `$Object` the native
-    // `__extern_set`/`__extern_get` service. Standalone-only (the open-object
-    // runtime is emitted only there); gc/host/wasi keep their existing lowering.
+    // `__extern_set`/`__extern_get` service. Host-free targets (standalone AND
+    // wasi — see the #2542-follow-up note in index.ts's resolveWasmType guard);
+    // gc/host keeps its existing lowering, since a JS host services `o[k]` there.
     const isPureStringIndexEmpty =
-      ctx.standalone &&
+      (ctx.standalone || ctx.wasi) &&
       !!ctxType &&
       ctxType.getProperties().length === 0 &&
       !!ctx.checker.getIndexInfoOfType(ctxType, ts.IndexKind.String);
@@ -2146,8 +2154,19 @@ export function compileObjectLiteralForStruct(
     for (const src of spreadSources) spreadByPropIndex.set(src.propIndex, src.srcFields);
     const insertionOrder: string[] = [];
     const seen = new Set<string>();
-    const pushName = (n: string | undefined): void => {
-      if (n === undefined || n.startsWith("$") || n.startsWith("__")) return;
+    // `written` = the key appears literally in this object literal's source, so
+    // it is unambiguously a USER property even when it starts with `$` / `__`
+    // (`{ $$typeof: … }` — React tags every element that way, and jQuery-style
+    // `$`-prefixed keys are common generally). The compiler's own hidden slots
+    // (`$shape`, `$arity`, `__tag`) never come through this path.
+    //
+    // Spread sources are different: their name list is the SOURCE STRUCT's slot
+    // names, which do mix user keys with those hidden slots. There is no way to
+    // tell them apart here, so the prefix heuristic is kept for that path —
+    // conservative, and exactly the previous behaviour.
+    const pushName = (n: string | undefined, written: boolean): void => {
+      if (n === undefined) return;
+      if (!written && (n.startsWith("$") || n.startsWith("__"))) return;
       if (seen.has(n)) return;
       seen.add(n);
       insertionOrder.push(n);
@@ -2156,14 +2175,14 @@ export function compileObjectLiteralForStruct(
       const prop = expr.properties[pi]!;
       if (ts.isSpreadAssignment(prop)) {
         const srcFields = spreadByPropIndex.get(pi);
-        if (srcFields) for (const f of srcFields) pushName(f.name);
+        if (srcFields) for (const f of srcFields) pushName(f.name, false);
         continue;
       }
       if (ts.isMethodDeclaration(prop) || ts.isGetAccessorDeclaration(prop) || ts.isSetAccessorDeclaration(prop)) {
-        if (prop.name) pushName(resolveAccessorPropName(ctx, prop.name));
+        if (prop.name) pushName(resolveAccessorPropName(ctx, prop.name), true);
         continue;
       }
-      pushName(resolvePropertyNameText(ctx, prop));
+      pushName(resolvePropertyNameText(ctx, prop), true);
     }
     if (insertionOrder.length > 0) ctx.structInsertionOrder.set(typeName, insertionOrder);
   }
@@ -2918,6 +2937,36 @@ export function compileObjectLiteralForStruct(
       // beyond the formal param count.
       if (prop.body && bodyUsesArguments(prop.body)) {
         ctx.funcUsesArguments.add(fullName);
+      }
+
+      // (#3948) Register optional/defaulted params for this object-literal
+      // method. Class bodies have always done this (class-bodies.ts
+      // `registerClassOptionalParams`), free functions too (declarations.ts);
+      // object literals were the one method form that never did — and
+      // `maybeSetArgcForKnownCall` is gated on exactly this map, so every
+      // `o.m()` call site silently skipped its `global.set $__argc`. The
+      // callee's param-default prologue then read the `-1` "unknown caller"
+      // sentinel, concluded no argument was missing, and used the raw
+      // (zero/null) incoming slot: `{ m(a = 5) }.m()` evaluated to 0 in BOTH
+      // lanes. `methodParams` leads with the receiver `this`, so the ValType
+      // for source parameter `i` is at `methodParams[i + 1]` — the same
+      // `paramTypeOffset = 1` the class path uses for instance methods.
+      const objMethodOptionalParams: OptionalParamInfo[] = [];
+      for (let pi = 0; pi < prop.parameters.length; pi++) {
+        const param = prop.parameters[pi]!;
+        if (!param.questionToken && !param.initializer) continue;
+        const paramValType = methodParams[pi + 1];
+        if (!paramValType) continue;
+        const info: OptionalParamInfo = { index: pi, type: paramValType };
+        if (param.initializer) {
+          const cd = extractConstantDefault(param.initializer, paramValType, ctx);
+          if (cd) info.constantDefault = cd;
+          else info.hasExpressionDefault = true;
+        }
+        objMethodOptionalParams.push(info);
+      }
+      if (objMethodOptionalParams.length > 0) {
+        ctx.funcOptionalParams.set(fullName, objMethodOptionalParams);
       }
 
       const methodTypeIdx = addFuncType(ctx, methodParams, methodResults, `${fullName}_type`);
@@ -3678,8 +3727,18 @@ export function compileArrayLiteral(
     }
 
     fctx.body.push({ op: "i32.const", value: 0 }); // length field (field 0)
-    fctx.body.push({ op: "i32.const", value: prealloc > 0 ? prealloc : 0 }); // size for array.new_default (#1001: preallocate if counted push loop detected)
-    fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx }); // data field (field 1)
+    // (#3921 follow-up) With no prealloc the backing store is zero-length and
+    // DEAD ON ARRIVAL — `push` grows on `capacity < length + argc`, which from
+    // capacity 0 always trips, so the first push replaces it. Share one
+    // immutable singleton per element type instead of allocating 31,414 of
+    // them per acorn parse. Prealloc'd literals keep their own store.
+    const sharedEmpty = prealloc > 0 ? undefined : emptyBackingStoreInstrs(ctx, arrTypeIdx);
+    if (sharedEmpty) {
+      for (const instr of sharedEmpty) fctx.body.push(instr);
+    } else {
+      fctx.body.push({ op: "i32.const", value: prealloc > 0 ? prealloc : 0 }); // size for array.new_default (#1001: preallocate if counted push loop detected)
+      fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx }); // data field (field 1)
+    }
     fctx.body.push({ op: "struct.new", typeIdx: vecTypeIdx }); // wrap in vec struct
     return { kind: "ref_null", typeIdx: vecTypeIdx };
   }

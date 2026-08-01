@@ -18,10 +18,14 @@ judged on:
    `#2200 #2668 #2670 #2742 #2747 #2552`.
 2. **Acorn performance** — compiled Acorn is still ~400–500× native at real-file
    scale (#3756). `#3756 #3675 #3782 #3780 #3686 #3685 #3684 #3683 #3730`.
-3. **ESLint** — continue PR #3687 (`codex/1400-eslint-e2e`, currently DIRTY +
-   held, and it *records* a known regression: the full graph no longer compiles
-   after the merge). Six criticals were stranded on the closed `sprint: 76` and
-   are pulled forward: `#3653 #3654 #3655 #3656 #3657 #3672`.
+3. **ESLint** — ~~continue PR #3687~~. **PR #3687 is CLOSED (2026-07-31,
+   stakeholder decision)**: DIRTY, bot park-held (so skipped by the
+   `auto-enqueue` backstop and unable to recover on its own), and ~12.9k lines
+   of divergence behind `main`. It was mined for slices instead — see the
+   carry-over table in `#1400`. `#3655` and `#3672` landed by other routes and
+   are **done**; `#3653` measures as substantially already met and needs a
+   status reconcile. Remaining: `#3654 #3656 #3657` plus the carry-overs
+   `#3798` (the architectural blocker that stopped #3687) and `#3930`.
 4. **React** — `#3801`, new: run React's OWN upstream unit tests against
    compiled React. Self-authored vectors share our blind spots.
 

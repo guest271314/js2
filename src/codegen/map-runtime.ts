@@ -428,6 +428,34 @@ export function ensureMapHelpers(ctx: CodegenContext): void {
           { op: "local.get", index: 2 },
           { op: "i64.xor" },
           { op: "i32.wrap_i64" },
+          // (#3951) Murmur3 finalizer — REQUIRED, not a refinement. The bare
+          // xor-fold leaves the low bits zero for integer keys (a small integer
+          // as an f64 has an all-zero low mantissa), and the caller's bucket
+          // index is `hash & (cap-1)` — exactly those bits — so every integer
+          // key hashed to bucket 0 and lookups were O(n). Bucket-only change;
+          // measurements and full analysis on plan/issues/3951-*.md.
+          { op: "local.set", index: 3 },
+          { op: "local.get", index: 3 },
+          { op: "local.get", index: 3 },
+          { op: "i32.const", value: 16 },
+          { op: "i32.shr_u" },
+          { op: "i32.xor" },
+          { op: "i32.const", value: 0x85ebca6b | 0 },
+          { op: "i32.mul" },
+          { op: "local.set", index: 3 },
+          { op: "local.get", index: 3 },
+          { op: "local.get", index: 3 },
+          { op: "i32.const", value: 13 },
+          { op: "i32.shr_u" },
+          { op: "i32.xor" },
+          { op: "i32.const", value: 0xc2b2ae35 | 0 },
+          { op: "i32.mul" },
+          { op: "local.set", index: 3 },
+          { op: "local.get", index: 3 },
+          { op: "local.get", index: 3 },
+          { op: "i32.const", value: 16 },
+          { op: "i32.shr_u" },
+          { op: "i32.xor" },
           { op: "i32.const", value: 0x3fffffff },
           { op: "i32.and" },
           { op: "return" },

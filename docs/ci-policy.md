@@ -100,9 +100,9 @@ Two test262 workflows currently run on PRs:
   check is `merge shard reports`, fed by the 57-shard host and standalone
   matrix.
   - Queue model (#109 → #1956, see `plan/method/pr-drift-protocol.md`):
-    every PR is validated on its own merge_group ref. Historically this was
-    pinned to a `batch=1` serial queue because the regression gate diffed
-    each group against the _main baseline_, where the cumulative diff of a
+    every PR is validated on its own `merge_group` ref. Historically this
+    was pinned to a `batch=1` serial queue because the regression gate diffed
+    each group against the **main baseline**, where the cumulative diff of a
     multi-entry queue window lets one PR's improvement mask another's
     regression (ALLGREEN hiding). #1956 retires that constraint: each
     merge_group run publishes its merged JSONLs keyed by the group head SHA,
@@ -150,6 +150,27 @@ Two test262 workflows currently run on PRs:
     back. If GH013 recurs, first confirm the ruleset still lists the
     `DeployKey: always` bypass actor
     (`gh api /repos/loopdive/js2/rulesets/16700772 --jq .bypass_actors`).
+  - ⚠️ **`refresh-baseline.yml` is `state=disabled_manually` and CANNOT be
+    dispatched** (verified 2026-07-25 and again 2026-08-01:
+    `gh api repos/loopdive/js2/actions/workflows/265204741 --jq .state`; a
+    `workflow_dispatch` returns **HTTP 422 "Cannot trigger a
+    'workflow_dispatch' on a disabled workflow"** — it fails before doing
+    anything). It is the only non-active workflow in the repo. Any runbook
+    step that says "dispatch `refresh-baseline.yml` in EMERGENCY mode" —
+    historically the documented lever for a queue wedged on #1897 — **will
+    not execute today**. Treat that lever as unavailable until #3611 settles
+    its disposition, and do NOT re-enable it mid-incident: that restarts an
+    8-hourly cron and runs an unconditional, guard-ignoring promote, which is
+    the most dangerous available version of that action.
+    **Note `gh workflow list` simply OMITS disabled workflows**, so absence
+    there is not evidence of non-existence — query the API by id or path.
+  - **Before relying on ANY documented lever, check it is enabled**, not just
+    that it exists:
+    `gh api repos/loopdive/js2/actions/workflows --jq '.workflows[]|"\(.state) \(.path)"' | grep -v '^active'`.
+    Disabling a workflow silently invalidates every runbook line naming it and
+    nothing links the two, so an untested recovery path is indistinguishable
+    from a working one until the moment it is needed. When disabling a
+    workflow, grep the docs for its name **in the same change**.
   - The `check for test262 regressions` job is also required. It compares
     the merged PR report against the baseline and catches full pass→fail
     regressions even when the inline hard guards inside `merge shard reports`
@@ -206,6 +227,68 @@ Two test262 workflows currently run on PRs:
 
 For one-off sharded runs outside the normal PR/merge_group path,
 `workflow_dispatch` is the supported entry point.
+
+### Pushing to `main` from a workflow — the rebuild tax (#3915)
+
+Two facts about the merge queue that are non-obvious, and each of which sent
+triage down a wrong path before being written down.
+
+**1. `[skip ci]` does NOT make a push inert to the merge queue.** It suppresses
+_workflows on that commit_. It does **not** stop GitHub rebuilding every queued
+merge group on the new base, and a rebuild **discards the `merge_group`
+validation already running** — including one that has already gone fully green.
+The marker reads as "this push is harmless", and that reading is wrong. There
+is no failure, no park and no label when this happens: a green run simply
+vanishes and a new one starts. What a human reports is "the queue is stuck."
+
+**2. The SHA in `gh-readonly-queue/main/pr-<N>-<sha>` is the BASE commit, not
+the group head.** Two distinct groups for the same PR therefore look like one
+run set unless you compare the embedded SHA. Grouping `merge_group` runs by
+`head_branch` alone produces an "all green" report on a group that was
+superseded. To attribute a rebuild, look up the commit the _superseding_ group
+was based on — do not match against a hardcoded list of known bot SHAs.
+
+Because a `push: main`-triggered bot lands its commit _after_ the merge that
+triggered it, the tax **scales with merge throughput**: the busier the queue,
+the more validation is thrown away. Measured 2026-07-31 17:55–23:11Z over 20
+distinct PRs, 6 needed more than one merge group and **5 of those 6 rebuilds
+were rooted at the one un-gated bot pusher**; the sixth was a legitimate PR
+landing ahead, the only kind a serial queue must pay for.
+
+**So: every workflow that pushes to `main` must gate that push on the merge
+queue.** Use the shared `scripts/main-push-queue-gate.mjs`
+(`test262-sharded.yml` and `baseline-summary-sync.yml` carry an equivalent
+inline gate from #1951). Its rule is:
+
+> **defer** ⟸ the queue is _positively_ busy **and** the artifact is
+> _positively_ fresh. Everything else proceeds.
+
+Two design points that are easy to get wrong:
+
+- **Fail-open is correct here, and it is not a violation of "a detector must be
+  able to say I don't know".** That rule exists because a _verifier_ which
+  cannot see must not fall onto the reassuring side. This is a _deferral_, and
+  the cost asymmetry is reversed: unknown ⇒ push costs at most one discarded
+  validation, once, whereas unknown ⇒ defer can freeze the artifact
+  indefinitely on a flaky API — silently, because a skipped push looks exactly
+  like a no-op one. The gate still _reports_ that it could not see, via a
+  `::warning::` and an explicit `queue=UNKNOWN` in the verdict line.
+- **Read freshness from the artifact, never from `git log`.** Every promote job
+  here is `fetch-depth: 1`, where `git log -1 --format=%ct -- <path>` returns
+  **empty rather than erroring**. Empty parses as "unknown age", which fails
+  open — silently disabling the staleness floor forever while the gate keeps
+  reporting success. Pass a timestamp carried _inside_ the artifact
+  (`benchmark-manifest.json` → `generatedAt`).
+
+A **staleness floor** (`--stale-after-hours`, 6h) keeps a never-draining queue
+from freezing the artifact: past the floor the push proceeds anyway, trading at
+most one rebuild per floor-period against an unbounded freeze. A pusher whose
+file set is re-landed by _another already-gated_ path may declare that with
+`--fallback` instead of carrying its own floor.
+
+Note also that the step shell is `bash -e {0}`: capture the gate's exit code
+with `... || RC=$?`, never with a bare call followed by `RC=$?`, or the DEFER
+path aborts the step and surfaces as a red run instead of a skipped push.
 
 ### Merge-queue wedge recovery — manual, one-shot only (#3456)
 

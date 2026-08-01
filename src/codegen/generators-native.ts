@@ -1329,11 +1329,23 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   // bail to host so the candidate gate and registration agree (no
   // undefined-funcidx module).
   //
-  // Still bailed (follow-up slices, #3386 residual):
-  //  • rest ELEMENTS (`[a, ...r]` / `{a, ...r}`) — the emit-site destructure
-  //    binds them, but the rest local's type (a fresh `__vec_externref` /
-  //    rest `$Object`) is minted inside the destructure helpers, not via
-  //    `resolveBindingElementType`, so the spill typing is not yet reconciled.
+  // (#3945) REST elements (`[a, ...r]` / `{a, ...r}`) are admitted, under a
+  // DIFFERENT typing rule than the non-rest elements below. A non-rest element's
+  // factory local is allocated by `ensureBindingLocals` from
+  // `resolveBindingElementType` and the emit site does not re-type it, so the
+  // checker rule is faithful there. A REST local is minted by the destructure
+  // lane instead and then REALLOCATED over that guess (destructuring-params.ts,
+  // the #971 realloc) — `$__vec_externref` / `$__vec_f64` / a rest `$Object`,
+  // decided by the EMIT SITE's resolved param type, which this builder cannot
+  // see (`isNativeGeneratorCandidate` calls it with no param types and must
+  // agree with `analyzeNativeGenerator`, or the emit bakes an undefined
+  // funcidx) and cannot read back afterwards (a `.next()` site can emit the
+  // resume fn before the generator's own emit site destructures). So a rest
+  // binding spills at the WASM-BOUNDARY rep, `externref`: AST-only, and
+  // reachable from every lane because `compileNativeGeneratorFunction` already
+  // coerces the factory local into the spill type. Same lesson as the #3620
+  // note on the `param_*` fields below. Full argument: plan/issues/3945-*.md.
+  //
   // Whole-param defaults (`[x] = []`) ARE admitted now: the emit site's
   // param-default machinery evaluates the initializer into the param local at
   // call time (before the destructure + factory pack), exactly as for ordinary
@@ -1348,12 +1360,20 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     const pat = param.name;
     if (!ts.isArrayBindingPattern(pat) && !ts.isObjectBindingPattern(pat)) return null;
     const elements: ts.BindingElement[] = [];
-    let hasRest = false;
+    const restNames: string[] = [];
     const walk = (p: ts.BindingPattern): void => {
       for (const el of p.elements) {
         if (ts.isOmittedExpression(el)) continue;
         if (el.dotDotDotToken) {
-          hasRest = true;
+          // (#3945) An IDENTIFIER rest takes the boundary-rep rule below. A
+          // nested pattern under it (`[...[a, b]]`, `[...{length}]`) binds its
+          // OWN names via the ordinary `ensureBindingLocals` path, so it is
+          // walked like any sub-pattern and keeps the checker rule. The pre-fix
+          // walk `continue`d here WITHOUT descending — lifting the bail alone
+          // would leave those names unspilled: host-free, valid, and silently
+          // reading the inert default.
+          if (ts.isIdentifier(el.name)) restNames.push(el.name.text);
+          else walk(el.name);
           continue;
         }
         if (ts.isIdentifier(el.name)) elements.push(el);
@@ -1361,25 +1381,56 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
       }
     };
     walk(pat);
-    if (hasRest) return null;
+    for (const name of restNames) {
+      patternParamSpillTypes.set(name, { kind: "externref" });
+      addSpill(name);
+    }
     for (const el of elements) {
       const id = el.name as ts.Identifier;
-      // (#3386) FUNCTION-VALUED element defaults (`[g = function(){}]`,
-      // `[g = () => 1]`, `[g = function*(){}]`) still bail. The emit-site
-      // destructure compiles the default into a closure/native-gen-state ref
-      // whose wasm rep does not cleanly round-trip the spill field in every
-      // lane — the class-method lane in particular emits an "illegal cast" at
-      // runtime (the `#3164` host-mix fixture, `*method([gen = function*(){}]
-      // = [])`). This is the documented W3 "throwing / function-valued
-      // default" exclusion; the dominant `dflt-*` cohort uses numeric / object
-      // / call-expression defaults, which are admitted (throwing defaults are
-      // CallExpressions and lower correctly). A later slice can widen this
-      // once the closure-valued spill round-trip is proven in all lanes.
-      if (
-        el.initializer &&
+      // (#3386 → #3952) Element defaults that evaluate to a CLOSURE. #3386 bailed
+      // all three of arrow / function-expression / class-expression, and set the
+      // bar for widening: "once the closure-valued spill round-trip is proven in
+      // all lanes". #3952 ran that proof — each arm spills the closure, SUSPENDS,
+      // resumes, and CALLS it (import-freedom plus a plain value read would pass a
+      // module that stored a broken reference and never invoked it):
+      //
+      //   ARROW / plain FUNCTION-EXPRESSION  → round-trips. objlit, class and
+      //     array-pattern lanes all return the called closure's value across a
+      //     suspension, host-free, and `arrow.name` is still `"arrow"`
+      //     (NamedEvaluation, #1450/#1119/#1049). ADMITTED.
+      //   GENERATOR function expression (`[g = function*(){}]`) → objlit lane
+      //     traps at runtime. STILL BAILS.
+      //   CLASS expression (`{ K = class {…} }`) → "dereferencing a null pointer"
+      //     in BOTH the objlit and class lanes. STILL BAILS.
+      //
+      // Note #3386's cited evidence is stale: the shape it named — the #3164
+      // host-mix fixture `*method([gen = function*(){}] = [])` in the CLASS lane —
+      // now passes. The unsafe set is real but different from the recorded one,
+      // which is why this widening is driven by a fresh matrix rather than by
+      // relaxing the predicate to whatever the old comment blamed.
+      //
+      // The class lane also passes the generator-fn-expr arm today (32 rows), but
+      // admitting a shape that traps in a sibling lane on lane identity alone is
+      // how a leak gets traded for a silent wrong value — so `gen` stays bailed
+      // uniformly and is left as a measured, bounded follow-up on #3952.
+      //
+      // The generator FUNCTION-EXPRESSION host (`const g = function*({…} = {}){}`)
+      // keeps the bail for ALL closure defaults too, and the control is what
+      // justifies it: that lane already traps on an element default with a plain
+      // NUMERIC value (`{ n = 41 }`), with no closure anywhere. So its defect is
+      // pre-existing and closure-INDEPENDENT — admitting these 8 rows would swap a
+      // loud host-import leak for a runtime trap without proving anything. Tracked
+      // separately; do not fold it in here.
+      const closureDefault =
+        el.initializer !== undefined &&
         (ts.isFunctionExpression(el.initializer) ||
           ts.isArrowFunction(el.initializer) ||
-          ts.isClassExpression(el.initializer))
+          ts.isClassExpression(el.initializer));
+      if (
+        closureDefault &&
+        ((ts.isFunctionExpression(el.initializer!) && el.initializer!.asteriskToken !== undefined) ||
+          ts.isClassExpression(el.initializer!) ||
+          ts.isFunctionExpression(decl))
       ) {
         return null;
       }
@@ -2042,17 +2093,42 @@ export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorD
       return false;
     }
   }
-  // (#2581) An OBJECT-LITERAL generator method with a DEFAULT or OPTIONAL param
-  // must bail to the host path. Object-literal methods are invoked through the
-  // closure trampoline (`emitObjectMethodAsClosure`), which forwards args but
-  // does NOT set the `__argc_default` global the param-default check reads — so
-  // the native factory would read the un-defaulted sentinel and yield the wrong
-  // value (`{ *m(d=5){yield d} }.m()` → 0 instead of 5). Class methods are called
-  // directly (argc set), so they keep defaults native. The eager-buffer host path
-  // applies defaults correctly for the object-literal case, so route there.
+  // (#2581 → #3948) The OBJECT-LITERAL generator method DEFAULT/OPTIONAL bail is
+  // LIFTED. #2581's diagnosis was right about the symptom and wrong about both
+  // the mechanism and the remedy, so the correction is recorded here rather than
+  // just deleted (see issue #3948 for the instrumented trace):
+  //
+  //   * The mechanism was NOT the `emitObjectMethodAsClosure` trampoline. A plain
+  //     `o.m()` is a direct call and does reach `maybeSetArgcForKnownCall`
+  //     (call-receiver-method.ts). What it found there was an EMPTY
+  //     `ctx.funcOptionalParams` — object-literal methods were the one method
+  //     form that never registered optional-param metadata (class bodies do it in
+  //     `registerClassOptionalParams`, free functions in declarations.ts). The
+  //     gate `!funcUsesArguments.has(n) && !funcOptionalParams.has(n)` therefore
+  //     returned early and `$__argc` kept its `-1` "unknown caller" sentinel.
+  //   * The remedy was NOT sound either: routing to the eager-buffer HOST path
+  //     does not apply the default correctly — measured on the host lane,
+  //     `{ *m(a = 5) }.m().next().value` is 0 there too. The bail bought no
+  //     correctness, only a `__gen_*` host-import leak in standalone (98 rows).
+  //
+  // #3948 fixes the real gap in literals.ts (register the optional params), which
+  // makes the argc-driven default fire for object-literal methods in BOTH lanes;
+  // this gate then has nothing left to protect against. Kill-switched both ways:
+  // restoring this bail turns the leak red again, and reverting the literals.ts
+  // registration alone leaves a host-free module that silently yields the inert 0.
+  //
+  // `questionToken` STILL bails, and that half was measured rather than inherited:
+  // with the argc registration in place, `{ *m(a?: number) { yield a === undefined
+  // ? 42 : a } }.m()` still yields 0, not 42 — an `a?: number` param lowers to a
+  // bare `f64` with no `undefined` inhabitant, so there is nothing for the missing
+  // -arg branch to bind. That is a value-representation gap (#3949's family), not
+  // an admission-gate one, and the same 0 comes out of a NON-generator
+  // `{ m(a?: number) }`. Admitting it here would trade a leak for a wrong value,
+  // so it keeps the host path until the rep gap is closed. #3893 made the same
+  // call for function expressions.
   if (ts.isMethodDeclaration(decl) && ts.isObjectLiteralExpression(decl.parent)) {
     for (const param of decl.parameters) {
-      if (param.initializer || param.questionToken) return false;
+      if (param.questionToken) return false;
     }
   }
   // (#2938) A generator METHOD whose emitted name is not unique within its

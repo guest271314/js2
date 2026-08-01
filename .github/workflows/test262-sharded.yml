@@ -704,6 +704,21 @@ jobs:
           ./node_modules/.bin/esbuild src/runtime.ts --bundle --platform=node --format=esm \
             --outfile=scripts/runtime-bundle.mjs --external:typescript --external:binaryen
 
+      # (#2928 E7) Standalone only: build the REFUSAL runtime-eval provider.
+      # `js2wasm:runtime-eval` is a MODULE-LEVEL import, so with no namespace
+      # supplied a standalone file that merely mentions dynamic `new Function`
+      # / indirect eval cannot instantiate and loses every assertion it has —
+      # 361 files in the published standalone baseline die that way, most of
+      # them never reaching the dynamic call. The refusal provider is a
+      # js2wasm-compiled, zero-import core-Wasm module with the same envelope
+      # ABI and NO capability: files run, and only the dynamic-code call itself
+      # throws the #2960 Tier-3 TypeError. `--refusal-only` skips the real
+      # Acorn+interpreter provider, which takes MINUTES to compile and is not
+      # affordable per shard; this one takes seconds.
+      - name: Prebuild refusal runtime-eval provider (#2928)
+        if: matrix.target.test262_target == 'standalone'
+        run: node scripts/build-runtime-eval-provider.mjs --refusal-only
+
       - name: Run shard
         run: |
           mkdir -p vitest-blob
@@ -841,6 +856,14 @@ jobs:
           pnpm run build:compiler-bundle
           ./node_modules/.bin/esbuild src/runtime.ts --bundle --platform=node --format=esm \
             --outfile=scripts/runtime-bundle.mjs --external:typescript --external:binaryen
+
+      # (#2928 E7) Same refusal-provider prebuild as `test262-shard` — see the
+      # comment there. merge_group re-validation must see the same standalone
+      # linking behaviour the PR-level and push lanes see, or the two lanes
+      # would disagree by exactly these 361 files.
+      - name: Prebuild refusal runtime-eval provider (#2928)
+        if: matrix.test262_target == 'standalone'
+        run: node scripts/build-runtime-eval-provider.mjs --refusal-only
 
       - name: Run shard
         run: |
@@ -1687,9 +1710,11 @@ jobs:
             echo "::warning::#1081/#3467 base resolution errored (non-fatal); keeping latest-main baseline."
 
       # #1956 — exact predecessor-group baseline for merge_group runs. The
-      # queue builds groups incrementally: this group's head is a merge
-      # commit whose FIRST PARENT is the predecessor group's head (or the
-      # main tip when this PR is the queue head). If a recent merge_group run
+      # queue builds groups incrementally, so the commit this group was built
+      # ON is the predecessor group's head (or the main tip when this PR is
+      # the queue head) — `github.event.merge_group.base_sha`, which equals
+      # HEAD^1 only for a single-entry group (see #3914 note in the step body).
+      # If a recent merge_group run
       # published `test262-group-<HEAD^1>` (see merge-report), diffing
       # against it isolates ONLY this PR's delta — no cross-PR drift and no
       # ALLGREEN masking inside multi-entry queue windows, which is the
@@ -1705,12 +1730,35 @@ jobs:
         if: env.HOST_RAN == 'true' && github.event_name == 'merge_group'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
         run: |
           set -uo pipefail
-          PRED=$(git rev-parse HEAD^1 2>/dev/null || echo "")
+          # #3914 — prefer the event's own `base_sha` over `HEAD^1`.
+          #
+          # For a SINGLE-entry group these are the same commit, so this is a
+          # no-op on today's serial queue. They diverge the moment the queue
+          # batches (`min_entries_to_merge > 1`): the queue stacks one merge
+          # commit per entry, so for a 3-PR group HEAD^1 is the SECOND PR's
+          # merge commit *inside this same group* — a commit that never
+          # published a `test262-group-<sha>` artifact, because only the group
+          # HEAD publishes one. The lookup would miss every time and silently
+          # fall back to the latest-main baseline, i.e. exactly the cross-PR
+          # drift path (a)-resolution exists to avoid.
+          #
+          # `base_sha` is the predecessor GROUP's head regardless of how many
+          # entries this group holds, so it keeps the diff exact. Note this
+          # isolates the whole BATCH's delta, not one PR's — batching trades
+          # per-PR attribution for throughput by design; auto-park parks every
+          # member of a failed group so attribution happens by re-enqueueing
+          # them singly.
+          PRED="${MG_BASE_SHA:-}"
+          if [ -z "$PRED" ]; then
+            PRED=$(git rev-parse HEAD^1 2>/dev/null || echo "")
+            [ -n "$PRED" ] && echo "::notice::merge_group.base_sha unset — falling back to HEAD^1 ($PRED)."
+          fi
           if [ -z "$PRED" ]; then
             echo "pred_path=none" >> "$GITHUB_OUTPUT"
-            echo "No first parent resolvable — keeping baseline from (b)/(c)."
+            echo "No predecessor resolvable (base_sha unset, no first parent) — keeping baseline from (b)/(c)."
             exit 0
           fi
           ART_NAME="test262-group-${PRED}"
@@ -2055,15 +2103,47 @@ jobs:
     # promoting a flagged run's pass-set would poison the regression baseline
     # every PR gates against. The merged-report ARTIFACT is the measurement
     # deliverable; the baseline stays owned by unflagged runs.
-    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.actor != 'github-actions[bot]' && !(github.event_name == 'workflow_dispatch' && inputs.ir_first)
+    # (#3611) `!cancelled() &&` IS LOAD-BEARING — do not "simplify" it away.
+    #
+    # Measured 2026-08-01 across **30 of 30** available push:main runs: this job
+    # was SKIPPED every time, so `check-standalone-highwater.mjs --update` — the
+    # #2097 raise — had not executed on a queue merge in the whole observable
+    # window. With `refresh-baseline.yml` also `disabled_manually`, BOTH paths
+    # that can raise the mark were dead, and the failure is silent in the
+    # PERMISSIVE direction (a floor that is too low never fires), so nothing
+    # ever complained.
+    #
+    # It was NOT the actor guard and NOT `success()` over `needs` — both needs
+    # were `success` on all 30, and the sibling `promote root baseline` job,
+    # gated on `github.actor == 'github-merge-queue[bot]'`, RAN on all 30, which
+    # proves the actor value and hence that every conjunct below is true. The
+    # job was skipped in the SAME SECOND `merge-report` resolved, with 0 steps.
+    #
+    # Mechanism: on the #3448 HIT path the shard matrix is skipped, and
+    # `merge-report` survives that only because it carries its own
+    # `if: always() && …`. GitHub then propagates the skip THROUGH that job into
+    # any dependent lacking a status-check function of its own. `!cancelled()`
+    # is that function — it re-enables the job while (unlike bare `always()`)
+    # still honouring cancellation, and the explicit `needs.*.result` checks
+    # below restore the failure semantics the implicit `success()` provided.
+    if: |
+      !cancelled() &&
+      needs.merge-report.result == 'success' &&
+      needs.mg-artifact-probe.result == 'success' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.actor != 'github-actions[bot]' &&
+      !(github.event_name == 'workflow_dispatch' && inputs.ir_first)
     name: promote merged report to main baseline
+    # (#2947) `!(… && inputs.ir_first)` above — an IR-first measurement dispatch
+    # (JS2WASM_IR_FIRST=1 in the shards) must NEVER promote its merged report:
+    # promoting a flagged run's pass-set would poison the regression baseline
+    # every PR gates against. The merged-report ARTIFACT is the measurement
+    # deliverable; the baseline stays owned by unflagged runs.
+    #
     # #3448 — mg-artifact-probe decides where the merged JSONLs come from:
     # MISS → the `test262-merged-report` artifact built by merge-report from a
     # fresh matrix (unchanged); HIT → the merge_group's own
-    # `test262-group-<sha>` artifact, skipping the 114-job rerun. Both jobs
-    # run+succeed on push and workflow_dispatch, so the implicit `success()`
-    # over `needs` holds (merge-report green-skips on the HIT path — still
-    # success).
+    # `test262-group-<sha>` artifact, skipping the 114-job rerun.
     needs: [merge-report, mg-artifact-probe]
     runs-on: ubuntu-latest
     # Gate the MAIN_DEPLOY_KEY secret behind a GitHub Environment so only this

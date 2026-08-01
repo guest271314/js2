@@ -20,6 +20,49 @@ related: [1044, 1075, 1277, 1279, 1282, 1287, 1289, 1573, 1575, 2690, 2691, 2693
 
 # #1400 - Compile ESLint package entry to valid Wasm
 
+## PR #3687 is CLOSED — dependency chain re-stated (2026-07-31)
+
+PR #3687 (`fix(eslint): advance real Linter graph compilation`, branch
+`codex/1400-eslint-e2e`) was the vehicle for this issue. It is **closed, not
+merged**, by stakeholder decision: it sat `DIRTY` behind a
+`github-actions[bot]` park-hold, a held PR is skipped by the `auto-enqueue`
+backstop so it could not recover on its own, and `main` moved far enough
+underneath it (~12.9k lines of divergence) that rescuing it was not viable.
+It was treated as a **source of slices** instead.
+
+Its branch ref `codex/1400-eslint-e2e`
+(`561c933af16651e49f50556b8128967892ce529e`) is retained; several issues below
+cite specific files on it as prior art. **Do not try to revive the PR.**
+
+### What already landed by other routes (do NOT re-do)
+
+| Was on PR #3687                                     | State on `main`                                       |
+| --------------------------------------------------- | ----------------------------------------------------- |
+| static CommonJS JSON require                        | **#3655 done** 2026-07-31 (PR #3867, different impl)  |
+| resolved-graph heap/timeout bound + enforced budget | **#3672 done** 2026-07-31                             |
+| `CompileOptions.emitWatOnlyFunctions`               | **#3743 done** 2026-07-28                             |
+| `fix(resolver): restore ESLint package graph resolution` | on `main` as `c9507546`                          |
+| `fix(resolver): scope JSDoc imports to comments`    | on `main` as `d3cb7b9e`                               |
+| `collectNodeBuiltinImports`                         | **superseded** — `main` has `collectGraphNodeBuiltinImports` (`src/compiler/node-builtin-import-collector.ts`), wired at `compiler.ts:1608`; the PR's copy was imported but never called |
+| uncatchable-trap → catchable TypeError (guarded-cast backup drop in `call-identifier.ts` / `string-ops.ts`) | **not needed** — self-inflicted by the PR's own identity rework. Probed on `main` @ `e4187572`: `` getF()`${n-1}` `` throws a catchable `tag is not a function`, and `var g = f; g(n-1)` returns the correct value |
+
+### Updated blocker chain
+
+1. **#3653** — measures as substantially already met on `main`; needs a status
+   reconcile, not implementation. See the note in that file.
+2. **#3654** — importer-scoped deps and extensionless CJS (still `ready`).
+3. ~~#3655~~ **done**.
+4. **#3656** — dynamic destructured parameter (still `ready`).
+5. ~~#3672~~ **done**.
+6. **#3798** — declaration-keyed module globals vs the structural program-ABI
+   registry. **This is now the load-bearing blocker**: it is the architectural
+   conflict that stopped PR #3687, and the identity work the ESLint graph needs
+   cannot land until it is decided.
+7. **#3930** — nested static `require()` never enters the compileProject graph
+   (silent link hole; `debug`/`esrecurse` shapes).
+8. **#3657** — the runtime host seam (`deprecate is not a function`), which is
+   what the pre-merge control on that branch bottomed out on.
+
 ## Reopened 2026-07-26 — current package entry does not compile
 
 The issue's title-level goal is not satisfied on current `origin/main`

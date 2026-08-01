@@ -4,7 +4,8 @@ title: "String.prototype methods: ToString(this) generic-receiver coercion, Requ
 status: ready
 sprint: current
 created: 2026-06-27
-updated: 2026-07-28
+updated: 2026-08-01
+assignee: ttraenkler/s78-dev2
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -22,7 +23,16 @@ depends_on: []
 # so the runtime must classify that source shape before exposing the closure.
 # PR #3753 keeps lastIndexOf's method-specific NaN fallback beside the shared
 # native-string integer-argument lowering.
+# (#2742 s78-dev2) The standalone arm of this issue lands in the reflective
+# String proto member-body dispatcher: the superseded #2875 wiring that
+# intercepts ahead of #3254's corrected borrowed-receiver path lives in
+# array-object-proto.ts, and the transferred-shape arms it composes with live
+# in char-at-transfer.ts / vec-props.ts / native-proto.ts.
 loc-budget-allow:
+  - src/codegen/array-object-proto.ts
+  - src/codegen/char-at-transfer.ts
+  - src/codegen/native-proto.ts
+  - src/codegen/vec-props.ts
   - src/runtime.ts
   - src/codegen/closure-exports.ts
   - src/codegen/closures/arrow-phases.ts
@@ -35,6 +45,7 @@ func-budget-allow:
   - src/codegen/index.ts::generateMultiModule
   - src/codegen/string-ops.ts::compileNativeStringMethodCall
 ---
+
 # #2742 — String.prototype generic-receiver `ToString(this)` coercion
 
 Every `String.prototype` method begins with `RequireObjectCoercible(this)` then
@@ -50,6 +61,7 @@ single clean root cause spanning ~50 tests.
 **(a) Non-string `this` must be `ToString`-coerced** (e.g.
 `__instance = new Object(42); __instance.charAt = String.prototype.charAt;
 __instance.charAt(0)`):
+
 - `test/built-ins/String/prototype/charAt/S15.5.4.4_A1_T1.js`
 - `test/built-ins/String/prototype/charCodeAt/S15.5.4.5_A1_T1.js`
 - `test/built-ins/String/prototype/indexOf/S15.5.4.7_A1_T1.js`
@@ -61,6 +73,7 @@ __instance.charAt(0)`):
 
 **(b) `null`/`undefined` `this` must throw a real `TypeError`
 (`RequireObjectCoercible`), not an internal null-deref:**
+
 - `test/built-ins/String/prototype/charAt/S15.5.4.4_A2.js`,
   `…/charAt/S15.5.4.4_A1.1.js`, `…/charAt/S15.5.4.4_A5.js`
 - `test/built-ins/String/prototype/charCodeAt/S15.5.4.5_A2.js`,
@@ -72,6 +85,7 @@ __instance.charAt(0)`):
 
 **(c) `this` whose `valueOf`/`toString` must run through `ToPrimitive`/`ToString`
 ordering (trim family):**
+
 - `test/built-ins/String/prototype/trimStart/this-value-object-tostring-meth-priority.js`
 - `test/built-ins/String/prototype/trimEnd/this-value-object-toprimitive-meth-priority.js`
 - `test/built-ins/String/prototype/trimStart/this-value-object-valueof-meth-priority.js`
@@ -79,6 +93,7 @@ ordering (trim family):**
 
 **(d) Each `String.prototype.X` must expose a `length` own data property
 (function arity):**
+
 - `test/built-ins/String/prototype/charAt/S15.5.4.4_A8.js`
 - `test/built-ins/String/prototype/charCodeAt/S15.5.4.5_A8.js`
 - `test/built-ins/String/prototype/indexOf/S15.5.4.7_A8.js`
@@ -115,6 +130,7 @@ no regressions in currently-passing tests.
 `ToString(this)` coercion). Tracked in this issue; assigned separately.
 
 ## Scope / out of scope
+
 - IN: charAt, charCodeAt, indexOf, lastIndexOf, slice, substring, concat,
   trim/trimStart/trimEnd generic-receiver + `ToString(this)` + `.length`.
 - OUT: regex-driven methods (`match`/`matchAll`/`replace`/`replaceAll`/`split`/
@@ -136,22 +152,32 @@ expected to pass) and a negative control (a deliberately-wrong expectation) to
 prove the harness can report both outcomes. **Baseline: 10 pass / 12 fail.**
 Three of this issue's claims do not survive contact with the measurement.
 
+> ⚠️ **LANE CORRECTION (s78-dev2, 2026-08-01): everything in the section below
+> was measured on the DEFAULT (JS-host) lane ONLY.** `runTest262File` defaults
+> to the host target unless `"standalone"` is passed as its 4th argument. On
+> `--target standalone` these same group-(a) shapes still FAIL. So "group (a) is
+> essentially ALREADY FIXED" is true of one lane and false of the other, and
+> reading it unqualified is how this issue looked done while 157 ≤ES5
+> `String/prototype` files were failing standalone-only. Measured 2-lane numbers
+> are in "Two-lane decomposition" below. **Do not quote a claim from this
+> section without naming the lane it was measured on.**
+
 **1. Group (a) is essentially ALREADY FIXED — 8 of its 9 listed files pass on
 `main` today.** `charAt`/`charCodeAt`/`indexOf`/`lastIndexOf`/`slice` +
 3× `substring` with a non-string `this` all pass. Only `concat/S15.5.4.6_A1_T10`
-fails, and for an unrelated reason (an *argument*'s `toString`, not the
+fails, and for an unrelated reason (an _argument_'s `toString`, not the
 receiver's). The issue's headline — "our implementations assume a string
 receiver" — is stale.
 
 **2. Group (b) is MISLABELLED.** It is described as `RequireObjectCoercible`
 (null/undefined `this`). It is not: genuine `String.prototype.charAt.call(undefined)`
 already throws a proper `TypeError` on `main` (probed directly). The 8 failing
-(b) files are two *different* mechanisms:
+(b) files are two _different_ mechanisms:
 
 - **6 files — "X is not a function".** Shape is
   `__FACTORY.prototype.charAt = String.prototype.charAt; new __FACTORY().charAt(…)`.
-  **This is NOT String-specific.** The decisive control: assigning a *plain user
-  function* to a user constructor's prototype (`F.prototype.m = function(){…}`)
+  **This is NOT String-specific.** The decisive control: assigning a _plain user
+  function_ to a user constructor's prototype (`F.prototype.m = function(){…}`)
   and calling it fails **identically** (`m is not a function`). The real defect is
   **dynamic `F.prototype.X = …` augmentation followed by an instance call** — a
   separate, broader issue that should not be filed under String.
@@ -163,7 +189,7 @@ already throws a proper `TypeError` on `main` (probed directly). The 8 failing
 
 ⚠️ **This also corrects the #3626 census's C1 `missing_builtin` classification.**
 The census reads the "`X` is not a function" signature (58 corpus-wide) as
-*"genuinely missing methods — add/repair the method"*. Measured here, the methods
+_"genuinely missing methods — add/repair the method"_. Measured here, the methods
 are **present and correct**; the failure is prototype-chain augmentation. Sizing
 any work off "add the missing method" would be sizing off a mislabel.
 
@@ -190,7 +216,7 @@ throws `"Cannot convert object to primitive value"`.
 **Fix** (`src/runtime.ts`): `_wrapAccessorGetterReturn` marshals an accessor
 getter's return through `_maybeWrapCallableUnknownArity`, which converts only
 values `__is_closure` positively identifies and passes everything else through.
-Deliberately confined to the **accessor** path — marshalling *generic* call exits
+Deliberately confined to the **accessor** path — marshalling _generic_ call exits
 was tried and reverted for regressing ~85 dstr files (#3123/#2835), which is also
 why `wasmClosureDynamicBridge` carves out the `new`-path only.
 
@@ -201,7 +227,7 @@ Post-fix, the receiver now matches V8 exactly on the encoded probe
 
 - **Regressions: 0** (22-file set re-run; equivalence suite green).
 - **test262 files flipped by this slice: 0 of 22.** The pass count is 10 → 10.
-  The 3 group-(c) files move *past* the spurious `TypeError` to a deeper
+  The 3 group-(c) files move _past_ the spurious `TypeError` to a deeper
   assertion, but do not flip.
 - **New coverage: 3 tests red on the merge base**, green with the fix
   (`tests/issue-2742.test.ts`, group (c) block), plus 2 narrowness/no-regression
@@ -215,7 +241,7 @@ it does **not** claim conformance flips it cannot demonstrate.
 1. **`@@toPrimitive` on the receiver is never consulted.** With a
    `get [Symbol.toPrimitive]()` present, the encoded probe returns `0` accesses
    where V8 gives `1` (`toString`/`valueOf` are now correct at 1/1). This is what
-   still blocks all 3 group-(c) test262 files — they assert the *access counters*,
+   still blocks all 3 group-(c) test262 files — they assert the _access counters_,
    not just the value. Symbol-keyed accessors are not reaching the host
    ToPrimitive path.
 2. **Dynamic `F.prototype.X = …` then instance call** (the 6 "not a function"
@@ -285,3 +311,321 @@ Exact local-vs-local Test262 A/B on base `c5bd4631724afa`:
 - Standalone directory: 15/25 → 17/25; ES5 subset: 11/21 → 13/21.
 - Fail→pass: `S15.5.4.8_A1_T10.js` and `S15.5.4.8_A4_T3.js`.
 - Pass→fail: none. Every remaining failure kept the same normalized signature.
+
+---
+
+# Standalone re-grounding (s78-dev2, 2026-08-01)
+
+Sprint 78 lever: raise ≤ES5 conformance in the **standalone** lane. Everything
+below is measured; where a hypothesis was refuted, the refutation is kept
+because it is the expensive part.
+
+## Two-lane decomposition — this is a LANE GAP, not "unimplemented"
+
+Scope: `built-ins/String/prototype/**` filtered to `es5id:` frontmatter.
+Sources: `.test262-cache/test262-standalone-current.jsonl` and
+`test262-current.jsonl`, same baselines run `20260801-010858`.
+**Rows floored:** 630 es5id files exist; 630 have a standalone row, 629 have a
+default row, so **629 are comparable**. The 1 missing row is reported, not
+silently dropped.
+
+| lane           | pass    | of 629 |
+| -------------- | ------- | ------ |
+| **standalone** | 412     | 65.5 % |
+| **default**    | 552     | 87.8 % |
+
+2×2 over the same 629 files:
+
+| bucket                                | n       |
+| ------------------------------------- | ------- |
+| pass in BOTH lanes                    | 395     |
+| fail in BOTH lanes                    | 60      |
+| **default passes, standalone fails**  | **157** |
+| standalone passes, default fails      | 17      |
+
+**157 vs 60 settles it**: the dominant failure mode is a standalone lane gap,
+not a feature nobody implemented. Excluding the 51 RegExp-engine codegen
+refusals (explicitly out of this issue's scope), 119 of 166 standalone failures
+pass on default (71.7 %).
+
+Causal buckets of the 218 standalone ≤ES5 failures (host-pass count in
+brackets — that is what turns "a failure" into "a standalone-only defect"):
+
+| n   | bucket                                   | host-pass |
+| --- | ---------------------------------------- | --------- |
+| 113 | assertion mismatch                       | 82        |
+| 51  | RegExp-engine refusal (OUT of scope)     | 38        |
+| 24  | null/undefined receiver deref            | 9         |
+| 15  | invalid Wasm binary (`__bindfn_*` locals) | 15        |
+| 9   | host-import leak                         | 8         |
+| 4   | unimplemented in standalone              | 3         |
+| 2   | misc                                     | 2         |
+
+## Instrument calibration (do not skip this when re-running)
+
+`runTest262File(file, cat, 60000, "standalone")` — **status only** is
+trustworthy (its error category and source location are artifacts; see
+`reference_runtest262file_not_ci_path_status_only`). Calibrated against the
+fresh standalone baseline on a 15-file subset: **14/14 agree, 0 disagreements**,
+and a known-passing file reports `pass`. All A/B below is same-box, same-run,
+same-file-list — never a local sweep diffed against a CI baseline.
+
+Two instrument bugs were caught by controls before they could mislead, both
+worth knowing:
+
+- `compile()` is **async**. An un-awaited call makes `r.success` `undefined`, so
+  **every** case — including a trivial positive control — reads as a compile
+  failure. The positive control is the only reason this was caught.
+- An ad-hoc "compile, instantiate, call the export, compare the value" harness
+  **fails on both lanes** (host needs a real import object; standalone string
+  returns do not marshal back naively). Its CONTROL failed, so the entire matrix
+  it produced was discarded rather than read. See
+  `project_wrapforhost_setexports_harness`.
+
+## REFUTED: "generalize the two hardcoded `charAt` transfer arms"
+
+The obvious fix shape, and it is wrong. `src/codegen/char-at-transfer.ts` holds
+two arms keyed on the **literal string `"charAt"`** —
+`buildTransferredCharAtMethodArm` (into `__extern_method_call`) and
+`buildTransferredCharAtApplyArm` (into `__apply_closure`). Generalizing them
+over the wired member set typechecks clean and flips **0 of 15** files.
+
+The diagnostic that killed it, rather than a rationalization of the zero:
+grep the emitted WAT for `__proto_method_\d+_<member>`. In the
+`__instance = new Object(42); __instance.charCodeAt = String.prototype.charCodeAt`
+shape **no proto-method closure is minted at all** — *not for `charCodeAt`, and
+not for `charAt` either*. Since those arms exist to serve `charAt`, they cannot
+be the mechanism by which anything works. The generalization was dead code and
+was reverted.
+
+(Also note: the first probe used `(String.prototype as any).charAt`. Per #3642
+the **declaration shape** changes the lowering, so an `as any` cast is a
+confound — re-probe with the exact untyped test262 spelling.)
+
+## ROOT CAUSE, proven by kill-switch removal
+
+Honest per-(shape, member) matrix, receiver `new Object(42)`, calibrated
+instrument, CONTROL (primitive-string receiver) green on every arm. The
+kill-switch forces `emitStringProtoMemberBody` to refuse, so the caller falls
+through to the legacy lowering:
+
+| arm                       | `String.prototype.M.call(obj)` | `obj.M = String.prototype.M; obj.M()` | total     |
+| ------------------------- | ------------------------------ | ------------------------------------- | --------- |
+| current `main`            | 5/14                           | 1/14                                  | 6/28      |
+| **String wiring refused** | **14/14**                      | 2/14                                  | **16/28** |
+
+The split is exact and inverts this issue's assumption. The members that FAIL
+`.call()` are precisely the ones **#2875 wired** (`charCodeAt`, `indexOf`,
+`lastIndexOf`, `trim`, `at`, `codePointAt`, `includes`, `startsWith`,
+`endsWith`). The ones that PASS are the ones **not** wired (`toUpperCase`,
+`slice`, `concat`) and therefore fall through to the legacy path — plus
+`substring`/`charAt`, which have bespoke bodies.
+
+**The reflective wiring is currently WORSE than the path it intercepts.**
+
+### Why — a superseded fix that was never removed
+
+- **#2875** added the wired bodies on this stated motivation: *"the reflective
+  path returns `undefined` and lands on a legacy `.call` that drops `thisArg`
+  and returns 0."* True when written.
+- **#3254** (status `done`, sprint 72, 2026-07-13) then added
+  `emitBorrowedStringReceiverToString` as a `receiverOverride` on the borrowed
+  dispatch, covering **every** method in `STANDALONE_STR_PROTO_METHODS`
+  (`calls.ts:6966`) — which contains every member the switch unwires.
+
+So #2875's motivating defect was fixed by #3254 in the legacy path, but the
+wiring that existed only to work around it stayed, and now intercepts *ahead* of
+the corrected path. This is a **revert of a superseded fix**, not a new feature.
+
+### The removal does NOT cost the descriptor surface (verified, not assumed)
+
+Descriptor/value-read callers pass `refusalBodyFallback: true`, so they still
+get a minted closure with correct metadata even when `emitMemberBody` refuses;
+only CALL dispatch falls through. Asserted empirically on both arms rather than
+read off the comment:
+
+| case                                                | baseline | wiring refused |
+| --------------------------------------------------- | -------- | -------------- |
+| `String.prototype.charCodeAt.name` / `.length`      | pass     | **pass**       |
+| `gOPD(String.prototype,"charCodeAt")` value/writable | pass     | **pass**       |
+| `charCodeAt.hasOwnProperty('length')`                | pass     | **pass**       |
+
+## THREE populations — do not conflate them in flip accounting
+
+Removing the wiring fixes exactly one of three. Naming them so the residual is
+not later misread as a regression:
+
+- **P1 — literal `String.prototype.M.call(obj)`.** Syntactic; #3254 covers it.
+  **Fixed by the removal** (5/14 → 14/14 on the micro matrix).
+- **P2 — transferred `obj.M = String.prototype.M; obj.M()`.** The single
+  largest sub-bucket (30 ≤ES5 files, 27 host-pass). Goes 1/14 → 2/14 — i.e.
+  **essentially untouched**. Legacy does not cover it either. This is a
+  genuinely separate second defect and needs its own root-cause pass.
+- **P3 — non-syntactic spellings.** `#3254`'s override fires only when
+  `typeName`/`methodName` are compile-time constants, so it cannot see:
+
+  | spelling                                             | baseline | wiring refused |
+  | ---------------------------------------------------- | -------- | -------------- |
+  | `var m = String.prototype.charCodeAt; m.call(o,0)`   | fail     | fail           |
+  | `String.prototype.charCodeAt.apply(o,[0])`           | fail     | fail           |
+  | `Function.prototype.call.bind(String.prototype.M)`   | fail     | fail           |
+
+  Unchanged by the removal — the wiring was not helping these either. The last
+  row is the propertyHelper/uncurryThis idiom and is the **#3571** seam; #3571's
+  own S1 analysis (`66ab19f84`) records that its host arm landed via #3635 and
+  only the standalone arm remains.
+
+**So the removal is strictly dominant on everything measured**: it fixes P1,
+regresses nothing, and leaves P2/P3 exactly as broken as they already are. It is
+not a tradeoff.
+
+## Adjacent, separate: the `__bindfn` invalid-Wasm cluster
+
+The 15 "invalid Wasm binary" files are corpus-wide **28 files, 25 host-pass**,
+one validation message (`call[N] expected type externref, found ref.null of
+type (ref null N)`), locals `__bindfn_tgt/__bindfn_arg/__bindfn_args` ⇒ the
+standalone arm of `compileFunctionBind` (`calls.ts:2277`). It is the
+propertyHelper family but a **compile-time** sub-mode, distinct from the runtime
+receiver-drop mode #3571 documents, so it does not double-attribute. A synthetic
+`Function.prototype.call.bind(...)` does **not** reproduce it (positive control
+green, so the instrument was live) — the trigger needs the full
+`propertyHelper`/`verifyNotWritable` shape. Keep it in its own PR.
+
+## Reconciling with "#3254 reopened as false-`done`" (below)
+
+The section folded in from #3877 reports #3254 reopened on 2026-07-31 because it
+left `trim` on the `"[object Object]"` terminal. That does **not** weaken the
+supersession finding above, and the two are consistent — but only because the
+claim above is empirical rather than inherited:
+
+- The load-bearing evidence is the **kill-switch measurement**, not #3254's own
+  status. With the #2875 wiring refused, `String.prototype.M.call(new Object(42))`
+  passes **14/14** on the calibrated instrument — `trim` included. Whatever
+  remains wrong in #3254, the path it feeds is measurably correct for the
+  literal-`.call` spelling on these members *today*.
+- #3254's stated "known limitation" (a dynamic `any`-typed OBJECT receiver
+  stringifies through `__any_to_string`) would predict `new Object(42)` FAILING.
+  It passes. So that limitation has been closed by something since, or is
+  narrower than written — worth pinning down before leaning on #3254's text for
+  anything other than the two facts used here (that it added the
+  `receiverOverride`, and which member set it covers).
+
+The residual `trim` defect #3254 was reopened for lives in the **same legacy
+path** this issue would route more traffic to, so the two should be sequenced,
+not raced: land the `trim` repair, then the wiring removal, or measure them
+together.
+
+## Measured frontier (2026-07-31) — folded in from #3877 (closed as duplicate)
+
+#3877 was filed for this defect before its author found this issue; it is now
+`wont-fix / duplicate_of: 2742`. Its measured content is preserved here.
+
+### Per-method matrix
+
+Receiver `new Number(1234)` (`ToString` → `"1234"`), method assigned as an own
+property and invoked. Harness: `runTest262File(abs, cat, 60000)` and
+`(…, "standalone")` on the same file. **Controls
+`Object.keys({a:1,b:2}).length===2`, `"ab".toUpperCase()==="AB"`,
+`String(new Boolean(false))==="false"` all pass on both lanes** (#3885), so
+these readings are load-bearing.
+
+| method        | host    | standalone |
+| ------------- | ------- | ---------- |
+| `substring`   | `23`    | `23` OK    |
+| `charAt`      | `2`     | `2` OK     |
+| `toUpperCase` | `1234`  | **`null`** |
+| `toLowerCase` | `1234`  | **`null`** |
+| `slice`       | `23`    | **`null`** |
+| `charCodeAt`  | `49`    | **`null`** |
+| `indexOf`     | `1`     | **`null`** |
+| `lastIndexOf` | `1`     | **`null`** |
+| `trim`        | `1234`  | **`null`** |
+| `concat`      | `1234X` | **`null`** |
+| `split`       | `2`     | **`0`**    |
+
+**9 of 11 broken; `substring` and `charAt` already work** — a working in-tree
+reference for whatever the other nine are missing. `split` returning `0` is a
+wrong number rather than a `null` and is attributed to nothing yet.
+
+### The receiver round-trip is NOT the problem
+
+```
+standalone: typeof=function  identity=true  hasOwn=true
+            String(b)="false"  toUpperCase.call(b)="FALSE"  b.toUpperCase()=null
+```
+
+`typeof`, `===` identity, `hasOwnProperty`, and `ToString` on the receiver are
+all correct, and the `.call()` form works on the **identical receiver**. Only the
+assigned-method invocation fails — but see below, that is a test shape, not a
+second defect.
+
+### Dispatch is NOT the differentiator
+
+The per-method call helpers are structurally identical between a failing member
+and a working one — `call 120` (member lookup) then `call 171` (invoke), same
+shape, opposite outcomes. So `obj.m = String.prototype.m; obj.m()` versus
+`String.prototype.m.call(obj)` is a **test-shape** distinction, not a defect
+axis.
+
+### Located: the per-member `__proto_method_*` wrapper
+
+Found by diffing a working arm against a broken one, with a repro **verified to
+reproduce the matrix first** — an `any`-annotated receiver
+(`const a: any = new Number(1234)`) does **not** reproduce (`charAt` returns null
+there); the repro must be plain-JS shape `var a = new Number(1234)` with
+`{ target: "standalone", allowJs: true }`.
+
+- The emitted `$test` bodies for `charAt` vs `charCodeAt` differ by **one line**
+  (the argument constant). Both use the same generic dispatch. So the defect is
+  not at the call site.
+- `$__proto_method_<brand>_charAt` coerces the receiver
+  (`extern.convert_any` → `call 128` → `ref.cast` to `$AnyString`);
+  `$__proto_method_<brand>_charCodeAt` has no such step and reads `struct.get` on
+  the raw receiver.
+- Bodies come from `glue.emitMemberBody` in `createNativeProtoMember`
+  (`src/codegen/native-proto.ts` ~537), dispatched per-member by
+  `emitStringProtoMemberBody` (`src/codegen/array-object-proto.ts:812`).
+  `toUpperCase` / `toLowerCase` / `slice` / `concat` / `split` are in **no arm**
+  and fall to `emitProtoMemberBodyRefusal`.
+
+### Three attributions tried and EXCLUDED — do not re-derive by reading
+
+1. **`substring`-only bail-out** (`call-receiver-method.ts` ~2311) pins a
+   guarded-native-string bail-out to `substring` while
+   `sourceHasMethodReassignment` is already generic. Generalising it produced
+   **byte-identical** standalone output. Reverted.
+2. **Refusal return type** — `emitProtoMemberBodyRefusal` does
+   `emitThrowTypeError` then `return null`, and `createNativeProtoMember` bails
+   on `null`, which would discard the wrapper _including the throw_. Returning
+   `{ kind: "externref" }` instead produced **byte-identical** output. Reverted.
+3. **"The refusal is never reached"** — WRONG, and the probe was invalid: it
+   grepped emitted **WAT text** for the refusal's message, which lives in the
+   **string pool**, so zero was structurally guaranteed. The wrapper for
+   `toUpperCase` is six lines and its entire body IS the refusal, ending in
+   `throw 0`.
+
+**Use a marker bisect, not source reading**: put a unique sentinel constant in
+each candidate emitter, compile, dump the wrapper, and see which survives to WAT.
+Attribution by marking cannot be wrong; attribution by reading was wrong three
+times here.
+
+### Acceptance bar for this frontier
+
+- **11/11 correct on BOTH lanes**, not "the nine standalone nulls are gone" —
+  host is already correct for 8 of the 9, so any shared-prologue change risks
+  perturbing paths host depends on (the #3871 shape). Note the
+  `__proto_method_*` wrappers are **standalone-only** (host emits **0** of them),
+  which bounds that risk but does not remove it for other shared structures.
+- `charAt` / `substring` must still pass — if a change breaks them, the change is
+  wrong, not the references.
+- **Kill-switch seen to fail**: revert and confirm the nine `null`s return.
+- Report pass→fail, fail→pass and net from an actual standalone run; #3468's
+  notes say floor impact is mixed and not computable in advance. State it in the
+  PR description — a floor movement explained up front is a review conversation;
+  the same movement found in `merge_group` is a park.
+
+### Related
+
+- **#3254** — reopened 2026-07-31 as false-`done`: it claims to generalise beyond
+  `trim` and left `trim` itself on the pre-fix `"[object Object]"` terminal.
+- **#3887 / #3888** — "TypeError never raised" family, separate from this one.

@@ -20,6 +20,16 @@ import { calibrateBenchmarkBatchSize, timeBenchmarkBatch } from "./timing.js";
 
 export type Strategy = "js" | "host-call" | "gc-native" | "linear-memory";
 
+/**
+ * Which stage of {@link runStrategy} a failure came from.
+ *
+ * `"cross-lane"` (#3898) is not an exception at all — the lane ran fine, it just
+ * computed a different answer than the JS baseline. It is recorded through the
+ * same failed-row channel (#3904) because the alternative, dropping the row, is
+ * indistinguishable from "deliberately not applicable" in `latest.json`.
+ */
+export type FailurePhase = "setup" | "warmup" | "calibration" | "mid-loop" | "cross-lane";
+
 export interface BenchmarkResult {
   name: string;
   strategy: Strategy;
@@ -42,6 +52,36 @@ export interface BenchmarkResult {
    * published as a valid comparison (#3898).
    */
   implausible?: boolean;
+  /**
+   * (#3904) Present and `"failed"` when the strategy errored instead of
+   * producing timings. Timing fields are all `0` on such a row — every
+   * consumer must skip them via {@link isMeasured}.
+   *
+   * A strategy listed in `BenchmarkDef.skip` is NOT recorded at all: an
+   * absent row means "deliberately not applicable" and a `status: "failed"`
+   * row means "this lane is broken". Before this existed, both looked
+   * identical in `latest.json` (the row was simply missing), which is how the
+   * four `dom/*` benchmarks shipped a JS-only chart for months.
+   */
+  status?: "failed";
+  /** (#3904) First line of the error that made this strategy fail. */
+  error?: string;
+  /** (#3904) Stage the failure came from. */
+  failedPhase?: FailurePhase;
+}
+
+/**
+ * True when a row carries real timings. Failed rows are placeholders whose
+ * numeric fields are all zero — never feed them to a median/ratio/winner
+ * computation.
+ *
+ * This is also the exemption the #3898 plausibility guard needs: a failed row
+ * has `medianMs === 0` and therefore an implied cost of 0 ns/op, which would
+ * trip the floor on every failure and report a broken lane as a hoisted one.
+ * "No measurement" and "an impossible measurement" are different diagnoses.
+ */
+export function isMeasured(r: BenchmarkResult): boolean {
+  return r.status !== "failed";
 }
 
 export interface BenchmarkDef {
@@ -52,10 +92,18 @@ export interface BenchmarkDef {
   iterations?: number;
   /** Warmup iterations (default 5). */
   warmup?: number;
-  /** Host dependencies for buildImports (e.g. DOM stubs). */
+  /**
+   * Host dependencies for buildImports (e.g. DOM stubs).
+   *
+   * This is the ONLY host-injection channel — every `env.*` import the module
+   * declares is resolved from here. A `declared_global` import (`document`,
+   * `window`, ...) is keyed by the *global's own name*, not by its class, so a
+   * benchmark using `declare const document: Document` needs a `document`
+   * entry, not just a `Document` one (#3904). A previous `extraEnv` field
+   * claimed to inject extra env imports but was never read by the harness; it
+   * was removed rather than left as a trap.
+   */
   deps?: Record<string, unknown>;
-  /** Extra env imports for manual instantiation. */
-  extraEnv?: Record<string, Function>;
   /**
    * JS-equivalent function to benchmark as baseline.
    *
@@ -85,7 +133,11 @@ export interface BenchmarkDef {
    * faster, not 4x — always does.
    */
   minNsPerOp?: number;
-  /** Strategies to skip for this benchmark. */
+  /**
+   * Strategies that are deliberately not applicable to this benchmark.
+   * Skipped strategies produce no row at all; a strategy that *fails* produces
+   * a `status: "failed"` row instead (#3904).
+   */
   skip?: Strategy[];
 }
 
@@ -101,6 +153,38 @@ function median(sorted: number[]): number {
 function percentile(sorted: number[], p: number): number {
   const idx = Math.ceil((p / 100) * sorted.length) - 1;
   return sorted[Math.max(0, idx)]!;
+}
+
+/**
+ * (#3904) Record a strategy failure as a first-class result row instead of
+ * dropping it. The stderr line is kept for the interactive run; the returned
+ * row is what makes the failure survive into `latest.json` so the published
+ * page — and the next person reading it — can tell a broken lane from an
+ * inapplicable one without re-running the suite by hand.
+ */
+function failedRow(name: string, strategy: Strategy, phase: FailurePhase, message: string): BenchmarkResult {
+  return {
+    name,
+    strategy,
+    iterations: 0,
+    batchSize: 0,
+    totalMs: 0,
+    avgMs: 0,
+    medianMs: 0,
+    p95Ms: 0,
+    status: "failed",
+    error: message,
+    failedPhase: phase,
+  };
+}
+
+function failedResult(name: string, strategy: Strategy, phase: FailurePhase, err: unknown): BenchmarkResult {
+  const raw = err instanceof Error ? err.message : String(err);
+  const message = raw.split("\n")[0] ?? raw;
+  // Preserve the historical stderr wording so existing greps keep matching.
+  const phaseNote = phase === "setup" ? "" : phase === "warmup" ? " (runtime)" : ` (runtime, ${phase})`;
+  process.stderr.write(`\n    [${strategy} skipped${phaseNote}: ${message}]\n`);
+  return failedRow(name, strategy, phase, message);
 }
 
 // ---------------------------------------------------------------------------
@@ -153,11 +237,14 @@ async function compileSource(source: string, fast: boolean, target?: "gc" | "lin
  * of the *same* computation. If they disagree, whatever the page publishes as
  * "JS vs Wasm" is comparing two different workloads — which is exactly how the
  * hoisted string baselines went unnoticed for so long. Report it loudly and
- * drop the lane rather than publishing a meaningless ratio.
+ * refuse to publish the lane rather than publishing a meaningless ratio.
+ *
+ * Returns the mismatch message, or `null` when the two lanes agree (or when
+ * either side declines to return a number, which is the pre-#3898 shape).
  */
-function assertSameResult(name: string, strategy: Strategy, jsResult: unknown, wasmResult: unknown): boolean {
-  if (typeof jsResult !== "number" || typeof wasmResult !== "number") return true;
-  if (Object.is(jsResult, wasmResult)) return true;
+function checkSameResult(name: string, strategy: Strategy, jsResult: unknown, wasmResult: unknown): string | null {
+  if (typeof jsResult !== "number" || typeof wasmResult !== "number") return null;
+  if (Object.is(jsResult, wasmResult)) return null;
 
   process.stderr.write(
     `\n` +
@@ -167,7 +254,7 @@ function assertSameResult(name: string, strategy: Strategy, jsResult: unknown, w
       `     this comparison (#3898).\n`,
   );
   process.exitCode = 1;
-  return false;
+  return `cross-lane mismatch: js baseline returned ${jsResult}, wasm run() returned ${wasmResult}`;
 }
 
 async function runStrategy(
@@ -232,14 +319,12 @@ async function runStrategy(
       }
     }
   } catch (err) {
-    // Strategy not supported for this benchmark
+    // Strategy failed to compile / instantiate for this benchmark.
     // Some optimizer failures (notably Binaryen's Emscripten wrapper) set a
-    // process exit code before throwing. Since this path explicitly treats the
-    // strategy as skipped, clear that sticky failure state here.
+    // process exit code before throwing. Since this path downgrades the
+    // failure to a recorded-but-unmeasured row, clear that sticky state here.
     process.exitCode = undefined;
-    const msg = err instanceof Error ? err.message : String(err);
-    process.stderr.write(`\n    [${strategy} skipped: ${msg.split("\n")[0]}]\n`);
-    return null;
+    return failedResult(def.name, strategy, "setup", err);
   }
 
   // Warmup
@@ -247,14 +332,15 @@ async function runStrategy(
   try {
     for (let i = 0; i < warmup; i++) lastResult = fn();
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    process.stderr.write(`\n    [${strategy} skipped (runtime): ${msg.split("\n")[0]}]\n`);
-    return null;
+    return failedResult(def.name, strategy, "warmup", err);
   }
 
   // Cross-lane result assertion (#3898) — after warmup, before timing.
-  if (strategy !== "js" && !assertSameResult(def.name, strategy, jsReference, lastResult)) {
-    return null;
+  // Recorded as a failed row, not dropped: under #3904 an absent row means
+  // "deliberately not applicable", which is the opposite of what a mismatch is.
+  if (strategy !== "js") {
+    const mismatch = checkSameResult(def.name, strategy, jsReference, lastResult);
+    if (mismatch) return failedRow(def.name, strategy, "cross-lane", mismatch);
   }
 
   // Linear-memory benchmarks may use a bump allocator whose state persists
@@ -268,9 +354,7 @@ async function runStrategy(
       timeBenchmarkBatch(fn, batchSize); // warm the calibrated loop before retaining samples
     }
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    process.stderr.write(`\n    [${strategy} skipped (runtime, calibration): ${msg.split("\n")[0]}]\n`);
-    return null;
+    return failedResult(def.name, strategy, "calibration", err);
   }
 
   // Timed runs. Each entry is normalized to one benchmark call, preserving the
@@ -289,9 +373,7 @@ async function runStrategy(
       timings.push(timeBenchmarkBatch(fn, batchSize) / batchSize);
     }
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    process.stderr.write(`\n    [${strategy} skipped (runtime, mid-loop): ${msg.split("\n")[0]}]\n`);
-    return null;
+    return failedResult(def.name, strategy, "mid-loop", err);
   }
 
   timings.sort((a, b) => a - b);
@@ -357,7 +439,9 @@ export async function runSuite(
     all.push(...results);
 
     // Inline summary
-    const cols = results.map((r) => `${r.strategy}: ${r.medianMs.toFixed(3)}ms`);
+    const cols = results.map((r) =>
+      isMeasured(r) ? `${r.strategy}: ${r.medianMs.toFixed(3)}ms` : `${r.strategy}: FAILED`,
+    );
     console.log(` ${cols.join("  |  ")}`);
   }
 

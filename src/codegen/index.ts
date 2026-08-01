@@ -181,6 +181,7 @@ import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
 import { fillAccessorDrivers } from "./accessor-driver.js";
 import { fillDisposableStackDisposeDriver } from "./disposable-runtime.js";
 import {
+  collectGlobalObjectPropertyNames,
   recordSloppyImplicitGlobalNames,
   recordScriptVarBindingNames,
   sourceContainsClass,
@@ -225,6 +226,7 @@ import {
 import { emitInlineMathFunctions } from "./math-helpers.js";
 import { ensureFuncClosureSingleton, finalizeMethodTrampolines, getFuncRefWrapperRootTypeIdx } from "./closures.js";
 import { peepholeOptimize } from "./peephole.js";
+import { installAllocCensus } from "./alloc-census.js"; // (#3921) per-type allocation census
 import { brandCollidingShapeTypes } from "./shape-brand.js";
 import {
   addImport,
@@ -3054,13 +3056,13 @@ function compileMultiIrOverlaySource(
 }
 
 function recordSourceGlobalEnvironment(ctx: CodegenContext, sourceFile: ts.SourceFile): void {
-  recordScriptVarBindingNames((ctx.globalObjectVarBindings ??= new Set()), sourceFile);
-  recordSloppyImplicitGlobalNames(
-    (ctx.sloppyImplicitGlobals ??= new Set()),
-    sourceFile,
-    ctx.oracle,
-    ctx.inferModuleStrictArguments ?? true,
-  );
+  const vars = (ctx.globalObjectVarBindings ??= new Set());
+  recordScriptVarBindingNames(vars, sourceFile);
+  const implicit = (ctx.sloppyImplicitGlobals ??= new Set());
+  recordSloppyImplicitGlobalNames(implicit, sourceFile, ctx.oracle, ctx.inferModuleStrictArguments ?? true);
+  // (#3956) A top-level `this.p = v` creates a global-object property that a
+  // bare `p` read resolves, exactly like the implicit `p = v` form above.
+  for (const name of collectGlobalObjectPropertyNames(sourceFile, vars)) implicit.add(name);
 }
 
 /** Pre-scan the small syntax surface that enables the linked runtime-eval ABI. */
@@ -4353,6 +4355,11 @@ export function generateModule(
 
     // Peephole optimization: remove redundant ref.as_non_null after ref.cast, etc.
     peepholeOptimize(mod);
+
+    // (#3921) Allocation census — no-op unless JS2WASM_ALLOC_CENSUS=1. Placed
+    // here because dead-type elimination has already remapped every `typeIdx`,
+    // so the index on each `struct.new` is the one the reader will see.
+    installAllocCensus(ctx);
 
     // ES5 Function `caller`: after dead-import elimination has finalized
     // function indices, thread each source caller's strictness into source
@@ -6362,6 +6369,11 @@ export function generateMultiModule(
     // Peephole optimization: remove redundant ref.as_non_null after ref.cast, etc.
     peepholeOptimize(mod);
 
+    // (#3921) Allocation census — no-op unless JS2WASM_ALLOC_CENSUS=1. Placed
+    // here because dead-type elimination has already remapped every `typeIdx`,
+    // so the index on each `struct.new` is the one the reader will see.
+    installAllocCensus(ctx);
+
     // Mirror the single-source ES5 Function `caller` finalizer.
     finalizeFunctionPoisonPillCalls(ctx);
 
@@ -7117,13 +7129,14 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
     // to externref — the empty struct stays registered (harmless; dead-eliminated
     // if unreferenced) but is never used as a value type, so no type-index shift.
     //
-    // Standalone-only: the open-object runtime is emitted exclusively under
-    // `ctx.standalone` (see compileObjectLiteral's #1901/#2542 gate); gc/host/wasi
-    // keep their existing struct/externref mapping byte-identical. A MIXED
-    // `{ a: number; [s: string]: T }` (own named props) is intentionally excluded —
-    // it has a static shape consumers read by field, so it keeps its struct.
+    // HOST-FREE targets (standalone AND wasi). The gate originally read
+    // `ctx.standalone` alone, which left wasi — equally host-free — with neither
+    // the host import gc/host uses nor this routing, so `o[k]` silently read the
+    // DEFAULT there. Analysis + measurements on plan/issues/2542-*.md. gc/host is
+    // unchanged (a JS host services `o[k]`); a MIXED `{ a: number; [s: string]: T }`
+    // stays excluded — it has a static shape consumers read by field.
     if (
-      ctx.standalone &&
+      (ctx.standalone || ctx.wasi) &&
       tsType.getProperties().length === 0 &&
       tsType.getCallSignatures().length === 0 &&
       !!ctx.checker.getIndexInfoOfType(tsType, ts.IndexKind.String)
@@ -7378,9 +7391,10 @@ export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void 
   // (see resolveWasmType's #2542 guard), NOT an empty WasmGC struct. Registering an
   // empty struct here would make `resolveWasmType` pick `ref $empty` for the binding
   // and break the call-boundary `$Object`→struct cast (every `o[k]` read returns 0).
-  // Standalone-only, matching the resolveWasmType guard's scope.
+  // Host-free targets (standalone AND wasi), matching the resolveWasmType guard's
+  // scope — see the #2542-follow-up note there for why wasi belongs here.
   if (
-    ctx.standalone &&
+    (ctx.standalone || ctx.wasi) &&
     tsType.getProperties().length === 0 &&
     !!ctx.checker.getIndexInfoOfType(tsType, ts.IndexKind.String)
   ) {

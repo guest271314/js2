@@ -226,7 +226,11 @@ function tryFlattenBinaryChain(
   // Determine numeric hint — also check if all operands use native i32 type annotations
   const isDivOrPow = op === ts.SyntaxKind.SlashToken || op === ts.SyntaxKind.AsteriskAsteriskToken;
   let allNativeI32 = !isDivOrPow;
-  if (allNativeI32 && !ctx.fast) {
+  // (#3907) The `!ctx.fast` short-circuit used to leave `allNativeI32` at its
+  // optimistic `true` in fast mode, because fast mode narrowed EVERY `number`
+  // to i32 anyway. Now that fast mode carries the spec f64 rep, the native
+  // annotation must actually be proven here in every mode.
+  if (allNativeI32) {
     // (#3673) The annotation only survives on the declaration's type NODE, so
     // resolve each operand through the declaration it reads. An int32 literal
     // is exactly representable in both domains and therefore does not break the
@@ -244,7 +248,11 @@ function tryFlattenBinaryChain(
     }
     if (!sawNative) allNativeI32 = false;
   }
-  const numericHint: ValType = { kind: (ctx.fast || allNativeI32) && !isDivOrPow ? "i32" : "f64" };
+  // (#3907) `ctx.fast` is NOT a licence to evaluate the chain in i32 — see the
+  // note on `numericHint` in `compileBinaryExpression`. Only the proof-carrying
+  // `allNativeI32` (every operand explicitly `type i32 = number`-annotated)
+  // narrows the hint.
+  const numericHint: ValType = { kind: allNativeI32 && !isDivOrPow ? "i32" : "f64" };
 
   // Compile first operand
   let resultType = compileExpression(ctx, fctx, operands[0], numericHint);
@@ -299,7 +307,7 @@ function tryFlattenBinaryChain(
     // dropping ToUint32's unsignedness. compileNumericBinaryOp routes `>>>`
     // through compileBitwiseBinaryOp, which uses `f64.convert_i32_u`.
     if (
-      (ctx.fast || allNativeI32) &&
+      allNativeI32 &&
       op !== ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken &&
       resultType.kind === "i32" &&
       rightType.kind === "i32"
@@ -1924,11 +1932,22 @@ export function compileBinaryExpression(
   // three rest on `isI32PureExpr`, whose add/sub/mul arms are only wrap-sound
   // "under the parent's ToInt32 guarantee" (see its comment), which an equality
   // does NOT provide. `(a + b) === c` must not silently compare wrapped i32s.
+  // (#3907) `ctx.fast` used to sit at the head of this term list, which made
+  // EVERY arithmetic node in fast mode evaluate in i32 — an unconditional
+  // narrowing with no proof behind it. `sum = sum + fib(30)` then wrapped at
+  // 2^31 (8,320,400,000 read back as -269,534,592) and `a[0] + a[1]` on
+  // fractional elements truncated both operands. A TS `number` is an IEEE-754
+  // double in every mode; the only sound i32 narrowings are the four
+  // proof-carrying terms that remain:
+  //   `bothNativeI32`          — explicit `type i32 = number` opt-in (#323/#3673)
+  //   `hasI32LocalOperand`     — relational only, both sides proven i32
+  //   `arithI32WithToInt32Wrap`— an enclosing ToInt32 makes the wrap observable-equal
+  //   `bitwiseI32`             — the op itself is ToInt32-defined
   const numericHint: ValType | undefined =
     isNumericOp || bothStaticNumberEq
       ? {
           kind:
-            (ctx.fast || bothNativeI32 || hasI32LocalOperand || arithI32WithToInt32Wrap || bitwiseI32) && !isDivOrPow
+            (bothNativeI32 || hasI32LocalOperand || arithI32WithToInt32Wrap || bitwiseI32) && !isDivOrPow
               ? "i32"
               : "f64",
         }

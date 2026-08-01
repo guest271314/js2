@@ -1,4 +1,4 @@
-import type { BenchmarkResult, Strategy } from "./harness.js";
+import { isMeasured, type BenchmarkResult, type Strategy } from "./harness.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -22,10 +22,18 @@ function groupByName(results: BenchmarkResult[]): GroupedRow[] {
   return Array.from(map.entries()).map(([name, results]) => ({ name, results }));
 }
 
+/** Measured result for a strategy, or undefined when absent or failed (#3904). */
+function measured(row: GroupedRow, s: Strategy): BenchmarkResult | undefined {
+  const r = row.results.get(s);
+  return r && isMeasured(r) ? r : undefined;
+}
+
 function winner(row: GroupedRow): Strategy | null {
   let best: Strategy | null = null;
   let bestMs = Infinity;
   for (const [s, r] of row.results) {
+    // A failed lane carries medianMs === 0 and would otherwise always "win".
+    if (!isMeasured(r)) continue;
     if (r.medianMs < bestMs) {
       bestMs = r.medianMs;
       best = s;
@@ -48,8 +56,8 @@ function fmtSize(bytes: number): string {
 }
 
 function speedup(row: GroupedRow, base: Strategy, target: Strategy): string {
-  const b = row.results.get(base);
-  const t = row.results.get(target);
+  const b = measured(row, base);
+  const t = measured(row, target);
   if (!b || !t) return "—";
   // #3898 — a ratio against an implausible lane is not a measurement.
   if (b.implausible || t.implausible) return "⚠ implausible";
@@ -86,10 +94,16 @@ export const MIN_PLAUSIBLE_NS_PER_OP = 1;
  *
  * Only benchmarks that declare `opsPerCall` are checked; the guard cannot know
  * the operation count otherwise.
+ *
+ * Failed rows (#3904) are exempt. They carry `medianMs === 0` by construction,
+ * so an unguarded check would compute 0 ns/op and report every broken lane as a
+ * hoisted one — turning a precise "compile error in gc-native" into a wrong
+ * "the loop was eliminated". A lane that never ran has no per-op cost to judge.
  */
 export function flagImplausibleLanes(results: BenchmarkResult[]): BenchmarkResult[] {
   const flagged: BenchmarkResult[] = [];
   for (const r of results) {
+    if (!isMeasured(r)) continue;
     if (!r.opsPerCall) continue;
     const nsPerOp = r.nsPerOp ?? (r.medianMs * 1e6) / r.opsPerCall;
     r.nsPerOp = nsPerOp;
@@ -146,23 +160,42 @@ export function generateMarkdown(results: BenchmarkResult[]): string {
   for (const row of rows) {
     const cols = STRATEGIES.map((s) => {
       const r = row.results.get(s);
-      if (!r) return "—";
+      // Three distinct states, and conflating any two of them is a bug that has
+      // already shipped once: "—" not applicable (#3904), "FAILED" ran and broke
+      // (#3904), "⚠" measured but the number is impossible (#3898).
+      if (!r) return "—"; // deliberately skipped / not applicable
+      if (!isMeasured(r)) return "FAILED";
       return r.implausible ? `⚠ ${fmtMs(r.medianMs)}` : fmtMs(r.medianMs);
     });
     const w = winner(row) ?? "—";
     lines.push(`| ${row.name} | ${cols.join(" | ")} | ${w} |`);
   }
 
-  // Per-operation costs — the sanity check that catches a collapsed loop.
-  const withOps = rows.filter((row) => Array.from(row.results.values()).some((r) => r.opsPerCall));
+  // (#3904) Spell the failures out. "—" means not applicable; a lane listed
+  // here ran and broke, and the message is what makes it diagnosable without
+  // re-running the suite.
+  const failures = results.filter((r) => !isMeasured(r));
+  if (failures.length > 0) {
+    lines.push("\n## Failed strategies\n");
+    lines.push("| Benchmark | Strategy | Phase | Error |");
+    lines.push("|-----------|----------|-------|-------|");
+    for (const f of failures) {
+      lines.push(`| ${f.name} | ${f.strategy} | ${f.failedPhase ?? "?"} | ${f.error ?? "(no message)"} |`);
+    }
+  }
+
+  // (#3898) Per-operation costs — the sanity check that catches a collapsed
+  // loop. Failed rows have no timings to divide, so they stay out of this table
+  // entirely; they are already accounted for in "Failed strategies" above.
+  const withOps = rows.filter((row) => Array.from(row.results.values()).some((r) => isMeasured(r) && r.opsPerCall));
   if (withOps.length > 0) {
     lines.push("\n## Cost per operation (ns)\n");
     lines.push("| Benchmark | ops/call | JS | Host-call | GC-native | Linear |");
     lines.push("|-----------|----------|-----|-----------|-----------|--------|");
     for (const row of withOps) {
-      const ops = Array.from(row.results.values()).find((r) => r.opsPerCall)?.opsPerCall;
+      const ops = Array.from(row.results.values()).find((r) => isMeasured(r) && r.opsPerCall)?.opsPerCall;
       const cols = STRATEGIES.map((s) => {
-        const r = row.results.get(s);
+        const r = measured(row, s);
         if (!r?.nsPerOp) return "—";
         return (r.implausible ? "⚠ " : "") + r.nsPerOp.toFixed(2);
       });
@@ -198,7 +231,7 @@ export function generateMarkdown(results: BenchmarkResult[]): string {
     lines.push("|-----------|-----------|-----------|--------|");
     for (const row of rows) {
       const cols = (["host-call", "gc-native", "linear-memory"] as Strategy[]).map((s) => {
-        const r = row.results.get(s);
+        const r = measured(row, s);
         return r?.binarySize ? fmtSize(r.binarySize) : "—";
       });
       lines.push(`| ${row.name} | ${cols.join(" | ")} |`);
@@ -211,7 +244,7 @@ export function generateMarkdown(results: BenchmarkResult[]): string {
   lines.push("|-----------|-----------|-----------|--------|");
   for (const row of rows) {
     const cols = (["host-call", "gc-native", "linear-memory"] as Strategy[]).map((s) => {
-      const r = row.results.get(s);
+      const r = measured(row, s);
       return r?.compileMs ? fmtMs(r.compileMs) : "—";
     });
     lines.push(`| ${row.name} | ${cols.join(" | ")} |`);
@@ -320,6 +353,9 @@ export function buildHistory(outDir: string): void {
       const raw: BenchmarkResult[] = JSON.parse(fs.readFileSync(`${outDir}/${file}`, "utf-8"));
       const benchmarks: Record<string, Record<string, number>> = {};
       for (const r of raw) {
+        // (#3904) Failed lanes carry medianMs === 0; folding them into the
+        // trend series would plot a phantom "infinitely fast" data point.
+        if (!isMeasured(r)) continue;
         if (!benchmarks[r.name]) benchmarks[r.name] = {};
         benchmarks[r.name][r.strategy] = r.medianMs;
       }

@@ -256,6 +256,22 @@ function fixupModuleGlobalIndices(ctx: CodegenContext, threshold: number, delta:
   if (ctx.genEagerFlagGlobalIdx !== undefined && ctx.genEagerFlagGlobalIdx >= threshold) {
     ctx.genEagerFlagGlobalIdx += delta;
   }
+  // (#3933) And again for the per-element-type shared zero-length vec backing
+  // store. This is the FOURTH instance of the identical bug — the cache is a
+  // Map rather than a scalar, but the failure is the same: the emitted
+  // `global.get`s below are shifted correctly while the cache is not, so the
+  // NEXT `[]` of that element type reuses an index that now names an unrelated
+  // global. Landing on an i32/f64 global fails validation ("struct.new[1]
+  // expected type (ref null N), found global.get of type i32"); landing on an
+  // externref one instead validates — the coercion layer repairs it with
+  // `any.convert_extern` + `ref.cast` — and traps at run time. That is the
+  // 400 `wasm_compile` / 3,634 `illegal_cast` split that took PR #3933 out of
+  // the merge queue at −2,621 test262 passes.
+  if (ctx.sharedEmptyVecGlobals !== undefined) {
+    for (const [typeIdx, globalIdx] of ctx.sharedEmptyVecGlobals) {
+      if (globalIdx >= threshold) ctx.sharedEmptyVecGlobals.set(typeIdx, globalIdx + delta);
+    }
+  }
 
   const visitedInstrs = new WeakSet<object>();
   const visitedArrays = new WeakSet<Instr[]>();

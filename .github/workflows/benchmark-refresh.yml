@@ -409,7 +409,56 @@ jobs:
             --snapshot "$GITHUB_WORKSPACE/downloaded/candidate-snapshot" \
             --source-sha "$SOURCE_SHA"
 
+      # (#3915) DO NOT DISCARD AN IN-FLIGHT merge_group VALIDATION. Any push to
+      # `main` — INCLUDING the `[skip ci]` one below — makes GitHub rebuild
+      # every queued merge group on the new base and THROW AWAY the validation
+      # already running under it. `[skip ci]` suppresses workflows on that
+      # commit; it does not make the push inert to the queue.
+      #
+      # This workflow is triggered BY each merge and pushes 7-12 min later,
+      # while the next PR's group forms within seconds of that merge and takes
+      # ~11-13 min. So every merge scheduled a push timed to land inside the
+      # next merge's validation window: measured 2026-07-31 17:55-23:11Z, of
+      # 20 distinct PRs 6 needed more than one merge group and **5 of those 6
+      # rebuilds were rooted at this workflow's artifact commit** (the 6th was
+      # a legitimate PR landing ahead). The two sibling bots that push `main`
+      # already defer this way since #1951 and accounted for ZERO.
+      - name: Gate the main push on the merge queue
+        id: queue_gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          # Freshness comes from the artifact's OWN `generatedAt`, not from
+          # `git log -1 -- <path>`: this checkout is `fetch-depth: 1`, where
+          # `git log` returns EMPTY rather than erroring. Empty would parse as
+          # "unknown age", which fails open, silently disabling the staleness
+          # floor forever while the gate still reported success.
+          LAST_REFRESH="$(node -e 'try{const m=JSON.parse(require("fs").readFileSync("promote/benchmarks/results/benchmark-manifest.json","utf8"));process.stdout.write(String(m.generatedAt??""))}catch{process.stdout.write("")}')"
+          # `|| RC=$?`, not a bare call then `RC=$?`: the default step shell is
+          # `bash -e {0}`, so a bare non-zero exit aborts the step before the
+          # next line runs — the DEFER path would look like a step failure.
+          # Putting the call on the left of `||` exempts it from -e.
+          RC=0
+          node promote/scripts/main-push-queue-gate.mjs \
+            --repo "$GITHUB_REPOSITORY" \
+            --last-refresh "$LAST_REFRESH" \
+            --stale-after-hours 6 \
+            --reason "landing benchmark artifacts" || RC=$?
+          if [ "$RC" -eq 10 ]; then
+            echo "decision=defer" >> "$GITHUB_OUTPUT"
+          else
+            # 0 = proceed. Anything else is a gate malfunction, and a broken
+            # gate must never freeze the artifact — fail OPEN, loudly.
+            [ "$RC" -eq 0 ] || echo "::warning title=main-push-queue-gate::gate exited ${RC}; failing open"
+            echo "decision=proceed" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Atomically promote the complete benchmark set
+        # A deferred refresh is not a failure: the very next push to main
+        # re-measures and promotes, and the 6h staleness floor in the gate
+        # bounds how long a permanently busy queue can hold the artifact back.
+        if: steps.queue_gate.outputs.decision != 'defer'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MAIN_DEPLOY_KEY: ${{ secrets.MAIN_DEPLOY_KEY }}

@@ -598,6 +598,34 @@ export function prNumberFromMergeQueueBranch(branch) {
   return m ? Number(m[1]) : null;
 }
 
+// #3914 — the group's BASE sha from the same ref (mirrors
+// baseShaFromQueueBranch in auto-park-merge-group-failure.mjs). `pr-<N>` names
+// only the LAST entry in the group, so under a batched queue
+// (`min_entries_to_merge > 1`) the branch alone under-reports which PRs a
+// failed run implicates. Pure + exported for unit tests.
+export function baseShaFromMergeQueueBranch(branch) {
+  if (typeof branch !== "string") return null;
+  const m = branch.match(/^gh-readonly-queue\/[^/]+\/pr-\d+-([0-9a-f]{7,40})$/);
+  return m ? m[1] : null;
+}
+
+// #3914 — every PR number named by a merge group's commit subjects (mirrors
+// prNumbersFromCommitSubjects in auto-park-merge-group-failure.mjs). Pure +
+// exported for unit tests.
+export function prNumbersFromMergeGroupSubjects(subjects) {
+  const found = [];
+  for (const raw of subjects || []) {
+    if (typeof raw !== "string") continue;
+    const subject = raw.split("\n", 1)[0];
+    const m = subject.match(/^Merge pull request #(\d+)\b/) || subject.match(/\(#(\d+)\)\s*$/);
+    if (m) {
+      const n = Number(m[1]);
+      if (!found.includes(n)) found.push(n);
+    }
+  }
+  return found;
+}
+
 // Pure park-race decision. Skip a candidate PR ONLY when it has a genuine recent
 // merge_group failure AND no human removed a `hold` label AFTER that failure
 // (i.e. nobody has deliberately re-admitted it). A later hold-removal means a
@@ -630,7 +658,7 @@ function recentMergeGroupFailures({ windowMinutes = 30, maxRuns = 40 } = {}) {
       "api",
       `repos/${REPO}/actions/runs?event=merge_group&per_page=${maxRuns}`,
       "--jq",
-      '[.workflow_runs[] | select(.conclusion == "failure") | {id: .id, headBranch: .head_branch, updatedAt: .updated_at}]',
+      '[.workflow_runs[] | select(.conclusion == "failure") | {id: .id, headBranch: .head_branch, headSha: .head_sha, updatedAt: .updated_at}]',
     ]);
     if (!res.ok) return out; // fail-safe: no failures known -> enqueue as usual
     let runs;
@@ -650,12 +678,43 @@ function recentMergeGroupFailures({ windowMinutes = 30, maxRuns = 40 } = {}) {
       const existing = out.get(prNumber);
       if (existing && existing >= whenMs) continue;
       if (!runHasFailedJob(run.id)) continue; // cancellation, not a real failure
-      out.set(prNumber, whenMs);
+      // #3914 — attribute the failure to EVERY PR in the group, not just the
+      // ref-named last entry. On a serial queue the group has one member and
+      // this resolves to [prNumber], unchanged. Under `min_entries_to_merge >
+      // 1`, skipping this would leave N-1 members looking un-failed, so the
+      // sweep would immediately re-add them into the #2975 park race — the
+      // very thing this guard exists to prevent, multiplied by the batch size.
+      // The compare call only fires for runs already confirmed genuinely
+      // failed (a small subset), and is fail-safe to [prNumber].
+      for (const pr of mergeGroupMemberPrs(run, prNumber)) {
+        const prior = out.get(pr);
+        if (!prior || prior < whenMs) out.set(pr, whenMs);
+      }
     }
   } catch {
     return new Map(); // fail-safe
   }
   return out;
+}
+
+// #3914 — the PR numbers a failed merge_group run implicates. Reads the group's
+// commit range (base sha from the queue ref .. the run's head sha) and pulls the
+// PR number out of each commit subject. FAIL-SAFE to `[fallbackPr]` on any
+// error, missing field, or empty result, so this can only ever widen the guard,
+// never narrow it below today's behaviour.
+function mergeGroupMemberPrs(run, fallbackPr) {
+  try {
+    const baseSha = baseShaFromMergeQueueBranch(run.headBranch);
+    const headSha = run.headSha;
+    if (!baseSha || !headSha) return [fallbackPr];
+    const res = ghMaybe(["api", `repos/${REPO}/compare/${baseSha}...${headSha}`, "--jq", ".commits[].commit.message"]);
+    if (!res.ok) return [fallbackPr];
+    const found = prNumbersFromMergeGroupSubjects(res.stdout.split(/\r?\n/).filter(Boolean));
+    if (!found.includes(fallbackPr)) found.push(fallbackPr);
+    return found;
+  } catch {
+    return [fallbackPr];
+  }
 }
 
 // True iff the run has >= 1 job that concluded "failure" (a genuine shard/check
