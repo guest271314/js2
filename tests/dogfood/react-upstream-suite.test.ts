@@ -12,6 +12,9 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // number up; never lower it to make a red run green.
 const PASS_FLOOR = 39;
 const SCORED_FLOOR = 50;
+// Every upstream test that upstream itself does not `.skip` must RUN. Filtering
+// one out to keep the pass rate tidy is the failure mode this floor prevents.
+const ADMITTED_FLOOR = 270;
 
 describe("react upstream suite", () => {
   it("pins the source revision matching the published React version", () => {
@@ -27,7 +30,7 @@ describe("react upstream suite", () => {
   });
 
   const heavy = process.env.DOGFOOD_REACT_UPSTREAM === "1" ? it : it.skip;
-  heavy("runs React's own unit tests against compiled Wasm", { timeout: 600_000 }, () => {
+  heavy("runs React's own unit tests against compiled Wasm", { timeout: 1_800_000 }, () => {
     const out = execFileSync("npx", ["tsx", join(HERE, "react-upstream-suite.mjs"), "--json"], {
       encoding: "utf-8",
       maxBuffer: 128 * 1024 * 1024,
@@ -44,8 +47,9 @@ describe("react upstream suite", () => {
     expect(report.extraction.rejectedTests.every((t: { reason?: string }) => !!t.reason)).toBe(true);
 
     // A test that cannot even be reproduced natively says nothing about the
-    // compiler, so it is excluded from the score — keep that bucket small
-    // enough that the scored set stays meaningful.
+    // compiler, so it is excluded from the score — but it still RAN, and the
+    // scored set must stay large enough to be meaningful.
+    expect(report.extraction.admitted).toBeGreaterThanOrEqual(ADMITTED_FLOOR);
     expect(report.results.scored).toBeGreaterThanOrEqual(SCORED_FLOOR);
     expect(report.results.passed).toBeGreaterThanOrEqual(PASS_FLOOR);
 

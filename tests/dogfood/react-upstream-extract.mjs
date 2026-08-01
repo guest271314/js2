@@ -159,9 +159,20 @@ function matcherRejection(text) {
   return null;
 }
 
-function classifyBody(fn, text, bodyText, droppedNames) {
-  if (fn.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword)) return "async";
+function classifyBody(fn, text, bodyText, droppedNames, admitAll) {
+  // STRUCTURAL rejection — a `done`-callback test never resolves without a
+  // scheduler to call it, so it cannot be turned into a callable function at
+  // all. `async` bodies ARE runnable: they compile to an async export and are
+  // awaited on both sides (see `isAsync` below).
   if (fn.parameters.length > 0) return "needs-done-callback";
+
+  // CAPABILITY rejections — the test is shaped fine, the harness just cannot
+  // supply what it reaches for. `admitAll` runs them anyway: they are expected
+  // to fail, and a failure that is RUN and counted is more honest than a test
+  // that is quietly filtered out. The native oracle still sorts them into
+  // `harness-incompatible` rather than blaming the compiler.
+  if (admitAll) return null;
+
   for (const [pattern, reason] of INFRA_PATTERNS) if (pattern.test(text)) return reason;
   // Only the BODY is checked against dropped names. The surviving prelude may
   // still *declare* one (`let act;` sits above the `internal-test-utils`
@@ -177,7 +188,7 @@ function classifyBody(fn, text, bodyText, droppedNames) {
 /**
  * @returns {{ tests: Array<object>, rejected: Array<object>, rejectionCounts: Record<string, number> }}
  */
-export function extractReactUpstreamTests({ root, testFiles }) {
+export function extractReactUpstreamTests({ root, testFiles, admitAll = false }) {
   const tests = [];
   const rejected = [];
 
@@ -254,13 +265,18 @@ export function extractReactUpstreamTests({ root, testFiles }) {
 
         const bodyText = fn.body.statements.map((statement) => statement.getText(sourceFile)).join("\n");
         const preludeText = [...localScope, ...localEach].join("\n");
-        const reason = classifyBody(fn, `${preludeText}\n${bodyText}`, bodyText, localDropped);
+        const reason = classifyBody(fn, `${preludeText}\n${bodyText}`, bodyText, localDropped, admitAll);
         if (reason) {
           rejected.push({ ...record, reason });
           continue;
         }
 
-        tests.push({ ...record, prelude: preludeText, body: bodyText });
+        tests.push({
+          ...record,
+          prelude: preludeText,
+          body: bodyText,
+          isAsync: fn.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword) === true,
+        });
       }
     };
 

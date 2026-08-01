@@ -1519,6 +1519,7 @@ if (selectedPackages.has("react")) {
         passRatePct: reactSuite.summary?.passRatePct ?? null,
         admitted: reactSuite.extraction?.admitted ?? null,
         upstreamTestsSeen: reactSuite.extraction?.upstreamTestsSeen ?? null,
+        harnessIncompatible: reactSuite.results?.harnessIncompatible ?? null,
         sourceIssue: 3958,
       },
       perf: null,

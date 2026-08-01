@@ -355,7 +355,8 @@ class NpmCompatChart extends HTMLElement {
       const reason = compiles ? "runtime not verified" : "compile blocked";
       tests = this._row("tests", `<span class="muted">n/a — ${reason}</span>`);
     } else {
-      const { kind, passed, total, passRatePct, status, reason, admitted, upstreamTestsSeen } = pkg.tests;
+      const { kind, passed, total, passRatePct, status, reason, admitted, upstreamTestsSeen, harnessIncompatible } =
+        pkg.tests;
       const label =
         kind === "official-suite"
           ? "own test suite"
@@ -364,14 +365,16 @@ class NpmCompatChart extends HTMLElement {
             : kind === "upstream-api-vectors"
               ? "upstream API vectors"
               : "differential ops";
-      // A package whose upstream suite cannot be run whole (React's is welded to
-      // Jest/ReactDOM/jsdom) reports only the slice that needs nothing but the
-      // package itself. Say the slice size out loud — "39/53" alone would read
-      // as the entire suite.
-      const slice =
-        upstreamTestsSeen && admitted && admitted < upstreamTestsSeen
-          ? ` <span class="muted">${admitted} of ${upstreamTestsSeen} upstream tests admitted</span>`
-          : "";
+      // The pass count is over the SCORED set — tests the native oracle also
+      // passes, so a failure is attributable to the compiler. React's suite is
+      // welded to Jest/ReactDOM/jsdom, so most of it runs but cannot be scored.
+      // Both numbers are shown: "39/55" alone would hide that 272 tests ran,
+      // and "272 run" alone would imply they were all scored.
+      const slice = upstreamTestsSeen
+        ? ` <span class="muted">${admitted} of ${upstreamTestsSeen} run${
+            harnessIncompatible ? `, ${harnessIncompatible} need unavailable infra` : ""
+          }</span>`
+        : "";
       if (status && status !== "measured") {
         tests = this._row(
           "tests",
