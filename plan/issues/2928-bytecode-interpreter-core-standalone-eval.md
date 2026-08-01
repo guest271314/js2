@@ -700,6 +700,13 @@ interpreter tier's yield here, and the single non-timeout regression
 (`prototype/call/S15.3.4.4_A7_T5.js`) is real and is the coincidental-pass
 unmasking described above.
 
+**A second reason not to trust arm C's timeouts.** It was measured at
+`608cd95e6`, which predates PR #3933 (`share one zero-length vec backing store
+— 8,922 fewer allocations per acorn parse`) and PR #3940/#3951 (numeric keys all
+hashing to bucket 0, O(n) → O(1)). Those are exactly the acorn/collection hot
+paths the interpreter runs on, so any re-measurement must be taken at a head
+that includes them.
+
 So the interpreter tier is worth materially more than the refusal tier
 (≥ +17 on a 262-file slice) — which is exactly why it is worth finishing, and
 exactly why it must not be smuggled in on a confounded measurement.
@@ -707,9 +714,10 @@ exactly why it must not be smuggled in on a confounded measurement.
 ### What is still owed
 
 1. **A clean, uncontended arm C** on the full 515-file scope (and then on
-   `language/eval-code/`) to separate genuine interpreter hangs from pool-queue
-   contention. Until that exists, the 30 s pool timeout is an unquantified risk
-   against a 25-minute shard budget.
+   `language/eval-code/`), at a head that includes #3933/#3940/#3951, to
+   separate genuine interpreter hangs from pool-queue contention and from
+   already-fixed allocator/hash pathologies. Until that exists, the 30 s pool
+   timeout is an unquantified risk against a 25-minute shard budget.
 2. The **151 s / 2,447,002-byte interpreter provider compile** — not affordable
    per shard. Either #2527 on-demand packaging publishes it as a build artifact
    shared by the 36 standalone shards, or the compile gets materially cheaper.
