@@ -667,7 +667,60 @@ measurement can tell them apart.
 | substring   | 0      | 0     | 0      | control — bespoke body     |
 | charAt      | 0      | 0     | 0      | control — bespoke body     |
 
-### The narrowed candidate — ⚠️ A PREDICTION, NOT A RESULT
+## ✅ SHIPPED — arm C validated the narrowed carve-out, arm D validated the code
+
+**Arm C** (narrowed unwire: `trim`, `codePointAt`, `includes`, `startsWith`,
+`endsWith` only; every regressing member kept wired) over the **full 450**:
+
+| assertion                                            | result                        |
+| ---------------------------------------------------- | ----------------------------- |
+| rows floored                                          | 450/450, **0 timeouts**       |
+| fail → pass                                           | **18**                        |
+| pass → fail                                           | **0**                         |
+| the 13 blanket-removal regressions held `pass`        | **13/13 held**                |
+| in-sweep control (`substring`/`charAt`, 76 files)     | **0 moved**                   |
+| **off-target moves** (a member NOT unwired changing)  | **0**                         |
+
+Per directory: `trim` +10, `codePointAt` +2, `includes` +2, `startsWith` +2,
+`endsWith` +2; `at`, `charAt`, `charCodeAt`, `indexOf`, `lastIndexOf`,
+`substring` all exactly **0**. The predicted +18/−0 was arithmetic; it is now
+**measured**, and the assumption it rested on — per-`(brand, member)`
+independence — is the thing that came back green rather than being waved
+through.
+
+**Arm D — the shipped code, with the experimental env var DELETED**, re-run over
+the same 450: **identical to arm C on 450/450 files, 0 differences.** A kill
+switch proves a *behaviour*; only this proves the *committed constant* produces
+it. Worth doing as a matter of course: the scaffold can read at a different
+time, cover a different set, or short-circuit a path the real edit does not.
+
+### What actually shipped
+
+`emitStringProtoMemberBody` (`src/codegen/array-object-proto.ts`) gains a
+five-member carve-out routing to `emitProtoMemberBodyRefusal`, so those members
+fall through to #3254's corrected borrowed-receiver path:
+
+```ts
+const SUPERSEDED_BY_BORROWED_PATH = new Set(["trim","codePointAt","includes","startsWith","endsWith"]);
+```
+
+**It is a carve-out, NOT a removal, and the distinction is the finding**:
+#2875 is *superseded* for these five and *still load-bearing* for the rest,
+because it carries `emitStringRequireObjectCoercible` — which legacy never had.
+That single fact explains both measurements: why blanket removal costs 13 files
+and why this set costs zero. The comment at the site names the five, names the
+eight deliberately excluded, and tells the next reader not to "simplify" the set
+without re-running the A/B — because tidying it into a loop silently
+reintroduces the 13.
+
+### Scope of the +18 — read before quoting it
+
+**+18 is measured over 450 `String/prototype` files and is P1 only.** It is the
+smallest of the three populations. **P2** (transferred shape, 30 files / 27
+host-pass) and **P3** (uncurryThis seam, ~1,810 host-pass gated, ~11× larger)
+are **untouched**. The strategic follow-up is P3, not more of P1.
+
+### The narrowed candidate — (superseded by the arm C/D result above)
 
 Unwire **only** `trim`, `codePointAt`, `includes`, `startsWith`, `endsWith`;
 keep every regressing member wired. Arithmetic over the ledger gives
