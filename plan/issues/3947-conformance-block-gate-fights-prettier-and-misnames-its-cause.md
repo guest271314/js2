@@ -85,6 +85,47 @@ block"_ — true, and irrelevant: **prettier touched it, not the edit.**
 A trap that catches a forewarned, specifically-attentive person twice is not an attention
 problem. Fix the tools so they agree.
 
+## Second file, and the damage is worse than whitespace (observed 2026-08-01, #3915)
+
+`CLAUDE.md` is not the only file this hits, and the `CLAUDE.md` case is the **mild** one.
+
+While adding a section to `docs/ci-policy.md`, a run of `prettier --write` on that file
+produced **6 unrelated changes** to pre-existing prose. Five were cosmetic
+(`*you*` → `_you_`). The sixth **corrupted a code span**:
+
+```diff
+-    (`tests/test262-slow-tests.json` / `-standalone.json`). **All of `src/**`
+-    stays both-lane** — `target: "standalone"` is a flag through the same
++    (`tests/test262-slow-tests.json` / `-standalone.json`). **All of `src/**`stays both-lane** —`target: "standalone"` is a flag through the same
+```
+
+Three words lost their separating spaces and two inline-code spans were re-delimited
+around the wrong text. That is **content damage**, not formatting: a reader now sees
+`` `src/**`stays `` and `` —`target: "standalone"` `` as code.
+
+Three things make this worth recording next to the `CLAUDE.md` case rather than separately:
+
+1. **`docs/ci-policy.md` is NOT in the prettier gate.** `format:check` covers only
+   `'src/**/*.ts' 'tests/**/*.ts' 'scripts/**/*.ts'`. So prettier has **no authority**
+   over this file and running it there is pure, unreviewed damage.
+2. **`origin/main`'s own copy is already prettier-dirty, and `main` is green** — which is
+   the positive proof that it is ungated. The same reasoning that made the `CLAUDE.md`
+   post-sync form safe to commit shows the prettier-formatted form here is simply wrong.
+3. It is the **same underscore-emphasis mangling** as `7327b3ac` ("backtick `merge_group`
+   so prettier stops corrupting the emphasis run") — third occurrence, second file.
+
+**Mitigation that generalises past both files:** the hazard is not "remember which files
+are gated", it is that `prettier --write <path>` **silently rewrites everything in the
+file, not just what you touched**. So: never run it on a markdown file that
+`format:check` does not cover, and after any prettier run on a doc, read
+`git diff --numstat` — a purely additive edit that reports deletions has been rewritten
+underneath you. On #3915 the fix was to extract the added section, `git checkout HEAD --`
+the file, and re-insert; the resulting diff was **62 added, 0 deleted**.
+
+The cheap structural fix is to make the ungated files ungated _loudly_: add `docs/**` and
+`CLAUDE.md` to `.prettierignore`, so `prettier --write` on them is a no-op instead of a
+silent rewrite. That closes the whole class without asking anyone to remember a list.
+
 ## Acceptance
 
 - [ ] A `--check` failure prints the actual diff and does not imply the conformance
@@ -92,6 +133,10 @@ problem. Fix the tools so they agree.
 - [ ] The prescribed remedy in the message actually repairs the failure it reports.
 - [ ] Running `prettier --write CLAUDE.md` followed by `sync:conformance:check` exits 0
       (i.e. the two agree), by whichever of the two mechanisms above is chosen.
+- [ ] `prettier --write docs/ci-policy.md` produces **no** diff — i.e. the files prettier
+      has no authority over are ignored explicitly rather than merely unchecked. Verify by
+      running it on a clean tree and asserting `git diff --numstat` is empty; the current
+      behaviour rewrites 6 lines and breaks a code span.
 
 ## Not this issue
 

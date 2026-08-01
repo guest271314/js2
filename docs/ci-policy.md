@@ -207,6 +207,68 @@ Two test262 workflows currently run on PRs:
 For one-off sharded runs outside the normal PR/merge_group path,
 `workflow_dispatch` is the supported entry point.
 
+### Pushing to `main` from a workflow — the rebuild tax (#3915)
+
+Two facts about the merge queue that are non-obvious, and each of which sent
+triage down a wrong path before being written down.
+
+**1. `[skip ci]` does NOT make a push inert to the merge queue.** It suppresses
+_workflows on that commit_. It does **not** stop GitHub rebuilding every queued
+merge group on the new base, and a rebuild **discards the `merge_group`
+validation already running** — including one that has already gone fully green.
+The marker reads as "this push is harmless", and that reading is wrong. There
+is no failure, no park and no label when this happens: a green run simply
+vanishes and a new one starts. What a human reports is "the queue is stuck."
+
+**2. The SHA in `gh-readonly-queue/main/pr-<N>-<sha>` is the BASE commit, not
+the group head.** Two distinct groups for the same PR therefore look like one
+run set unless you compare the embedded SHA. Grouping `merge_group` runs by
+`head_branch` alone produces an "all green" report on a group that was
+superseded. To attribute a rebuild, look up the commit the _superseding_ group
+was based on — do not match against a hardcoded list of known bot SHAs.
+
+Because a `push: main`-triggered bot lands its commit _after_ the merge that
+triggered it, the tax **scales with merge throughput**: the busier the queue,
+the more validation is thrown away. Measured 2026-07-31 17:55–23:11Z over 20
+distinct PRs, 6 needed more than one merge group and **5 of those 6 rebuilds
+were rooted at the one un-gated bot pusher**; the sixth was a legitimate PR
+landing ahead, the only kind a serial queue must pay for.
+
+**So: every workflow that pushes to `main` must gate that push on the merge
+queue.** Use the shared `scripts/main-push-queue-gate.mjs`
+(`test262-sharded.yml` and `baseline-summary-sync.yml` carry an equivalent
+inline gate from #1951). Its rule is:
+
+> **defer** ⟸ the queue is _positively_ busy **and** the artifact is
+> _positively_ fresh. Everything else proceeds.
+
+Two design points that are easy to get wrong:
+
+- **Fail-open is correct here, and it is not a violation of "a detector must be
+  able to say I don't know".** That rule exists because a _verifier_ which
+  cannot see must not fall onto the reassuring side. This is a _deferral_, and
+  the cost asymmetry is reversed: unknown ⇒ push costs at most one discarded
+  validation, once, whereas unknown ⇒ defer can freeze the artifact
+  indefinitely on a flaky API — silently, because a skipped push looks exactly
+  like a no-op one. The gate still _reports_ that it could not see, via a
+  `::warning::` and an explicit `queue=UNKNOWN` in the verdict line.
+- **Read freshness from the artifact, never from `git log`.** Every promote job
+  here is `fetch-depth: 1`, where `git log -1 --format=%ct -- <path>` returns
+  **empty rather than erroring**. Empty parses as "unknown age", which fails
+  open — silently disabling the staleness floor forever while the gate keeps
+  reporting success. Pass a timestamp carried _inside_ the artifact
+  (`benchmark-manifest.json` → `generatedAt`).
+
+A **staleness floor** (`--stale-after-hours`, 6h) keeps a never-draining queue
+from freezing the artifact: past the floor the push proceeds anyway, trading at
+most one rebuild per floor-period against an unbounded freeze. A pusher whose
+file set is re-landed by _another already-gated_ path may declare that with
+`--fallback` instead of carrying its own floor.
+
+Note also that the step shell is `bash -e {0}`: capture the gate's exit code
+with `... || RC=$?`, never with a bare call followed by `RC=$?`, or the DEFER
+path aborts the step and surfaces as a red run instead of a skipped push.
+
 ### Merge-queue wedge recovery — manual, one-shot only (#3456)
 
 GitHub's merge queue has a rare silent-wedge failure mode: the head entry
