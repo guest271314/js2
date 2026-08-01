@@ -355,7 +355,7 @@ class NpmCompatChart extends HTMLElement {
       const reason = compiles ? "runtime not verified" : "compile blocked";
       tests = this._row("tests", `<span class="muted">n/a — ${reason}</span>`);
     } else {
-      const { kind, passed, total, passRatePct, status, reason } = pkg.tests;
+      const { kind, passed, total, passRatePct, status, reason, admitted, upstreamTestsSeen } = pkg.tests;
       const label =
         kind === "official-suite"
           ? "own test suite"
@@ -364,6 +364,14 @@ class NpmCompatChart extends HTMLElement {
             : kind === "upstream-api-vectors"
               ? "upstream API vectors"
               : "differential ops";
+      // A package whose upstream suite cannot be run whole (React's is welded to
+      // Jest/ReactDOM/jsdom) reports only the slice that needs nothing but the
+      // package itself. Say the slice size out loud — "39/53" alone would read
+      // as the entire suite.
+      const slice =
+        upstreamTestsSeen && admitted && admitted < upstreamTestsSeen
+          ? ` <span class="muted">${admitted} of ${upstreamTestsSeen} upstream tests admitted</span>`
+          : "";
       if (status && status !== "measured") {
         tests = this._row(
           "tests",
@@ -373,7 +381,7 @@ class NpmCompatChart extends HTMLElement {
         const pct = passRatePct != null ? passRatePct : total ? ((passed / total) * 100).toFixed(1) : null;
         tests = this._row(
           "tests",
-          `<span class="mono">${passed}/${total}</span>${pct != null ? ` <span class="muted">${pct}%</span>` : ""} <span class="tag">${this._esc(label)}</span>`,
+          `<span class="mono">${passed}/${total}</span>${pct != null ? ` <span class="muted">${pct}%</span>` : ""} <span class="tag">${this._esc(label)}</span>${slice}`,
         );
       }
     }
