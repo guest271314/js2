@@ -593,6 +593,65 @@ back to a dispatch that answers `undefined`. Fix and pins in
 `plan/issues/3719-new-assigned-to-binding-loses-fnctor-approval.md`.
 All five original matrix cases plus the untyped-only control now return 1000.
 
+## Step-1 result (2026-08-01) — the 156 are measured: 100 % presence-tracked
+
+The decline census the suspension note asked for is landed
+(`src/codegen/proven-receiver-stats.ts`, `JS2WASM_PROVEN_RECEIVER_STATS=1`,
+inert otherwise; pinned by `tests/issue-3685-decline-stats.test.ts`) and run
+over one standalone acorn 8.16.0 compile (226 KB dist + the
+`__npmCompatStandaloneBenchmark` inline driver, `target: "standalone"`,
+`optimize: 0`).
+
+```
+[proven-receiver] asked=4002 proven=244 inlined=88 declinedAfterProof=156
+```
+
+`proven=244` and `inlined=88` reproduce the audit's figures exactly. The 156
+break down as:
+
+| decline reason                        | sites   | share of 156 |
+| ------------------------------------- | ------: | -----------: |
+| `presence:Node.<f>` (externref field)  | **144** |    **92.3 %** |
+| `reserved:Node.name`                   |      12 |       7.7 % |
+| `nofield:` (name not a declared field) |   **0** |         0 % |
+| `accessor:` / `callsig:` / `no-struct` |       0 |         0 % |
+
+Sums to 156 exactly. Every one of the 144 presence declines is an **externref**
+field of `Node` (`loc`/`raw`/`local` 16 each, `key`/`argument` 12 each,
+`exported`/`imported`/`expressions`/`operator`/`value`/`property` 8 each,
+`id`/`body`/`static`/`quasis`/`properties`/`generator` 4 each). The 12
+`reserved:Node.name` sites are annotated `presence-tracked`, i.e. `name` **is**
+a declared, presence-tracked slot of `$__fnctor_Node` — so removing the
+`RESERVED_PROPS` carve-out alone would just move those 12 into the presence
+bucket. **Effectively 156/156 of the miss is the presence-tracked carve-out.**
+
+**Verdict against this issue's own decision rule: the `nofield:` bucket is
+ZERO, so the "dominated by not-a-declared-field ⇒ close this issue" branch is
+FALSIFIED.** The object-literal/expando story is still real for the 3,758
+*unproven* receivers (that is where `types$1` lives), but it explains none of
+the proven-but-not-inlined gap. A carve-out is over-broad, so there is a
+landable fix inside #3685.
+
+**What the fix is** (described, deliberately NOT implemented in the
+instrumentation pass): the carve-out's stated reason — "absence is semantic
+(`undefined`), which a bare `struct.get` cannot express" — is true of a bare
+`struct.get` and false of the compiler. `emitNullGuardedStructGet`
+(`src/codegen/property-access.ts` ~L1280-1297) already emits exactly the needed
+shape for a presence-tracked closed-struct read: `presenceTestInstrs` → `if`
+→ `struct.get` : `undefinedExternInstrs`. The proven-receiver emitter can nest
+that inside its existing `ref.test` then-arm; the `else` (dynamic
+`__extern_get`) arm is unchanged. All 144 sites are externref, so the absent
+value is a real `undefined` and no f64-default hazard arises — but the
+lowering must still refuse a non-externref presence-tracked field, where
+`defaultValueInstrs` would silently substitute `0` for `undefined`.
+
+Not measured here, and required before believing it pays: a wall-clock A/B with
+#3673's interleaved duplicate-baseline control arm on an idle box. The
+attribution table above says the two hot twins
+(`__closure_571__typed_this` + `__closure_347__typed_this`, 28.5 % of the
+`__extern_get` bucket ≈ 2.8 % of parse time) are the plausible payer, but
+nothing in this step measured time.
+
 ## Cross-box caveat on this issue's ranking (#3780 round 4, 2026-07-31)
 
 Every share quoted in this issue comes from a profile of the standalone acorn

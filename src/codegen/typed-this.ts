@@ -76,6 +76,8 @@ import { allocLocal } from "./context/locals.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
 import { addFuncType } from "./registry/types.js";
 import { analyzeReceiverFlow, receiverClassOf } from "./receiver-flow-analysis.js";
+// (#3685 step 1) decline census — inert unless JS2WASM_PROVEN_RECEIVER_STATS=1
+import { noteProvenReceiver, noteProvenReceiverPhase, provenReceiverStatsEnabled } from "./proven-receiver-stats.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 // `shared.js` holds the late-bound delegates precisely so a feature module can
 // reach the expression/coercion engines without a cycle back through
@@ -1323,35 +1325,76 @@ export function tryEmitProvenReceiverFieldGet(
   if (ts.isPrivateIdentifier(expr.name)) return undefined;
   if (expr.questionDotToken) return undefined;
 
+  // (#3685 step 1) Every exit below this point is tallied when
+  // `JS2WASM_PROVEN_RECEIVER_STATS=1`; see `proven-receiver-stats.ts` for why.
+  noteProvenReceiverPhase("asked");
   const cls = provenReceiverClass(ctx, fctx, expr.expression);
-  if (cls === undefined) return undefined;
+  if (cls === undefined) {
+    noteProvenReceiver("unproven-receiver");
+    return undefined;
+  }
+  noteProvenReceiverPhase("proven");
   const structName = `__fnctor_${cls}`;
   const structTypeIdx = ctx.structMap.get(structName);
-  if (structTypeIdx === undefined) return undefined;
+  if (structTypeIdx === undefined) {
+    noteProvenReceiver(`no-struct:${cls}`);
+    return undefined;
+  }
 
   // Same carve-outs as the `this` form — they are semantic, not incidental.
-  if (RESERVED_PROPS.has(propName)) return undefined;
-  if (ctx.classAccessorSet.has(`${structName}_${propName}`)) return undefined;
+  if (RESERVED_PROPS.has(propName)) {
+    // Annotated with what the name WOULD have resolved to, so the census can
+    // say whether this carve-out shadows a real declared slot or is a no-op.
+    // The lookup is behind the gate so the shipping path adds no work at all.
+    if (provenReceiverStatsEnabled()) {
+      const slot = ctx.structFields.get(structName)?.find((f) => f.name === propName);
+      const shape = slot === undefined ? "no-such-field" : slot.presenceTracked ? "presence-tracked" : "plain-field";
+      noteProvenReceiver(`reserved:${cls}.${propName}:${shape}`);
+    }
+    return undefined;
+  }
+  if (ctx.classAccessorSet.has(`${structName}_${propName}`)) {
+    noteProvenReceiver(`accessor:${cls}.${propName}`);
+    return undefined;
+  }
   const fields = ctx.structFields.get(structName);
-  if (!fields) return undefined;
+  if (!fields) {
+    noteProvenReceiver(`no-field-table:${cls}`);
+    return undefined;
+  }
   const fieldIdx = fields.findIndex((f) => f.name === propName);
-  if (fieldIdx < 0) return undefined;
+  if (fieldIdx < 0) {
+    noteProvenReceiver(`nofield:${cls}.${propName}`);
+    return undefined;
+  }
   const field = fields[fieldIdx]!;
   // Presence-tracked ⇒ absence is semantic (`undefined`), which a bare
   // struct.get cannot express.
-  if (field.presenceTracked) return undefined;
+  if (field.presenceTracked) {
+    noteProvenReceiver(`presence:${cls}.${propName}:${field.type.kind}`);
+    return undefined;
+  }
   // A method-typed access keeps its closure lowering (S3 devirtualizes calls;
   // S2 must not box the callee).
   const accessType = ctx.checker.getTypeAtLocation(expr);
-  if (accessType.getCallSignatures && accessType.getCallSignatures().length > 0) return undefined;
+  if (accessType.getCallSignatures && accessType.getCallSignatures().length > 0) {
+    noteProvenReceiver(`callsig:${cls}.${propName}`);
+    return undefined;
+  }
 
   const externGetIdx = ctx.funcMap.get("__extern_get");
-  if (externGetIdx === undefined) return undefined;
+  if (externGetIdx === undefined) {
+    noteProvenReceiver("no-extern-get");
+    return undefined;
+  }
 
   // Evaluate the receiver ONCE into a temp, before the branch.
   const tmp = allocLocal(fctx, `__prf_${propName}_${fctx.locals.length}`, { kind: "externref" });
   const recvType = compileExpression(ctx, fctx, expr.expression, { kind: "externref" });
-  if (recvType === null) return undefined;
+  if (recvType === null) {
+    noteProvenReceiver(`receiver-void:${cls}.${propName}`);
+    return undefined;
+  }
   if (!valTypesMatch(recvType, { kind: "externref" })) {
     coerceType(ctx, fctx, recvType, { kind: "externref" });
   }
@@ -1383,6 +1426,8 @@ export function tryEmitProvenReceiverFieldGet(
       { op: "struct.get", typeIdx: structTypeIdx, fieldIdx },
     );
     provenFieldStats.gets++;
+    noteProvenReceiverPhase("inlined");
+    noteProvenReceiver(`ok-unguarded:${cls}.${propName}`);
     return field.type;
   }
 
@@ -1403,6 +1448,8 @@ export function tryEmitProvenReceiverFieldGet(
     },
   );
   provenFieldStats.gets++;
+  noteProvenReceiverPhase("inlined");
+  noteProvenReceiver(`ok:${cls}.${propName}:${field.type.kind}`);
   return field.type;
 }
 
