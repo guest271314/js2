@@ -160,7 +160,7 @@ function _emitStructFieldGettersInner(ctx: CodegenContext): void {
       const field = fields[i];
       if (!field || !field.type) continue;
       // Skip fields with names that would create invalid export names
-      if (!field.name || field.name.startsWith("$")) continue;
+      if (!field.name || isInternalStructFieldName(ctx, structName, field.name)) continue;
 
       let entries = fieldMap.get(field.name);
       if (!entries) {
@@ -383,7 +383,7 @@ function _emitStructFieldSettersInner(ctx: CodegenContext): void {
     for (let i = 0; i < fields.length; i++) {
       const field = fields[i];
       if (!field || !field.type) continue;
-      if (!field.name || field.name.startsWith("$")) continue;
+      if (!field.name || isInternalStructFieldName(ctx, structName, field.name)) continue;
       // Only emit setters for mutable fields — `struct.set` on an immutable
       // field is a Wasm validation error (e.g. boxed-number singletons).
       if (!field.mutable) continue;
@@ -668,6 +668,30 @@ function buildSetterStore(
  */
 
 /**
+ * Is `fieldName` one of the compiler's own hidden slots on `structName`, rather
+ * than a property the source actually wrote?
+ *
+ * The hidden slots (`$shape`, `$arity`, `$func`, `__tag`, …) are all `$`/`__`
+ * prefixed, so a bare prefix test was used as the discriminator. But that
+ * prefix is legal in a real property name, and the ecosystem uses it: React
+ * stamps `$$typeof` on every element it creates, which the prefix test silently
+ * erased from `__struct_field_names` / `__sget_*`. The consequence was not a
+ * visible error — `Object.keys(element)` just omitted `$$typeof`, `switch
+ * (x.$$typeof)` matched nothing and `JSON.stringify` dropped the key, so
+ * `React.Children.*` and `isValidElement` quietly returned wrong answers for
+ * every element that crossed the host bridge.
+ *
+ * `ctx.structInsertionOrder` records the keys an object literal literally
+ * wrote, so it is the authority when present: a recorded name is a user
+ * property no matter how it is spelled. Structs with no recording (named
+ * classes, IR-fresh structs) keep the prefix heuristic unchanged.
+ */
+export function isInternalStructFieldName(ctx: CodegenContext, structName: string, fieldName: string): boolean {
+  if (!fieldName.startsWith("$") && !fieldName.startsWith("__")) return false;
+  return !ctx.structInsertionOrder.get(structName)?.includes(fieldName);
+}
+
+/**
  * (#2009 R3b) Permute a struct's slot-order field names into JS INSERTION order
  * for the host name export, using the per-literal order recorded in
  * `ctx.structInsertionOrder` (see its doc). MEMBERSHIP is preserved exactly:
@@ -726,7 +750,7 @@ export function resolveSameShapeFieldNameCollisions(ctx: CodegenContext): void {
     const typeParts: string[] = [];
     for (const f of fields) {
       if (!f || !f.type || !f.name) continue;
-      if (f.name.startsWith("$") || f.name.startsWith("__")) continue;
+      if (isInternalStructFieldName(ctx, structName, f.name)) continue;
       names.push(f.name);
       typeParts.push(typeKindKey(f.type));
     }
@@ -871,7 +895,7 @@ function emitStructFieldNamesExport(
     const names: string[] = [];
     for (const field of fields) {
       if (!field || !field.type || !field.name) continue;
-      if (field.name.startsWith("$") || field.name.startsWith("__")) continue;
+      if (isInternalStructFieldName(ctx, structName, field.name)) continue;
       names.push(field.name);
     }
     // (#2009 R3b) Permute to JS insertion order for spec-correct host
