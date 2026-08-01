@@ -14,6 +14,14 @@ task_type: bug
 area: compiler
 language_feature: objects
 goal: core-semantics
+# The insertion-order recorder lives inside compileObjectLiteralForStruct and
+# cannot be moved out: it walks that function's own `expr.properties` and
+# `spreadSources`. The growth is the written-vs-spread distinction plus the
+# comment explaining why spread keeps the old heuristic.
+loc-budget-allow:
+  - src/codegen/literals.ts
+func-budget-allow:
+  - src/codegen/literals.ts::compileObjectLiteralForStruct
 ---
 
 # `$`-prefixed user properties are erased at the host bridge

@@ -26,17 +26,17 @@ package, following the existing Acorn/React precedent.
 The original package-specific harnesses, plus the deeper Acorn conformance
 check, are:
 
-| package                                 | issue | entry file          | oracle diff                                                                 |
-| --------------------------------------- | ----- | ------------------- | --------------------------------------------------------------------------- |
-| **acorn** (JS parser)                   | #1710 | `dist/acorn.mjs`    | structural AST diff (`ast-diff.mjs`)                                        |
-| **marked** (Markdown→HTML)              | #3716 | `lib/marked.esm.js` | plain string equality (HTML output)                                         |
-| **acorn official suite**                | #3729 | `dist/acorn.mjs`    | acorn's own real `test/tests*.js` (~3,500 cases)                            |
-| **clsx** (className joiner)             | #3748 | `dist/clsx.mjs`     | per-op string equality (see below — driver epilogue, not a raw export call) |
-| **cookie** (RFC-6265 parser/serializer) | #3751 | `dist/index.js`     | per-op JSON-normalized equality (direct export calls, no epilogue)          |
-| **eslint** (JavaScript linter)          | #1400 | `lib/api.js`        | bounded full-package compile/validate; runtime diff pending                 |
-| **prettier** (code formatter)           | —     | `standalone.mjs`    | bounded package-entry compile/validate; runtime diff pending                |
-| **react** (UI library)                  | —     | `index.js`          | bounded package-entry compile/validate                                      |
-| **react upstream suite**                | —     | `cjs/react.production.js` | React's own real `packages/react/src/__tests__` unit tests             |
+| package                                 | issue | entry file                | oracle diff                                                                 |
+| --------------------------------------- | ----- | ------------------------- | --------------------------------------------------------------------------- |
+| **acorn** (JS parser)                   | #1710 | `dist/acorn.mjs`          | structural AST diff (`ast-diff.mjs`)                                        |
+| **marked** (Markdown→HTML)              | #3716 | `lib/marked.esm.js`       | plain string equality (HTML output)                                         |
+| **acorn official suite**                | #3729 | `dist/acorn.mjs`          | acorn's own real `test/tests*.js` (~3,500 cases)                            |
+| **clsx** (className joiner)             | #3748 | `dist/clsx.mjs`           | per-op string equality (see below — driver epilogue, not a raw export call) |
+| **cookie** (RFC-6265 parser/serializer) | #3751 | `dist/index.js`           | per-op JSON-normalized equality (direct export calls, no epilogue)          |
+| **eslint** (JavaScript linter)          | #1400 | `lib/api.js`              | bounded full-package compile/validate; runtime diff pending                 |
+| **prettier** (code formatter)           | —     | `standalone.mjs`          | bounded package-entry compile/validate; runtime diff pending                |
+| **react** (UI library)                  | —     | `index.js`                | bounded package-entry compile/validate                                      |
+| **react upstream suite**                | —     | `cjs/react.production.js` | React's own real `packages/react/src/__tests__` unit tests                  |
 
 ## acorn (#1710)
 
@@ -211,7 +211,7 @@ Three rules keep the number honest:
 1. **Admission is conservative and counted.** A test is admitted only if it
    needs nothing but React itself. Anything reaching for ReactDOM, `act`, the
    console-assertion helpers, `jest.*`, a `document`, `__DEV__` or async
-   scheduling is rejected *with its reason recorded*, and the rejection tally is
+   scheduling is rejected _with its reason recorded_, and the rejection tally is
    reported next to the pass count — so the admitted slice is never mistaken for
    the whole suite.
 2. **The `expect` shim implements only the matchers the admitted tests use**

@@ -14,6 +14,13 @@ task_type: bug
 area: compiler
 language_feature: errors
 goal: core-semantics
+# The new dispatch arm is 9 lines in compileCallExpression's guard ladder — the
+# only place a call-expression guard can live. The emitter itself went into
+# new-builtin-globals.ts (the subsystem module), not the driver.
+loc-budget-allow:
+  - src/codegen/expressions/calls.ts
+func-budget-allow:
+  - src/codegen/expressions/calls.ts::compileCallExpression
 ---
 
 # `Error(msg)` without `new` compiles to null
@@ -66,7 +73,7 @@ upstream React tests failed on it (#3958). Minifiers also prefer the
 `tryCompileErrorCtorCallWithoutNew` (`src/codegen/expressions/new-builtin-globals.ts`),
 dispatched from `compileCallExpression` alongside the other early guards.
 Because the spec defines [[Call]] and [[Construct]] identically here, it
-delegates to the *same* emitter rather than duplicating it — a CallExpression
+delegates to the _same_ emitter rather than duplicating it — a CallExpression
 and a NewExpression expose the same `.expression`/`.arguments` shape that
 emitter reads. A shadowed binding (`class Error {}`, a local, an import) is left
 alone: `ctx.classSet` plus `resolvesToAmbientGlobal` gate it to the ambient

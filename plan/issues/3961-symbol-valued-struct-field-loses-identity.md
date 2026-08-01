@@ -33,12 +33,18 @@ Two symptoms, one root cause. Both are silent — wrong answers, no diagnostic.
 ```js
 var SYM = Symbol.for("s");
 var exports = {};
-function inner(t) { return { $$typeof: SYM, type: t }; }
-exports.outer = function (t) { return inner(t); };
+function inner(t) {
+  return { $$typeof: SYM, type: t };
+}
+exports.outer = function (t) {
+  return inner(t);
+};
 
-String(exports.outer("div").$$typeof)               // wasm: "-1"   native: "Symbol(s)"
-switch (exports.outer("div").$$typeof) { case SYM: } // wasm: no match
-exports.outer("div").$$typeof === SYM               // wasm: true  ← statically folded
+String(exports.outer("div").$$typeof); // wasm: "-1"   native: "Symbol(s)"
+switch (exports.outer("div").$$typeof) {
+  case SYM:
+} // wasm: no match
+exports.outer("div").$$typeof === SYM; // wasm: true  ← statically folded
 ```
 
 The direct `===` still reads `true` because it is folded from the known literal
@@ -52,8 +58,10 @@ difference is purely whether the value crosses the CommonJS export boundary.
 
 ```js
 const SYM = Symbol.for("tag");
-function readTag(x) { return typeof x.s; }
-readTag({ s: SYM, n: 1 })   // wasm: "boolean"   native: "symbol"
+function readTag(x) {
+  return typeof x.s;
+}
+readTag({ s: SYM, n: 1 }); // wasm: "boolean"   native: "symbol"
 ```
 
 ## Why it matters
@@ -116,11 +124,17 @@ Land this as part of, or immediately after, #2610 — not as another point patch
       cluster clears.
 - [ ] No new traps: the inbound path must land with the outbound one.
 
-## Reproduction
+## Permanent test reference
 
-Both symptoms reproduce standalone, without React — see the snippets above.
-`tests/dogfood/react-upstream-suite.mjs` exercises them through the real
-pinned React tarball.
+`tests/dogfood/react-upstream-suite.test.ts` already covers this, as a
+FAILING-and-counted frontier rather than a skip: the eight `ReactChildren`
+tests and the `is indistinguishable from a plain object` /
+`identifies valid elements` tests are admitted, scored, and enumerated in the
+report right now. They are what the pass floor of 39 excludes. Fixing this
+issue moves that floor up; there is nothing to add to the corpus first.
+
+Both symptoms also reproduce standalone, without React — see the snippets
+above.
 
 ## References
 

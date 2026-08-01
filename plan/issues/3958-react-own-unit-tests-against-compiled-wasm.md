@@ -58,7 +58,7 @@ Three rules keep the resulting number honest:
    needs nothing but React itself. ReactDOM, `act`, the console-assertion
    helpers, `jest.*`, a `document`, `__DEV__`, async scheduling, or a name that
    only existed on a prelude statement the harness had to drop — each is
-   rejected *with its reason recorded*, and the rejection tally is reported next
+   rejected _with its reason recorded_, and the rejection tally is reported next
    to the pass count. The admitted slice can never be mistaken for the suite.
 2. **The `expect` shim implements only the matchers the admitted tests use.** A
    test using anything outside `SUPPORTED_MATCHERS` is rejected rather than
@@ -74,11 +74,11 @@ silently removed.
 
 ## Result
 
-| | before | after |
-| --- | --- | --- |
+|             | before                 | after                                |
+| ----------- | ---------------------- | ------------------------------------ |
 | test source | 5 hand-written vectors | 273 real upstream tests, 56 admitted |
-| scored | 5 | 53 |
-| passing | 2 | **39** |
+| scored      | 5                      | 53                                   |
+| passing     | 2                      | **39**                               |
 
 The 39 is after the two compiler fixes this work uncovered (#3959, #3960); the
 suite scored 32/53 before them. The remaining 14 failures are real and stay
