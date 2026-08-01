@@ -19,8 +19,8 @@ import { describe, it, expect } from "vitest";
 import { compile, buildImports, instantiateWasm } from "../src/index.js";
 import { stringBenchmarks } from "../benchmarks/suites/strings.js";
 import { mixedBenchmarks } from "../benchmarks/suites/mixed.js";
-import { flagImplausibleLanes, MIN_PLAUSIBLE_NS_PER_OP } from "../benchmarks/report.js";
-import type { BenchmarkResult } from "../benchmarks/harness.js";
+import { flagImplausibleLanes, generateMarkdown, MIN_PLAUSIBLE_NS_PER_OP } from "../benchmarks/report.js";
+import { runBenchmark, type BenchmarkResult } from "../benchmarks/harness.js";
 
 function lane(over: Partial<BenchmarkResult>): BenchmarkResult {
   return {
@@ -84,6 +84,105 @@ describe("#3898 plausibility guard", () => {
     expect(flagImplausibleLanes(results)).toHaveLength(0);
     expect(results[0]!.implausible).toBeUndefined();
   });
+
+  it("exempts a #3904 failed row instead of calling it hoisted", () => {
+    // A failed lane carries medianMs === 0 by construction, so an unguarded
+    // guard computes 0 ns/op and flags every failure as an eliminated loop —
+    // turning "gc-native did not compile" into the wrong diagnosis entirely.
+    const results = [
+      lane({
+        name: "string/indexOf",
+        strategy: "gc-native",
+        medianMs: 0,
+        opsPerCall: 1000,
+        minNsPerOp: 5,
+        status: "failed",
+        error: "local.set type error",
+        failedPhase: "setup",
+      }),
+    ];
+
+    expect(flagImplausibleLanes(results)).toHaveLength(0);
+    expect(results[0]!.implausible).toBeUndefined();
+  });
+});
+
+describe("#3898 x #3904 — the report keeps all three lane states apart", () => {
+  // "not applicable", "ran and broke" and "ran but the number is impossible"
+  // are three different findings. Collapsing any two of them is how a wrong
+  // number reaches the public page.
+  const results: BenchmarkResult[] = [
+    lane({ name: "string/indexOf", strategy: "js", medianMs: 0.0015575, opsPerCall: 1000, minNsPerOp: 5 }),
+    lane({ name: "string/indexOf", strategy: "gc-native", medianMs: 0.0149466, opsPerCall: 1000, minNsPerOp: 5 }),
+    lane({
+      name: "string/indexOf",
+      strategy: "host-call",
+      medianMs: 0,
+      opsPerCall: 1000,
+      status: "failed",
+      error: "illegal cast",
+      failedPhase: "warmup",
+    }),
+    // linear-memory is absent entirely — deliberately not applicable.
+  ];
+  flagImplausibleLanes(results);
+  const md = generateMarkdown(results);
+
+  it("marks the implausible lane, not the failed one", () => {
+    expect(results[0]!.implausible).toBe(true); // the hoisted JS baseline
+    expect(results[1]!.implausible).toBeUndefined();
+    expect(results[2]!.implausible).toBeUndefined(); // failed, not hoisted
+  });
+
+  it("renders the failed lane as FAILED and the implausible lane with a warning", () => {
+    expect(md).toContain("FAILED");
+    expect(md).toContain("⚠ Implausible lanes");
+    expect(md).toContain("## Failed strategies");
+    expect(md).toContain("illegal cast");
+  });
+
+  it("refuses to publish a ratio computed against an implausible baseline", () => {
+    // Both guards' whole point: no "9.6x slower" bar off a hoisted baseline.
+    expect(md).toContain("⚠ implausible");
+  });
+
+  it("keeps the failed lane out of the per-operation cost table", () => {
+    const table = md.slice(md.indexOf("## Cost per operation"));
+    expect(table).toContain("string/indexOf");
+    // A failed row has no timings to divide; it must not appear as "0.00".
+    expect(table).not.toMatch(/\|\s*0\.00\s*\|/);
+  });
+});
+
+describe("#3898 cross-lane mismatch is recorded, not dropped", () => {
+  it("produces a failed row with phase 'cross-lane' rather than no row at all", async () => {
+    // Under #3904 an ABSENT row means "deliberately not applicable" — the exact
+    // opposite of what a mismatch is. Dropping the lane (the pre-merge
+    // behaviour) would file a real disagreement as a non-event.
+    const previousExitCode = process.exitCode;
+    try {
+      const results = await runBenchmark(
+        {
+          name: "probe/mismatch",
+          iterations: 1,
+          warmup: 1,
+          // The wasm lane deliberately computes a different value.
+          source: `export function run(): number { return 2; }`,
+          js: () => 1,
+        },
+        ["js", "gc-native"],
+      );
+
+      const gc = results.find((r) => r.strategy === "gc-native");
+      expect(gc, "the mismatching lane must still be reported").toBeDefined();
+      expect(gc!.status).toBe("failed");
+      expect(gc!.failedPhase).toBe("cross-lane");
+      expect(gc!.error).toContain("cross-lane mismatch");
+      expect(process.exitCode).toBe(1);
+    } finally {
+      process.exitCode = previousExitCode;
+    }
+  }, 120_000);
 });
 
 describe("#3898 benchmark definitions", () => {

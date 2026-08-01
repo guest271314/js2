@@ -233,7 +233,14 @@ export const stringBenchmarks: BenchmarkDef[] = [
     name: "string/concat-short",
     iterations: 50,
     opsPerCall: 10000,
-    minNsPerOp: 2,
+    // No per-benchmark floor: measured 2026-08-01 at 3.79 ns/op (js) and
+    // 5.93 (gc-native). `minNsPerOp` is documented as "roughly a quarter of the
+    // honest cost", which here is ~0.95 ns — i.e. below the universal 1 ns
+    // bound, so the universal bound is already the right and only floor. The
+    // earlier `minNsPerOp: 2` sat only 1.9x under the honest js cost, tight
+    // enough that a machine faster than this container would trip it and fail
+    // the run on a benchmark that was never hoisted in the first place (a rope
+    // concat of a growing string is inherently not loop-invariant).
     source: `
 export function run(): number {
   let s = "";
@@ -248,7 +255,10 @@ export function run(): number {
     name: "string/concat-long",
     iterations: 50,
     opsPerCall: 1000,
-    minNsPerOp: 3,
+    // Same reasoning as concat-short, and tighter still: measured 4.19 ns/op
+    // (js), so the previous `minNsPerOp: 3` had only a 1.4x margin — it was far
+    // more likely to fire on a fast machine than on a collapsed loop, which is
+    // 20x+ too fast, not 1.4x. The universal 1 ns bound covers it.
     source: `
 export function run(): number {
   const chunk = "x".repeat(1024);
@@ -347,15 +357,19 @@ ${variantTable(CASE_VARIANTS)}
     name: "string/substring",
     iterations: 100,
     opsPerCall: 10000,
-    // Floor is 1 ns, not 3: our `__str_substring` is an O(1) slice view
-    // (`NativeString` is {len, off, data} — #3901 confirmed it copies zero
-    // characters), and Binaryen then SCALAR-REPLACES the view entirely when only
-    // a couple of characters are read, so no struct.new survives in the loop.
-    // The lane still does real work — verified 2 `array.get` per iteration plus
-    // the offset arithmetic — it is just legitimately cheap. A 3 ns floor
-    // assumed substring must copy ~15 characters, which is true of the JS
-    // baseline but not of this implementation.
-    minNsPerOp: 1,
+    // This floor was briefly lowered 3 -> 1, on the theory that our
+    // `__str_substring` is an O(1) slice view (#3901) that Binaryen may
+    // legitimately scalar-replace down to near-nothing. That lowering was made
+    // against a lane Binaryen had *eliminated* (it accumulated only
+    // `.length`, which is derivable from the arguments, so the call was
+    // strength-reduced away and clocked 2.394 ns/op). Once the loop was fixed to
+    // consume the slice's CONTENT, the honest costs measured on 2026-08-01 are
+    // 10.3-13.7 ns/op (js) and 110-114 ns/op (gc-native) — nowhere near 3 ns.
+    // So restore 3: it is ~3.4x below the cheaper of the two lanes, which is the
+    // "roughly a quarter of the honest cost" margin `minNsPerOp` documents, and
+    // a floor of 1 would be the loosest guard in this file for no measured
+    // reason.
+    minNsPerOp: 3,
     source: `
 export function run(): number {
   const s = "abcdefghijklmnopqrstuvwxyz";
