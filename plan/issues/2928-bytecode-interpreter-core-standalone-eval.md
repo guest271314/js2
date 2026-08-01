@@ -639,6 +639,18 @@ does not run that script, so its cache was always cold and the same files died
 at instantiate. The two lanes therefore diverged **silently**, and by a specific
 amount: **roughly the interpreter tier's yield**.
 
+**The general form, which outlives this issue: a harness that SILENTLY selects a
+capability the published lane does not have invalidates every cross-lane
+comparison made against it — and the results carry no trace of the choice.** It
+is a measurement-validity defect, not a convenience. The fix has two halves and
+needs both: (1) the capability is **opt-in behind a named flag**, never
+"whatever happens to be cached"; (2) the harness **announces which tier it
+selected on every path, including the successful one** —
+`announceRuntimeEvalTier` in `scripts/test262-worker.mjs` now does this, and the
+interpreter arm says out loud that its results are not CI-comparable. Half (1)
+alone still leaves a run whose report cannot be traced back to its
+configuration. Carry both into the next harness.
+
 **What that invalidates.** Any standalone eval-scope number measured *locally*
 on this repo in that window is an **interpreter-linked** number, and is
 **inflated relative to CI** — i.e. relative to the published baseline, the
