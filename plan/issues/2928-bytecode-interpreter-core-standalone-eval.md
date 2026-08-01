@@ -2,8 +2,9 @@
 id: 2928
 title: "Bytecode interpreter core + standalone new Function / indirect eval"
 status: in-progress
+assignee: ttraenkler/s78-sendev-eval
 created: 2026-07-02
-updated: 2026-07-26
+updated: 2026-08-01
 priority: medium
 horizon: xl
 feasibility: hard
@@ -551,6 +552,174 @@ packaging seam itself is done and measured working.
 
 Artifacts: `benchmarks/results/test262-standalone-results-20260727-{020133,013447,021328}.jsonl`
 (local machine; copies retained in the session workspace `.tmp/e6-*.jsonl`).
+
+## Implementation findings (E7 — the provider was never linked in CI, 2026-08-01)
+
+### Root cause: E6's prebuild is unreachable from CI
+
+E6 wired the prebuild into `scripts/run-test262-vitest.sh`. **CI never runs
+that script.** Every `test262-sharded.yml` shard job (and every
+`refresh-baseline.yml` heal shard) invokes `node
+node_modules/vitest/dist/cli.js run tests/test262-chunkN.test.ts` directly, so
+`scripts/build-runtime-eval-provider.mjs` is never executed and the provider
+cache is always cold. The published standalone baseline — which is a **CI**
+artifact, fetched from `loopdive/js2wasm-baselines` — therefore carries **361
+files** failing at instantiate:
+
+```text
+WebAssembly.instantiate(): Import #0 "js2wasm:runtime-eval":
+module is not an object or function
+```
+
+Measured against `.test262-cache/test262-standalone-current.jsonl` (baselines
+run `20260801-010858`, 48,088 rows): 361 records, **all `status: fail`**, led
+by `annexB/language/eval-code/indirect` (104), `annexB/.../direct` (32),
+`built-ins/Function/prototype/apply` (22) and `/call` (22), plus the whole
+`built-ins/Function/S15.3.2.1_*` / `length/*` Function-constructor family.
+
+### Why that costs far more than the eval assertions
+
+The import is **module-level**, not call-level. A file that merely *mentions*
+dynamic `new Function` / indirect eval carries the import and cannot
+instantiate, so it loses **every** assertion it has — not just the ones that
+need eval. That matters here because the standalone `new Function` route
+already does §20.2.1.1.1 argument ToString **AOT at the call site**
+(`emitStandaloneDynamicFunctionRuntime` → `compileAndEmitToString`), so a
+throwing `toString` throws *before* the provider is ever consulted. Verified
+against a compiled probe: the only import such a module has is
+`js2wasm:runtime-eval::__runtime_new_function`; everything else is internal.
+
+### The fix: a second, refusal tier
+
+The real Acorn+interpreter provider is **2,447,002 bytes and 151 s to
+compile** (measured on this box) — not affordable in each of the 36 standalone
+shards, and #2928's own E6 finding 2 records an interpreter hang family
+(~100 annexB files) that would additionally burn the 30 s pool timeout each.
+So CI does not get the interpreter; it gets a **refusal provider**:
+
+- a js2wasm-compiled, **zero-import** core-Wasm module with the *same*
+  `[ok, value]` envelope ABI and the same two exports, and **no capability**:
+  both entry points return `[false, TypeError]`;
+- **53,152 bytes, 2.5 s to compile** — affordable per shard;
+- linked by `scripts/test262-worker.mjs` whenever the interpreter tier is
+  absent, so eval-mentioning modules instantiate and only the dynamic-code
+  call itself throws the typed, catchable #2960 Tier-3 TypeError that direct
+  eval already reports.
+
+It injects **no JS-host capability** — it is core Wasm from the compiler under
+test, just an empty one. The build **canary-verifies before caching**, and the
+canary is a *cross-module* positive control (a throwaway user module takes the
+dynamic route and must report a catchable `TypeError`), with an explicit
+assertion that the canary really does import the provider so it cannot pass
+vacuously.
+
+`TEST262_FULL_RUNTIME_EVAL=1` is now the **opt-in** for the interpreter tier,
+in both the runner and the worker. Before, a local sweep silently used any
+cached interpreter provider while CI could not — so the two lanes disagreed by
+exactly the interpreter's yield. Opt-in makes local and CI report the same
+standalone number by default.
+
+### Measurement (arms A/B, same machine, same HEAD, 2026-08-01)
+
+Scope `built-ins/Function/` (the task's named lever), `--official-scope-only`,
+`COMPILER_POOL_SIZE=2 TEST262_WORKERS=2 TEST262_IT_TIMEOUT_MS=600000`.
+**Row count floored at 515 in both arms** (509 `test/built-ins/Function` + 6
+`test/annexB/built-ins/Function`) — E6 finding 1's silent row loss did not
+recur.
+
+| Arm                                                   | pass    | fail    |  CE |
+| ----------------------------------------------------- | ------: | ------: | --: |
+| A — control, `TEST262_DISABLE_RUNTIME_EVAL_PROVIDER=1` |     174 |     308 |  33 |
+| B — refusal provider linked                            | **179** |     303 |  33 |
+
+**+5 flips, 0 regressions, 0 other status changes.** Attribution is by
+removal: arm A is the kill-switch arm, so every delta is the refusal link.
+
+**Of the 5, three are genuine and two are coincidental — read this before
+quoting the number.**
+
+| file                                              | why it flips                                                                              | honest? |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------ | ------- |
+| `Function/S15.3.2.1_A1_T1.js`                     | body's `toString` throws `7`; §20.2.1.1.1 coercion is AOT, so the provider is never reached | genuine |
+| `Function/S15.3.2.1_A3_T1.js`                     | param `toString` throws `1` before the body's does — pure coercion-order assertion          | genuine |
+| `Function/prototype/toString/built-in-function-object.js` | walks the intrinsics and asserts `visited.length !== 0`; nothing eval-dependent     | genuine |
+| `Function/prototype/apply/S15.3.4.3_A8_T5.js`     | wants a `TypeError` from `new (Function("…").apply)()` — gets the REFUSAL's `TypeError`      | **coincidental** |
+| `Function/prototype/call/S15.3.4.4_A7_T5.js`      | same shape, via `.call`                                                                     | **coincidental** |
+
+The two coincidental ones are confirmed as such by arm C below: with the real
+interpreter linked, `Function("…")` succeeds and both files correctly **fail**
+on the assertion they actually make. So the honest net for the refusal tier in
+this scope is **+3 real, +2 right-answer-for-the-wrong-reason**.
+
+The refusal error type is deliberately **not** tuned away from this. `TypeError`
+is the already-shipped #2960 Tier-3 contract that direct eval throws today, so
+the same exposure already exists on 26 direct-eval records; picking a
+non-matching error class purely to avoid coincidental matches would be tuning
+the instrument to the corpus, just in the self-flagellating direction.
+
+The 103 in-scope link failures go to **0** and are replaced by *diagnostic*
+failures that name the real blocker: 63 `TypeError: dynamic code evaluation is
+not supported…`, 16 harness-wrapped variants of the same, 10
+SyntaxError-detection cases (`Expected a SyntaxError but got a undefined`),
+and a handful of `caller`/`arguments`/`with` semantics. That is the honest
+shape of the remainder: **~90 of the 103 genuinely need the interpreter**, and
+the refusal tier banks the 5 that never did.
+
+**No regression vector.** Only files that were already failing carry the
+import, so the tier cannot demote a pass — with one theorised exception worth
+recording: the worker counts a `negative: {phase: runtime}` test as a pass when
+*instantiate* throws a matching error, so a runtime-negative test expecting
+`TypeError` could have been passing **vacuously** off the missing-import
+`TypeError`. Making such a file instantiate would de-inflate it. The measured
+arm shows **zero** such regressions in this scope; the possibility is flagged
+for the full-lane run.
+
+**No shard-budget risk.** Slowest `exec_ms` in arm B was 1,094 ms; the refusal
+provider returns immediately, so no hang family is unlocked. Per-shard cost is
+one ~2.5 s prebuild.
+
+### Arm C — the interpreter tier, PARTIAL and load-confounded
+
+A third arm with `TEST262_FULL_RUNTIME_EVAL=1` was started on the same scope
+and **killed at chunk 8/16**, so it is not a complete arm. It produced rows for
+262 of the 515 files. Restricting all three arms to exactly those 262:
+
+| Arm (262-file restriction)     | pass   | fail | CE | compile_timeout |
+| ------------------------------- | -----: | ---: | -: | --------------: |
+| A — control                     |     83 |  163 | 16 |               0 |
+| B — refusal                     |     84 |  162 | 16 |               0 |
+| C — full interpreter (partial)  | **93** |  123 | 15 |          **31** |
+
+**What this does and does not license.** Arm C ran while the box was at a 1-min
+load average of 19–28, against 7–17 for arm B, so its 31 `compile_timeout` rows
+are **confounded by machine contention and must not be attributed to the
+interpreter** — several are in `prototype/toString/async-generator-*`, which has
+no dynamic-code path at all. What contention *cannot* manufacture is a pass, so
+the **17 files that flip to pass over arm B are a valid lower bound** on the
+interpreter tier's yield here, and the single non-timeout regression
+(`prototype/call/S15.3.4.4_A7_T5.js`) is real and is the coincidental-pass
+unmasking described above.
+
+So the interpreter tier is worth materially more than the refusal tier
+(≥ +17 on a 262-file slice) — which is exactly why it is worth finishing, and
+exactly why it must not be smuggled in on a confounded measurement.
+
+### What is still owed
+
+1. **A clean, uncontended arm C** on the full 515-file scope (and then on
+   `language/eval-code/`) to separate genuine interpreter hangs from pool-queue
+   contention. Until that exists, the 30 s pool timeout is an unquantified risk
+   against a 25-minute shard budget.
+2. The **151 s / 2,447,002-byte interpreter provider compile** — not affordable
+   per shard. Either #2527 on-demand packaging publishes it as a build artifact
+   shared by the 36 standalone shards, or the compile gets materially cheaper.
+3. The E6 finding-2 **hang family** (~100 annexB `function-in-if` files) is
+   still unaddressed and is interpreter work, not packaging work.
+
+The ≥30-file acceptance box therefore stays unchecked. What E7 delivers is the
+floor beneath it: the standalone lane no longer loses whole files to an
+unresolvable import, and the residual failures now name the interpreter as the
+blocker instead of hiding behind a link error.
 
 ## Coercion-sites allowance (`src/codegen/expressions/eval-inline.ts`)
 
