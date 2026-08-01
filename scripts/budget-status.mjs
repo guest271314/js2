@@ -662,7 +662,7 @@ function describeFilters() {
       ? `role=${ROLE}${ROLE_DEFAULTED ? " (DEFAULT — no --role/$JS2WASM_ROLE given; scope filtered as a developer)" : ""}`
       : `role=${ROLE} UNKNOWN → scope filter effectively OFF`,
   );
-  parts.push(MODEL ? `model=${MODEL}` : "model=OFF (no --model/--as lane given — task lane NOT filtered)");
+  parts.push(MODEL ? `model=${MODEL}` : "model=OFF (no --model/$JS2WASM_MODEL given — task lane NOT filtered)");
   parts.push(AS ? `as=${AS}` : "as=OFF (own claims cannot be distinguished from others')");
   return parts.join(", ");
 }
