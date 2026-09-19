@@ -9346,3 +9346,83 @@ The September 19 timer artifact/numeric-handle regression also passes its one
 selected case (21 unselected), exercising both compiled instances on current
 main. The recovered timer delta is ready for normal hooks and a ready PR;
 this does not release either existing integration hold.
+
+
+### 2026-09-19: C1 accessor-call body extraction from delivered main
+
+Implementation plan recorded before source edits in isolated
+`codex/3518-native-accessor-call-20260919`, based on exact delivered main
+`750fb7e7365692b315179dc909b57fa1407d4527`. The frozen C1 donor map's
+`buildAccessorCall` scope still matches SHA256
+`37addf888c8c67c09e3a6ce1f448f9ddad67b066501f0701a22ba2e389bcd7b2`;
+its committed source is the authority for the new fixed donor fixture.
+
+Owned scope is only the `buildAccessorCall` adapter/import in
+`src/codegen/accessor-driver.ts`, new pure
+`src/runtime/wasmgc/values/accessor-call-bodies.ts`, its dedicated test/fixture,
+and this additive plan. Reservations, driver lookup/fill, setter-result drop,
+JSON reviver/toJSON/replacer bodies and all other C1/C2 owners remain unchanged.
+The legacy compiler remains available until IR behavior is tested and equal.
+
+The adapter retains the exact acquisition sequence: read `__closure_arity`,
+ensure the existing `__argc` global, acquire the actual-arity dispatcher, then
+arity 8 down through actual+1, including each canonical undefined reservation
+and shallow instruction snapshot at its original omitted-argument position.
+When closure arity is missing, it still acquires the unused wider bindings and
+re-reads the actual-arity dispatcher for the historical fallback. Captured
+function handles stay the exact numbers obtained at each donor lookup; later
+map changes cannot retroactively replace them. Data-only descriptors carry
+these handles, the shared global, argument locals and per-omission undefined
+snapshots to the runtime builder; no callbacks or codegen/frontend imports
+enter the pure leaf. The builder retains declared/actual max dispatch through
+8, original receiver, actual argc, local declaration and fresh shallow clones.
+Missing legacy dispatch and disabled undefined remain explicit compatibility
+data, never evidence admitting incomplete future native resources.
+
+Validation will authenticate the committed donor fixture and reconstruct all
+source outside the extracted function/import exactly; compare full acquisition
+traces and emitted bodies under real reservation-order mutations, missing arity,
+missing dispatch, inactive/canonical undefined, and stable handles. Positive-first
+mutants must detect lost argc, receiver or max-dispatch behavior. Executable Wasm
+controls will check underapplication, actual argc, supplied/undefined operands,
+original receiver, setter result drop and historical fallbacks. The existing
+`tests/issue-4392-accessor-underapplication.test.ts` runs unchanged. These tests
+prove this body extraction only, not completed native C1/C2 resource ownership.
+Compiler/runtime tests and typecheck wait for the parent's serialized test slot;
+normal gates and new-module inventory integration remain explicit follow-up.
+
+
+C1 accessor-call extraction validation is now terminal on the exact isolated
+750fb base: 40/40 new controls plus the unchanged Issue 4392 accessor
+underapplication test pass; source TypeScript7 exits 0. The new controls include
+16 executable Wasm cases, four positive-first executable body mutants, complete
+donor acquisition traces and exact source reconstruction outside the extraction.
+Two sequential worker starts record Node 25.9.0, exception references and a
+4 GB heap. All 1,469 source files (1,467 TypeScript files plus two README files)
+and all 1,480 recorded inputs remain identical before and after both jobs.
+
+The initial run remains recorded as 40/41: the deferred-snapshot mutant selected
+the missing-arity fallback, which discards the padded branches it meant to
+observe. Only that mutant premise changed to present arity; the positive donor
+comparison and negative inequality remain, as do every missing-arity control.
+The initial launcher lacked a complete before-manifest and carries no full
+unchanged-input claim. A later fail-closed setup refusal also remains retained;
+it compared an all-file source list against a TypeScript-only list and launched
+no child. The corrected run uses one consistent path set and actual raw rows.
+Evidence is `.tmp/native-accessor-call-b/validation-corrected`, with original
+failures under `validation`. This result completes the scoped body extraction
+validation, not native C1/C2 resource completion or whole-family execution.
+New-module policy integration and normal integration gates remain with the lead.
+
+
+The parent-added inventory entry classifies only the new accessor body leaf as
+clean native runtime, with one corresponding root and a 35-to-36 minimum; no
+edge allowance changes. The exact-base inventory gate exits 0 with 1,467 actual
+modules and 11,224 observed edges (11,220 resolved, four unknown), reporting
+`inventory-valid-architecture-incomplete`. Both scoped budget gates check the
+two changed source files successfully (net +61 LOC). The unchanged dead-export
+command's preservation contract passes 6/6 full and cut witnesses, with 12/12
+core-node callers and 10/10 core-type references. Its strict graph remains OPEN;
+retirement/deletion is not certified. All quality inputs remain unchanged.
+The six-file local checkpoint proceeds through full normal signing hooks;
+publishing and integration remain with the lead.
