@@ -221,6 +221,7 @@
         "src/backend/wasmgc/resources/native-values.ts",
         "src/backend/wasmgc/resources/native-string-number.ts",
         "src/backend/wasmgc/resources/native-string-flatten.ts",
+        "src/backend/wasmgc/resources/native-string-equality.ts",
         "src/backend/wasmgc/resources/native-argument-vectors.ts",
         "src/backend/wasmgc/resources/native-closures.ts",
         "src/backend/wasmgc/resources/native-resource-declarations.ts",
@@ -237,7 +238,7 @@
         "src/backend/wasmgc/resources/native-object-layouts.ts",
         "src/backend/wasmgc/resources/native-symbol-carrier.ts"
       ],
-      "minModules": 22
+      "minModules": 23
     },
     {
       "id": "native-runtime",
@@ -264,6 +265,7 @@
         "src/runtime/wasmgc/values/string-number-bodies.ts",
         "src/runtime/wasmgc/values/string-to-bigint-body.ts",
         "src/runtime/wasmgc/values/string-flatten-bodies.ts",
+        "src/runtime/wasmgc/values/string-equality-body.ts",
         "src/runtime/wasmgc/values/string-utf8-decode-bodies.ts",
         "src/runtime/wasmgc/values/argument-vector-bodies.ts",
         "src/runtime/wasmgc/values/closure-layouts.ts",
@@ -289,7 +291,7 @@
         "src/runtime/wasmgc/values/object-layouts.ts",
         "src/runtime/wasmgc/values/symbol-carrier-bodies.ts"
       ],
-      "minModules": 42
+      "minModules": 43
     },
     {
       "id": "standalone-platform",
@@ -12691,6 +12693,16 @@
       "path": "src/runtime/contracts/timer-capability.ts",
       "state": "clean",
       "layer": "runtime-contracts"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/string-equality-body.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/backend/wasmgc/resources/native-string-equality.ts",
+      "state": "clean",
+      "layer": "backend-wasmgc"
     }
   ]
 }

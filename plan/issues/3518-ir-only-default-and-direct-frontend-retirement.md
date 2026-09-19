@@ -10107,3 +10107,149 @@ recorded as explicit forward deltas without reseeding any donor fixture.
 Evidence lives in `.tmp/native-object-integration-r-20260919/symbol-join/`,
 `symbol-composed-first.*`, `symbol-ts7-*` and `symbol-quality-first/`.
 Normal signed merge hooks follow separately on these frozen executable inputs.
+
+
+### September 19 native string equality prerequisite (Codex)
+
+Isolated branch codex/3518-native-string-equality-20260919 from signed9dd54aff.
+Own pure runtime string-equality body/definition builder and issued backend
+resource owner, focused real Wasm tests, and only a donor-preserving legacy
+__str_equals adapter. __str_compare remains untouched. Archive exact donor
+bytes and hashes under .tmp/native-string-equality before extraction.
+
+Explicit lazy plan preserves identity/length/nonzero unequal-hash early exits,
+collision fallback and UTF16 code-unit comparison. Actual authenticated string
+and flatten packs supply layouts/handles under one physical ledger; reserve,
+freeze, canonical fill and completion are distinct. Reject forged/cross-ledger
+packs, substituted dependencies, duplicate fill and mutated bodies/layouts.
+No codegen/environment dependency or arbitrary instruction callback is admitted
+by the native owner. Legacy getFlattenIdx acquisition ordering and hashed type
+read timing remain unchanged. Validate real flat/slice/rope/UTF8 strings, valid
+hash collisions, surrogate pairs/lone surrogates, lazy true/false flatten call
+counts and rope memoization. No fake flatten implementation proves completion.
+
+Scope: new runtime/wasmgc/values/string-equality-body.ts; new backend/wasmgc/
+resources/native-string-equality.ts; new tests/issue-3518-native-string-equality.test.ts;
+minimal codegen/native-strings-basics.ts adapter. Scoped boundary inventory
+additions require root coordination; no edges/allowances relaxed. Legacy
+compiler remains until all IR behavior is implemented, tested and equal.
+
+Equality validation receipt (September 19, before commit): the complete focused
+pair passes 43/43 (38 real Wasm/owner controls and five historical donor controls),
+with 1,508 inputs unchanged; source TS7 passes with the same unchanged pins.
+The first attempt is retained as 15/43: all 28 execution failures arose from a
+new zero-hash fixture missing the four canonical cache fields. Only that fixture
+initializer was corrected. Production source was unchanged between attempts.
+The immutable donor fixture and separate donor test retain the three original
+functions from 9dd54aff with exact file/function SHA256 provenance; root also
+independently authenticated every unique source span. The complete original
+ordering helper and wrapper stay byte-exact, including changing-handle ordering
+and post-mint hashed-layout reads.
+
+Unchanged legacy validation: 70/71 passes, with all 1,557 source/test/corpus
+inputs unchanged. Native string equality passes 7/7, including the exact five
+Test262 rows; native flatten resources passes 61/61; flat-string inline-cache
+controls pass 2/3. An independent --no-hardlinks corpus clone is clean at
+b363f29d3c43c626dc852744ad64a0b48a003693; all five selected test files and all 44
+harness files were compared byte-for-byte against that commit and pinned.
+The remaining poison-arm control fails before execution because the existing
+repair rejects shared instruction arrays. The unchanged complete three-row
+file was then run on clean exact parent 9dd54aff: 2/3 again, all 1,504 inputs
+unchanged, with identical per-row outcomes and identical diagnostic text before
+path-dependent stack frames. Both failures remain preserved; this is not a
+71/71 result or a waiver of that original negative control. Local receipts live
+under .tmp/native-string-equality and the parent's unique ignored
+.tmp/equality-parent-verifier-20260919 directory.
+
+The boundary delta adds only the two actual owner entrypoints and their clean
+file inventory rows, raising backend-wasmgc minimum 20 to 21 and native-runtime
+minimum 38 to 39. No activation history, allowed edge, or other allowance changes.
+Full native-owner completion is distinct from test-only flatten-call tracing:
+only an already validated module is cloned, its real flatten body is retained
+with a counter prefix, and the clone never claims authenticated completion.
+No prepared-program equality integration or legacy retirement is claimed here.
+
+Initial eight-gate attempt: six passed; lint rejected a test recording comma
+operator, and preservation found that relocatedFlattenPreamble lost its last
+real production caller. Both original failures are retained. The reviewed
+correction keeps the original legacy call at its exact pre-mint point and feeds
+its data into the pure low-level body builder; the native definition builds
+its own guarded preamble from the authenticated flatten handle. The native
+owner accepts neither instruction arrays nor callbacks. No dead-export waiver
+or baseline change is used. The test recorder now uses explicit increment
+statements with unchanged recording semantics. Final revalidation is pending.
+
+Final corrected-source validation: focused pair 43/43 and TS7 pass, all 1,508
+inputs unchanged. The complete unchanged legacy group remains 70/71 with all
+1,557 inputs unchanged; all 71 row outcomes and the sole failure diagnostic
+match the retained first attempt and exact-parent attribution. All eight scoped
+gates now pass (format, lint, LOC, function budget, oracle, coercion, boundary
+inventory, preservation), without baseline or allowance changes. Boundary
+inventory validity does not certify architectural completion. Normal signed
+local checkpoint is authorized; no publication or legacy retirement is implied.
+
+
+Separate follow-up after signed equality checkpoint f75aed66: the exact-parent
+poison failure is caused by flat-str-ic.ts sharing one global POISON_ARM
+instruction array across flatten, identity-equality and length-equality sites.
+The existing ownership repair correctly refuses this representation before the
+unchanged negative test can exercise its expected trap. Scope is only that
+producer: create a fresh array and unreachable instruction at each of its three
+poisoned sites. Preserve all non-poisoned arms, counters and off-token bytes,
+all original tests and diagnostics, and the repair's rejection of shared arrays.
+The existing complete three-row inline-cache suite must again prove off-mode
+byte identity, native Node answers and actual poisoned traps. No assertion or
+validator weakening, no publication; validation awaits the serialized lane.
+
+Poison follow-up validation: the unchanged complete issue-4157-flat-str-ic suite
+now passes 3/3, proving off-token/poison-alone byte identity, native Node answers,
+and an actual unreachable trap from poisoned arms. All 1,506 inputs stayed
+unchanged; source TS7 also passes with 1,508 unchanged inputs. Eight scoped
+gates pass against exact f75aed66, including existing preservation and boundary
+inventory modes; no source/test/fixture/gate relaxation was made. Original
+candidate and exact-parent failures remain retained as historical evidence.
+This is a separate production instrumentation repair, not a reinterpretation
+of the original equality checkpoint's 70/71 denominator.
+
+
+### September 19 canonical object prerequisite equality composition (Codex)
+
+Compose signed poison/equality head 3aee785b (including equality f75aed66)
+into signed Symbol/layout/getter/bag checkpoint 9b371b226c. Before resolving
+metadata, archive all conflict stages and the exact parent blobs. Preserve
+all existing source, donor fixtures, original failures and repaired production
+bytes. The only composition edits are the complete issue-history union and
+two boundary classification/entry additions: backend minimum 22 to 23 and
+native-runtime minimum 42 to 43. No edge, allowance or old history changes.
+
+Validate the complete unique 28-file prerequisite cohort on this joined tree:
+prior 21-file 609-row object union, updated 40-row Symbol owner, 26 additional
+Symbol-array controls, 43 focused equality/donor rows and all 71 equality,
+flatten and inline-cache legacy rows. The proposed total is 789, to be
+measured rather than assumed. Authenticate the five selected Test262 rows and
+all 44 harness files against pinned b363f29d before execution; retain previous
+70/71 candidate and exact-parent failures as historical records. Follow with
+source TS7, eight scoped repository gates and full normal signed merge hooks.
+Keep the existing compiler until everything runs through IR, is tested and
+is equal to that baseline. This connected prerequisite composition does not
+claim full native object/Promise execution or retirement; no publication.
+
+
+The composed 28-file run now passes **789/789**, with no failed or pending
+rows and all 2,120 inputs unchanged, including the five exact Test262 cases
+and 44 harness files. Source TS7 also exits 0 with all 2,120 pins unchanged.
+The entire original three-row inline-cache suite passes alongside the equality,
+flatten, object, Symbol and shared recipe controls. All 43 cumulative source,
+test and fixture paths still match their exact signed parent blobs; the earlier
+Symbol two-file atomicity forward delta remains separately authenticated.
+
+All eight scoped gates pass with 2,119 unchanged inputs: formatting, lint,
+exact-main LOC/function budgets, oracle, coercion, inventory and preservation.
+Inventory is valid with 1,477 modules (157 clean, 1,315 unmigrated and five
+compatibility adapters), zero errors and 44 actual native-runtime members.
+Preservation passes six full and six cut witnesses, 12/12 core-node callers
+and 10/10 core-type references in both views. Architecture remains incomplete
+and the graph remains OPEN; this does not certify retirement. Exact dependency
+base remains delivered main 750fb7e7365692b315179dc909b57fa1407d4527. Retained
+receipts are under .tmp/native-object-integration-r-20260919/equality-*.
+Proceed through the full normal signed merge hooks without bypass or publication.
