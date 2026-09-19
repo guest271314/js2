@@ -9426,3 +9426,117 @@ core-node callers and 10/10 core-type references. Its strict graph remains OPEN;
 retirement/deletion is not certified. All quality inputs remain unchanged.
 The six-file local checkpoint proceeds through full normal signing hooks;
 publishing and integration remain with the lead.
+
+
+## Implementation Plan — C1 native object key foundation (2026-09-19)
+
+This isolated continuation starts at verified main `750fb7e7365692b315179dc909b57fa1407d4527`.
+Develop and validate IR while retaining the legacy compiler as the execution baseline;
+retire it only after complete IR coverage is tested and equivalent. This foundation
+neither changes the default path nor claims complete native Promise materialization.
+
+- Move the eight frozen key/lookup instruction expressions from `src/codegen/object-runtime.ts`
+  into canonical typed builders in `src/runtime/wasmgc/values/object-key-bodies.ts`:
+  ToPropertyKey prefix and late non-Symbol ToPrimitive/ToString arm, coercion wrapper,
+  UTF-16/Symbol hash, key equality/classification/matching, and own-table find.
+- Preserve real type/function handles, optional hashed-string caching, native-first
+  stack shape, numeric/i31 keys, Symbol identity, object-to-Symbol conversion,
+  collision probing and tombstone handling. The runtime leaf has only Wasm model
+  type dependencies and performs no compilation, reservation or registry lookup.
+- Keep registrations, signatures, locals, layouts, allocation order and late splice
+  timing in the legacy caller. Delegate every moved body to its one canonical builder;
+  retain all other object/accessor/prototype/invocation code unchanged.
+- Add `tests/fixtures/issue-3518-object-key-donors.json` with exact original spans,
+  source/commit hashes and offsets, authenticated by the focused
+  `tests/issue-3518-native-object-key-foundation.test.ts`. Compare real donor/new
+  instruction output across genuine mode/layout variants, reject changed receipts,
+  and verify fresh instruction identities rather than masking mutable aliases.
+- Execute real standalone Wasm controls for numeric/string and distinct Symbol keys,
+  object ToPrimitive effects/Symbol result, colliding live/deleted/reinserted entries
+  and hash-cache mutation. Preserve original source/options and compare actual
+  native results. Existing relevant key/Symbol regressions remain part of validation.
+- Source/test checks run serially only after the parent grants the heavy slot.
+  Freeze exact donor and candidate pins, preserve failures, and run source TS7 and
+  scoped normal gates before integration. No baseline/gate exception is added.
+
+The first frozen donor is recorded in the worktree-local
+`.tmp/native-object-foundation-r-20260919/DONOR-SCOPE.json`. This slice does not
+supply accessor/closure dispatch or certify an empty object carrier inventory;
+those remain the existing C1/C2 dependency joins in the implementation spec.
+
+
+### C1 key-foundation local execution evidence (2026-09-19)
+
+The eight-body extraction and legacy delegation are implemented locally on
+`750fb7e7365692b315179dc909b57fa1407d4527`. The exact donor fixture was checked
+against that commit's original source bytes (SHA-256 `692133e0345a24e3c45071ed031036b96dc3f6e7702dc358e2f99651820eed9e`).
+Hash-context values are acquired at the original hash construction point after
+ToPropertyKey registration; the runtime API contains only plain typed values.
+
+- Focused first run: **26/27**. Its single failure was test-only JSON snapshot
+  serialization of a real i64 BigInt, before the diagnostic table probe. The raw
+  failure and original test bytes are retained. Replacing that snapshot with
+  lossless `structuredClone` plus deep equality produced **27/27** with unchanged
+  production bytes, no skipped cases, and no drift over 1,581 pinned inputs.
+- The passing execution controls include both legacy/experimental-IR source
+  paths, Symbol identity and object-key effects, real hash-cache mutation, and
+  the actual emitted hash/table mask/tombstone lookup. Replacing the observed
+  first deleted slot by an empty slot stops lookup of the later live key.
+- Four complete unchanged legacy suites pass **61/61**: `issue-2042` 14,
+  `issue-2042-r2-topropkey-object` 8, `issue-2866` 27, and `issue-2985` 12.
+  Their run preserved all 1,587 inputs, including the coordinator's new
+  native-runtime boundary classification. All 1,469 source files stayed fixed.
+- Canonical source TS7 passed independently. Actual workers used Node 25.9,
+  a 4 GB heap, one-worker scheduling, GC/EH flags, and finite load admission.
+  Raw rows, before/after maps, worker observations and the failed first attempt
+  remain under `.tmp/native-object-foundation-r-20260919/` in the isolated tree.
+
+All eight scoped repository checks passed: formatting, unlimited scoped lint,
+exact-base LOC/function budgets, oracle and coercion ratchets, boundary inventory,
+and the canonical dead-export preservation audit. Their 1,934 input maps stayed
+unchanged. The coercion census was nonempty (127 files / 519 sites).
+Inventory is valid with 1,467 modules (147 clean, 1,315 unmigrated, five
+compatibility adapters), zero inventory errors, and incomplete architecture.
+The preservation audit passes six full and six cut witnesses; strict closure
+remains open on the existing nonliteral imports in `optimize.ts` and
+`platform-capability-adapter.ts`, so it does not certify retirement.
+
+These measurements precede the normal signed local checkpoint. This is the key/own-table
+foundation only; getter dispatch, complete object-carrier resources and native
+Promise integration remain open. The legacy compiler remains the baseline.
+
+
+### C1 combined local checkpoint (2026-09-19)
+
+The isolated integration joins signed accessor parent
+`4d3d621e4b14593f718305f1a3ec7412e18a000b` with signed key-foundation parent
+`7a64d0b60cb11343128e0c5c0b006f4d2547ec28`, both based on verified delivered
+main `750fb7e7365692b315179dc909b57fa1407d4527`. All eight production, test and
+donor-fixture files are byte-identical to their owning parent. The issue keeps
+both complete append histories. The boundary union adds only the two clean
+native-runtime leaves and their entries, raising the minimum to 37; all edge
+rules, allowances, historical moves and evidence remain unchanged.
+
+The seven complete combined suites pass **129/129**, zero failures or pending:
+accessor controls 40, key-foundation controls 27, unchanged key/Symbol suites
+14 + 8 + 27 + 12, and unchanged accessor-underapplication 1. The run preserves
+all 1,593 inputs; its raw rows and worker records remain under
+`.tmp/physical-async-state-scan-r-20260919/combined-foundation.*`.
+
+Independent integrated source TS7 and all eight static gates exit 0: formatting,
+unlimited scoped lint, exact-main LOC/function budgets, oracle, coercion,
+boundary inventory and the dead-export preservation contract. Each before/after
+map preserves all 1,937 inputs. Coercion coverage is 127 files / 519 sites.
+Inventory is valid with 1,468 modules: 148 clean, 1,315 unmigrated and five
+compatibility adapters; actual native-runtime membership is 38. Architecture
+remains incomplete. Preservation passes six full and six cut witnesses, 12/12
+core-node callers and 10/10 core-type references; strict closure remains OPEN
+on the two existing nonliteral imports, without a retirement certificate.
+New integration evidence is `.tmp/runtime-foundation-integration-r-20260919/`.
+Earlier failed attempts in each owning worktree remain preserved separately.
+
+This checkpoint integrates the two body extractions only. Getter/property and
+native Promise resource joins remain open. Keep the legacy compiler as the
+baseline until **everything runs through IR, is tested, and is equal to the
+existing compiler**; only then retire it. No default switch or deletion is
+part of this checkpoint. Publication remains with the lead.
