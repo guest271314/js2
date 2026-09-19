@@ -9540,3 +9540,173 @@ native Promise resource joins remain open. Keep the legacy compiler as the
 baseline until **everything runs through IR, is tested, and is equal to the
 existing compiler**; only then retire it. No default switch or deletion is
 part of this checkpoint. Publication remains with the lead.
+
+### 2026-09-19: C1 initial object-get body extraction
+
+Pre-edit implementation plan: isolated `codex/3518-native-object-get-20260919`
+on exact delivered main `750fb7e7365692b315179dc909b57fa1407d4527`. The
+signed accessor checkpoint remains separate and unpublished. The existing
+September 9 C1 donor map and current read-only donor report define the boundary;
+current committed donor bytes, not the joined candidate, authenticate receipts.
+
+Move only the initial `__extern_get` body into canonical typed runtime builders.
+Keep its legacy allocation/registration schedule, local declarations and every
+later closed-field, proxy, string, closure, cache and metadata finalizer intact.
+The key/hash/find extraction and enumeration region belong to other lanes.
+
+The parent explicitly released these seven small dependency wrapper/import
+hunks: `buildTemplateRawGetArm` in object-runtime-template-raw;
+`buildInstancePropGetArm` in instance-props;
+`buildVecOrClosurePropGetMissArm` in vec-props;
+`buildClosurePropGetMissArm` in closure-props;
+`protoIndexRecvGetMissInstrs` in proto-index-store;
+`nativeGeneratorProtocolReadPrefix` in generators-native-protocol; and
+`reverseGetArmInstrs` in standalone-link-reverse-peer. Their reserve, fill and
+classification code remains unchanged. Capture actual optional handles/layouts
+and per-occurrence canonical literal/undefined operands in the original order.
+These legacy capture adapters feed explicit typed arm descriptors; no context
+getters, arbitrary callbacks or opaque whole-arm buffers enter the pure leaf.
+Template-literal binding acquisition stays at its original early call site.
+
+Use cohesive `runtime/wasmgc/values/object-get-bodies.ts` and, if needed for
+normal function budgets, `object-get-arms.ts`; no budget exceptions. Preserve
+one-shot Reflect receiver consumption before any getter, instance-own-before-
+prototype precedence, original accessor receiver, null-getter versus missing
+property and present undefined, fnctor brand guard, optional real generator/
+vector/closure/prototype hooks and first-depth cache owner/entry/table identity.
+The reverse-peer getter's owned-global presence channel must preserve stored
+null independently from an unhandled miss. All later legacy body splices retain
+the same body objects and indices; do not rebuild at finalization.
+
+Proof will reconstruct committed source outside the exact donor regions, compare
+all selected/de-selected acquisition traces and emitted bodies against fixed
+donors, and execute representative real Wasm property reads including explicit
+receiver, nested getter latch consumption, own/prototype precedence, exceptions,
+undefined/null, cache depth and peer presence. Positive-first mutations must
+expose lost latch, precedence, receiver, cache or presence semantics. Relevant
+existing complete test files run unchanged after the parent's serialized slot
+grant. No native resource pack, completed C1/C2 ownership, public cutover or
+legacy retirement is claimed by this initial-body extraction.
+
+The parent additionally approved removal of six arm-returning exports that lost
+their sole real reader in this extraction. Their complete original functions
+remain in the fixed donor receipt. The capture adapters are the actual legacy
+readers; the prototype wrapper retains its other real callers. No dummy call
+is introduced to satisfy export reachability. Dependency trace controls cover
+both fnctor branches, absent closure with subsequent undefined reservation
+mutations, shallow list snapshots and the companion else-array identity, plus
+a valid reverse-peer owned-global index of zero distinct from absence.
+
+The emitted getter controls use actual WasmGC objects with controlled explicit
+find/accessor/carrier imports. They do not prove key-foundation integration or
+a completed native resource pack. Unchanged legacy compiler regressions are a
+separate population; all validation remains pending until the serialized run.
+
+Validation on this exact 750fb-based getter extraction: the first focused run
+was 79/80. Its sole failure was the test's inverse import envelope for
+instance-props: formatting condensed the two-symbol generator import. The
+original raw failure and pins remain under `.tmp/native-object-get-b/validation`.
+The test-only correction authenticates the exact complete original/current
+import statements; it does not relax the full-source hashes or donor counts.
+The corrected run passed 80/80: 13 fixed-donor/source controls, 35 dependency
+acquisition controls, 27 emitted-getter cases with controlled dependencies, and
+five positive-first executable mutation controls. All eight complete committed
+source inverses match their original hashes. The 27 getter cases plus five
+paired mutations construct and invoke 37 actual Wasm instances. They are not
+execution of a completed native object-access resource pack.
+
+Independent source TS7 passed. Six unchanged complete legacy suites passed
+37/37: carrier-bag prototype walk (13), accessor underapplication (1),
+prototype-index store (10), standalone reverse-peer read (1), ES2015
+TypedArray round-three receiver controls (10), and tagged-template call-site
+arity/raw reads (2). Focused, TS7, and legacy runs each retained full input
+pins: 1,488 inputs including 1,470 source files, with zero drift. The corrected
+run and unchanged legacy rows are under `validation-v2`; source bytes stayed
+identical to the source TS7 success. The canonical Node 25.9.0 fork metadata
+records the EH flag and 4 GiB heap cap, with file parallelism disabled.
+
+Scoped format/lint, LOC/function budgets, oracle, coercion and the explicit
+inventory gate passed on base 750fb. No budget exception or edge allowance was
+added. The coercion check used a verified no-space alias for this same tree and
+counted 127 unique positive files / 521 sites, with no growth across the eight
+changed codegen files. Inventory measured 1,468 modules, 11,233 observed edges,
+11,229 resolved and four unknown dynamic imports: inventory-valid, architecture
+and graph incomplete. The standard preservation reachability contract passed
+6/6 full and 6/6 dispatch-cut witnesses; core nodes passed 12/12 and core types
+10/10 in both views. Strict modeled closure and retirement remain uncertified.
+These limits do not require deleting the old compiler: keep it available until
+IR behavior is fully tested and equivalent. Normal local commit hooks run
+separately from these measured populations.
+
+The first normal commit attempt completed format/lint, then stopped before
+budgets and tests because its explicit PATH omitted the installed pnpm
+directory. All 1,488 inputs were unchanged. Its hook log remains preserved;
+the full normal hook chain is retried with the existing package-manager path,
+without bypassing any gate.
+
+### 2026-09-19: compose signed C1 getter, key and accessor checkpoints
+
+Pre-test-change integration plan: finish the existing merge of signed getter
+4280967c297c5e33d14c55dca81af331785fd241 into signed key/accessor integration
+cfff0f5cebb19e3b3773a4b892b0619ac2e511e3, both based on delivered 750fb.
+Retain both complete issue histories. Union the four canonical runtime leaves
+and the native-runtime minimum of 39; preserve all existing edges, allowances
+and activation history. Enumeration remains isolated from this composition.
+
+The only shared production file is object-runtime.ts. Authenticate the exact
+750fb-to-7a64d0b6 key changes and 750fb-to-4280967c getter changes from their
+committed Git blobs, verifying signed provenance while authoring the receipt.
+Preserve every original donor fixture and whole-file source hash. A separate
+fixed peer-delta receipt records only those exact before/after hunks, never a
+hash obtained from the joined candidate. Offline tests require unique ordered
+spans, reverse each peer delta, reproduce the exact other signed source and
+the original 750fb source, and prove both compositions agree. The getter's
+existing full-source inverse runs after removing only the authenticated key
+delta; the key suite adds an exact current-source composition check.
+
+Add positive-first controls for altered, missing, duplicate and reordered
+signed spans, changed receipt bytes and corruption outside the owned hunks.
+All original behavioral controls and refusal expectations remain. Inspect the
+automatic production merge against each signed owner; no production repair is
+authorized by this composition step. After the serialized slot opens, run the
+combined focused and unchanged relevant suites, source TS7 and required gates,
+then all normal signed-merge hooks without bypass. This composes body recipes;
+it does not create or certify a native object-access resource owner.
+
+#### Measured integration evidence, 2026-09-19
+
+The 13-file combined cohort passes 257/257: accessor 40, key 28, getter 91,
+and 98 unchanged compiler controls across ten files. There are no pending
+rows. Preserve the first 256/257 attempt: one new corruption control selected
+the reverse-peer import from the template-raw import hunk. Swapping those two
+selector literals corrected the harness while retaining mutations against all
+eight authenticated getter hunks. No production or historical fixture changed.
+The corrected cohort, independent source TS7, and all eight quality gates
+completed with 1,527 pinned inputs (1,472 source files) unchanged. Actual fork
+records show canonical Node 25.9.0, the EH flag and 4 GiB heap cap; files ran
+serially. Raw rows, first failure and exact before/after hashes remain under
+`.tmp/getter-integration-b/validation{,-v2}` and `quality`.
+
+All three original donor fixtures and the original 40 accessor / 27 key /
+80 getter controls remain. The separate fixed composition receipt authenticates
+nine signed key hunks and eight signed getter hunks. Both inverse orders recover
+the exact other signed peer and original 750fb whole source. Retained code
+outside both deltas also remains mandatory. All 13 production paths match their
+signed owner or the independent disjoint composition; enumeration is excluded.
+
+Scoped formatting/lint, source type checking, LOC/function budgets and oracle
+pass without allowances. The exact-base budget check covers 13 source files,
+net +447 LOC. The positive coercion census counts 127 unique files / 519 sites
+through a verified no-space alias to this same worktree. Explicit inventory
+mode measures 1,470 modules and 11,237 observed edges, of which 11,233 resolve;
+four dynamic-import edges remain unknown. The policy union retains all edges,
+allowances and history, with 40 native-runtime entries and a floor of 39.
+
+The preservation reachability contract passes 6/6 full and 6/6 dispatch-cut
+source witnesses. Core nodes pass 12/12 full observations, while their
+dispatch-cut observation remains UNKNOWN; core types pass 10/10 in both views.
+The graph remains OPEN, architecture incomplete, and retirement uncertified.
+Keep the legacy compiler until IR behavior is fully tested and equivalent.
+These results establish composed body recipes and retained legacy behavior;
+they do not issue or certify a complete native object-access resource owner.
+Normal signed-merge hooks are a separate subsequent measured population.

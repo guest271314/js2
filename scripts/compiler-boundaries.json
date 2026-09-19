@@ -267,6 +267,8 @@
         "src/runtime/wasmgc/values/closure-layouts.ts",
         "src/runtime/wasmgc/values/accessor-call-bodies.ts",
         "src/runtime/wasmgc/values/object-key-bodies.ts",
+        "src/runtime/wasmgc/values/object-get-arms.ts",
+        "src/runtime/wasmgc/values/object-get-bodies.ts",
         "src/runtime/wasmgc/values/native-resource-declaration-types.ts",
         "src/runtime/wasmgc/values/number-ryu-tables.ts",
         "src/runtime/wasmgc/values/number-ryu-bodies.ts",
@@ -282,7 +284,7 @@
         "src/runtime/wasmgc/async/prepared-async-frame-engine.ts",
         "src/runtime/wasmgc/async/prepared-async-frame-types.ts"
       ],
-      "minModules": 37
+      "minModules": 39
     },
     {
       "id": "standalone-platform",
@@ -1648,6 +1650,16 @@
     },
     {
       "path": "src/runtime/wasmgc/values/closure-layouts.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/object-get-arms.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/object-get-bodies.ts",
       "state": "clean",
       "layer": "native-runtime"
     },
