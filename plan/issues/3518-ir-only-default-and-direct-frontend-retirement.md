@@ -9710,3 +9710,130 @@ Keep the legacy compiler until IR behavior is fully tested and equivalent.
 These results establish composed body recipes and retained legacy behavior;
 they do not issue or certify a complete native object-access resource owner.
 Normal signed-merge hooks are a separate subsequent measured population.
+
+
+### Implementation Plan — C1 carrier-bag read/presence (2026-09-19)
+
+This isolated slice starts at signed integration
+`cfff0f5cebb19e3b3773a4b892b0619ac2e511e3`, retaining exact main dependency
+`750fb7e7365692b315179dc909b57fa1407d4527`. The pre-edit donor is frozen in
+`.tmp/carrier-bag-read-r-20260919/DONOR-SCOPE.json` from the committed
+`src/codegen/carrier-bag-visibility.ts` bytes, before any source edits.
+
+Own only the marker instruction builder and the bag-of/bag-has construction
+hunks in that adapter, new typed runtime leaf
+`src/runtime/wasmgc/values/carrier-bag-read-bodies.ts`, and dedicated
+`tests/issue-3518-native-carrier-bag-read-bodies.test.ts` plus fixed donor fixture
+`tests/fixtures/issue-3518-carrier-bag-read-donor.json`.
+
+- Keep all early fill gates, strict-equality helper acquisition before the arms,
+  both predicate/lookup reads for every arm, closure/vector/instance/error order,
+  whole-fill return when all arms are absent, and function/local publication order.
+- Transfer the actual Object screen and presence/marker instructions with plain
+  type/function handles and local indices. No compiler context, callbacks,
+  arbitrary complete-arm instruction input, bag ensure/allocation or invented
+  carrier inventory enters the runtime API. Missing layout remains false in the
+  compatibility wrapper; actual marker consumers delegate to the same body.
+- Preserve live-entry self-marker identity, the eq guard for arbitrary stored
+  values, inherited lookup/tombstone behavior, and fresh instruction ownership.
+  Reservations, GOPD, key enumeration, writes, and all other donor source remain
+  unchanged. This is not a native object/Promise resource completion claim.
+- Authenticate the fixed committed donor, invert only the permitted source spans,
+  compare original/current acquisition and publication traces, and execute real
+  Wasm screening/precedence/marker controls with positive-first mutations. Run
+  existing carrier-bag regressions separately, keeping exact source/options and
+  every failure. Canonical Node 25 / one-worker / 4 GB checks wait for the lead's
+  serialized heavy slot; no test is inferred from source receipts.
+
+The lead owns new-module boundary policy and integration. Keep the existing
+compiler until everything executes through IR, is tested, and is equivalent;
+this extraction changes no default and retires no code. No publication is made.
+
+
+The scoped extraction is now implemented and validated locally on `cfff0f5ceb`.
+All **47/47** focused controls pass: 33 fixed-donor/acquisition/publication
+controls, 12 executed Wasm screening/presence/precedence controls, and two real
+compiler executions with actual builder delegation and unchanged source/native
+answers. The controls preserve both reads per arm, all-absent whole-fill return,
+screen-before-cast, live self-marker identity, non-eq values, and missing layout.
+Post-publication mutation controls independently retain cached local layout 102
+while the marker uses the later layout 302 or the original false fallback;
+replacing that late read with the cached value is detected.
+
+Independent source TS7 exits 0. Five complete unchanged legacy files pass
+**95/95**: Issue 4010 (47), Error expandos 4098 (8), carrier slot 4241 (16),
+instance slot 4241 (11), and prototype walk 4563 (13). No assertions, fixtures or
+production bytes changed between these runs. Focused/TS7 preserve 1,590 inputs;
+legacy preserves 1,594; all contain the same 1,471 complete source files. Actual
+workers record Node 25.9, 4 GB, GC/EH flags and configured one-worker execution.
+Raw rows, source/options pins and finite load admissions are retained under
+`.tmp/carrier-bag-read-r-20260919/`. No failed attempt was discarded or repaired.
+
+The lead adds only this new clean native-runtime leaf and entry, raising the
+minimum from 37 to 38 without edge/allowance changes. Repository gates and full
+normal signing hooks follow on the same frozen executable inputs. Complete
+native carrier/resource ownership and the Promise join are still unfinished.
+
+All eight scoped repository gates now exit 0, with 1,938 inputs unchanged:
+formatting, unlimited scoped lint, exact-main LOC/function budgets, oracle and
+coercion ratchets, boundary inventory and the existing preservation audit.
+The nonempty coercion census is 127 files / 519 sites. Inventory is valid with
+1,469 modules (149 clean, 1,315 unmigrated, five compatibility), zero errors,
+and 39 actual native-runtime members; architecture remains incomplete.
+Preservation passes six full and six cut witnesses, core-node callers 12/12,
+and core-type references 10/10. Strict closure remains OPEN at the same two
+nonliteral imports; no retirement certification is inferred. The six-file
+checkpoint proceeds through normal signing hooks without bypass or publication.
+
+
+### 2026-09-19: compose the signed carrier-bag read checkpoint
+
+Pre-validation integration plan: merge signed 9dd54aff748b62b7417e7b0d4b0bf95e172bb4b3,
+whose parent is cfff, into signed getter integration
+c4fce6396b87ed1e4b0151bedb68b7752e27e1e8. The only shared changed paths are this
+issue record and compiler-boundaries.json. Preserve both complete histories.
+Keep the exact getter/key/accessor sources, all existing donor fixtures and
+the signed key/getter composition receipt. Import the bag adapter, pure leaf,
+47-case focused test and fixed donor fixture unchanged from 9dd54aff.
+
+The carrier-bag donor source at cfff is unchanged at c4f. Its complete source
+inverse and four original spans need no new receipt or hash. Retain the existing
+getter/key inverse in both orders without modification. Policy adds one clean
+native-runtime module and required entry to the getter union, with minimum 40
+and 41 actual entries; all other layers, edges, allowances and history remain.
+No production conflict or new source repair is part of this merge.
+
+Validate the complete 18-file union (proposed 386 rows), counting the shared
+13-case prototype-walk file once. Run independent source TS7, eight required
+gates with exact750fb bases, positive coercion census and full normal signed
+merge hooks. Measure actual rows and preserve any failed attempt. These body
+and legacy controls do not establish complete native object ownership or the
+native Promise join. Keep the existing compiler until all IR behavior is tested
+and equal; no publication or retirement is part of this integration.
+
+
+The composed 18-file cohort now passes **386/386**, with zero pending rows:
+206 focused accessor/key/getter/bag controls and 180 unchanged complete-file
+compiler controls. The 13-case prototype-walk suite is counted once. The first
+attempt stopped before collection because the ignored overlay's relative base
+config import had not gained the extra directory level; preserve its raw exit-1
+log. Correcting only that ignored path allowed the unchanged tracked inputs to
+run. No source, test, donor fixture or refusal expectation changed.
+
+Independent source TS7 and all eight quality gates pass. Each measured run
+retains 1,534 pinned inputs, including 1,473 source files, with zero drift.
+Two sequential fork records authenticate Node 25.9.0, EH and 4 GiB settings
+under the one-worker configuration. Exact 9dd bag blobs and c4f getter/key/
+accessor sources and fixtures authenticate after composition; all existing
+whole-source inverses remain unchanged. Evidence is retained under
+`.tmp/getter-integration-b/bag-integration/`.
+
+Inventory mode is valid with 1471 modules, 11239 observed edges,
+11235 resolved edges and 4 unknown edges. Architecture remains
+incomplete. The verified positive coercion scan measures 127 unique files /
+519 sites, with no policy or allowance relaxation. Preservation witnesses
+pass 6/6 full and cut; core nodes pass 12/12 full with dispatch-cut UNKNOWN,
+and core types pass 10/10 in both views. Strict closure and retirement remain
+uncertified. Full normal signed-merge hooks are measured separately; no push,
+new resource owner, native Promise completion or old-compiler retirement is
+part of this composition.
