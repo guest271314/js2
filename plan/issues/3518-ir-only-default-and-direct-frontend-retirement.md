@@ -9973,3 +9973,137 @@ closure remains open. Raw commands, worker identities, counts and input maps
 are retained in `.tmp/native-object-integration-r-20260919/`. Full normal
 signed-merge hook execution is recorded separately after these local checks.
 No publication or full object/Promise completion follows from this checkpoint.
+
+
+### Implementation Plan — C1 native Symbol carrier and interned boxing (2026-09-19)
+
+This isolated slice starts at signed 17ac5ad7d3fd5d959a4ffbea0f526d9f18d1c901.
+Freeze the committed symbol-native.ts source and ensureSymbolCarrier donor
+before source edits. Own only its selected carrier/body expressions and import,
+new runtime/wasmgc/values/symbol-carrier-bodies.ts, new backend/wasmgc/resources/
+native-symbol-carrier.ts, dedicated tests and the fixed donor fixture. All
+Symbol description-table, registry, counter, provider selection and boundary
+bridge code stays unchanged. The historical no-interning comment is stale;
+the actual selected body already interns by ID and remains authoritative.
+
+The runtime leaf preserves immutable $Symbol{id:i32,desc:ref_null AnyString},
+the mutable symref backing array, null-initialized mutable intern table and
+actual boxing algorithm: allocate id+1 lazily, repeatedly double/copy as needed,
+reuse the existing reference for an ID and create a null-description carrier
+only on a missing entry. The legacy adapter retains real type/helper lookup,
+cache/read timing, allocator handles and publication order. Pure builders take
+plain typed indices from their owning adapter, never context or callbacks.
+
+The new backend owner uses the existing PhysicalModuleReservations only.
+Authenticate the actual native string literal/layout pack on the same ledger
+before allocating any dependent resource; no raw signature or lookalike layout
+is authority. A frozen declaration plan and current inventory enumerate all
+four resources in order: symbol type, intern-array type, mutable intern global,
+and boxing function. Resolve the historical backing-array name from the actual
+issued symbol token index. An owner WeakMap binds the exact pack, plan, string
+pack and ledger. Fill after freeze, require completed strings, and attest actual
+function/global completion and content currentness through the existing ledger.
+Do not publish exports or create another allocator/registry/root implicitly.
+
+Authenticate the original whole-source reconstruction and exact instruction/
+local definitions under shifted indices. Execute emitted Wasm to prove same-ID
+reference identity before/after growth, distinct IDs, null descriptions, field
+and imported-global/type/function offsets, and isolation between instances.
+Positive-first negatives reject copied/foreign owners, different string packs,
+changed type/global/body records, missing/forged fills and incomplete resources
+without dependent allocation. Preserve original legacy Symbol regressions.
+Heavy tests wait for the lead's serialized slot; no native resource acceptance
+is inferred from donor text equality. This is the Symbol carrier prerequisite,
+not full Symbol semantics, C1 completion, native Promise completion or retirement.
+
+#### C1 Symbol carrier validation (2026-09-19)
+
+The isolated `codex/3518-native-symbol-carrier-20260919` checkpoint is based on
+`17ac5ad7d3fd5d959a4ffbea0f526d9f18d1c901`. The fixed donor fixture remains
+`aa7beec33888dd1ddc7bf8fdb9ac515ed9ba7a5ae0e8e3489215ab9572b5bca1`; the complete
+legacy source reconstructs to its original authenticated hash. The adapter only
+replaces the Symbol type and boxing instruction construction. Description storage,
+registry, counter and boundary bridge are unchanged.
+
+The first focused run passed **32/38**, with six failures from Vitest inspecting
+opaque WasmGC objects during negative identity matchers. This raw run is retained
+in `.tmp/symbol-carrier-b-20260919/validation/`. Nine test-only comparisons now
+use boolean `Object.is` or membership via `some(Object.is)`, preserving all
+identity conditions and downstream assertions. The corrected full run passed
+**38/38**, followed by source TS7 exit 0; both recorded **1,515 unchanged inputs**,
+including **1,475 source files**. The actual emitted Wasm controls cover same-ID
+identity across growth, distinct IDs, null descriptions, type/global/function
+offsets, fresh-instance isolation, and a valid-Wasm copy-loss mutant. Exact
+matching external fills of either resource or both never confer owner completion.
+
+The unchanged complete `issue-2866.test.ts` and
+`issue-3481-symbolarr-vec-brand.test.ts` suites passed **53/53**, with **1,516
+unchanged inputs**. These are real legacy compiler/runtime controls; the new
+resource tests establish the isolated issued carrier pack, not full native Symbol
+or native object-access integration. Corrected evidence is retained under
+`.tmp/symbol-carrier-b-20260919/validation-v2/`.
+
+The policy adds only the two new module entries and clean classifications; native
+runtime and backend floors advance 40→41 and 20→21. All activation histories,
+allowed edges and allowances remain unchanged. All eight scoped gates pass with
+1,517 unchanged inputs. The inventory contains 1,473 modules and 11,246 observed
+edges (11,242 resolved; four unknown): inventory-valid, architecture-incomplete.
+LOC/function gates cover all three changed source files (net +262 LOC), without
+new allowances. The no-space-path coercion census positively observes 127 files
+and 519 sites. Preservation witnesses pass 6/6 full and 6/6 cut; core nodes pass
+12/12 observed (cut unknown), core types 10/10 full and cut. Strict closure is OPEN
+and retirement is not certified. Full normal signed commit hooks follow this
+record. The old compiler remains available; retirement still requires the separate
+complete-IR equivalence condition.
+
+
+### 2026-09-19: compose Symbol ownership and preflight all reservation keys
+
+Pre-edit integration plan: merge signed Symbol checkpoint
+`5794fd983a107f4ef754bc969f7b225275f2e718` into signed layout/getter/bag
+checkpoint `0ef8e0ea4c23829a4eba37dca6dd6822aa95265e`. Authenticate all 36
+source/test/fixture blobs from their owning signed parent before any correction;
+archive the signed Symbol owner and test separately. Preserve both complete
+issue histories and the exact policy union (backend22/native-runtime42), with
+no edge or allowance changes. Only issue/history and policy conflicted.
+
+The Symbol owner currently reserves its type/array prefix before discovering
+a pre-existing global or box-function key. Add the ledger's complete read-only
+key-availability check before the first Symbol allocation. Use the real frozen
+four-row declaration keys, preserving the original reservation/interner order
+when available. Add positive-first late global/function collision controls with
+actual pre-existing resources; assert unchanged full module, array identities,
+and function-type interner population. No fake binding or rollback is inferred.
+Record this exact forward delta instead of claiming signed source equality for
+the corrected owner/test. The pure body and original donor fixture stay exact.
+
+Run the complete updated Symbol suite with shared layout/ledger/recipe and
+legacy Symbol controls only after the current serialized test lane releases;
+measure the new denominator, then source TS7, required gates and normal hooks.
+The later signed poison/equality repair will compose separately. Keep the
+legacy compiler until full IR coverage is tested equal; this remains a C1
+prerequisite, not completed object access or native Promise integration.
+
+
+The Symbol composition and bounded preflight correction now pass **316/316**
+across six complete files: **40** current Symbol controls (all original 38 plus
+two late-collision rows), **52** layout, **149** ledger, **22** recipe, and **53**
+unchanged Symbol legacy controls. There are no failed or pending rows and no
+input drift across 1,605 pins. Source TS7 passes on the same source; an earlier
+TS7 load admission refused before a child started and remains recorded.
+
+All eight exact750fb gates pass with 1,953 inputs unchanged. Inventory is valid
+with 1475 modules: 155 clean,
+1315 unmigrated and 5
+compatibility adapters; zero errors, architecture incomplete. The exact policy
+union raises backend/native floors to22/42 without changing layer edges,
+allowances or prior history. Preservation remains6/6 full and cut with the
+same open modeled closure; no retirement or full C1 completion is inferred.
+
+The original signed Symbol owner/test and all36 signed input identities were
+archived before the correction. Exactly34 remain byte-identical; the owner has
+one added batch-key check and its test has two additional collision controls,
+recorded as explicit forward deltas without reseeding any donor fixture.
+Evidence lives in `.tmp/native-object-integration-r-20260919/symbol-join/`,
+`symbol-composed-first.*`, `symbol-ts7-*` and `symbol-quality-first/`.
+Normal signed merge hooks follow separately on these frozen executable inputs.
