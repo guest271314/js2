@@ -9837,3 +9837,139 @@ and core types pass 10/10 in both views. Strict closure and retirement remain
 uncertified. Full normal signed-merge hooks are measured separately; no push,
 new resource owner, native Promise completion or old-compiler retirement is
 part of this composition.
+
+
+### 2026-09-19 C1 canonical object layouts — implementation plan (R)
+
+This prerequisite advances the existing native object-access plan from the signed
+carrier-bag checkpoint `9dd54aff748b62b7417e7b0d4b0bf95e172bb4b3`
+(main dependency `750fb7e7365692b315179dc909b57fa1407d4527`). Work is isolated in
+`worktrees/codex-3518-native-object-layouts-20260919`; legacy codegen remains the
+baseline. Retirement follows only after everything runs through IR, is tested,
+and is equal. This layout owner does not complete object access or native async.
+
+Implementation scope, recorded before source edits:
+
+- `src/wasm/physical/module-reservations.ts`: add a narrow plain-data
+  `reserveSelfReferentialStructType` operation. Resolve explicit self field
+  markers at the ledger's next flattened type coordinate. Preserve the existing
+  type allocator/token identity and no-parent final struct representation.
+  Reject accessors, callbacks, malformed descriptors/self markers and invalid
+  existing references before appending. No provisional tokens, guessed indices,
+  generic forward references, self parents or post-registration mutation.
+- `src/backend/wasmgc/resources/native-resource-declarations.ts`: permit only a
+  same-declaration struct FIELD symbolic reference; preflight the entire recipe
+  before allocating any prefix. The executor translates self fields through the
+  ledger operation and authenticates other prerequisite tokens normally. Shape
+  comparison resolves self against the actual issued token, never a supplied
+  numeric coordinate or candidate-derived expectation. Preserve array/global/
+  signature forward-reference and metadata-cursor restrictions. Existing native
+  declaration types need only documentation if their current typeKey can express
+  the same-row field without schema expansion.
+- NEW `src/runtime/wasmgc/values/object-layouts.ts` and NEW
+  `src/backend/wasmgc/resources/native-object-layouts.ts`: describe/reserve the
+  exact donor `$PropEntry`, mutable `$PropMap`, and final self-referential
+  `$Object` layouts, in that order. Expose same-ledger issued layout tokens and
+  exact recipe inventory/currentness checks. No placeholder functions, fabricated
+  carrier inventory, C2 completion claim, or hidden legacy import. The original
+  codegen layout builder remains untouched in this slice.
+- NEW `tests/issue-3518-native-object-layouts.test.ts`: positive-first canonical
+  layout/ledger/recipe controls, including index0 and nonzero flattened offsets
+  after an explicit multi-member rec wrapper; actual emitted Wasm linked-object
+  prototype traversal/null and mutable property-entry state; exact historical
+  donor layout comparison; foreign/copied/stale tokens, changed plans, missing/
+  forward/self-parent refs, sparse/accessor/malformed inputs, and no module
+  population growth on rejected operations/late invalid recipe rows.
+
+Validation will be serialized by the root: focused complete new suite, unchanged
+`issue-3518-module-reservations.test.ts` and
+`issue-3518-native-resource-declarations.test.ts`, source TS7, relevant boundary/
+LOC/function/oracle/dead-export gates and normal hooks only when authorized.
+Before/after source pins and any failed attempts remain in ignored
+`.tmp/native-object-layouts-r-20260919/`. Root owns boundary inventory additions.
+No push, PR or queue action is authorized for this checkpoint.
+
+### 2026-09-19 C1 canonical object layouts — local implementation evidence (R)
+
+Implemented the bounded layout prerequisite on signed parent
+`9dd54aff748b62b7417e7b0d4b0bf95e172bb4b3`: the ledger resolves plain-data
+self field markers at its own flattened coordinate; the native declaration
+executor authenticates prerequisite tokens and checks all actual reservation
+keys before allocating. Preflight retains a descriptor-derived snapshot used
+for validation and execution. The object layout owner retains that snapshot
+and independently checks its original plan identity/currentness and issued
+tokens. No generic forward reference, self parent, provisional token, callback
+allocator, or numeric producer-authentication shortcut was introduced.
+
+The canonical final `$Object`, `$PropEntry`, and `$PropMap` declarations match
+the unchanged legacy donor span (SHA-256
+`e4d546ab2007a44fe45d5bcda8453e190aaaa89296d427c7de20df045ec8f547`).
+Actual emitted Wasm tests cover linked-object prototype traversal and null
+termination, mutable count/flags/value, host object/null/undefined identity,
+and nonzero flattened indices following an explicit two-member rec group.
+Adversarial controls cover malformed/reentrant self descriptors, swallowed
+reentrant errors, late missing references and key collisions without prefix
+allocation, duplicate/closed-phase entry calls, foreign/copied tokens, and
+plan/requirements/layout mutation. Legacy production adapters are unchanged.
+
+Canonical Node 25.9, one 4GB fork: the original cohort was **222/223**
+(149/149 unchanged ledger, 22/22 unchanged recipes, 51/52 new layout cases).
+The one new-test failure came from the assertion framework inspecting the
+intentionally trapping Proxy; the retained boolean identity check and final
+get-spy assertion then passed in a complete **52/52** rerun. Both raw records
+remain in `.tmp/native-object-layouts-r-20260919/`; no production change was
+made between them. The first load admission refused before any test child.
+Source TS7 and all eight scoped static gates passed, with no input drift.
+Inventory is valid: **1471 modules = 151 clean + 1315 unmigrated + 5
+compatibility adapters**, zero errors; architecture completeness remains false.
+The two new clean entries raise backend/native floors 20→21 and 38→39;
+no dependency allowance or layer edge changed. Preservation witnesses are
+6/6 full and 6/6 cut; strict modeled closure remains open, not certified.
+`VALIDATION-RESULTS.json` records the exact local receipt hashes and populations.
+
+This completes only the self-field/layout prerequisite, not executable object
+access or Promise integration. The legacy compiler remains the baseline until
+everything runs through IR, is tested, and matches the existing compiler;
+retirement follows that complete equality, not this local checkpoint.
+
+### 2026-09-19: compose the signed C1 object layout prerequisite
+
+Integration plan: merge signed layout checkpoint
+`55b61eb6b5b5aba7b27e83380bf3bda11150abd6` into the signed getter/bag
+checkpoint `17ac5ad7d3fd5d959a4ffbea0f526d9f18d1c901` in isolated
+`codex/3518-native-object-integration-20260919`. The common ancestor is
+`9dd54aff748b62b7417e7b0d4b0bf95e172bb4b3`. Resolve only the appended issue
+history and exact boundary inventory union. Keep every source, test and
+fixture blob from its owning signed parent, including the legacy donors.
+The inventory floors become backend 21/native-runtime 41; no layer edge,
+dependency allowance, prior entry or history is removed.
+
+The merge is prepared for review with no compiler, test, or hook execution
+in this composition step. Combined owner/executor validation is still needed
+because the new self-field/snapshot path shares the existing recipe executor.
+Planned checks cover the complete layout, ledger and recipe suites together
+with the existing getter/accessor/key/bag owner and reservation controls,
+then source TS7 and normal repository gates. This joins issued prerequisites;
+it does not complete object access or Promise integration. The legacy compiler
+remains until everything runs through IR, is tested, and is equal.
+
+
+The prepared layout/getter/bag composition now passes the complete **609/609**
+cohort across **21 files**, with zero failures or pending rows. The measured
+population combines all prior 386 getter/key/accessor/bag and legacy controls
+with 52 layout, 149 unchanged ledger, and 22 unchanged recipe controls.
+Source TS7 also exits 0; both runs retain 1,617 unchanged input pins. The
+composition proof authenticates all 31 cumulative source/test/fixture files
+to exact signed parent blobs, including every legacy donor and source inverse.
+
+All eight scoped gates pass with 1,949 inputs unchanged. The exact750fb
+LOC/function checks cover 20 changed source files (net +903 lines), with no
+allowance changes. Inventory is valid: 1473 modules, 153 clean, 1315 unmigrated,
+five compatibility adapters and zero errors; actual native-runtime42 with
+floor41. Architecture remains incomplete. Coercion passes across ten changed
+codegen files; preservation witnesses remain 6/6 full and cut, core nodes12/12
+full with dispatch-cut UNKNOWN, and core types10/10 in both views. Strict
+closure remains open. Raw commands, worker identities, counts and input maps
+are retained in `.tmp/native-object-integration-r-20260919/`. Full normal
+signed-merge hook execution is recorded separately after these local checks.
+No publication or full object/Promise completion follows from this checkpoint.

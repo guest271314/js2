@@ -233,9 +233,10 @@
         "src/backend/wasmgc/resources/prepared-async-frame.ts",
         "src/backend/wasmgc/program/native-string-output-abi.ts",
         "src/backend/wasmgc/program/native-string-output.ts",
-        "src/backend/wasmgc/resources/native-string-output.ts"
+        "src/backend/wasmgc/resources/native-string-output.ts",
+        "src/backend/wasmgc/resources/native-object-layouts.ts"
       ],
-      "minModules": 20
+      "minModules": 21
     },
     {
       "id": "native-runtime",
@@ -283,9 +284,10 @@
         "src/runtime/wasmgc/promise/delay-combinator-layouts.ts",
         "src/runtime/wasmgc/async/frame-defaults.ts",
         "src/runtime/wasmgc/async/prepared-async-frame-engine.ts",
-        "src/runtime/wasmgc/async/prepared-async-frame-types.ts"
+        "src/runtime/wasmgc/async/prepared-async-frame-types.ts",
+        "src/runtime/wasmgc/values/object-layouts.ts"
       ],
-      "minModules": 40
+      "minModules": 41
     },
     {
       "id": "standalone-platform",
@@ -1614,6 +1616,16 @@
     }
   ],
   "files": [
+    {
+      "path": "src/runtime/wasmgc/values/object-layouts.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/backend/wasmgc/resources/native-object-layouts.ts",
+      "state": "clean",
+      "layer": "backend-wasmgc"
+    },
     {
       "path": "src/runtime/wasmgc/values/object-key-bodies.ts",
       "state": "clean",
