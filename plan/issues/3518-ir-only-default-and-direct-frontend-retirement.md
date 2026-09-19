@@ -9694,3 +9694,26 @@ gates now pass (format, lint, LOC, function budget, oracle, coercion, boundary
 inventory, preservation), without baseline or allowance changes. Boundary
 inventory validity does not certify architectural completion. Normal signed
 local checkpoint is authorized; no publication or legacy retirement is implied.
+
+
+Separate follow-up after signed equality checkpoint f75aed66: the exact-parent
+poison failure is caused by flat-str-ic.ts sharing one global POISON_ARM
+instruction array across flatten, identity-equality and length-equality sites.
+The existing ownership repair correctly refuses this representation before the
+unchanged negative test can exercise its expected trap. Scope is only that
+producer: create a fresh array and unreachable instruction at each of its three
+poisoned sites. Preserve all non-poisoned arms, counters and off-token bytes,
+all original tests and diagnostics, and the repair's rejection of shared arrays.
+The existing complete three-row inline-cache suite must again prove off-mode
+byte identity, native Node answers and actual poisoned traps. No assertion or
+validator weakening, no publication; validation awaits the serialized lane.
+
+Poison follow-up validation: the unchanged complete issue-4157-flat-str-ic suite
+now passes 3/3, proving off-token/poison-alone byte identity, native Node answers,
+and an actual unreachable trap from poisoned arms. All 1,506 inputs stayed
+unchanged; source TS7 also passes with 1,508 unchanged inputs. Eight scoped
+gates pass against exact f75aed66, including existing preservation and boundary
+inventory modes; no source/test/fixture/gate relaxation was made. Original
+candidate and exact-parent failures remain retained as historical evidence.
+This is a separate production instrumentation repair, not a reinterpretation
+of the original equality checkpoint's 70/71 denominator.
