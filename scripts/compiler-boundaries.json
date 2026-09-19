@@ -285,9 +285,16 @@
         "src/runtime/wasmgc/async/frame-defaults.ts",
         "src/runtime/wasmgc/async/prepared-async-frame-engine.ts",
         "src/runtime/wasmgc/async/prepared-async-frame-types.ts",
-        "src/runtime/wasmgc/values/object-layouts.ts"
+        "src/runtime/wasmgc/values/object-layouts.ts",
+        "src/runtime/wasmgc/values/any-to-string-body.ts",
+        "src/runtime/wasmgc/values/any-to-string-object-bodies.ts",
+        "src/runtime/wasmgc/values/any-to-string-recovery-bodies.ts",
+        "src/runtime/wasmgc/values/any-to-string-types.ts",
+        "src/runtime/wasmgc/values/to-primitive-bodies.ts",
+        "src/runtime/wasmgc/values/to-primitive-method-bodies.ts",
+        "src/runtime/wasmgc/values/to-primitive-wrapper-bodies.ts"
       ],
-      "minModules": 41
+      "minModules": 48
     },
     {
       "id": "standalone-platform",
@@ -7763,6 +7770,38 @@
       "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."
     },
     {
+      "path": "src/codegen/proto-index-read-bindings.ts",
+      "state": "unmigrated",
+      "layer": "mixed-needs-split",
+      "destination": "backend-wasmgc",
+      "owner": "3518-coordinator",
+      "nextBoundary": "Replace legacy CodegenContext-bound prototype companion read lookup with prepared physical bindings; compatibility extraction preserves existing callers."
+    },
+    {
+      "path": "src/codegen/runtime-ref-number.ts",
+      "state": "unmigrated",
+      "layer": "mixed-needs-split",
+      "destination": "backend-wasmgc",
+      "owner": "3518-coordinator",
+      "nextBoundary": "Separate context-bound native string and canonical runtime object numeric conversion from prepared physical bindings; exact runtime type recognition does not certify general nominal coercion parity."
+    },
+    {
+      "path": "src/codegen/to-primitive-dispatch-presence.ts",
+      "state": "unmigrated",
+      "layer": "mixed-needs-split",
+      "destination": "backend-wasmgc",
+      "owner": "3518-coordinator",
+      "nextBoundary": "Replace CodegenContext-bound nominal method dispatcher publication with prepared physical bindings; retain legacy one-result callers and explicit per-invocation method presence."
+    },
+    {
+      "path": "src/codegen/to-primitive-presence.ts",
+      "state": "unmigrated",
+      "layer": "mixed-needs-split",
+      "destination": "backend-wasmgc",
+      "owner": "3518-coordinator",
+      "nextBoundary": "Separate legacy CodegenContext-bound companion presence reservations and fill receipts from prepared-program physical ownership; extraction alone does not establish native runtime ownership."
+    },
+    {
       "path": "src/codegen/proven-receiver-stats.ts",
       "state": "unmigrated",
       "layer": "mixed-needs-split",
@@ -12679,6 +12718,49 @@
       "path": "src/runtime/contracts/timer-capability.ts",
       "state": "clean",
       "layer": "runtime-contracts"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/any-to-string-body.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/any-to-string-object-bodies.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/any-to-string-recovery-bodies.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/any-to-string-types.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/codegen/native-addition.ts",
+      "state": "unmigrated",
+      "layer": "mixed-needs-split",
+      "destination": "backend-wasmgc",
+      "owner": "3518-coordinator",
+      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."
+    },
+    {
+      "path": "src/runtime/wasmgc/values/to-primitive-bodies.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/to-primitive-method-bodies.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/to-primitive-wrapper-bodies.ts",
+      "state": "clean",
+      "layer": "native-runtime"
     }
   ]
 }

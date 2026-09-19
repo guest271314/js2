@@ -1,5 +1,4 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
-import { buildProtoIndexRead, type ProtoIndexReadBinding } from "../runtime/wasmgc/values/object-get-arms.js";
 /**
  * (#4160, generalized by #4176) Prototype-PROPERTY store for `--target
  * standalone` — the runtime substrate that makes a property written onto a
@@ -109,6 +108,14 @@ import { BUILTIN_BRAND_BASE, BUILTIN_BRAND_COUNT, builtinBrandOffsetOf } from ".
 import { nativeStringLiteralInstrs } from "./native-strings.js"; // (#4176) wrapper-slot key at FILL time
 import { nativeProtoParentBrands, nativeProtoSeedersByBrandOffset } from "./native-proto.js"; // (#2175 V2-S3b-1) companion seeding
 import { addFuncType } from "./registry/types.js";
+import { createToPrimitivePresenceOwner } from "./to-primitive-presence.js";
+export {
+  protoIndexRecvGetMissInstrs,
+  captureProtoIndexReadBinding,
+  protoIndexRecvHasMissInstrs,
+} from "./proto-index-read-bindings.js";
+
+const toPrimitivePresence = createToPrimitivePresenceOwner();
 
 /** Reserved helper names (all internal, never exported from the module). */
 const PROTOIDX_COMPANION = "__protoidx_companion";
@@ -232,6 +239,8 @@ export function reserveProtoIndexStore(ctx: CodegenContext): void {
   });
   ctx.protoIndexCompanionsGlobalIdx = tableGlobalIdx;
 
+  const presenceReservations = toPrimitivePresence.createReservations(ctx);
+
   // --- helper stubs (bodies filled by fillProtoIndexStore at finalize).
   // Stub bodies are FRESH arrays per helper — never a shared Instr list.
   const reserve = (name: string, params: ValType[], results: ValType[], stub: () => Instr[]): void => {
@@ -241,6 +250,7 @@ export function reserveProtoIndexStore(ctx: CodegenContext): void {
     const placeholder: WasmFunction = { name, typeIdx, locals: [], body: stub(), exported: false };
     pushDefinedFunc(ctx, funcIdx, placeholder);
     ctx.funcMap.set(name, funcIdx);
+    toPrimitivePresence.recordReservation(ctx, presenceReservations, name, placeholder);
   };
   const ext: ValType = { kind: "externref" };
   const i32: ValType = { kind: "i32" };
@@ -297,6 +307,7 @@ export function reserveProtoIndexStore(ctx: CodegenContext): void {
   // resolves that index at fill time; this one now matches them structurally so
   // the split cannot be reintroduced.
   reserve(PROTOIDX_OWN_RECV, [ext], [ext], () => [{ op: "local.get", index: 0 }]);
+  toPrimitivePresence.installReservations(ctx, presenceReservations);
 }
 
 /**
@@ -320,50 +331,6 @@ export function protoIndexForInPushInstrs(
     { op: "local.get", index: seenLocal },
     { op: "call", funcIdx: pushIdx },
   ];
-}
-
-/**
- * (#4176) Receiver-aware GET consult `[recv, key] -> externref` for a
- * non-`$Object` miss chokepoint (`__closure_prop_get` / `__vec_prop_get`
- * tails): classifies the receiver's proto brand at runtime and consults that
- * companion, then Object's. `undefined` when unreserved — the caller keeps
- * its pre-existing miss byte-identically.
- */
-export function protoIndexRecvGetMissInstrs(
-  ctx: CodegenContext,
-  recvLocal: number,
-  keyLocal: number,
-  accessorRecvLocal?: number,
-): Instr[] | undefined {
-  return buildProtoIndexRead(captureProtoIndexReadBinding(ctx, recvLocal, keyLocal, accessorRecvLocal));
-}
-
-export function captureProtoIndexReadBinding(
-  ctx: CodegenContext,
-  recvLocal: number,
-  keyLocal: number,
-  accessorRecvLocal?: number,
-): ProtoIndexReadBinding | undefined {
-  const getRIdx = ctx.funcMap.get(PROTOIDX_GET_R);
-  if (getRIdx === undefined) return undefined;
-  const getKIdx = ctx.funcMap.get(PROTOIDX_GET_K);
-  const brandOffIdx = ctx.funcMap.get(PROTOIDX_BRAND_OFF);
-  if (
-    accessorRecvLocal !== undefined &&
-    accessorRecvLocal !== recvLocal &&
-    getKIdx !== undefined &&
-    brandOffIdx !== undefined
-  ) {
-    return {
-      kind: "split-receiver",
-      receiver: recvLocal,
-      key: keyLocal,
-      accessorReceiver: accessorRecvLocal,
-      brandOffset: brandOffIdx,
-      getKey: getKIdx,
-    };
-  }
-  return { kind: "direct", receiver: recvLocal, key: keyLocal, get: getRIdx };
 }
 
 /**
@@ -474,19 +441,12 @@ function fillOwnRecvBody(ctx: CodegenContext): void {
   ];
 }
 
-/** (#4176) Receiver-aware HAS consult `[recv, key] -> i32`; see get twin. */
-export function protoIndexRecvHasMissInstrs(
-  ctx: CodegenContext,
-  recvLocal: number,
-  keyLocal: number,
-): Instr[] | undefined {
-  const hasRIdx = ctx.funcMap.get(PROTOIDX_HAS_R);
-  if (hasRIdx === undefined) return undefined;
-  return [
-    { op: "local.get", index: recvLocal },
-    { op: "local.get", index: keyLocal },
-    { op: "call", funcIdx: hasRIdx },
-  ];
+/** The registered body stays unreachable until the existing finalizer completes it. */
+export function captureProtoIndexPresenceBinding(ctx: CodegenContext): {
+  readonly kind: "call";
+  readonly hasIdx: number;
+} {
+  return toPrimitivePresence.capture(ctx);
 }
 
 /**
@@ -667,11 +627,21 @@ function findFn(ctx: CodegenContext, name: string): WasmFunction | undefined {
  * `reserveProtoIndexStore` ran (flag-set standalone modules only).
  */
 export function fillProtoIndexStore(ctx: CodegenContext): void {
-  if (!ctx.protoIndexStoreReserved || ctx.protoIndexStoreFilled) return;
+  toPrimitivePresence.assertCurrent(ctx);
+  // Body generation can discover a dynamic TypedArray after the original
+  // prescan. Resolve that real demand here without rebuilding ToPrimitive.
+  if (toPrimitivePresence.needsReservation(ctx)) reserveProtoIndexStore(ctx);
+  if (!ctx.protoIndexStoreReserved || ctx.protoIndexStoreFilled) {
+    toPrimitivePresence.complete(ctx);
+    return;
+  }
   ctx.protoIndexStoreFilled = true;
   const deps = resolveFillDeps(ctx);
-  if (!deps) return; // dependencies absent — stubs keep answering "miss" (safe)
-
+  if (!deps) {
+    toPrimitivePresence.complete(ctx); // A selected consumer must not bind unfilled stubs.
+    return;
+  }
+  const presenceInputs = toPrimitivePresence.captureFillInputs(ctx);
   fillCompanionBody(ctx, deps);
   fillNormKeyBody(ctx, deps);
   fillHasKBody(ctx, deps);
@@ -685,6 +655,7 @@ export function fillProtoIndexStore(ctx: CodegenContext): void {
   fillOwnRecvBody(ctx); // (#2175 P2) own-view substitution — type idx resolved HERE
   spliceNativeProtoWriteArms(ctx);
   spliceNativeProtoDirectReadArms(ctx);
+  toPrimitivePresence.complete(ctx, presenceInputs);
 }
 
 /**

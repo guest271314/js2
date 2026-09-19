@@ -78,7 +78,7 @@ import type { FieldDef, Instr, ValType } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
 import { classObjectDisplayName } from "./class-static-metadata.js";
 import {
-  buildArgumentsToPrimitiveArm,
+  captureArgumentsToPrimitiveBindings,
   buildArgumentsLengthAbsentMiss,
   buildArgumentsLengthAbsentTail,
   ARGUMENTS_LENGTH_OVERRIDE_FIELD,
@@ -90,6 +90,7 @@ import { ensureNativeCharCodeAtHelper } from "./char-code-at-helpers.js";
 import { getFuncRefWrapperRootTypeIdx } from "./closures/funcref-wrapper-types.js"; // (#3673 round 19b)
 import { lazyStrFlattenEnabled, redundantFlattenCall } from "./lazy-str-flatten.js"; // (#4157)
 import {
+  ANY_TO_STRING_HELPER,
   ensureAnyToStringHelper,
   ensureNativeStringBoundaryBridge,
   ensureNativeStringHelpers,
@@ -181,6 +182,7 @@ import {
   protoIndexHasIdxInstrs,
   protoIndexOwnViewSubstituteInstrs,
   captureProtoIndexReadBinding,
+  captureProtoIndexPresenceBinding,
   protoIndexRecvHasMissInstrs,
   protoIndexSetDecisionInstrs,
   reserveProtoIndexStore,
@@ -271,11 +273,13 @@ import {
   captureReversePeerReadBinding,
   reverseMethodCallArmInstrs,
 } from "./standalone-link-reverse-peer.js"; // (#5383 S17 / #6600) the REVERSE hop
-import {
-  buildOwnToPrimitiveOverridePresent,
-  buildWrapperSlotShortCircuit,
-  type ToPrimitiveSlotDeps,
-} from "./to-primitive-wrapper-slot.js"; // (#4492 wave-5) __to_primitive's [[PrimitiveValue]] arms
+import { captureWrapperPrimitiveKey } from "./to-primitive-wrapper-slot.js"; // (#4492 wave-5) __to_primitive's [[PrimitiveValue]] arms
+import { buildToPrimitiveBody } from "../runtime/wasmgc/values/to-primitive-bodies.js";
+import type {
+  ToPrimitiveCoreBindings,
+  ToPrimitiveMethodLiterals,
+  ToPrimitiveSymbolBindings,
+} from "../runtime/wasmgc/values/to-primitive-method-bodies.js";
 export { fillProxyDispatch } from "./object-runtime-proxy.js";
 
 /** Initial `$PropMap` capacity. Must be a power of two (mask = cap - 1).
@@ -4416,427 +4420,104 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       typeofUndefinedIdx,
       typeofBigintIdx,
     ];
-    const returnIfPrimitive = (localIdx: number, includeSymbol = true): Instr[] => [
-      { op: "local.get", index: localIdx },
-      { op: "ref.is_null" },
-      {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [{ op: "local.get", index: localIdx }, { op: "return" }],
-      },
-      ...primitiveTypePredicates.flatMap((predicateIdx): Instr[] => [
-        { op: "local.get", index: localIdx },
-        { op: "call", funcIdx: predicateIdx },
-        {
-          op: "if",
-          blockType: { kind: "empty" },
-          then: [{ op: "local.get", index: localIdx }, { op: "return" }],
-        },
-      ]),
-      ...(includeSymbol && symbolKeysEnabled
-        ? ([
-            { op: "local.get", index: localIdx },
-            { op: "any.convert_extern" },
-            { op: "ref.test", typeIdx: symbolTypeIdx },
-            {
-              op: "if",
-              blockType: { kind: "empty" },
-              then: [{ op: "local.get", index: localIdx }, { op: "return" }],
-            },
-          ] satisfies Instr[])
-        : []),
-    ];
-
-    const throwTypeError = (): Instr[] => [
-      ...stringExtern(typeErrorMessage),
-      { op: "call", funcIdx: typeErrorCtorIdx },
-      { op: "throw", tagIdx: exnTagIdx },
-    ];
-
-    const isStringHint: Instr[] = [
-      { op: "local.get", index: 1 },
-      { op: "ref.is_null" },
-      {
-        op: "if",
-        blockType: { kind: "val", type: { kind: "i32" } },
-        then: [{ op: "i32.const", value: 0 }],
-        else: [
-          { op: "local.get", index: 1 },
-          { op: "call", funcIdx: typeofStringIdx },
-          {
-            op: "if",
-            blockType: { kind: "val", type: { kind: "i32" } },
-            then: [
-              { op: "local.get", index: 1 },
-              { op: "any.convert_extern" },
-              { op: "ref.cast", typeIdx: anyStrTypeIdx },
-              { op: "call", funcIdx: strFlattenIdx },
-              ...nativeStringLiteralInstrs(ctx, "string"),
-              { op: "call", funcIdx: strFlattenIdx },
-              { op: "call", funcIdx: strEqualsIdx },
-            ],
-            else: [{ op: "i32.const", value: 0 }],
-          },
-        ],
-      },
-    ];
-
-    // (#2106 S1) Normalize the method lookup back to the legacy null-keyed
-    // convention: under the singleton regime a MISSING valueOf/toString comes
-    // back as the non-null `$undefined` singleton, which the `ref.is_null`
-    // absence check below would treat as a callable method — the exact source
-    // of PR #2025's 948 "Cannot convert object to primitive value" CEs.
-    const s1ToPrimNorm: Instr[] = (() => {
-      const idx = ctx.funcMap.get("__nullish_to_null");
-      return idx !== undefined ? [{ op: "call", funcIdx: idx }] : [];
-    })();
-    // The absent-toString fallback below models only the implicit
-    // Object.prototype terminal. The private predicate walks from this root to
-    // the final `$proto === null` object, so descendants observe a later
-    // ancestor setPrototypeOf(null) without flag propagation.
-    const implicitObjectToStringFallbackAllowed = (): Instr[] => [
-      { op: "local.get", index: L_ANY },
-      { op: "ref.cast", typeIdx: objectTypeIdx },
-      { op: "call", funcIdx: objectTerminalAllowsImplicitProtoIdx },
-    ];
-    const tryOrdinaryMethod = (name: "valueOf" | "toString", defaultObjectToStringOnMissing: boolean): Instr[] => [
-      { op: "local.get", index: 0 },
-      ...stringExtern(name),
-      { op: "call", funcIdx: externGetIdx },
-      ...s1ToPrimNorm.map((i) => ({ ...i })),
-      { op: "local.tee", index: L_METHOD },
-      { op: "ref.is_null" },
-      {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: defaultObjectToStringOnMissing
-          ? [
-              { op: "local.get", index: 0 },
-              ...stringExtern(name),
-              { op: "call", funcIdx: externHasIdx },
-              { op: "i32.eqz" },
-              {
-                op: "if",
-                blockType: { kind: "empty" },
-                then: [
-                  ...implicitObjectToStringFallbackAllowed(),
-                  {
-                    op: "if",
-                    blockType: { kind: "empty" },
-                    then: [...stringExtern("[object Object]"), { op: "return" }],
-                  },
-                ],
-              },
-            ]
-          : [],
-        else: [
-          { op: "local.get", index: L_METHOD },
-          { op: "call", funcIdx: typeofFunctionIdx },
-          {
-            op: "if",
-            blockType: { kind: "empty" },
-            then: [
-              { op: "local.get", index: 0 },
-              { op: "local.get", index: L_METHOD },
-              { op: "call", funcIdx: callMethod0Idx },
-              { op: "local.set", index: L_RESULT },
-              ...returnIfPrimitive(L_RESULT),
-            ],
-          },
-        ],
-      },
-    ];
-
-    // (#5102/#2175) GetMethod(input, @@toPrimitive) is an ordinary [[Get]], so
-    // both inherited data methods and inherited accessor getters must observe
-    // the original receiver before OrdinaryToPrimitive. Reuse __extern_get
-    // rather than the old raw own-entry probe; an absent value still falls
-    // through to the unchanged valueOf/toString path below.
-    const symbolToPrimitive = (): Instr[] => {
-      if (!symbolKeysEnabled) return [];
-      const boxSymbolIdx = ctx.funcMap.get("__box_symbol");
-      if (boxSymbolIdx === undefined) return [];
-      const applyClosureIdx = reserveApplyClosure(ctx);
-      return [
-        { op: "local.get", index: 0 },
-        { op: "i32.const", value: 3 }, // well-known Symbol.toPrimitive
-        { op: "call", funcIdx: boxSymbolIdx },
-        { op: "call", funcIdx: externGetIdx },
-        ...s1ToPrimNorm.map((i) => ({ ...i })),
-        { op: "local.set", index: L_METHOD },
-        { op: "local.get", index: L_METHOD },
-        { op: "ref.is_null" },
-        {
-          op: "if",
-          blockType: { kind: "empty" },
-          then: [],
-          else: [
-            { op: "local.get", index: L_METHOD },
-            { op: "call", funcIdx: typeofFunctionIdx },
-            {
-              op: "if",
-              blockType: { kind: "empty" },
-              then: [
-                { op: "call", funcIdx: objVecNewIdx },
-                { op: "local.set", index: L_ARGS },
-                { op: "local.get", index: L_ARGS },
-                // (#5270 step 8) §7.1.1.1 step 2.b passes the HINT STRING, and
-                // an absent PreferredType is the string `"default"` (step 1),
-                // never the null the internal hint slot uses to encode it.
-                // Passing local 1 raw made a user `@@toPrimitive` method see
-                // `null` where the spec mandates `"default"` (probe p02 logged
-                // `LnullRnull`).
-                { op: "local.get", index: 1 },
-                { op: "ref.is_null" },
-                {
-                  op: "if",
-                  blockType: { kind: "val", type: { kind: "externref" } },
-                  then: stringExtern("default"),
-                  else: [{ op: "local.get", index: 1 }],
-                },
-                { op: "call", funcIdx: objVecPushIdx },
-                { op: "local.get", index: L_METHOD },
-                { op: "local.get", index: 0 },
-                { op: "local.get", index: L_ARGS },
-                { op: "call", funcIdx: applyClosureIdx },
-                { op: "local.set", index: L_RESULT },
-                ...returnIfPrimitive(L_RESULT, false),
-                // ToNumber(Symbol) is abrupt. Keep the Symbol result for
-                // string-hint users such as ToPropertyKey; number/default
-                // consumers must throw before __unbox_number can degrade
-                // the carrier to NaN.
-                { op: "local.get", index: L_RESULT },
-                { op: "any.convert_extern" },
-                { op: "ref.test", typeIdx: symbolTypeIdx },
-                {
-                  op: "if",
-                  blockType: { kind: "empty" },
-                  then: [
-                    ...isStringHint,
-                    {
-                      op: "if",
-                      blockType: { kind: "empty" },
-                      then: [{ op: "local.get", index: L_RESULT }, { op: "return" }],
-                      else: [...throwTypeError()],
-                    },
-                  ],
-                  else: [...throwTypeError()],
-                },
-                ...throwTypeError(),
-              ],
-              else: [...throwTypeError()],
-            },
-          ],
-        },
-      ];
-    };
-
-    // (#4492 wave-5) FACTORIES — each call returns fresh `Instr` objects, so the
-    // two emission sites below never alias one array into two tree positions.
-    const slotDeps: ToPrimitiveSlotDeps = {
-      anyLocal: L_ANY,
-      slotLocal: L_SLOT,
+    // Keep acquisition at the original isStringHint and normalization sites.
+    const hintLiteral = nativeStringLiteralInstrs(ctx, "string");
+    const nullishToNullIdx = ctx.funcMap.get("__nullish_to_null");
+    const core: ToPrimitiveCoreBindings = {
+      frame: { any: L_ANY, method: L_METHOD, result: L_RESULT, slot: L_SLOT, args: L_ARGS },
+      wrapperPresence: { cursorLocal: 8, presentLocal: 7, companion: captureProtoIndexPresenceBinding(ctx) },
+      primitiveTypePredicates,
+      typeofStringIdx,
+      typeofFunctionIdx,
+      symbolKeysEnabled,
+      symbolTypeIdx,
+      anyStrTypeIdx,
       objectTypeIdx,
       propEntryTypeIdx,
+      strFlattenIdx,
+      strEqualsIdx,
+      externGetIdx,
+      externHasIdx,
+      callMethod0Idx,
+      objectTerminalAllowsImplicitProtoIdx,
       objFindIdx,
-      wrapperPrimitiveKey: WRAPPER_PRIMITIVE_KEY,
       flagInternal: FLAG_INTERNAL,
-      stringExtern,
+      typeErrorCtorIdx,
+      exnTagIdx,
+      nullishToNullIdx,
+      objVecNewIdx,
+      objVecPushIdx,
     };
-    const wrapperSlotShortCircuit = (): Instr[] => buildWrapperSlotShortCircuit(slotDeps);
-    const ownToPrimitiveOverridePresent = (): Instr[] => buildOwnToPrimitiveOverridePresent(slotDeps);
-
-    const body: Instr[] = [
-      // Non-objects return unchanged (ToPrimitive step 1).
-      { op: "local.get", index: 0 },
-      { op: "ref.is_null" },
-      {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [{ op: "local.get", index: 0 }, { op: "return" }],
-      },
-      // (#3673 round 11) Primitive identity early-out (§7.1.1 step 1): an i31
-      // small int, a `$BoxedNumber`, or a native string IS already a
-      // primitive — return it before the object test. Previously a plain
-      // number fell into the non-$Object arm and paid a
-      // `__class_to_primitive` dispatcher walk per ToNumber site.
-      { op: "local.get", index: 0 },
-      { op: "any.convert_extern" },
-      { op: "local.tee", index: L_ANY },
-      { op: "ref.test", typeIdx: -20 }, // abstract i31
-      {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [{ op: "local.get", index: 0 }, { op: "return" }],
-      },
-      ...(ctx.nativeBoxNumberTypeIdx >= 0
-        ? ([
-            { op: "local.get", index: L_ANY },
-            { op: "ref.test", typeIdx: ctx.nativeBoxNumberTypeIdx },
-            {
-              op: "if",
-              blockType: { kind: "empty" },
-              then: [{ op: "local.get", index: 0 }, { op: "return" }],
-            },
-          ] satisfies Instr[])
-        : []),
-      // (ES5 standalone lane) …and a `$BoxedBoolean`. This arm was MISSING while
-      // its number and string siblings were present, so `true`/`false` was the
-      // one primitive that fell through to the non-`$Object` tail and got asked
-      // `__class_to_primitive`. That answered correctly ONLY while the module
-      // emitted no `__call_toString` dispatcher at all (absent dispatcher ⇒
-      // "return the input unchanged"); the moment ANY struct in the module
-      // contributed a dispatcher arm, the boxed boolean matched none of them and
-      // `__class_to_primitive`'s string-hint tail rendered its
-      // "toString absent ⇒ inherited Object.prototype.toString" answer,
-      // "[object Object]". Measured: `String.prototype.trim.call(true)` and
-      // `new Boolean().indexOf(…)` both flipped the moment an unrelated object
-      // literal in the same file gained a dispatcher arm — an action-at-a-
-      // distance bug that the early-out removes at the source. §7.1.1 step 1:
-      // ToPrimitive of a value that is ALREADY primitive returns it unchanged.
-      ...(ctx.nativeBoxBooleanTypeIdx >= 0
-        ? ([
-            { op: "local.get", index: L_ANY },
-            { op: "ref.test", typeIdx: ctx.nativeBoxBooleanTypeIdx },
-            {
-              op: "if",
-              blockType: { kind: "empty" },
-              then: [{ op: "local.get", index: 0 }, { op: "return" }],
-            },
-          ] satisfies Instr[])
-        : []),
-      ...(ctx.anyStrTypeIdx >= 0
-        ? ([
-            { op: "local.get", index: L_ANY },
-            { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
-            {
-              op: "if",
-              blockType: { kind: "empty" },
-              then: [{ op: "local.get", index: 0 }, { op: "return" }],
-            },
-          ] satisfies Instr[])
-        : []),
-      // (ES5 standalone lane) The native ERROR struct returns UNCHANGED — the
-      // same action-at-a-distance hazard as the boxed-boolean arm above, third
-      // instance. An error's spec toString is Error.prototype.toString, served
-      // by `__any_to_string`'s error arm AFTER ToPrimitive hands the struct
-      // back unchanged. That held only while the module emitted no
-      // `__call_toString` dispatcher; once ANY struct contributed an arm (a
-      // harness object literal with a `toString` field suffices),
-      // `__class_to_primitive`'s string-hint tail rendered the error as
-      // "[object Object]". Measured on the first full ES5 run after the
-      // dispatcher arm landed: every `errObj.toString()` and every thrown-
-      // error rendering regressed — the 15.11.4.4-* family, try/S12.14_A19,
-      // and ~14 harness asyncHelpers/compare-array rows whose failure
-      // MESSAGES stringify errors.
-      ...(ctx.errorStructTypeIdx >= 0
-        ? ([
-            { op: "local.get", index: L_ANY },
-            { op: "ref.test", typeIdx: ctx.errorStructTypeIdx },
-            {
-              op: "if",
-              blockType: { kind: "empty" },
-              then: [{ op: "local.get", index: 0 }, { op: "return" }],
-            },
-          ] satisfies Instr[])
-        : []),
-      // (#6432) …and the native `$Symbol` carrier — the FOURTH instance of the
-      // same action-at-a-distance hazard the boxed-boolean and error-struct
-      // arms above document, and the one that blocked the whole linked
-      // standalone Temporal lane. §7.1.1 step 1: a Symbol is ALREADY a
-      // primitive, so ToPrimitive must hand it straight back; `returnIfPrimitive`
-      // below has always agreed (its `includeSymbol` arm), but the INPUT
-      // cascade did not, so a Symbol fell through the `$Object` test into
-      // `__class_to_primitive`. That answered correctly only while
-      // `__class_to_primitive` had no generic runtime walk; the moment the
-      // module gained one (`buildClassToPrimitiveRuntimeWalk`, emitted as soon
-      // as its probe natives resolve — which a LINKED standalone module always
-      // has), the walk's `__typeof_object(sym) || __typeof_function(sym)` guard
-      // answered TRUE for the Symbol carrier (`__typeof_object` has no Symbol
-      // arm) and sent a property read at it: `sym.toString()` → the inherited
-      // `Object.prototype.toString` glue → its loud standalone refusal.
-      //
-      // Measured 2026-09-12 (#6432): that refusal fired from INSIDE
-      // `__protoidx_companion` → `__nativeproto_seed_<Array>` →
-      // `__defineProperty_accessor(Array, @@species, …)` → `__obj_find` →
-      // `__to_property_key` → here, i.e. during MODULE INIT, before any user
-      // statement — which is why every linked test262 Temporal row reported
-      // "Object.prototype.toString is not yet implemented in --target
-      // standalone" and scored 0 pass.
-      ...(symbolKeysEnabled
-        ? ([
-            { op: "local.get", index: L_ANY },
-            { op: "ref.test", typeIdx: symbolTypeIdx },
-            {
-              op: "if",
-              blockType: { kind: "empty" },
-              then: [{ op: "local.get", index: 0 }, { op: "return" }],
-            },
-          ] satisfies Instr[])
-        : []),
-      { op: "local.get", index: 0 },
-      { op: "any.convert_extern" },
-      { op: "local.tee", index: L_ANY },
-      { op: "ref.test", typeIdx: objectTypeIdx },
-      { op: "i32.eqz" },
-      {
-        op: "if",
-        blockType: { kind: "empty" },
-        then:
-          arrayLikeReduce && vecBaseTypeIdx >= 0 && arrayToPrimIdx >= 0
-            ? [
-                ...buildArgumentsToPrimitiveArm(ctx, isStringHint, tryOrdinaryMethod, stringExtern),
-                // (#2358 #10) A real array (`$__vec_base`) reduces to its
-                // Array.prototype.toString (`join(",")`) — a primitive string the
-                // caller's hint then coerces (`__str_to_number` / string concat).
-                { op: "local.get", index: L_ANY },
-                { op: "ref.test", typeIdx: vecBaseTypeIdx },
-                {
-                  op: "if",
-                  blockType: { kind: "empty" },
-                  then: [{ op: "local.get", index: 0 }, { op: "call", funcIdx: arrayToPrimIdx }, { op: "return" }],
-                },
-                // (#2638) A nominal CLASS instance is neither `$Object` nor `$Vec`.
-                // Route it through `__class_to_primitive(obj, stringHint)`, which
-                // calls the per-struct `__call_valueOf`/`__call_toString`
-                // dispatchers per §7.1.1.1 and returns a boxed primitive on a
-                // method match, or the input unchanged otherwise. If the driver
-                // produced a primitive (the class had valueOf/toString), return
-                // it; else fall through to "return unchanged" (a struct/closure
-                // with no user ToPrimitive — today's behaviour, no regression).
-                ...(classToPrimIdx >= 0
-                  ? ([
-                      { op: "local.get", index: 0 },
-                      ...isStringHint,
-                      { op: "call", funcIdx: classToPrimIdx },
-                      { op: "local.set", index: L_RESULT },
-                      ...returnIfPrimitive(L_RESULT),
-                    ] satisfies Instr[])
-                  : []),
-                // Any other non-$Object value (a struct/closure without a user
-                // ToPrimitive) returns unchanged as before.
-                { op: "local.get", index: 0 },
-                { op: "return" },
-              ]
-            : [{ op: "local.get", index: 0 }, { op: "return" }],
-      },
-      // #1910/#1472 S2 — boxed primitive wrapper short-circuit, now GATED on "no
-      // own valueOf/toString" (#4492 wave-5). Full rationale + the measured
-      // failure on `buildWrapperSlotShortCircuit` / `buildOwnToPrimitiveOverridePresent`.
-      ...symbolToPrimitive(),
-      ...ownToPrimitiveOverridePresent(),
-      { op: "i32.eqz" },
-      { op: "if", blockType: { kind: "empty" }, then: wrapperSlotShortCircuit() },
-      ...isStringHint,
-      {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [...tryOrdinaryMethod("toString", true), ...tryOrdinaryMethod("valueOf", false)],
-        else: [...tryOrdinaryMethod("valueOf", false), ...tryOrdinaryMethod("toString", true)],
-      },
-      ...wrapperSlotShortCircuit(),
-      ...throwTypeError(),
-    ];
+    // These context fields were read before the arguments arm's literal ensures.
+    const inputTypes = {
+      number: ctx.nativeBoxNumberTypeIdx,
+      boolean: ctx.nativeBoxBooleanTypeIdx,
+      string: ctx.anyStrTypeIdx,
+      error: ctx.errorStructTypeIdx,
+    };
+    const array =
+      arrayLikeReduce && vecBaseTypeIdx >= 0 && arrayToPrimIdx >= 0
+        ? {
+            vecBaseTypeIdx,
+            arrayToPrimIdx,
+            classToPrimIdx,
+            arguments: captureArgumentsToPrimitiveBindings(ctx, stringExtern),
+          }
+        : undefined;
+    // This lookup/reservation occurs AFTER the selected arguments literals.
+    const symbol: ToPrimitiveSymbolBindings | undefined = (() => {
+      if (!symbolKeysEnabled) return undefined;
+      const boxSymbolIdx = ctx.funcMap.get("__box_symbol");
+      if (boxSymbolIdx === undefined) return undefined;
+      const applyClosureIdx = reserveApplyClosure(ctx);
+      return {
+        boxSymbolIdx,
+        applyClosureIdx,
+        defaultHint: stringExtern("default"),
+        errors: [
+          stringExtern(typeErrorMessage),
+          stringExtern(typeErrorMessage),
+          stringExtern(typeErrorMessage),
+          stringExtern(typeErrorMessage),
+        ],
+      };
+    })();
+    // A real, typed reservation breaks the ToPrimitive/ToString dependency
+    // cycle. Fill immediately after the existing AnyToString ensure below.
+    const pendingWrapperStringBody: Instr[] = [{ op: "unreachable" }];
+    const wrapperStringBridgeIdx = registerNative(
+      "__to_primitive_wrapper_to_string",
+      [{ kind: "externref" }],
+      [{ kind: "externref" }],
+      [],
+      pendingWrapperStringBody,
+    );
+    const wrapperStringBridge = definedFuncAt(ctx, wrapperStringBridgeIdx);
+    const captureMethod = (name: "valueOf" | "toString", fallback: boolean): ToPrimitiveMethodLiterals => {
+      const lookup = stringExtern(name);
+      const missingLookup = stringExtern(name);
+      const defaultObject = fallback ? stringExtern("[object Object]") : undefined;
+      const primitiveKey = captureWrapperPrimitiveKey(WRAPPER_PRIMITIVE_KEY, stringExtern);
+      return {
+        lookup,
+        missingLookup,
+        defaultObject,
+        wrapperIntrinsic:
+          name === "valueOf"
+            ? { kind: "valueOf", primitiveKey }
+            : { kind: "toString", primitiveKey, stringifyIdx: wrapperStringBridgeIdx },
+      };
+    };
+    const body = buildToPrimitiveBody({
+      core,
+      hintLiteral,
+      inputTypes,
+      array,
+      symbol,
+      stringFirst: [captureMethod("toString", true), captureMethod("valueOf", false)],
+      numberFirst: [captureMethod("valueOf", false), captureMethod("toString", true)],
+      terminalError: stringExtern(typeErrorMessage),
+    });
 
     registerNative(
       "__to_primitive",
@@ -4848,12 +4529,34 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         { name: "result", type: { kind: "externref" } },
         { name: "slot", type: { kind: "ref_null", typeIdx: propEntryTypeIdx } },
         { name: "args", type: { kind: "externref" } },
+        { name: "methodPresent", type: { kind: "i32" } },
+        { name: "methodCursor", type: objRefNull },
       ],
       body,
     );
 
     const toPrimitiveIdx = ctx.funcMap.get("__to_primitive")!;
     const anyToStringIdx = ensureAnyToStringHelper(ctx);
+    // Ensures can shift imports: resolve both live handles after all effects.
+    const currentBridgeIdx = ctx.funcMap.get("__to_primitive_wrapper_to_string");
+    const currentAnyToStringIdx = ctx.funcMap.get(ANY_TO_STRING_HELPER);
+    if (
+      !wrapperStringBridge ||
+      currentBridgeIdx === undefined ||
+      definedFuncAt(ctx, currentBridgeIdx) !== wrapperStringBridge ||
+      wrapperStringBridge.name !== "__to_primitive_wrapper_to_string" ||
+      wrapperStringBridge.body !== pendingWrapperStringBody ||
+      currentAnyToStringIdx === undefined ||
+      ctx.nativeStrHelpers.get(ANY_TO_STRING_HELPER) !== currentAnyToStringIdx ||
+      definedFuncAt(ctx, currentAnyToStringIdx)?.name !== ANY_TO_STRING_HELPER
+    )
+      throw new Error("ToPrimitive wrapper string dependency is not current");
+    wrapperStringBridge.body = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "call", funcIdx: currentAnyToStringIdx },
+      { op: "extern.convert_any" },
+    ];
     const toStringBody: Instr[] = [
       { op: "local.get", index: 0 },
       { op: "ref.is_null" },

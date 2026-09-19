@@ -3,7 +3,7 @@ id: 3518
 title: "IR-only default and direct front-end retirement"
 status: in-progress
 created: 2026-07-21
-updated: 2026-09-14
+updated: 2026-09-20
 priority: critical
 feasibility: hard
 reasoning_effort: max
@@ -59,6 +59,19 @@ func-budget-allow:
 > patched by an IR overlay. This epic ends only when IR is the sole front-end,
 > both WasmGC and linear consume the same prepared IR program, unsupported
 > source fails explicitly, and the direct front-end is deleted.
+
+## Current sequencing — develop IR before retirement (2026-09-20)
+
+The user requires the IR path to be developed while the old compiler remains
+operational. Retirement happens only once **everything is on the IR path,
+tested, and behaviorally equal**. Keep the old compiler as the comparison
+baseline throughout development. Passing subsets, body extractions, inventory
+checks and local commits do not authorize deleting old code or changing the
+default path. The full epic remains open until its complete requirements are
+verified; only verified main merges count as delivery.
+
+This sequencing supersedes earlier instructions that would retire code during
+partial migration. Historical plans and failure evidence below remain intact.
 
 ## Active sequencing amendment — standalone separation (2026-09-07)
 
@@ -9973,3 +9986,611 @@ closure remains open. Raw commands, worker identities, counts and input maps
 are retained in `.tmp/native-object-integration-r-20260919/`. Full normal
 signed-merge hook execution is recorded separately after these local checks.
 No publication or full object/Promise completion follows from this checkpoint.
+
+### September 19 full AnyToString body prerequisite (Codex)
+
+Isolated branch codex/3518-native-any-to-string-20260919 starts at signed
+0ef8e0ea4c23829a4eba37dca6dd6822aa95265e. Own only the pure runtime AnyToString
+body modules, minimal native-strings.ts adapter, focused donor/behavior tests,
+fixed licensed donor fixture, this issue record and exact boundary inventory.
+B owns ToPrimitive/object-runtime and wrapper-slot extraction; R owns current
+integration. No edits to those worktrees or any other production caller.
+
+Preserve the entire selected donor branch tree of ensureAnyToStringHelper,
+including raw null, AnyValue tags, i31 and boxed scalar recovery, native strings,
+number rendering, primitive wrappers, Error/Date/Arguments recognition, class
+and open-object reduction, and legacy absent-provider behavior. The prefix
+ensures/acquires strings, AnyValue, number formatting, union types, error/date
+helpers and captured indices in original order. Cache-hit behavior and final
+signature/mint/map writes/push also remain in the adapter unchanged.
+
+Construction has observable acquisition points inside body building: each
+literal request, each Arguments-brand lookup, and the late residual boxed-type
+snapshot after boxDispatch construction. A pure data request/response generator
+can retain those exact positions without importing CodegenContext, frontend or
+ambient settings, or accepting an arbitrary callback as provider authority.
+Initial captures stay at their legacy points; the captured object-layout
+reference is read only at its original recovery point. Native callers would
+answer these requests from authenticated resource/literal records, but this
+increment supplies no native ownership/completion admission.
+
+Proposed modules: runtime/wasmgc/values/any-to-string-types.ts (explicit bindings
+and request data), any-to-string-object-bodies.ts (class/Error/Date/Arguments
+terminal), any-to-string-recovery-bodies.ts (tag-5 and boxed primitive recovery),
+and any-to-string-body.ts (complete tag dispatch/residual/body assembly).
+Keep functions cohesive and within existing budgets without grants. Only
+codegen/native-strings.ts drives the legacy request adapter. Preserve an exact
+whole-source donor fixture from 0ef8e0ea and test inverse reconstruction,
+recorded construction order with mutable dependency/literal providers, full
+emitted definitions, and meaningful genuine compiler/Wasm/Node behavior.
+No string-only substitute, placeholder, skipped branch, fake provider or
+retirement claim. Tests/compiler/hooks remain serialized and await lane grant.
+
+AnyToString first validation (September 19): the complete focused pair executed
+32 assertion rows: 29 passed and 3 failed; all 1,516 before/after inputs were
+unchanged. All 12 full donor definition/acquisition comparisons passed, including
+changing construction reads; six protocol controls and the actual emitted-body
+poison execution control passed. The inverse-only failure was a test parser
+context error: parsing moved generator-body statements at top level left `yield*`
+as identifier/product tokens (1,234 versus 1,207 tokens). The test transport now
+parses these statements inside a generator; a static reconstruction verifies
+all 25,327 moved bytes with exact code/comment tokens, without changing donor or
+scaffold pins. A formal rerun remains pending. Source TS7 passed with the same
+1,516 unchanged inputs.
+
+Two real behavior failures remain explicit and unmodified: own wrapper override
+produced hash 3424620 instead of native Node 3841, and Date rendering produced
+-487947114 instead of 1375344642. Neither is yet attributed. An isolated exact
+0ef8 parent control contains the byte-identical eight behavior cases, source
+construction, options and native oracle; only its compile import resolves to the
+parent compiler, and no extracted runtime modules were copied there. Its first
+finite admission refused load 10.2407 against limit 8 before any test child; no
+parent result is claimed. Original focused output, input maps, TS7 receipt and
+parent behavior-span provenance remain in the respective ignored task artifacts.
+No assertions, source fixtures, legacy availability or retirement gate changed.
+
+Fresh lower-load admission subsequently allowed the exact-parent control: eight
+rows executed, six passed and the same two failed, with 1,509 unchanged inputs.
+Both parent failures have identical actual/expected hashes to the candidate:
+wrapper 3424620 versus 3841; Date -487947114 versus 1375344642. The six other
+behavior rows pass on both. This attributes these two failures to signed 0ef8,
+not this extraction; it does not establish JavaScript conformance for those paths.
+The corrected focused pair then executed all 32 rows: 30 passed, two same
+pre-existing runtime failures retained, with 1,516 unchanged inputs. The complete
+donor suite is 17/17, including exact whole-source reconstruction (115,646 bytes,
+SHA256 234d016944b8597b53ae735af814785e16b5f98915bf52dc0a2f79ec859b041c),
+all 12 acquisition/definition scenarios, and inverse mutation controls. Protocol
+controls are 6/6 and genuine emitted-body poison execution is 1/1. Neither failed
+native oracle was adjusted or skipped. Legacy cohorts and final gates remain
+unrun at this checkpoint, pending attribution review.
+
+Date oracle environment correction reviewed before edit: standalone Date local
+formatting is intentionally UTC (date-parse-native.ts contract). The retained
+original Date failure compared that result to the host's local timezone. Root
+measured isolated Node TZ=UTC with the unchanged fixture and obtained the exact
+candidate hash. The Date row will therefore run its identical erased source and
+seeds in a bounded isolated Node child with TZ=UTC, retaining actual text/hash
+output; no global timezone mutation or hard-coded expected hash. All other rows
+keep their current native oracle. Original local-timezone failure receipts remain
+unchanged. Wrapper default-hint mismatch remains a normative failed assertion,
+separately awaiting a reviewed production correction.
+
+The five complete unchanged legacy files executed 43/43 (no skips); 1,518 input
+pins unchanged. All eight scoped gates passed, 1,862 inputs unchanged, including
+exact compiler inventory and preserved legacy reachability. No commit authorized
+while the normative wrapper regression remains open.
+
+Proposed forward wrapper/default-hint correction (pre-edit, awaiting review):
+
+The retained `render(value: any) { return "" + value; }` reaches native string
+addition, whose separate compileNativeConcatOperand cascade hardcodes string
+hints for externrefs and typed refs. coercion-engine.ts is not this native
+callsite. Changing its provider selector alone cannot repair the retained case.
+The existing emitAnyAdd also is not yet an evaluation-order proof: its nominal
+static-numeric operand arm coerces the left before evaluating the right.
+
+Proposed production ownership is string-ops.ts (native + gate before batching),
+binary-ops.ts (defer existing operand coercion until both expressions have
+evaluated), and add-to-primitive.ts (small pure admission/proof helper if needed).
+No runtime AnyToString donor, ToPrimitive owner, template, relational, String(),
+shared provider or startup semantics changes are proposed. New focused tests
+will live in issue-3518-native-add-default-hint.test.ts.
+
+For native-first + with native strings, inspect original binary operands and
+all leaves the existing collectConcatOperands would flatten. Preserve batching
+only when every leaf is positively proven primitive and cannot trigger user
+coercion; route the original binary AST through full addition when any leaf is
+object/dynamic/unproven. Never flatten such a chain before evaluation: even a
+string-typed intermediate can hide an object operand and observable conversion.
+Union primitive proof must cover every member; any/unknown/type-parameter/
+intersection/object/boxed-wrapper/Symbol/BigInt must not silently earn batching
+authority. Transparent assertions cannot establish primitive authority; inspect
+the underlying expression. Existing BigInt/Symbol handling and nested operator
+boundaries need explicit controls. A checker primitive flag alone cannot prove
+a reassigned/dynamic value: unproven producer paths must take the runtime route.
+The exact admissible primitive producer proof remains a review point; do not
+introduce a name-only or assertion-derived fast-path proof.
+
+Refactor existing emitAddOperand into evaluation plus delayed conversion data:
+retain actual ValType and raw local for the nominal-static arm, evaluate left
+and right once, then perform the same existing default-hint coercion and boxing
+left-to-right, then emitAnyAddFromExternTemps. Preserve current source-text
+callable handling and guards, late-import flushing, scalar boxing and native
+provider acquisition. Keep raw typed refs until static conversion; do not erase
+the type and hope a generic runtime carrier discovers it. Returning from the
+native-string caller must preserve its native string representation.
+
+Controls: retained wrapper concat returns intrinsic value while String/template
+use own toString; both operand orders; exact evaluation/conversion event order;
+right expression throwing before left coercion; conversion throws; nested left
+and right association; primitive scalar/string batching positive; null/undefined
+and Boolean; Symbol refusal; UTC Date; @@toPrimitive default versus string hint
+and receiver identity; valueOf returning object falls through; single evaluation
+of accessors/calls. Existing += paths call emitAnyAddFromExternTemps and must be
+covered by property read/RHS/setter ordering if the shared operation changes.
+No baseline expectation weakening or retirement of the legacy compiler.
+
+Native addition first repair evidence: combined63 executed58pass/5fail with
+1,518 unchanged inputs. Exact0ef8 semantic+batching control16 executed6pass/10fail
+with1,509 unchanged inputs. Six behaviors improve; no full conformance claim.
+Wrapper default behavior remains wrong and B owns its ToPrimitive correction.
+Symbol refusal is wrong on both (parent6, candidate12, native23), not identical
+preservation. The batching test guessed arity3 but both actual WAT outputs
+contain __str_concat_4 after template normalization; correct only that observed
+arity assertion and keep runtime-value checks and original failed receipts.
+
+Reviewed Symbol repair before edit: use only the actual physical Symbol struct
+type registered on ctx. Do not interpret unbranded i32 ids/numbers as Symbols.
+Treat that real carrier as primitive in the addition-only residue classifier,
+so it neither receives object method probes nor loses its identity. Complete
+both ToPrimitive operations left-to-right after both expression evaluations;
+then throw using the existing TypeError builder when either reduced value is
+that carrier, before either numeric or concatenation branch. Build/flush the
+error path before retaining the final branch provider indices. Add both operand
+orders, numeric+Symbol, exotic-returned Symbol, right-conversion sentinel identity
+and ordinary numeric controls, preserving all first-attempt sources/results.
+
+Symbol/batching forward diagnostic executed 68 rows:65passed/3failed with all
+1,518 input pins unchanged. All Symbol controls passed (both orders, numeric
+branch, exotic-produced Symbol, right-conversion sentinel identity, genuine
+TypeError and numeric non-Symbol control), as did actual batching arity4 and
+the UTC Date oracle. Remaining three rows are the unchanged wrapper/default
+mismatches (6vs7,0vs3,3424620vs3841), coordinated with B's ToPrimitive ownership.
+After that terminal receipt, the residue outer entry guard was tightened to use
+the same physical-carrier-aware primitive predicate as its result guard; this
+explicitly avoids Symbol object-method probing. That final guard change has
+not yet been rerun and is not covered by the preceding65/68 result.
+
+Budget-driven factoring approved before edit: preserve the measured addition
+implementation in a cohesive native-addition.ts owner, moving operand evaluation,
+deferred conversion and full addition functions byte-for-byte before formatting.
+binary-ops.ts retains compatible exports for all current callers, including +=;
+string-ops.ts delegates only the new dispatch via a distinct undefined/not-handled
+result, never confusing a compile result with permission to evaluate twice.
+Move the primitive proof to that same owner. Add a truthful mixed legacy-codegen
+inventory row; no budget/edge/allowance changes. Pre-move source/test hashes and
+all prior failed gates remain archived for direct token/body transport proof.
+
+Corrected Symbol guard validation repeated all68:65passed, the same three wrapper
+failures,1,518 inputs unchanged; sourceTS7 passed. Eight complete affected legacy
+files ran123 rows:117passed/6failed,1,522 inputs unchanged. Exact0ef8 reran all
+three affected files (60rows):54passed/6failed,1,511 inputs unchanged. Every one
+of the six failures matches exactly, including four host2022 outcomes, async
+host timing11307vs10021, and an already-stale3673 it.fails whose body passes on
+both. No expectation was changed. Expanded gates then passed6/8; LOC/function
+failed at driver growth, so factoring proceeded rather than changing ratchets.
+The new514-line native-addition owner retains the21,035-byte operation body
+byte-exactly (SHA a23f0514774ee5f26f2389fcdef313f5df6689bbcd6e2f9f5794da6cab0e3ffb),
+including comments, and the2,265-byte producer proof unchanged except envelope
+whitespace. These facts prove transport only; post-move behavior/gates remain
+unrun at this checkpoint.
+
+Post-factor validation:68focused again65pass/3same wrappers with1,519 stable
+inputs; sourceTS7 passed. The repeated123legacy rows exactly matched all prior
+statuses/failure values (117pass/6base-shared failures),1,523 inputs unchanged.
+The remaining small string-driver duplicate Symbol branches were deduplicated
+with ordered short-circuit iteration retaining the exact Plus-only guard and
+return expression. Final focused+complete Symbol cohort ran95rows:92passed and
+only the same3wrapper failures,1,520inputs unchanged; original Symbol27/27.
+All8final gates then passed,1,864inputs unchanged, including both budgets with
+no allowance changes. No source changes followed; no process remains. Work is
+uncommitted and frozen for B's wrapper correction integration. Full receipts
+and final source pins are in ignored native-any-to-string/ready-for-wrapper-join.json.
+
+### Implementation Plan — C1 full selected ToPrimitive body extraction (2026-09-19)
+
+This isolated `codex/3518-native-to-primitive-20260919` work starts at signed
+`0ef8e0ea4c23829a4eba37dca6dd6822aa95265e`. The verifier's C1 closure memo and
+all 14 signed source pins were read and authenticated against the named Git
+objects; `.tmp/native-to-primitive-b-20260919/closure-pin-check.json` retains
+that comparison. The selected donor is the complete existing `__to_primitive`
+construction and registration prefix of its block in `object-runtime.ts`,
+including every selected input and result carrier. Later `__extern_toString`,
+ToPropertyKey finalization, array/class reserve-fill helpers and the old compiler
+remain outside the implementation change. This is a body extraction, not an
+issued native executable ToPrimitive/object-access owner or complete C1/C2 graph.
+
+Owned source boundary before editing:
+
+- `src/codegen/object-runtime.ts`: only the selected ToPrimitive construction,
+  typed dependency/literal acquisition adapter and corresponding imports. Keep
+  pre-reservation, function registration, local indices and later finalizers in
+  their original order. Keep every optional selection and historical fallback.
+- `src/codegen/to-primitive-wrapper-slot.ts`: relocate the two complete selected
+  wrapper recipes to a canonical runtime leaf and preserve their original
+  per-occurrence literal acquisition through explicit data capture. Each wrapper
+  occurrence constructs fresh instructions; no shared arm buffer or context
+  callback crosses into the runtime recipe. Actual construction readers move
+  with the recipes, without dummy calls to retain an obsolete export.
+- Additional narrow scope explicitly released by the parent: only
+  `src/codegen/arguments-length-brand.ts#buildArgumentsToPrimitiveArm` and its
+  necessary capture/import adapter. Preserve all brand, reservation, length and
+  fill helpers. The branded-arguments toString/valueOf order and tag fallback
+  move into a pure typed recipe; passing a prebuilt semantic arm is forbidden.
+- New `src/runtime/wasmgc/values/to-primitive-bodies.ts`,
+  `to-primitive-method-bodies.ts` and `to-primitive-wrapper-bodies.ts`: cohesive
+  pure body/type helpers using canonical Wasm types, explicit scalar/type/
+  callable handles, selected carrier facts and literal operands. No frontend,
+  CodegenContext, arbitrary callbacks, name lookup or new allocator authority.
+- New focused donor/behavior test, fixed signed-source fixture, this additive
+  issue section and exact new runtime classifications/entry paths in
+  `scripts/compiler-boundaries.json`. No edge or budget allowance changes.
+
+The adapter captures leaves at their original evaluation points: initial runtime
+reservations and typeof handles; TypeError message/constructor/tag; native string
+hint; nullish-normalization lookup; primitive-input type fields; selected
+arguments brand and ordered method/tag literal occurrences; then conditional
+Symbol boxing/apply reservation and default/error literals; own-method probes,
+early wrapper slot, both ordinary method-order branches, late wrapper slot and
+terminal TypeError. Per-occurrence operands keep acquisition timing visible;
+opaque whole semantic-arm instruction arrays are not dependencies. Wrapper
+occurrences remain distinct under later function-index remapping.
+
+Preserve the full control sequence: null and primitive identity; number/boolean/
+string/error/Symbol input arms; branded arguments, vector and nominal-class
+paths; one receiver-correct `@@toPrimitive` getter and application with the
+actual hint (`default` for a missing hint); primitive result classification,
+Symbol string-hint return and number/default TypeError behavior; own-override
+checks; wrapper short-circuit/fallback; method precedence; missing versus
+non-callable methods; terminal-prototype fallback; original exception order.
+
+Fixed donor receipts will record original full-source Git blobs/SHA256 and UTF16
+scopes from this exact base, never a joined candidate as historical authority.
+Positive-first reconstruction/trace controls must reject altered imports,
+changed retained source, missing/reordered method/branch logic, wrong handles,
+literal acquisition order and aliasing. Connected emitted-Wasm controls use the
+actual legacy compiler path through the extracted builders: inherited getters
+returning callable coercion methods, observable receiver/hint/lookup order,
+primitive or Symbol results consumed by real property-key/hash/find, thrown
+getters, noncallable methods, nonprimitive results, wrappers, arrays/classes and
+null/undefined. Any controlled dependency fixture is labeled separately and is
+never called an authenticated native resource graph. Relevant unchanged complete
+legacy suites include string-hint conversion, any-parameter ToPrimitive,
+ToPropertyKey and wrapper override regressions; freeze exact files/counts before
+execution. No compiler/tests/hooks/publication until the serialized slot grant.
+
+#### Extraction measurements and scoped forward correction (2026-09-19)
+
+The fixed three-source donor fixture remains
+`2da520f20060b198ea9c19b7d7d6ef2b49ae0a784c89b3878ce17e66eb2a9b53`,
+authenticated against exact `0ef8e0ea4c23829a4eba37dca6dd6822aa95265e`.
+The first focused run was **40/46**, including two test-printer transport
+failures and four native-Node versus emitted-Wasm completion mismatches. The
+printer correction changed only expected template formatting; the fresh full
+run was **42/46**. All donor/acquisition/aliasing controls and the positive-first
+emitted-body poison control then passed. All twelve unchanged behavior sources
+were also run against an isolated exact-parent checkout: **8/12**, with the same
+four outcomes as the candidate (hint order, undefined result, null result, and
+two object-returning wrapper overrides). These are preserved failures, not
+waivers or evidence of semantic parity with JavaScript.
+
+The seven unchanged complete legacy files measured **70/78**. Exact-parent
+attribution of the three affected complete files measured **43/51**, with all
+51 statuses and all eight first diagnostics matching the candidate. Four of the
+eight failures are unexpected passes in existing `it.fails` cases; four other
+existing `it.fails` cases still fail as expected. The remaining failures are a
+string-array result, two receiver traps, and a compile refusal. Six raw errors
+match after checkout-path normalization; the two receiver traps retain different
+Wasm URLs/offsets and are not claimed byte-identical. An overstrict raw-error
+join assertion failed before a shell command still launched TS7; that
+orchestration error is retained explicitly. TS7 itself completed successfully
+on unchanged inputs and was not repeated.
+
+Eight subsequent scoped gates exited zero: formatting, lint, explicit inventory,
+LOC, function budgets, oracle, coercion, and preservation-mode reachability.
+All 1,865 gated inputs, including 1,478 source files, were unchanged. Inventory
+contains 1,476 modules (156 clean, five compatibility adapters, 1,315 unmigrated)
+and 11,249 resolved edges. Inventory is valid; architecture remains incomplete.
+The coercion check measured 127 files and 519 sites through a verified no-space
+alias. Reachability preservation witnesses pass, but the graph remains OPEN and
+retirement is not certified. The old compiler remains available. No checkpoint
+commit or native C1/C2 completion is claimed by these measurements.
+
+Retained evidence lives in this worktree's
+`.tmp/native-to-primitive-b-20260919/{validation,validation-v2,oracle-review,quality}`;
+the exact-parent records remain in the separate
+`codex-3518-to-primitive-baseline-20260919` worktree. In particular,
+`oracle-review/exact-parent-join.json`, `exact-parent-legacy-join.json`, and
+`overstrict-join-attempt.json` preserve the row-level qualifications.
+
+**Approved forward scope:** the existing three pure ToPrimitive leaves, the
+selected legacy adapter/capture hunks, and focused tests. The verifier separately
+owns addition routing/order in its own branch; no duplicate addition edits here.
+R's invocation/accessor-return work remains separately owned. Keep the original
+donor fixture and explicit, independently checked forward source/body deltas;
+do not silently reseed historical expected output to the repaired candidate.
+
+1. Remove the whole-walk wrapper shortcuts. The early own-only test bypasses
+   inherited overrides; the final ungated slot return incorrectly rescues two
+   callable overrides that both return objects.
+2. At each ordinary method's actual lookup position, perform the existing single
+   `__extern_get`. Only a normalized-null result, a false `__extern_has`, the
+   existing implicit-terminal-prototype permission, and a real `FLAG_INTERNAL`
+   primitive slot together permit synthesis of the missing intrinsic. A present
+   null/undefined/noncallable member still shadows the intrinsic. Inherited
+   overrides and getter side effects retain their original receiver and order.
+3. A missing intrinsic `valueOf` returns the internal primitive at that position.
+   A missing intrinsic `toString` converts it through the canonical existing
+   primitive string helper: returning a raw number/boolean would be incorrect
+   when default-hint addition subsequently selects numeric versus string work.
+   The ordinary plain-object fallback remains after the wrapper attempt.
+4. Preserve registration and dependency acquisition timing. The canonical
+   `__any_to_string` ensure currently occurs immediately after `__to_primitive`
+   registration and can allocate dependencies. Bind its real callable through
+   the existing reserve/fill discipline, without earlier side effects, duplicate
+   formatter recipes, guessed function indices, or stale pre-ensure captures.
+   Any necessary dependency-owner hunk must be named before editing it.
+5. Add native-Node completion comparisons for both method orders and String,
+   Number and Boolean wrappers: no override; one override at either position;
+   first method returning an object; both returning objects; explicit null,
+   undefined and noncallable shadows; inherited methods/getters; throwing getters;
+   exact receiver and one lookup/call. Pair the corrected emitted body with an
+   actual poison/mutation control. Preserve the original twelve case sources and
+   all prior failures. Do not update the eight legacy `it.fails` silently.
+6. The null/undefined-result mismatches are not yet localized. Method-result
+   classification already accepts ref-null and the canonical undefined predicate;
+   nullish normalization is on method lookup, not its result. The undefined case
+   also traverses the separately owned addition path. Retain these probes and
+   obtain bounded result/call-count observations before any further source change;
+   if closure-result boxing is implicated, coordinate its exact C2 owner first.
+
+Validation is serialized by the parent: new focused wrapper controls, the full
+existing 46-row file, the unchanged seven-file cohort with its explicit expected-
+failure accounting, then source typecheck and scoped gates. Compare any new
+failure against the retained exact-parent evidence before repair. No retirement,
+new native owner authority, publication, or unrelated semantic expansion is part
+of this correction.
+
+The parent additionally approved one narrow `proto-index-store.ts` dependency
+reader: expose the existing receiver-aware companion presence target as typed
+data, distinguishing the documented disabled store from an expected-but-missing
+reservation. This reader must not reserve/fill anything. Before the real method
+Get, the pure recipe captures ordinary table presence via `__obj_find` and typed
+`$Object.$proto` traversal, plus the selected non-observable `__protoidx_has_r`
+companion metadata. It does not call generic `__extern_has` before Get. A missing
+expected companion is an error, not permission to synthesize an intrinsic.
+The existing post-Get absence check and terminal-prototype permission remain.
+This prevents a getter that deletes itself and returns undefined from being
+misclassified as a missing method, without introducing Proxy.has or peer calls.
+The native prototype writer canonicalizes Proxy targets/unsupported foreign
+prototypes to its existing ordinary representation; this work does not certify
+that representation as complete Proxy prototype support.
+
+
+The first forward completion suite measured **39/40**, with all 1,520 pinned
+inputs unchanged. Its sole failure was the unchanged late dynamic TypedArray
+positive: the provisional companion-absence guard refused after body generation
+set `moduleUsesDynTaView`. The exact signed `0ef8e0ea` parent passes that same
+source, observer, native completion oracle and compiler options (**1/1**, 1,514
+unchanged inputs). This is an introduced refusal, not a pre-existing frontier.
+Both raw runs and the first guard/test source are retained; the original positive
+fixture remains unchanged.
+
+The approved correction supersedes only the earlier reader-only restriction in
+`proto-index-store.ts`. Capture reserves one actual stable `(externref, externref)
+-> i32` presence callable, with an unreachable placeholder and private descriptor
+identity. The existing finalization entry determines final demand: no store and
+no demand fills an explicit zero body; real demand invokes the existing canonical
+store reservation/fill chain and binds the actual receiver-aware presence helper.
+No ToPrimitive body is rebuilt. A private successful-fill receipt is issued only
+after all five owned presence dependency bodies were actually replaced by their
+canonical fill steps; first completion and idempotent reads verify exact current
+descriptors, signatures, locals and bodies. The legacy `filled` flag or matching
+function names/shapes cannot grant completion. Copied/replaced descriptors,
+external placeholder mutation, incomplete dependency fill and changed completed
+content must refuse. Demand appearing only after completed absence remains a
+stale-finalization error, rather than silently reusing zero. This is legacy
+lifecycle authentication, not a new native resource owner or C1 completion claim.
+
+### September 20 conversion integration (Codex, implementation and validation plan)
+
+Compose the frozen AnyToString/addition and ToPrimitive/wrapper working-tree deltas on their exact common 0ef8 baseline. Preserve every historical fixture and original failure. Validate the five complete suites together, then typecheck and required gates; resolve only measured failures. This intermediate integration must later include signed fdaa prerequisites and freshly verified upstream main. No retirement or delivery claim follows from this checkpoint.
+
+
+### Conversion integration validation and remaining repairs (2026-09-20)
+
+The root integration at `codex/3518-conversion-integration-20260920` combines
+both frozen conversion donors on `0ef8e0ea`. Its five complete focused suites
+measured **186/189**, with all 1,531 recorded inputs unchanged. The three
+remaining original ToPrimitive cases concern hint/receiver observations,
+undefined results, and null results; preserve their original sources and native
+oracles. Diagnostic copies expose 19 scalar observations without replacing
+those regression tests. Source typecheck passed separately.
+
+The first complete eight-gate run passed five gates and failed formatting,
+one test lint rule, and `proto-index-store.ts` size (2,068 versus 1,849 lines).
+The formatting correction and equivalent property removal via
+`Reflect.deleteProperty` pass targeted formatting/lint checks. The size repair
+extracts the added companion-presence ownership into a private-instance helper;
+the canonical reservation/fill chain retains its authority. No budget increase
+or weakened gate is authorized. Re-run the complete gates and affected tests
+after that extraction; previous green evidence does not certify edited inputs.
+
+Evidence: `.tmp/conversion-integration-20260920/validation/` and
+`.tmp/conversion-integration-20260920/gates1/`; diagnostic sources and original
+hashes are retained in `.tmp/to-primitive-diagnosis-b-20260920/`.
+This is local integration evidence, not a main delivery or full IR parity.
+The existing compiler remains available until everything runs through IR,
+is tested, and matches its behavior.
+
+
+The companion-presence extraction is now locally frozen: its private factory
+uses owner/context-bound opaque reservation and fill tokens, with all five
+canonical dependency receipts required. The related read-binding adapters moved
+without changing their callers. The store is 1,820 newline lines, below its
+1,849-line allowance; targeted formatting, lint, and the actual change-scoped
+LOC gate pass. The original forward fixtures remain unchanged; a separate
+structural receipt reconstructs the prior store before applying the original
+inverse. The proposed 87-row wrapper suite has not yet been measured.
+
+The first diagnostic attempt accidentally inherited the base suite include list
+through Vitest configuration merging. Its unrelated results are not evidence for
+the 19 planned observations. Logs and original configuration are retained under
+`.tmp/to-primitive-diagnosis-b-20260920/`. A separate unexecuted `-run2` directory
+replaces the include list, supplies an explicit CLI file selector, and requires
+exactly 19 assertion rows, three compile receipts, and 19 observations. Completion
+of this diagnosis and post-extraction runtime checks remains outstanding.
+
+
+Post-extraction full static validation passed **8/8 gates** (format, lint, LOC,
+function budget, oracle, coercion, boundary inventory, legacy preservation),
+with **1,875 recorded inputs unchanged**. Root tool session 18311 completed with
+exit 0; receipts are in `.tmp/conversion-integration-20260920/gates2/`.
+This does not substitute for post-extraction typecheck/runtime execution or
+resolve the three original conversion failures.
+
+
+### Measured conversion frontier and scoped semantic repairs (2026-09-20)
+
+The post-extraction five-file runtime cohort passed **198/201**, including all
+**87/87** wrapper-forward controls. All 1,534 recorded inputs were unchanged;
+typecheck separately passed against the same source population. The three
+original runtime failures remain unchanged. Root evidence lives under
+`.tmp/conversion-integration-20260920/validation2/`.
+
+The corrected diagnostic run selected exactly three programs and 19 observations:
+**13/19 matched Node**, with 1,501 unchanged inputs. All three original predicates
+still fail. Component observations identify the mismatches: default hint calls
+are 0 instead of 1; undefined invokes the fallback method once instead of zero;
+null produces NaN instead of zero. Other observed values, receiver counts and
+method counts are retained in the raw JSONL, not inferred from aggregate counts.
+
+Implementation plan from the actual WAT:
+
+- Extend the existing any/unknown addition admission in `binary-ops.ts` only
+  when the complete native-first/native-string implementation is available.
+  Preserve both BigInt exclusions and the old non-native route. Return the
+  actual `emitAnyAdd` value type; do not alter generic numeric conversion hints.
+  Add exact-source Node controls for default versus explicit string hint,
+  operand/conversion ordering, and a numeric-looking addition yielding string.
+- Repair the closed-struct class conversion path. Actual returned undefined
+  reaches the dispatcher intact but is excluded by the primitive cascade;
+  returned null reaches it intact but is confused with dispatcher no-match.
+  Preserve method-presence independently from the returned value, including
+  reentrancy and single observable invocation. Keep legacy callers compatible;
+  merely treating raw null as a primitive would be unsound while it also means
+  no match. Preserve the original failing fixtures and full comparison cohort.
+
+These are required behavioral repairs, not permission to retire the old compiler.
+
+
+The default-hint repair passes **39/39** addition tests, including three new
+Node comparisons, with 1,531 unchanged inputs. The subsequent exact diagnostic
+run passes **12/19** observations: all **9/9 hint observations now agree**. The
+remaining seven mismatches are in the existing undefined/null cases. Correct
+addition now exposes the erroneous fallback string through typeof, NaN and
+self-inequality checks; the numeric export alone previously masked that result.
+This is not a completed conversion repair. Evidence is retained in
+`.tmp/hint-forward-fix-v-20260920/validation/` and
+`.tmp/to-primitive-diagnosis-b-20260920-run3/`. The class matched/value dispatcher
+repair is in progress and requires fresh combined validation. Its context-bound
+helper is explicitly classified as mixed, not certified native ownership.
+
+
+### Class completion validation and follow-up repairs (2026-09-20)
+
+The first six-file combined cohort measured **223/225**, with all **1,536
+recorded inputs unchanged**. All three original conversion failures now pass.
+The new class-presence suite contributes **19/21**, with failures for void-return
+metadata and a nested conversion. Typecheck identified three matching nullable
+return-type errors. The six unchanged legacy suites measured **47/49** over
+1,537 unchanged inputs; two Number(class-instance) cases fail compilation.
+Raw evidence remains under `.tmp/conversion-integration-20260920/validation3/`.
+
+An exact-source diagnostic measured **1/4**, with 1,497 unchanged inputs. The
+void metadata repair now passes its original source: closure metadata uses null
+for no result, which must emit canonical undefined rather than read `.kind`.
+Both Number cases explicitly report a missing `__box_number` dependency. The
+repair must acquire the actual provider before retaining dispatcher indices,
+not restore a fabricated null result. The nested case has correct outer product
+(0), first-call count (1) and fallback count (0); its inner object multiplication
+returns 0 rather than NaN. Retained WAT contains `f64.const 0` without a receiver
+load or ToPrimitive call. Its original failing source remains unchanged while
+the numeric-coercion owner is investigated. Diagnostic evidence is under
+`.tmp/class-to-primitive-presence-b-20260920/diagnostic1/`.
+
+Static validation measured **7/8** with 1,877 unchanged inputs. The sole failure
+is compileBinaryExpression at 1,938 lines versus its 1,935-line allowance. The
+addition admission predicate has since been extracted into its existing module,
+preserving evaluation order and both BigInt exclusions; revalidation is pending.
+No allowance or baseline was increased. Full conversion parity, native ownership
+and delivery remain incomplete; retained receiver restoration and typed i64
+bridge limitations are not certified by these passing subsets.
+
+
+The nested inner value is the actual canonical runtime `$Object`, identified by
+`ctx.objectRuntimeTypes.objectTypeIdx`. The typed-reference numeric coercion
+falls past nominal-name handling into drop/default-zero. The next repair routes
+only this exact runtime type through the existing externref numeric conversion.
+Its adjacent native-string numeric branch will be extracted without behavior
+changes into `runtime-ref-number.ts`, with a separate preservation receipt;
+other nominal reference conversions remain unchanged. The helper is classified
+as mixed. The second diagnostic attempt was refused by its finite load gate
+before launching any child and supplies no runtime result.
+
+
+### Conversion checkpoint measured after repairs (2026-09-20)
+
+All **228/228** cases across the six conversion suites pass, including the
+unchanged original failures and all 24 class-presence controls. All **49/49**
+cases across the six unchanged legacy suites pass, including both Number(class)
+regressions. Typecheck passes. Inputs remained unchanged: 1,538 for the combined
+cohort and typecheck, 1,539 for legacy validation. All **8/8 static gates** pass
+with 1,879 unchanged inputs, including legacy preservation and boundary inventory.
+Evidence is retained in `.tmp/conversion-integration-20260920/validation4/` and
+`gates4/`; earlier failures and load refusals remain available.
+
+This is a 277-row local conversion checkpoint, not complete IR coverage or a
+verified main merge. Native ownership and runtime-created invocation carriers
+remain unfinished. The historical exceptional receiver restoration and typed
+i64 bridge limitations still require work. The old compiler remains operational;
+retirement requires everything on the IR path, tested and behaviorally equal.
+
+
+The normal signed-commit hook selected 12 changed root suites and blocked the
+commit at the inherited object-get preservation suite: **41/91 pass, 50/91 fail**.
+No commit was created. Failures identify the new conversion spans in
+`object-runtime.ts` and the relocated companion-read functions in
+`proto-index-store.ts`; earlier signed getter/key full-source checks correctly
+reject the unaccounted composition. The 277-row conversion/legacy result above
+remains a narrower passing result, not hook completion.
+
+Repair scope is test-only: compose the existing conversion, wrapper-forward and
+presence-extraction receipts back to the exact 0ef8 source blobs before running
+the unchanged historical getter/key inverses. Add ordered-span and relocated
+module checks with corruption controls, preserving all old fixtures and final
+full-source/peer hashes. Getter trace tests must read the actual authenticated
+relocated helper; unrelated runtime/layout tests remain unchanged. The original
+failed hook log is `.tmp/conversion-integration-20260920/checkpoint/commit2.log`.
+
+
+The composition adapter's first run measured **119/135**, with all 16 failures
+reporting historical getter hunk 3 before conversion normalization. That failed
+attempt remains under `validation5/`. The corrected ordering now passes
+**135/135** (16 new composition controls, 91 original getter cases, 28 original
+key cases), with all **1,622 inputs unchanged**, under `validation6/`. The
+historical verifier body remains byte-identical; historical mutations operate
+on actual current source reconstructed through the authenticated inverse. Both
+current-source and historical corruption controls remain enforced. No production
+source changed after the successful 277-row conversion/legacy checkpoint.
+Normal signed-commit hooks must still complete before this becomes a commit.

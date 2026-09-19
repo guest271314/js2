@@ -11,8 +11,14 @@ import {
   authenticateObjectRuntimeComposition,
   invertObjectRuntimePeer,
   objectRuntimeCompositionText,
+  verifyHistoricalObjectRuntimeComposition,
   verifyObjectRuntimeComposition,
 } from "./helpers/object-get-key-composition.js";
+import {
+  authenticatedProtoIndexReadSource,
+  invertConversionSource,
+  protoIndexStorePath,
+} from "./helpers/conversion-source-composition.js";
 
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 const read = (file: string) => readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
@@ -111,6 +117,7 @@ function functionText(source: string, name: string) {
 }
 function reconstruct(source: string, index: number) {
   if (index === 0) source = invertObjectRuntimePeer(source, "key");
+  if (index === 5) source = invertConversionSource(protoIndexStorePath, source);
   const donor = donors[index]!;
   const span = scope(source, index === 0 || index === 5 ? donor.name : captures[index]!);
   let end = span.end;
@@ -238,8 +245,8 @@ function traceGetter(current: boolean, opts: TraceOptions, mutate?: (source: str
     .slice(1)
     .map((donor, i) =>
       current
-        ? (i + 1 === 5 ? functionText(read(donor.file), donor.name) + "\n" : "") +
-          functionText(read(donor.file), captures[i + 1]!)
+        ? (i + 1 === 5 ? functionText(authenticatedProtoIndexReadSource(), donor.name) + "\n" : "") +
+          functionText(i + 1 === 5 ? authenticatedProtoIndexReadSource() : read(donor.file), captures[i + 1]!)
         : donor.text,
     )
     .join("\n")
@@ -1253,6 +1260,13 @@ const peerIdentities = {
     "buildObjectGetBody",
   ],
 };
+// Historical mutations operate after the authenticated later conversion inverse.
+// The source is always reconstructed from today's bytes, never substituted from a fixture.
+function historicalPeerSource(): string {
+  const current = read(donors[0]!.file);
+  verifyObjectRuntimeComposition(current);
+  return invertConversionSource(donors[0]!.file, current);
+}
 describe("authenticated signed key/getter composition", () => {
   it("reproduces both exact signed peers and the unchanged historical source in both orders", () => {
     const current = read(donors[0]!.file),
@@ -1266,8 +1280,8 @@ describe("authenticated signed key/getter composition", () => {
   });
 
   it.each(["key", "getter"] as const)("rejects altered semantic identities in every signed %s hunk", (peer) => {
-    const source = read(donors[0]!.file);
-    verifyObjectRuntimeComposition(source);
+    const source = historicalPeerSource();
+    verifyHistoricalObjectRuntimeComposition(source);
     const hunks = authenticateObjectRuntimeComposition(objectRuntimeCompositionText).peers[peer].hunks;
     expect(peerIdentities[peer]).toHaveLength(hunks.length);
     for (const [index, hunk] of hunks.entries()) {
@@ -1275,38 +1289,41 @@ describe("authenticated signed key/getter composition", () => {
       expect(hunk.after).toContain(identity);
       const changed = source.replace(hunk.after, hunk.after.replace(identity, `corrupted_${identity}`));
       expect(changed).not.toBe(source);
-      expect(() => verifyObjectRuntimeComposition(changed)).toThrow("span missing or duplicated");
+      expect(() => verifyHistoricalObjectRuntimeComposition(changed)).toThrow("span missing or duplicated");
     }
   });
 
   it.each(["key", "getter"] as const)("rejects every removed signed %s hunk", (peer) => {
-    const source = read(donors[0]!.file);
-    verifyObjectRuntimeComposition(source);
-    for (const hunk of authenticateObjectRuntimeComposition(objectRuntimeCompositionText).peers[peer].hunks)
-      expect(() => verifyObjectRuntimeComposition(source.replace(hunk.after, ""))).toThrow(
-        "span missing or duplicated",
-      );
+    const source = historicalPeerSource();
+    verifyHistoricalObjectRuntimeComposition(source);
+    for (const hunk of authenticateObjectRuntimeComposition(objectRuntimeCompositionText).peers[peer].hunks) {
+      const changed = source.replace(hunk.after, "");
+      expect(changed).not.toBe(source);
+      expect(() => verifyHistoricalObjectRuntimeComposition(changed)).toThrow("span missing or duplicated");
+    }
   });
 
   it.each(["key", "getter"] as const)("rejects every duplicated signed %s hunk", (peer) => {
-    const source = read(donors[0]!.file);
-    verifyObjectRuntimeComposition(source);
-    for (const hunk of authenticateObjectRuntimeComposition(objectRuntimeCompositionText).peers[peer].hunks)
-      expect(() => verifyObjectRuntimeComposition(source.replace(hunk.after, hunk.after + hunk.after))).toThrow(
-        "span missing or duplicated",
-      );
+    const source = historicalPeerSource();
+    verifyHistoricalObjectRuntimeComposition(source);
+    for (const hunk of authenticateObjectRuntimeComposition(objectRuntimeCompositionText).peers[peer].hunks) {
+      const changed = source.replace(hunk.after, hunk.after + hunk.after);
+      expect(changed).not.toBe(source);
+      expect(() => verifyHistoricalObjectRuntimeComposition(changed)).toThrow("span missing or duplicated");
+    }
   });
 
   it.each(["key", "getter"] as const)("rejects reordered signed %s hunks", (peer) => {
-    const source = read(donors[0]!.file);
-    verifyObjectRuntimeComposition(source);
+    const source = historicalPeerSource();
+    verifyHistoricalObjectRuntimeComposition(source);
     const hunks = authenticateObjectRuntimeComposition(objectRuntimeCompositionText).peers[peer].hunks;
     const first = hunks[0]!.after,
       last = hunks.at(-1)!.after,
       token = "__signed_composition_test_placeholder__";
     expect(source).not.toContain(token);
     const changed = source.replace(first, token).replace(last, first).replace(token, last);
-    expect(() => verifyObjectRuntimeComposition(changed)).toThrow("span order mismatch");
+    expect(changed).not.toBe(source);
+    expect(() => verifyHistoricalObjectRuntimeComposition(changed)).toThrow("span order mismatch");
   });
 
   it("rejects corruption outside both signed peer deltas", () => {

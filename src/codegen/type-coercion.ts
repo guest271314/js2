@@ -38,6 +38,7 @@ import {
   reserveTypedMemberGetF64DispatchLate,
   unpackedElemType,
 } from "./shared.js";
+import { tryRuntimeRefToNumber } from "./runtime-ref-number.js";
 import { tryEmitFastToNumber } from "./tonumber-fast-paths.js"; // (#4157) flag-gated, default OFF
 import { structMustReifyAtExternrefBoundary } from "./struct-boundary-reify.js"; // (#2358, #4491)
 import { pushZeroArgCallPad } from "./zero-arg-method-pad.js"; // (#4644) declared-but-unpassed params
@@ -3753,31 +3754,7 @@ export function coerceType(
   // Re-entrancy guard: prevent infinite recursion when valueOf itself returns a struct.
   if ((from.kind === "ref" || from.kind === "ref_null") && to.kind === "f64") {
     const typeIdx = (from as { typeIdx: number }).typeIdx;
-    if (
-      ctx.nativeStrings &&
-      (typeIdx === ctx.anyStrTypeIdx || (ctx.nativeStrTypeIdx >= 0 && typeIdx === ctx.nativeStrTypeIdx))
-    ) {
-      let strToNumberIdx = ctx.funcMap.get("__str_to_number");
-      if (strToNumberIdx === undefined) {
-        addUnionImports(ctx);
-        strToNumberIdx = ctx.funcMap.get("__str_to_number");
-      }
-      if (strToNumberIdx !== undefined) {
-        fctx.body.push({ op: "extern.convert_any" });
-        fctx.body.push({ op: "call", funcIdx: strToNumberIdx });
-        return;
-      }
-      addUnionImports(ctx);
-      const unboxIdx = ctx.funcMap.get("__unbox_number");
-      if (unboxIdx !== undefined) {
-        fctx.body.push({ op: "extern.convert_any" });
-        fctx.body.push({ op: "call", funcIdx: unboxIdx });
-        return;
-      }
-      fctx.body.push({ op: "drop" });
-      fctx.body.push({ op: "f64.const", value: NaN });
-      return;
-    }
+    if (tryRuntimeRefToNumber(ctx, fctx, typeIdx, toPrimitiveHint)) return;
     const wasInsideValueOf = (ctx as any).__insideValueOfCoercion ?? false;
     if (wasInsideValueOf) {
       // Already inside a valueOf coercion — don't recurse, return NaN

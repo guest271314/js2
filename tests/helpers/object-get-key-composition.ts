@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { invertConversionSource, objectRuntimePath } from "./conversion-source-composition.js";
 
 const BASE = "750fb7e7365692b315179dc909b57fa1407d4527";
 const SOURCE_SHA = "692133e0345a24e3c45071ed031036b96dc3f6e7702dc358e2f99651820eed9e";
@@ -94,11 +95,17 @@ function replacePeer(source: string, peer: Peer, inverse: boolean): string {
 
 /** The caller must still run its original full-source/donor checks on this result. */
 export function invertObjectRuntimePeer(source: string, name: ObjectRuntimePeer): string {
-  return replacePeer(source, authenticateObjectRuntimeComposition(objectRuntimeCompositionText).peers[name], true);
+  const peer = authenticateObjectRuntimeComposition(objectRuntimeCompositionText).peers[name];
+  return replacePeer(invertConversionSource(objectRuntimePath, source), peer, true);
+}
+
+/** Undo the declared later conversion before consulting historical peer context. */
+export function verifyObjectRuntimeComposition(source: string) {
+  return verifyHistoricalObjectRuntimeComposition(invertConversionSource(objectRuntimePath, source));
 }
 
 /** Both independent orders must reproduce each signed peer and the unchanged original. */
-export function verifyObjectRuntimeComposition(source: string) {
+export function verifyHistoricalObjectRuntimeComposition(source: string) {
   const r = authenticateObjectRuntimeComposition(objectRuntimeCompositionText);
   const getterOnly = replacePeer(source, r.peers.key, true),
     keyOnly = replacePeer(source, r.peers.getter, true);
