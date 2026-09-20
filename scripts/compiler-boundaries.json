@@ -335,9 +335,10 @@
         "src/runtime/wasmgc/values/ordinary-object-descriptor-data.ts",
         "src/runtime/wasmgc/values/ordinary-object-key-definitions.ts",
         "src/runtime/wasmgc/values/ordinary-object-storage-bodies.ts",
-        "src/runtime/wasmgc/values/ordinary-object-storage-definitions.ts"
+        "src/runtime/wasmgc/values/ordinary-object-storage-definitions.ts",
+        "src/runtime/wasmgc/values/prototype-companion-body.ts"
       ],
-      "minModules": 70
+      "minModules": 71
     },
     {
       "id": "standalone-platform",
@@ -13132,6 +13133,11 @@
       "path": "src/ir/program/native-object-access-requirements.ts",
       "state": "clean",
       "layer": "ir-program"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/prototype-companion-body.ts",
+      "state": "clean",
+      "layer": "native-runtime"
     }
   ]
 }

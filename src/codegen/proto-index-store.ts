@@ -1,4 +1,8 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import {
+  buildPrototypeCompanionBody,
+  type PrototypeCompanionSeedCall,
+} from "../runtime/wasmgc/values/prototype-companion-body.js";
 /**
  * (#4160, generalized by #4176) Prototype-PROPERTY store for `--target
  * standalone` — the runtime substrate that makes a property written onto a
@@ -789,139 +793,34 @@ function fillCompanionBody(ctx: CodegenContext, deps: ProtoIndexFillDeps): void 
     { name: "arr", type: arrRefNull },
     { name: "c", type: { kind: "externref" } },
   ];
-  fn.body = [
-    // (#2175 V2-S3b-1) A brand with a SEEDER always materializes its companion,
-    // even on a pure read. Both read probes (`__protoidx_get_k` /
-    // `__protoidx_has_k`) call in with `create = 0` — correct for #4176, where a
-    // companion only exists once the program has WRITTEN to that prototype, so
-    // "absent slot" genuinely means "nothing stored". A seeded brand inverts
-    // that: its own members are waiting to be installed and the slot is absent
-    // only because nobody has asked yet. Forcing `create = 1` for exactly the
-    // seeded offsets makes the read paths self-materializing without changing
-    // behaviour for any unseeded brand (whose slot keeps its create-on-write
-    // rule) — and, because both probes go through here, GET and `in` agree by
-    // construction instead of by accident.
-    ...buildSeededOffsetForceCreateArms(ctx, 0, 1),
-    { op: "global.get", index: deps.tableGlobalIdx },
-    { op: "local.set", index: 2 },
-    { op: "local.get", index: 2 },
-    { op: "ref.is_null" },
-    {
-      op: "if",
-      blockType: { kind: "empty" },
-      then: [
-        { op: "local.get", index: 1 },
-        { op: "i32.eqz" },
-        {
-          op: "if",
-          blockType: { kind: "empty" },
-          then: [{ op: "ref.null.extern" }, { op: "return" }],
-        },
-        { op: "i32.const", value: BUILTIN_BRAND_COUNT },
-        { op: "array.new_default", typeIdx: deps.tableArrTypeIdx },
-        { op: "local.set", index: 2 },
-        { op: "local.get", index: 2 },
-        { op: "global.set", index: deps.tableGlobalIdx },
-      ],
-    },
-    // c = arr[whichOff]
-    { op: "local.get", index: 2 },
-    { op: "ref.as_non_null" },
-    { op: "local.get", index: 0 },
-    { op: "array.get", typeIdx: deps.tableArrTypeIdx },
-    { op: "local.set", index: 3 },
-    // absent && create → mint a plain $Object companion into the slot
-    { op: "local.get", index: 3 },
-    { op: "ref.is_null" },
-    { op: "local.get", index: 1 },
-    { op: "i32.and" },
-    {
-      op: "if",
-      blockType: { kind: "empty" },
-      then: [
-        { op: "call", funcIdx: deps.newPlainObjectIdx },
-        { op: "local.set", index: 3 },
-        { op: "local.get", index: 2 },
-        { op: "ref.as_non_null" },
-        { op: "local.get", index: 0 },
-        { op: "local.get", index: 3 },
-        { op: "array.set", typeIdx: deps.tableArrTypeIdx },
-        // (#2175 V2-S3b-1) Seed the fresh companion with the brand's BUILTIN
-        // own members, so a `$NativeProto` flowing as a runtime value answers
-        // `p.exec` / `TypedArray.prototype.find` through the ordinary consult.
-        // Placed AFTER the slot store, which is what makes it re-entrancy-safe:
-        // a seeder body calls `__defineProperty_value`/`_accessor`, whose own
-        // #4176 write arms can route back into `__protoidx_companion` for the
-        // same offset — by then the slot is non-null, so that re-entry takes
-        // the cached path instead of minting a second companion and recursing.
-        ...buildCompanionSeedArms(ctx, 0, 3),
-      ],
-    },
-    { op: "local.get", index: 3 },
-  ];
+  fn.body = buildPrototypeCompanionBody({
+    tableGlobalIdx: deps.tableGlobalIdx,
+    tableArrTypeIdx: deps.tableArrTypeIdx,
+    newPlainObjectIdx: deps.newPlainObjectIdx,
+    brandCount: BUILTIN_BRAND_COUNT,
+    forceCreateOffsets: companionForceCreateOffsets(ctx),
+    seedCalls: companionSeedCalls(ctx),
+  });
 }
 
-/**
- * (#2175 V2-S3b-1) The brand-offset dispatch that seeds a freshly minted
- * companion: `if (whichOff == <off>) __nativeproto_seed_<brand>(companion)`,
- * one arm per brand whose `$NativeProto` was materialized during codegen.
- *
- * Empty when nothing registered (no arms, no bytes) — which is the case for
- * every module that is not `protoMemberDirty`, so this fill stays
- * byte-identical for them. funcIdx is resolved from `funcMap` HERE, at fill
- * time, never captured at mint time: a late import between the two shifts every
- * defined-func index (#2043), and a stale `call` would silently target the
- * wrong function.
- */
-/**
- * (#2175 V2-S3b-1) `if (whichOff == <seededOff>) create = 1` — one arm per
- * seeded brand. Empty (and therefore byte-inert) when no seeder registered.
- */
-function buildSeededOffsetForceCreateArms(ctx: CodegenContext, whichOffLocal: number, createLocal: number): Instr[] {
+// Keep the two original late-resolution traversals separate and ordered.
+function companionForceCreateOffsets(ctx: CodegenContext): number[] {
   const seeders = nativeProtoSeedersByBrandOffset(ctx);
-  if (seeders.size === 0) return [];
-  const arms: Instr[] = [];
-  for (const [off, funcName] of seeders) {
-    if (ctx.funcMap.get(funcName) === undefined) continue;
-    arms.push(
-      { op: "local.get", index: whichOffLocal },
-      { op: "i32.const", value: off },
-      { op: "i32.eq" },
-      {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [
-          { op: "i32.const", value: 1 },
-          { op: "local.set", index: createLocal },
-        ],
-      },
-    );
+  const offsets: number[] = [];
+  for (const [offset, name] of seeders) {
+    if (ctx.funcMap.get(name) !== undefined) offsets.push(offset);
   }
-  return arms;
+  return offsets;
 }
 
-function buildCompanionSeedArms(ctx: CodegenContext, whichOffLocal: number, companionLocal: number): Instr[] {
+function companionSeedCalls(ctx: CodegenContext): PrototypeCompanionSeedCall[] {
   const seeders = nativeProtoSeedersByBrandOffset(ctx);
-  if (seeders.size === 0) return [];
-  const arms: Instr[] = [];
-  for (const [off, funcName] of seeders) {
-    const funcIdx = ctx.funcMap.get(funcName);
-    if (funcIdx === undefined) continue;
-    arms.push(
-      { op: "local.get", index: whichOffLocal },
-      { op: "i32.const", value: off },
-      { op: "i32.eq" },
-      {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [
-          { op: "local.get", index: companionLocal },
-          { op: "call", funcIdx },
-        ],
-      },
-    );
+  const calls: PrototypeCompanionSeedCall[] = [];
+  for (const [offset, name] of seeders) {
+    const functionIndex = ctx.funcMap.get(name);
+    if (functionIndex !== undefined) calls.push({ offset, functionIndex });
   }
-  return arms;
+  return calls;
 }
 
 /**

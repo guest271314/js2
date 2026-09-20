@@ -1,4 +1,5 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import { applyPrototypeCompanionExtraction } from "./helpers/prototype-companion-extraction.js";
 import { applyClosureApplyExtraction } from "./helpers/object-runtime-apply-extraction.js";
 import { applyFnctorGuardForward } from "./helpers/object-runtime-fnctor-guard-forward.js";
 import { createHash } from "node:crypto";
@@ -740,7 +741,7 @@ function restorePresenceStore(
 ): string {
   for (const module of record.modules)
     if (sha(reader(module.path)) !== module.sha256) throw new Error("changed extracted presence module");
-  let source = reader(record.store.path);
+  let source = applyPrototypeCompanionExtraction(reader(record.store.path), true, reader);
   if (sha(source) !== record.store.afterSha256) throw new Error("changed composed presence store");
   let priorBefore = 0;
   let priorAfter = 0;

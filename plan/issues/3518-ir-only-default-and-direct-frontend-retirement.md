@@ -12574,3 +12574,36 @@ real default-prototype companion ownership rather than replacing it with a
 fresh-local-object-only carve-out. Support-resource planning must include actual
 TypeError and invocation diagnostic strings for semantic getter demand. Preserve
 original source/codec executions, mutations, exceptions and legacy comparison.
+
+
+### Prototype companion implementation plan (root, base65448565c7)
+
+Extract exact companion-table body and seeder dispatch as a pure typed runtime
+recipe. Keep legacy reserve/finalize gates and late function-map acquisition at
+their original sites; pass only leaf indices/offsets, never prebuilt instruction
+arms or callbacks. Preserve separate force-create and seed-map traversals,
+table publication before lookup, and companion slot publication before seeding.
+Authenticate original donor spans and compare complete emitted locals/body plus
+acquisition logs for empty, partial, multiple and changing seeder populations.
+Then join the general companion/lookup/normalization, facade and ordered seeder
+owners to the sole native ledger. No local-object proof replaces prototypes.
+Existing full-source preservation receipts must compose the new extraction
+outside their unchanged historical inverses before this can be committed.
+
+
+Prototype companion extraction first run23090: TS7pass,10/10 donor/acquisition
+controls,1621 inputs unchanged. The complete original proto-index-store hash
+reconstructs from live bytes; empty, missing, zero-index, multiple and changing
+seeder lookups preserve locals/body and read order. Add authenticated outer
+extraction to unchanged conversion/presence receipts and two actual builder/
+receipt mutation controls. Add one clean native-runtime inventory row and its
+floor without rewriting history or dependency allowances. Broader validation
+is pending; this recipe alone is not a complete prototype owner.
+
+Prototype composition53272: TS7pass,511/511 across5 suites,1626 inputs unchanged.
+Original conversion/presence/main source hashes and all349 boundary controls
+remain intact; new recipe/adapter is still only a prototype-owner prerequisite.
+
+Prototype six-gate73726 passes LOC/functions/coercion/oracle/inventory/
+preservation exports,1623 inputs unchanged, against exact65448565c7.
+No retirement inference: the graph audit is preservation-only and remains OPEN.

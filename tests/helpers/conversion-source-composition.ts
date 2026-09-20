@@ -1,4 +1,5 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import { applyPrototypeCompanionExtraction } from "./prototype-companion-extraction.js";
 import { applyClosureApplyExtraction } from "./object-runtime-apply-extraction.js";
 import { applyFnctorGuardForward } from "./object-runtime-fnctor-guard-forward.js";
 import { createHash } from "node:crypto";
@@ -168,7 +169,7 @@ export function invertPreWriteConversionSource(
   if (path === objectRuntimePath) source = invertObjectRuntimeMainComposition(source);
   if (path === protoIndexStorePath) {
     authenticatedProtoIndexReadSource(reader);
-    source = replacePresence(source, presence.store, true);
+    source = replacePresence(applyPrototypeCompanionExtraction(source, true, reader), presence.store, true);
   }
   source = applyConversionSpans(source, forward.records.find((r) => r.path === path)!.spans, true);
   return applyConversionSpans(source, row.spans, true);
@@ -192,7 +193,8 @@ export function verifyConversionComposition(reader: Reader = readConversionSourc
     let replay = applyConversionSpans(original, row.spans, false);
     if (conversionSha(replay) !== row.extractionSha256) throw new Error("conversion extraction replay mismatch");
     replay = applyConversionSpans(replay, forward.records.find((r) => r.path === row.path)!.spans, false);
-    if (row.path === protoIndexStorePath) replay = replacePresence(replay, presence.store, false);
+    if (row.path === protoIndexStorePath)
+      replay = applyPrototypeCompanionExtraction(replacePresence(replay, presence.store, false), false, reader);
     if (row.path === objectRuntimePath)
       replay = applyClosureApplyExtraction(
         applyFnctorGuardForward(
