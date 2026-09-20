@@ -11174,3 +11174,21 @@ Primitive checkpoint gates34251: LOC/function/coercion/oracle/inventory and
 dead-export preservation checks all exit0,1505 inputs unchanged. Preservation
 mode does not certify removal; runtime reachability remains an open graph.
 Normal commit hooks will now run the complete506 changed-file test population.
+
+
+Current-main integration validation (2026-09-20): primitive checkpoint aac11f60
+completed full normal hooks,506/506 tests,13 staged inputs unchanged, signed.
+The pending clean merge incorporates exact canonical main200f7e2c, preserving
+its live fnctor prototype guard and linked static inheritance regressions.
+Candidate TS7 passes;153/168 runtime tests pass,15 fail. A clean detached
+200f7e2c control independently reproduces all18 arraylike rows (3 pass,15 fail),
+with identical statuses and failure text after checkout paths and stack locations
+are normalized;1470 control inputs unchanged. These remain existing failures,
+not a claim of full-green behavior. Evidence: main-join/exact-main-comparison.json.
+
+Authenticated54bffc6 fnctor-guard inverse/replay composes outside the unchanged
+35e040 nineteen-span historical receipt. Original full-source hashes remain
+asserted. Five affected suites pass251/251,0 pending,1576 inputs unchanged,
+including genuine current-source and missing/altered/duplicate guard controls.
+No runtime behavior is removed. Retirement remains conditional on everything
+executing through IR with tests and behavioral equality; full parity is open.

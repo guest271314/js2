@@ -1,4 +1,9 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import {
+  applyFnctorGuardForward,
+  authenticateFnctorGuardReceipt,
+  fnctorGuardReceiptText,
+} from "./helpers/object-runtime-fnctor-guard-forward.js";
 import { describe, expect, it } from "vitest";
 import {
   applyObjectRuntimeMainComposition,
@@ -13,10 +18,15 @@ import {
   readConversionSource,
   verifyConversionComposition,
 } from "./helpers/conversion-source-composition.js";
-import { verifyObjectRuntimeComposition } from "./helpers/object-get-key-composition.js";
+import { verifyObjectRuntimeComposition as verifyCurrentObjectRuntimeComposition } from "./helpers/object-get-key-composition.js";
 
 const receipt = authenticateObjectRuntimeMainComposition();
-const current = readConversionSource(objectRuntimePath);
+const rawCurrent = readConversionSource(objectRuntimePath);
+const current = applyFnctorGuardForward(rawCurrent, true);
+// The old 19-span controls continue to mutate their exact historical layer.
+function verifyObjectRuntimeComposition(source: string) {
+  return verifyCurrentObjectRuntimeComposition(applyFnctorGuardForward(source, false));
+}
 describe("fixed main changes precede the unchanged conversion and getter/key inverses", () => {
   it("reconstructs the entire signed integration and reciprocally reproduces the actual merge", () => {
     const integration = verifyObjectRuntimeMainComposition(current);
@@ -90,5 +100,32 @@ describe("fixed main changes precede the unchanged conversion and getter/key inv
       objectRuntimeMainCompositionText.replace("35e040c0", "00000000"),
     ])
       expect(() => authenticateObjectRuntimeMainComposition(text)).toThrow("receipt digest mismatch");
+  });
+});
+
+describe("committed fnctor prototype guard composes outside historical main", () => {
+  it("restores the current compiler through old receipts and replays the guard", () => {
+    verifyCurrentObjectRuntimeComposition(rawCurrent);
+    verifyConversionComposition();
+    const historical = verifyObjectRuntimeMainComposition(current);
+    expect(applyFnctorGuardForward(applyObjectRuntimeMainComposition(historical, false), false)).toBe(rawCurrent);
+  });
+  it.each(["missing", "altered", "duplicated"])("refuses %s guard after the live positive", (mutation) => {
+    verifyCurrentObjectRuntimeComposition(rawCurrent);
+    const { before, after } = authenticateFnctorGuardReceipt();
+    expect(rawCurrent.split(after)).toHaveLength(2);
+    const replacement =
+      mutation === "missing"
+        ? before
+        : mutation === "duplicated"
+          ? after + after
+          : after.replace("!== undefined", "=== undefined");
+    expect(replacement).not.toBe(after);
+    const changed = rawCurrent.replace(after, replacement);
+    expect(() => verifyCurrentObjectRuntimeComposition(changed)).toThrow("fnctor guard span missing or duplicated");
+  });
+  it("refuses changed guard provenance", () => {
+    verifyCurrentObjectRuntimeComposition(rawCurrent);
+    expect(() => authenticateFnctorGuardReceipt(fnctorGuardReceiptText + " ")).toThrow("receipt digest mismatch");
   });
 });
