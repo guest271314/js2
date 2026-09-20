@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { invertObjectWriteSource, replayObjectWriteSource, writeExtractionPath } from "./native-object-write-donor.js";
 import {
   applyObjectRuntimeMainComposition,
   invertObjectRuntimeMainComposition,
@@ -153,7 +154,12 @@ export function authenticatedProtoIndexReadSource(reader: Reader = readConversio
   return reader(protoIndexReadPath);
 }
 
-export function invertConversionSource(path: string, source: string, reader: Reader = readConversionSource): string {
+/** Historical entry for mutation controls, after authenticating and undoing the write layer. */
+export function invertPreWriteConversionSource(
+  path: string,
+  source: string,
+  reader: Reader = readConversionSource,
+): string {
   const { receipt, forward, presence } = authenticateConversionComposition(reader);
   const row = receipt.records.find((r) => r.path === path);
   if (!row) throw new Error("unrecorded conversion source");
@@ -164,6 +170,11 @@ export function invertConversionSource(path: string, source: string, reader: Rea
   }
   source = applyConversionSpans(source, forward.records.find((r) => r.path === path)!.spans, true);
   return applyConversionSpans(source, row.spans, true);
+}
+
+export function invertConversionSource(path: string, source: string, reader: Reader = readConversionSource): string {
+  if (path === objectRuntimePath) source = invertObjectWriteSource(path, source, reader(writeExtractionPath), reader);
+  return invertPreWriteConversionSource(path, source, reader);
 }
 
 /** Exact 0ef8 reconstruction plus reciprocal replay; no historical file is substituted. */
@@ -177,7 +188,13 @@ export function verifyConversionComposition(reader: Reader = readConversionSourc
     if (conversionSha(replay) !== row.extractionSha256) throw new Error("conversion extraction replay mismatch");
     replay = applyConversionSpans(replay, forward.records.find((r) => r.path === row.path)!.spans, false);
     if (row.path === protoIndexStorePath) replay = replacePresence(replay, presence.store, false);
-    if (row.path === objectRuntimePath) replay = applyObjectRuntimeMainComposition(replay, false);
+    if (row.path === objectRuntimePath)
+      replay = replayObjectWriteSource(
+        row.path,
+        applyObjectRuntimeMainComposition(replay, false),
+        reader(writeExtractionPath),
+        reader,
+      );
     if (replay !== current) throw new Error("conversion forward replay mismatch");
     return { path: row.path, original, current };
   });

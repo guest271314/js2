@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { describe, expect, it } from "vitest";
 import { invertObjectRuntimeMainComposition } from "./helpers/object-runtime-main-composition.js";
+import { invertObjectWriteSource } from "./helpers/native-object-write-donor.js";
 import {
   applyConversionSpans,
   authenticateConversionComposition,
@@ -18,6 +19,7 @@ import {
 import {
   verifyHistoricalObjectRuntimeComposition,
   verifyObjectRuntimeComposition,
+  verifyPreWriteObjectRuntimeComposition,
 } from "./helpers/object-get-key-composition.js";
 
 const readerWith = (path: string, text: string) => (p: string) => (p === path ? text : readConversionSource(p));
@@ -51,7 +53,7 @@ describe("conversion changes compose before the unchanged getter/key donor chain
     const row = record.receipt.records[0]!;
     const forward = record.forward.records.find((r) => r.path === row.path)!;
     const measured = applyConversionSpans(
-      invertObjectRuntimeMainComposition(readConversionSource(row.path)),
+      invertObjectRuntimeMainComposition(invertObjectWriteSource(row.path, readConversionSource(row.path))),
       forward.spans,
       true,
     );
@@ -79,10 +81,12 @@ describe("conversion changes compose before the unchanged getter/key donor chain
   });
 
   it.each(["altered", "removed", "duplicated", "reordered"])(
-    "positive first: %s current conversion spans cannot enter the old peer chain",
+    "positive first: %s reconstructed conversion spans cannot enter the old peer chain",
     (kind) => {
-      const source = readConversionSource(objectRuntimePath);
-      verifyObjectRuntimeComposition(source);
+      const current = readConversionSource(objectRuntimePath);
+      verifyObjectRuntimeComposition(current);
+      const source = invertObjectWriteSource(objectRuntimePath, current);
+      verifyPreWriteObjectRuntimeComposition(source);
       const spans = record.forward.records.find((r) => r.path === objectRuntimePath)!.spans;
       if (kind === "reordered") {
         const first = spans[0]!.after;
@@ -90,7 +94,8 @@ describe("conversion changes compose before the unchanged getter/key donor chain
         const token = "__conversion_forward_reorder__";
         expect(source).not.toContain(token);
         const changed = source.replace(first, token).replace(last, first).replace(token, last);
-        expect(() => verifyObjectRuntimeComposition(changed)).toThrow("span order mismatch");
+        expect(changed).not.toBe(source);
+        expect(() => verifyPreWriteObjectRuntimeComposition(changed)).toThrow("span order mismatch");
       } else {
         for (const span of spans) {
           const replacement =
@@ -101,7 +106,7 @@ describe("conversion changes compose before the unchanged getter/key donor chain
                 : "/* altered */" + span.after.slice(1);
           const changed = source.replace(span.after, replacement);
           expect(changed).not.toBe(source);
-          expect(() => verifyObjectRuntimeComposition(changed)).toThrow("span missing or duplicated");
+          expect(() => verifyPreWriteObjectRuntimeComposition(changed)).toThrow("span missing or duplicated");
         }
       }
     },

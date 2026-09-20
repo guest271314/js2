@@ -154,9 +154,10 @@
         "src/ir/runtime/async-attachment.ts",
         "src/ir/runtime/intrinsic-verification.ts",
         "src/ir/runtime/native-async-callables.ts",
-        "src/ir/runtime/vector-callables.ts"
+        "src/ir/runtime/vector-callables.ts",
+        "src/ir/runtime/ordinary-object-callables.ts"
       ],
-      "minModules": 12
+      "minModules": 13
     },
     {
       "id": "ir-program",
@@ -190,9 +191,10 @@
         "src/ir/program/host-import-plan.ts",
         "src/ir/program/host-number-boundary-setup.ts",
         "src/ir/program/runtime-abi-identity.ts",
-        "src/ir/program/native-string-output-requirements.ts"
+        "src/ir/program/native-string-output-requirements.ts",
+        "src/ir/program/native-object-access-requirements.ts"
       ],
-      "minModules": 27
+      "minModules": 28
     },
     {
       "id": "runtime-contracts",
@@ -236,9 +238,12 @@
         "src/backend/wasmgc/resources/native-string-output.ts",
         "src/backend/wasmgc/resources/native-object-layouts.ts",
         "src/backend/wasmgc/resources/native-string-equality.ts",
-        "src/backend/wasmgc/resources/native-symbol-carrier.ts"
+        "src/backend/wasmgc/resources/native-symbol-carrier.ts",
+        "src/backend/wasmgc/resources/native-object-access-declarations.ts",
+        "src/backend/wasmgc/resources/native-object-access.ts",
+        "src/backend/wasmgc/resources/native-object-storage.ts"
       ],
-      "minModules": 23
+      "minModules": 26
     },
     {
       "id": "native-runtime",
@@ -296,9 +301,17 @@
         "src/runtime/wasmgc/values/to-primitive-method-bodies.ts",
         "src/runtime/wasmgc/values/to-primitive-wrapper-bodies.ts",
         "src/runtime/wasmgc/values/string-equality-body.ts",
-        "src/runtime/wasmgc/values/symbol-carrier-bodies.ts"
+        "src/runtime/wasmgc/values/symbol-carrier-bodies.ts",
+        "src/runtime/wasmgc/values/object-same-value-body.ts",
+        "src/runtime/wasmgc/values/ordinary-object-access-bodies.ts",
+        "src/runtime/wasmgc/values/ordinary-object-descriptor-accessor.ts",
+        "src/runtime/wasmgc/values/ordinary-object-descriptor-common.ts",
+        "src/runtime/wasmgc/values/ordinary-object-descriptor-data.ts",
+        "src/runtime/wasmgc/values/ordinary-object-key-definitions.ts",
+        "src/runtime/wasmgc/values/ordinary-object-storage-bodies.ts",
+        "src/runtime/wasmgc/values/ordinary-object-storage-definitions.ts"
       ],
-      "minModules": 50
+      "minModules": 58
     },
     {
       "id": "standalone-platform",
@@ -12785,6 +12798,71 @@
       "path": "src/backend/wasmgc/resources/native-string-equality.ts",
       "state": "clean",
       "layer": "backend-wasmgc"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/object-same-value-body.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/ordinary-object-access-bodies.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/ordinary-object-descriptor-accessor.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/ordinary-object-descriptor-common.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/ordinary-object-descriptor-data.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/ordinary-object-key-definitions.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/ordinary-object-storage-bodies.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/ordinary-object-storage-definitions.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/backend/wasmgc/resources/native-object-access-declarations.ts",
+      "state": "clean",
+      "layer": "backend-wasmgc"
+    },
+    {
+      "path": "src/backend/wasmgc/resources/native-object-access.ts",
+      "state": "clean",
+      "layer": "backend-wasmgc"
+    },
+    {
+      "path": "src/backend/wasmgc/resources/native-object-storage.ts",
+      "state": "clean",
+      "layer": "backend-wasmgc"
+    },
+    {
+      "path": "src/ir/program/native-object-access-requirements.ts",
+      "state": "clean",
+      "layer": "ir-program"
+    },
+    {
+      "path": "src/ir/runtime/ordinary-object-callables.ts",
+      "state": "clean",
+      "layer": "ir-runtime"
     }
   ]
 }

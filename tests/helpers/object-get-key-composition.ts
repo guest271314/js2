@@ -1,7 +1,11 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { invertConversionSource, objectRuntimePath } from "./conversion-source-composition.js";
+import {
+  invertConversionSource,
+  invertPreWriteConversionSource,
+  objectRuntimePath,
+} from "./conversion-source-composition.js";
 
 const BASE = "750fb7e7365692b315179dc909b57fa1407d4527";
 const SOURCE_SHA = "692133e0345a24e3c45071ed031036b96dc3f6e7702dc358e2f99651820eed9e";
@@ -102,6 +106,11 @@ export function invertObjectRuntimePeer(source: string, name: ObjectRuntimePeer)
 /** Undo the declared later conversion before consulting historical peer context. */
 export function verifyObjectRuntimeComposition(source: string) {
   return verifyHistoricalObjectRuntimeComposition(invertConversionSource(objectRuntimePath, source));
+}
+
+/** Preserve older mutation controls on bytes actually reconstructed through the write inverse. */
+export function verifyPreWriteObjectRuntimeComposition(source: string) {
+  return verifyHistoricalObjectRuntimeComposition(invertPreWriteConversionSource(objectRuntimePath, source));
 }
 
 /** Both independent orders must reproduce each signed peer and the unchanged original. */

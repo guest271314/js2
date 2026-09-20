@@ -20,6 +20,7 @@
  * so the `registerNative` call ORDER (and the minted func-index sequence) is
  * preserved exactly.
  */
+import { buildObjectSameValueBody } from "../runtime/wasmgc/values/object-same-value-body.js";
 import type { Instr, ValType } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
 import { getStringToNumberProvider, getToPrimitiveProvider } from "./coercion-engine.js";
@@ -1442,135 +1443,6 @@ export function buildObjectEnumerationHelpers(ctx: CodegenContext, s: ObjectEnum
     const unboxNumIdx = ctx.funcMap.get("__unbox_number")!;
     const unboxBoolIdx = ctx.funcMap.get("__unbox_boolean")!;
     const toBigIdx = ctx.funcMap.get("__to_bigint")!;
-    const EQ_HEAP = -19; // WasmGC `eq` abstract heap type
-
-    // params: a=0, b=1 ; locals: aa=2 (anyref), ba=3 (anyref)
-    const bothTag = (tagIdx: number): Instr[] => [
-      { op: "local.get", index: 0 },
-      { op: "call", funcIdx: tagIdx },
-      { op: "local.get", index: 1 },
-      { op: "call", funcIdx: tagIdx },
-      { op: "i32.and" },
-    ];
-    // Reference identity over the WasmGC `eq` heap (the anyref temps are already
-    // materialised in locals 2/3 by `identityArm`'s preamble below).
-    const refIdentityArm: Instr[] = [
-      { op: "local.get", index: 2 },
-      { op: "ref.test", typeIdx: EQ_HEAP },
-      { op: "local.get", index: 3 },
-      { op: "ref.test", typeIdx: EQ_HEAP },
-      { op: "i32.and" },
-      {
-        op: "if",
-        blockType: { kind: "val", type: { kind: "i32" } },
-        then: [
-          { op: "local.get", index: 2 },
-          { op: "ref.cast", typeIdx: EQ_HEAP },
-          { op: "local.get", index: 3 },
-          { op: "ref.cast", typeIdx: EQ_HEAP },
-          { op: "ref.eq" },
-        ],
-        else: [{ op: "i32.const", value: 0 }],
-      },
-    ];
-    // String SameValue = value equality (flatten both, __str_equals); else ref
-    // identity. `__str_flatten`/`__str_equals` are resolved at the top of this
-    // same `ensureObjectRuntime` pass (object-runtime helpers already call them,
-    // e.g. __obj_hash/__obj_find), so the call indices are regime-consistent.
-    const stringOrIdentityArm: Instr[] =
-      strFlattenIdx !== undefined && strEqualsIdx !== undefined && anyStrTypeIdx >= 0
-        ? [
-            { op: "local.get", index: 2 },
-            { op: "ref.test", typeIdx: anyStrTypeIdx },
-            { op: "local.get", index: 3 },
-            { op: "ref.test", typeIdx: anyStrTypeIdx },
-            { op: "i32.and" },
-            {
-              op: "if",
-              blockType: { kind: "val", type: { kind: "i32" } },
-              then: [
-                { op: "local.get", index: 2 },
-                { op: "ref.cast", typeIdx: anyStrTypeIdx },
-                { op: "call", funcIdx: strFlattenIdx },
-                { op: "local.get", index: 3 },
-                { op: "ref.cast", typeIdx: anyStrTypeIdx },
-                { op: "call", funcIdx: strFlattenIdx },
-                { op: "call", funcIdx: strEqualsIdx },
-              ],
-              else: refIdentityArm,
-            },
-          ]
-        : refIdentityArm;
-    const identityArm: Instr[] = [
-      { op: "local.get", index: 0 },
-      { op: "any.convert_extern" },
-      { op: "local.set", index: 2 },
-      { op: "local.get", index: 1 },
-      { op: "any.convert_extern" },
-      { op: "local.set", index: 3 },
-      ...stringOrIdentityArm,
-    ];
-    const bigintArm = (elseArm: Instr[]): Instr[] => [
-      ...bothTag(typeofBigIdx),
-      {
-        op: "if",
-        blockType: { kind: "val", type: { kind: "i32" } },
-        then: [
-          { op: "local.get", index: 0 },
-          { op: "call", funcIdx: toBigIdx },
-          { op: "local.get", index: 1 },
-          { op: "call", funcIdx: toBigIdx },
-          { op: "i64.eq" },
-        ],
-        else: elseArm,
-      },
-    ];
-    const boolArm = (elseArm: Instr[]): Instr[] => [
-      ...bothTag(typeofBoolIdx),
-      {
-        op: "if",
-        blockType: { kind: "val", type: { kind: "i32" } },
-        then: [
-          { op: "local.get", index: 0 },
-          { op: "call", funcIdx: unboxBoolIdx },
-          { op: "local.get", index: 1 },
-          { op: "call", funcIdx: unboxBoolIdx },
-          { op: "i32.eq" },
-        ],
-        else: elseArm,
-      },
-    ];
-    const numberArm = (elseArm: Instr[]): Instr[] => [
-      ...bothTag(typeofNumIdx),
-      {
-        op: "if",
-        blockType: { kind: "val", type: { kind: "i32" } },
-        then: [
-          // SameValue numbers: compare f64 bit patterns (NaN==NaN, +0!=-0).
-          { op: "local.get", index: 0 },
-          { op: "call", funcIdx: unboxNumIdx },
-          { op: "i64.reinterpret_f64" },
-          { op: "local.get", index: 1 },
-          { op: "call", funcIdx: unboxNumIdx },
-          { op: "i64.reinterpret_f64" },
-          { op: "i64.eq" },
-        ],
-        else: elseArm,
-      },
-    ];
-    const nullArm = (rest: Instr[]): Instr[] => [
-      { op: "local.get", index: 0 },
-      { op: "ref.is_null" },
-      { op: "local.get", index: 1 },
-      { op: "ref.is_null" },
-      { op: "i32.and" },
-      {
-        op: "if",
-        blockType: { kind: "val", type: { kind: "i32" } },
-        then: [{ op: "i32.const", value: 1 }],
-        else: rest,
-      },
-    ];
     registerNative(
       "__object_is",
       [{ kind: "externref" }, { kind: "externref" }],
@@ -1579,7 +1451,17 @@ export function buildObjectEnumerationHelpers(ctx: CodegenContext, s: ObjectEnum
         { name: "aa", type: { kind: "anyref" } },
         { name: "ba", type: { kind: "anyref" } },
       ],
-      nullArm(numberArm(boolArm(bigintArm(identityArm)))),
+      buildObjectSameValueBody({
+        typeofNumIdx,
+        typeofBoolIdx,
+        typeofBigIdx,
+        unboxNumIdx,
+        unboxBoolIdx,
+        toBigIdx,
+        anyStrTypeIdx,
+        strFlattenIdx,
+        strEqualsIdx,
+      }),
     );
   }
 }

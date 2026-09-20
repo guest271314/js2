@@ -10945,3 +10945,277 @@ The current join has passing evidence for all 609 distinct preservation cases
 peer/conversion cases, and the3 array-like positive controls: 667 passing cases
 and15 reproduced main failures across26 suites. TS7 and eight static gates pass.
 Normal hooks remain required; full IR parity and main delivery remain unproven.
+
+
+### September 20 executable ordinary property-read resources (Codex, pre-edit plan)
+
+The isolated `codex/3518-native-object-access-20260920` starts at signed
+`2e89b4cf62b3fb28e71cac5ef6fddf2fc1ae118e`. This work implements the ordinary
+property-read graph required by native ToPrimitive; it neither replaces the
+legacy compiler nor certifies a general `__extern_get` provider. No production
+file in the invocation or delivery worktrees is owned by this lane.
+
+Owned implementation paths are new backend resource modules
+`native-object-access.ts` and `native-object-access-declarations.ts`, cohesive
+pure runtime `ordinary-object-access-bodies.ts` / definition helpers as needed,
+and focused `issue-3518-native-object-access-resources.test.ts` plus a retained
+source integration fixture. Existing pure key/get recipes may receive narrow
+semantic-helper exports to avoid duplicating the donor. Existing source donors,
+fixed historical receipts, invocation modules and producer lowering remain
+unchanged unless a precise additional hunk is approved.
+
+The resource boundary authenticates the actual same-ledger object layout pack
+and exact declaration plan, string literal/flatten/equality owners, Symbol
+carrier, canonical values and an issued invocation getter association. It never
+accepts a function name, raw signature, caller-supplied instruction arm, arbitrary
+callback or copied pack as completion authority. Declare and batch-check the
+entire owned function/global graph before allocation; reserve before freeze;
+fill canonical detached bodies once; require every demanded dependency and
+owned body current and completed before publication. Preserve the original
+function slots, closure identity and captures.
+
+Ordinary receiver operations consume the issued `$Object` layout, whose `proto`
+field is exactly nullable `$Object`. Own lookup uses the existing canonical
+hash/classify/equality/find recipes, preserving Symbol identity, string content,
+tombstone probing and table storage used by writers. Get walks own then actual
+prototype entries; descriptor accessors invoke once using the original or
+explicit receiver; an absent getter returns canonical undefined; a data null or
+undefined remains a present value and shadows inherited entries. Has performs
+no getter invocation and distinguishes presence independently of the value.
+No shared mutable presence latch is introduced. Reflect-style receiver handling
+must preserve nested calls and thrown identity. String/Symbol PropertyKey
+operations are explicitly distinguished from general ToPropertyKey, whose
+ToPrimitive/string-conversion cycle needs its real issued dependencies.
+
+The full legacy finalization population is not empty: closed fields, function
+and vector/instance bags, native/companion prototypes, String exotic/template
+raw, proxy/boundary reads, builtin metadata and runtime-created carriers remain
+separate demanded owners. A parent join must reconcile those actual carriers;
+missing dependencies produce located unsupported requirements. A typed ordinary
+resource is not permission to bind generic Get or to silently remove those arms.
+
+Current concrete dependency: R's native invocation owner authenticates only
+actual selected source call/apply occurrences. It has no issued C1 getter-demand
+producer yet, and the signed base has no invocation owner at all. An authentic
+prepared Get/descriptor-getter-to-source-unit/slot association must authorize
+zero-actual-argument dispatch. Do not fabricate a `.call` source, an empty census,
+or a signature-only token to unlock getter completion. Root/R coordination will
+assign that pure demand bridge. The existing method0 body already pads declared
+formals itself; native getter calls should use that true actual-arity contract.
+
+Retain the actual producer acceptance target: a valueOf getter records trace 1,
+returns a capturing function which records trace 2 and returns 7; a toString
+getter throws 99; `Number(object) * 100 + trace` must eventually equal 712.
+This exact behavior remains an explicit integration target if source/object or
+invocation providers are missing. Resource execution tests cannot relabel it as
+passed. Focused controls will cover own/prototype/null/undefined shadowing,
+accessors and throws, receiver identity/reentrancy, string and Symbol keys,
+collisions/tombstones, actual type/global/function offsets, wrong-ledger/copied/
+changed/incomplete dependencies, duplicate/external fills and unchanged module
+population on preflight failure. Use canonical Node25 EH, one worker and 4GB
+only after the root grants the serialized heavy lane; retain every failure.
+
+The additional approved pure ownership is
+`src/ir/program/native-object-access-requirements.ts`: it issues a census only
+from actual prepared operations and descriptor/getter/source-allocation
+associations. Root owns the missing neutral semantic callable declarations and
+object-literal getter producer; R owns invocation consumption and source slots.
+The signed base's structural `object.get` and `dyn.member_get` instructions do
+not by themselves prove ordinary descriptors. No synthetic records will fill
+that gap. R's getter accessor accepts the exact retained issued C1 requirements
+and returns the actual reserved method0 token, with completion checked separately.
+
+The internal ordinary kernel consumes canonical String/Symbol PropertyKeys and
+issued `$Object`/`$PropEntry` layouts. Its lookup returns a per-call pair
+`(status, entry)`: 1 is a present descriptor, 0 is a fully exhausted explicit-null
+prototype chain, and 2 requests the real implicit-prototype companion. Has
+preserves that status without invoking getters. Get returns `(status, value)`
+and takes the original/Reflect receiver explicitly. Real null, canonical
+undefined and an accessor without a getter are all present; they never become a
+miss. Status 2 cannot authorize an undefined result at the public parent join.
+This distinction follows the existing `OBJ_FLAG_NULL_PROTO` representation; the
+last actual prototype node controls it, including later prototype mutations.
+All function declarations are reserved together before freeze. Canonical key
+hash/equality/find bodies are reused, not a replacement string-key engine.
+
+Root's initial producer measurement is separate evidence: the exact 712 source
+currently refuses at `GetAccessor` in `lowerObjectLiteral`, while its scalar
+positive prepares. The fixture remains an integration target, not a completed
+native resource or source execution claim.
+
+The first executable read prerequisite is measured. Its genuine issued owner
+contains five functions (canonical hash, key equality, own lookup, prototype
+lookup and three-state Has); the six-function aggregate declaration separately
+identifies the Get slot awaiting C2. The first TS7 attempt rejected one local
+TypeScript narrowing error; after the explicit binding guard, TS7 passes with
+1,541 unchanged inputs. The first focused run was 34/35: every Wasm behavior
+control passed, while a completion assertion ran after a duplicate-fill refusal
+had correctly poisoned the ledger. The test now checks missing canonical fill
+before the duplicate attempt, then the duplicate rejection, failed state and
+failed-state completion refusal. Corrected 35/35 passes with all 1,541 inputs
+(1,497 source files) unchanged. Both failures and corrected raw rows remain in
+`.tmp/object-access-b-20260920/attempt{1,2,3}/`.
+
+This denominator includes actual issued key/lookup execution and separately
+labelled Get-body tests with controlled invocation. It does not certify an
+issued Get owner, source descriptor construction, C2 getter dispatch or the
+712 producer target. Root's four-file semantic-contract dependency patch
+`da5657555a07418e176fc8972afc045c03e88df03c1aa3b88fe5861df8d2c71d`
+and R's value-reservation assertion patch
+`4df1658e54a6f78f51b17f06e33cbd1980c93c98a55f85952408b7a7c4aabeb5`
+were applied only after exact base-file verification; their before/after pins
+and owner attribution are retained. They are dependency work, not B authorship.
+
+Root has authorized the next concrete write prerequisite after this read
+measurement: actual create/descriptor reservation and fill using the preserved
+legacy semantics. The required body closure is `__new_plain_object`,
+`__obj_insert` and `__obj_grow` in `object-runtime.ts`, plus the ordinary
+`__defineProperty_value` / `__defineProperty_accessor` arms in
+`object-runtime-descriptors.ts`. Preserve insertion order, tombstones, capacity
+growth and both accessor halves during rehash; descriptor updates use explicit
+presence bits (data 191, getter 310, setter 566 for object literals). An absent
+half's null operand is ignored. Real null/undefined data values are retained.
+Non-extensibility, non-configurable redefinition, SameValue checks and tagged
+TypeError behavior are real dependencies of the generic descriptor contract,
+not optional no-op arms. The existing TypeError resource currently lacks public
+reserved/completed-owner assertions, so that narrow authentication seam and the
+actual SameValue provider must be resolved before writer completion is claimed.
+The original broad-carrier legacy branches remain operational and cannot be
+silently replaced by the typed ordinary prerequisite.
+
+The exact storage and ordinary descriptor donor release is now recorded before
+source edits. The immutable `issue-3518-native-object-write-donor.json` records
+base 2e89, both complete source files and their Git blob/full SHA256 identities,
+and each storage body scope/hash. Only the three storage expressions and their
+imports, and the ordinary descriptor recipe/capture boundaries, may change.
+Existing broad receiver branches, locals, registration order and key-coercion
+prefixes stay operational. Detached storage bodies retain actual flags, table
+identity replacement, sequence numbers, and both accessor halves during growth.
+The separate `__object_is` SameValue body in object-runtime-enumeration.ts is a
+located additional dependency, requested before any edit to that file.
+
+The exact native-first `__object_is` block in object-runtime-enumeration.ts
+is additionally released for canonical SameValue body extraction. Its full
+source/blob and bounded scope are added to the same immutable donor receipt
+before editing. Preserve every number/boolean/BigInt/string/null/identity arm
+and legacy acquisition order; the remainder of enumeration is outside scope.
+Existing issued values supply only numeric callables and the boolean layout;
+the missing issued boolean/BigInt predicate/unbox dependencies remain explicit
+until resolved, never replaced by signature-only or false-returning providers.
+
+The storage/descriptor draft now has a fixed complete-source donor and a
+separate ordered extraction receipt for all three legacy files. The new issued
+storage owner reserves the complete five-function create/insert/grow batch
+against the real lookup owner and same ledger before freeze; canonical fill and
+completion remain distinct from reservations. Its prototype-argument ABI is a
+nullable issued ordinary-object reference, not generic prototype admission.
+The detached ordinary descriptor and SameValue recipes preserve the legacy
+conditional branches and acquisition trace. Focused Wasm controls use real issued
+storage/key/string/Symbol owners and explicitly controlled callable dependencies
+for these detached recipes; they cannot certify a descriptor, getter-dispatch,
+Boolean, or BigInt provider. The new TypeError assertions also distinguish an
+external body fill from the canonical owner.
+
+Fifty-one focused cases are proposed for the first storage measurement, including
+growth with both accessor halves, presence-mask updates, null/undefined versus
+missing properties, tagged errors, full-source inverse/forward reconstruction,
+acquisition traces, copied/foreign/deformed resources and a real growth-copy
+mutant. This count is a planned population until the test report exists. The
+known legacy SameValue bitwise-NaN behavior and broader receiver/prototype
+obligations are retained limitations, not silently declared normative parity.
+Formatting and lint passed; compiler/execution validation is still queued.
+
+The first storage measurement passed TS7 with 1,552 inputs unchanged, then
+measured 22/51 focused cases passing with the same inputs unchanged. All eight
+TypeError ownership controls and all fourteen donor/full-source/acquisition
+controls passed. Each of the other 29 rows stopped in test setup before storage
+execution: the real string-flatten owner requires the empty-string literal, but
+the fixture supplied only property keys. Add that real literal to the fixture;
+retain every failed row and the original source/receipt pins. This test setup
+repair changes no provider, runtime body, donor receipt, or expected behavior.
+
+Storage attempt2 measured 50/51 passing with all 1,552 inputs unchanged. The
+remaining native accessor-identity control supplied a foreign JavaScript
+function. The retained native SameValue identity arm accepts GC eq-references,
+so redefining with that foreign function threw the actual tagged exception.
+Preserve the raw failure and both old test/helper bytes. The intended native
+identity control now obtains two actual native closure values from the issued
+closure-layout owner and canonical closure constructor, executes the first
+lifted body, and checks same-reference/different-reference identity before the
+original descriptor assertions. This supplies the real carrier required by the
+control; foreign JS-function identity remains an explicit unsupported domain of
+the preserved recipe. No production or donor/extraction receipt changed.
+
+The separate signed-producer census tree measured the exact remaining source
+join after enabling existing native string-key/unbox policies: js.object.create-default
+has no provider. A canonical symbolic runtime-callable manifest recipe can make
+the genuine program preparable, as the existing vector family already does.
+It grants no physical body. Parent acceptance must authenticate the issued C1
+requirements, actual source closures, receiver/prototype obligations and exact
+resource plan before adding ordinary bindings to its accepted native ABI set.
+Use actual reservation tokens and the one ledger; preserve the internal
+three-state Has/Get ABI until the public wrappers consume the real implicit
+prototype companion. Descriptor recipes still need real Boolean/BigInt/SameValue,
+TypeError and C2 invocation dependencies; raw matching signatures cannot complete
+those owners. This is the concrete next join, not a fabricated sealed program.
+
+Storage attempt3 now measures 51/51 passing, zero pending, with all 1,552 inputs
+(1,504 source files) unchanged. This includes actual native closure identity in
+the non-configurable accessor test. The original 22/51 and 50/51 results remain
+preserved. This does not measure generic descriptor-provider completion, a
+source getter dispatch, or the 712 integration target.
+
+Before further validation, compose the new write extraction with the existing
+historical preservation chain in test code only. Authenticate the immutable
+write donor/extraction receipts and actual relocated modules, undo only their
+ordered spans to recover the exact signed 2e89 source, then run the unchanged
+main/conversion/getter/key full-source checks. Reciprocal replay must reproduce
+the actual candidate. Existing historical mutation controls operate on bytes
+reconstructed from the authenticated current source, with an explicit historical
+entry point; no fixture source substitution, changed digest or relaxed rejection
+is permitted. Separate current-source controls cover every write span, outside
+edits, old-source substitution, relocated modules and receipt corruption. Only
+the test helpers and their affected tests change; production and all fixed donor
+receipts stay frozen.
+
+The composed preservation run now passes all 312 cases in seven complete files:
+conversion composition 16, getter bodies 91, key foundation 28, storage 51,
+new write composition 15, historical main composition 24, and wrapper-forward
+87. All 1,652 inputs, including 1,504 source files and the complete fixture
+population, remained unchanged. Existing mutation assertions still run against
+bytes reconstructed from the authenticated actual candidate. The new outer
+write layer rejects changes before the older checks; it reciprocally replays
+the exact candidate after the historical chain. No old receipt was reseeded.
+
+Thirteen actual new modules receive clean boundary classifications and required
+entries: eight runtime recipes, three backend resource modules, the pure C1
+requirements issuer and root's canonical ordinary-object callable declarations.
+The existing floors increase by only these populations (runtime 50 to 58,
+backend 23 to 26, IR program 27 to 28, IR runtime 12 to 13). Allowed edges,
+activation history and budget allowances remain unchanged. Static gates and
+normal signed commit hooks are pending measurement. This local checkpoint
+retains the explicit generic receiver/prototype, full descriptor dependency,
+source-issued getter dispatch and 712 execution gaps; it does not retire the
+legacy compiler or claim a completed C1 property-access family.
+
+The final-source TS7 check passes with 1,652 unchanged inputs. Quality attempt1
+passed formatting and then stopped at one lint finding in the immutable 712
+input asset: the function expression would be rewritten as an arrow function.
+All 2,005 gate inputs remained unchanged; the six later gates did not run.
+Preserve that failure and the original bytes. The authorized repair renames the
+asset from `.ts` to `.ts.txt` and updates its sole test reader. The source remains
+byte-identical with SHA256
+`c0550b99175c0eb61afa7d5d110a287f3fe90e9fc8e581c6d58a19fe0a971ba9`;
+there is no arrow rewrite, lint suppression, or oracle change. Production and
+the fixed donor/extraction receipts remain frozen for the new quality attempt.
+
+Quality attempt2 passes all eight required gates with all 2,005 inputs
+unchanged. Inventory measures 1,502 modules and 11,369 resolved edges, with no
+inventory errors and architecture explicitly incomplete. The scoped LOC and
+function checks cover 21 changed source files (net +1,686 lines); the existing
+manifest allowance is retained, with no new allowance. Oracle growth is zero.
+The unchanged coercion gate runs through a verified space-free alias and
+measures 129 files / 522 sites, so this is not a zero-scan result. The existing
+preservation contract passes all six full and six cut witnesses while keeping
+the two unresolved dynamic imports, graph OPEN and retirement/deletion not
+certified. These limitations do not authorize removing the old compiler.
