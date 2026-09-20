@@ -38,6 +38,12 @@
 import { IR_STRING_COMPARE_FN } from "./runtime-symbols.js";
 import { IR_ASYNC_CONSOLE_LOG_STRING_FN, IR_ASYNC_NUMBER_TO_STRING_FN } from "./async-semantic-runtime.js";
 import { ts, forEachChild } from "../ts-api.js";
+import { IR_CLOSURE_UNDEFINED } from "./core/closure-invocation-callables.js";
+import {
+  fixedClosureParameters,
+  lowerSourceClosureInvocation,
+  type SourceClosureInvocationPlan,
+} from "./source-closure-invocation.js";
 import { exactIndirectEvalStatement } from "../eval-call-shape.js";
 
 import { TsCheckerOracle, type TypeOracle } from "../checker/oracle.js";
@@ -394,6 +400,10 @@ export interface IrExternClassMeta {
  * until Phase 3, so from-ast doesn't see them.
  */
 export interface IrFromAstResolver extends PreparedAsyncFromAstResolver {
+  /** Exact complete-source proof of a local closure's primordial call/apply member. */
+  sourceClosureInvocation?(expression: ts.CallExpression): SourceClosureInvocationPlan | undefined;
+  /** Exact higher-order parameter certified by the complete source invocation proof. */
+  sourceClosureCallableParameter?(node: ts.FunctionTypeNode): boolean;
   /** Resolve the pre-collected exact JS-host indirect-eval import. */
   hostIndirectEvalTarget?(): IrFuncRef | null;
   /** Exact pre-scanned sparse constructor sites. */
@@ -1717,7 +1727,7 @@ function lowerStatementList(stmts: readonly ts.Statement[], cx: LowerCtx): void 
         // (`host.appendChild(box);`, `console.log("…");`). Expression
         // position keeps throwing on void — only this flag differs.
         if (ts.isPropertyAccessExpression(s.expression.expression) && !s.expression.questionDotToken) {
-          void lowerMethodCall(s.expression, cx, /* statementPosition */ true);
+          void lowerMethodCallWithSourcePlan(s.expression, cx, /* statementPosition */ true);
           continue;
         }
         // The result SSA value is unused; DCE strips it if pure.
@@ -1990,7 +2000,7 @@ function lowerDiscardedExpression(expr: ts.Expression, cx: LowerCtx): void {
     const hostDateGetter = lowerHostDateGetterCall(expr, cx);
     if (hostDateGetter !== undefined) return;
     if (ts.isPropertyAccessExpression(expr.expression) && !expr.questionDotToken) {
-      void lowerMethodCall(expr, cx, /* statementPosition */ true);
+      void lowerMethodCallWithSourcePlan(expr, cx, /* statementPosition */ true);
       return;
     }
     if (ts.isIdentifier(expr.expression) || expr.expression.kind === ts.SyntaxKind.SuperKeyword) {
@@ -6798,7 +6808,7 @@ function lowerCall(expr: ts.CallExpression, cx: LowerCtx, statementPosition = fa
   // the class shape and be non-void (slice 4 only handles methods with
   // a returning result in expression position).
   if (ts.isPropertyAccessExpression(expr.expression)) {
-    const r = lowerMethodCall(expr, cx);
+    const r = lowerMethodCallWithSourcePlan(expr, cx);
     if (r === null) {
       // Unreachable: in expression position (statementPosition=false) every
       // void arm throws before returning null (#2856 added the null returns
@@ -7998,6 +8008,27 @@ function tryLowerNativeMapConstruction(expr: ts.NewExpression, cx: LowerCtx): Ir
   // invariant (producer-promise): a compiler-support/runtime helper declared non-void returned no SSA value — #4502.
   if (result === null) throw new Error(`ir/from-ast: native Map allocator returned void (${cx.funcName})`);
   return result;
+}
+
+function lowerMethodCallWithSourcePlan(
+  expr: ts.CallExpression,
+  cx: LowerCtx,
+  statementPosition = false,
+): IrValueId | null {
+  if (!ts.isPropertyAccessExpression(expr.expression)) {
+    demoteToLegacy("method-call-unsupported", `ir/from-ast: malformed method call in ${cx.funcName}`);
+  }
+  const closureInvocation = cx.resolver?.sourceClosureInvocation?.(expr);
+  if (closureInvocation)
+    return lowerSourceClosureInvocation(closureInvocation, {
+      builder: cx.builder,
+      lower: (node) =>
+        isUnshadowedUndefinedExpression(node, cx)
+          ? cx.builder.emitCall(irIntrinsicFuncRef(IR_CLOSURE_UNDEFINED), [], irVal({ kind: "externref" }))!
+          : lowerExpr(node, cx, irVal({ kind: "externref" })),
+      externalize: (value) => coerceToExpectedExtern(value, { kind: "externref" }, cx, "closure invocation"),
+    });
+  return lowerMethodCall(expr, cx, statementPosition);
 }
 
 function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPosition = false): IrValueId | null {
@@ -14884,7 +14915,7 @@ function closureParameterTypeToIr(node: ts.TypeNode, cx: LowerCtx, where: string
         "type-resolution-unsupported",
         `ir/from-ast: unsupported closure-valued parameter signature (${where})`,
       );
-    return { kind: "closure", signature };
+    return { kind: cx.resolver?.sourceClosureCallableParameter?.(node) ? "callable" : "closure", signature };
   }
   if (ts.isArrayTypeNode(node) && node.elementType.kind === ts.SyntaxKind.NumberKeyword) {
     const elementValType: ValType = { kind: "f64" };
@@ -15397,6 +15428,7 @@ function liftClosureBody(
       return builder.finish({
         signature,
         captureFieldTypes: [...captureFieldTypes],
+        ...fixedClosureParameters(expr, signature),
         ...(hostOneShot ? { hostOneShot: true } : {}),
         ...(domCallbackAuthority ? { domCallbackAuthority } : {}),
       });
@@ -15423,6 +15455,7 @@ function liftClosureBody(
   return builder.finish({
     signature,
     captureFieldTypes: [...captureFieldTypes],
+    ...fixedClosureParameters(expr, signature),
     ...(hostOneShot ? { hostOneShot: true } : {}),
     ...(domCallbackAuthority ? { domCallbackAuthority } : {}),
   });

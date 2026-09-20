@@ -10253,3 +10253,919 @@ and the graph remains OPEN; this does not certify retirement. Exact dependency
 base remains delivered main 750fb7e7365692b315179dc909b57fa1407d4527. Retained
 receipts are under .tmp/native-object-integration-r-20260919/equality-*.
 Proceed through the full normal signed merge hooks without bypass or publication.
+
+
+### September 19 C2 executable native invocation ownership (Codex, pre-edit plan)
+
+Isolated `codex/3518-native-invocation-20260919` starts at signed integration
+`fdaa94315aeeeab5dc85a3596f2b4997b388ac76`. The existing September 9 native
+async implementation specification, Lane C2, is the scope. Freeze actual
+current donors and dependency blobs before editing under
+`.tmp/native-invocation-r-20260919/DONOR-BASELINE.json`; no archived candidate
+or inferred empty population supplies authorization. The legacy compiler
+remains the baseline until every behavior runs through IR, is tested and equal.
+No default switch, deletion, publication or second resource allocator is planned.
+
+#### Connected implementation and ownership for lead review
+
+New canonical source files:
+
+- `src/runtime/wasmgc/values/closure-invocation-types.ts`: plain typed
+  invocation layouts, ordered signature/shape entries, conversion bindings
+  and explicit provider variants, without compiler context or callbacks.
+- `src/runtime/wasmgc/values/closure-invocation-bodies.ts`: one executable
+  arity/funcref/method-dispatch implementation, including actual input conversion,
+  output boxing, under/over-application and nested receiver/argument state.
+- `src/runtime/wasmgc/values/closure-apply-body.ts`: real argument-vector
+  reading, declared-arity widening and apply dispatch; shared with the old
+  adapter rather than independently reimplemented for the native owner.
+- `src/backend/wasmgc/resources/native-invocation.ts`: one ledger-issued
+  declaration/reservation/fill/currentness/completion owner. An internal
+  `native-invocation-inventory.ts` may separate its complete association checks
+  to stay within ordinary function/file budgets; it is not a second census.
+
+New tests are `tests/issue-3518-native-invocation-resources.test.ts` and
+`tests/issue-3518-native-invocation-donor.test.ts`, with the fixed historical
+`tests/fixtures/issue-3518-native-invocation-donor.json`. The fixture retains
+original source spans and explicit inverse edits; never reseed old fixtures.
+
+Narrow legacy adapters are the invocation region of `object-runtime.ts`
+(current lines 6681–7439: reserve/fillApplyClosure plus their adjacent variadic
+helpers), and the arity/funcref/method-dispatch portions of `closure-exports.ts`.
+Registration, late-import flushing, provider acquisition, publication ordinals,
+exports, front-guard order, locals and fallback behavior stay at their original
+read points. Keep the free-call path delegating to shared pure helpers where
+those helpers are extracted; do not replace unrelated free-call behavior.
+The exact context-resolving hunks in `closures/result-boxing.ts`,
+`closures/method-dispatch-prologue.ts` and `closure-classifier.ts` are proposed
+small adapters for shared executable policy, subject to the lead's scope review.
+B owns ToPrimitive plus its wrapper/arguments helpers; those ranges and files
+are excluded. The AnyToString worker owns its native-string range, also excluded.
+
+#### Proposed resource API and authentication
+
+Use `declareNativeInvocationResources`, `reserveNativeInvocationResources`,
+`nativeInvocationReservationInventory`, `fillNativeInvocationResources`, and
+`requireCompletedNativeInvocationResources`. The declaration is a normal
+`NativeResourceRecipe` with ordered global/function steps. The pack exposes
+issued `closureArity`, per-demand `callMethod` functions, `applyClosure`,
+`typeofFunction`, and the invocation-state globals (`currentThis`, `argc`,
+`extrasArgv`); a required closed-then dispatcher is included only with its real
+producer-bound property/method dependencies. These are canonical references
+and signatures, not permission inferred from a function name.
+
+Reuse the actual `NativeClosureReservations` plus its exact declaration plan:
+`nativeClosureReservationInventory` authenticates wrappers/metadata, while the
+real lifted function, selected capture subtype, and allocating producer are
+separate mandatory associations. Derive these from the existing selected
+program/projection/support/ABI/allocation census and actual producer recipes;
+keep all owners including empty owners. Include source closures and compiler-
+created Promise settlement captures, delay callbacks, combinator reactions and
+other selected callable carriers. Deduplicate repeated signature observations
+without losing per-request metadata identities or public `.length`.
+
+The current `NativePromiseSourceCensus` is explicitly descriptive, not a whole-
+program acceptance capability. Its currentness check cannot alone certify an
+empty carrier category. Parent admission remains responsible for the checked
+program/projection; the new owner reconciles every required association with
+actual same-ledger producer inventories. Missing source/capture associations,
+unsupported rest/brand/provider forms or an unaccounted compiler-created carrier
+produce a located refusal before allocation. Do not manufacture an all-empty
+selection for the unchanged five-owner family.
+
+Real dependencies are the authenticated closure, argument-vector, primitive
+value, string/Symbol conversion and error packs, plus C1's reserved object/get/
+accessor/bag bindings. Authenticate producer identity and expected plans as well
+as type/signature shape. An arbitrary callable token with a matching signature
+is insufficient. Batch-check every owned reservation key before allocation,
+retain a checked plain-data snapshot, and reject foreign/copied/stale/incomplete
+packs or changed associations without consuming a type/signature/function prefix.
+
+Two current API gaps need narrow lead-reviewed exposure, not forged substitutes:
+`native-values.ts` offers `requireCompletedNativeValues` only after fill, while
+C2 needs a non-mutating issued-pack check during reservation; `native-errors.ts`
+currently has reserve/fill but no public issued/completed-pack assertion. Propose
+read-only reservation and completion authentication over their existing WeakMap
+owners, preserving all existing construction/fill behavior. No source edit to
+these dependencies precedes that scope review.
+
+#### One-ledger cycle and semantics
+
+Reserve actual layouts, values/closures/ObjVec and all C1/C2/provider function
+slots before freezing. C1 accessors/getters may bind reserved C2 dispatchers,
+and C2 then/method cases may bind reserved C1 readers; neither recursively fills
+the other. Reconcile all slots with declarations, freeze once, fill bodies with
+stable handles, then require both owners complete before publication. Explicit
+reserved-phase checks break the dependency cycle; missing code is never a
+successful `unreachable`, null, undefined or constant-classifier placeholder.
+
+Preserve canonical undefined versus null, receiver installation, exact raw argc
+before arity widening, clamped formals plus real extras, captured subtype
+funcref extraction, brand-specific conversions and ordered overload matching.
+Legacy missing-dispatcher/null fallbacks remain compatibility-only; native
+preflight refuses missing demanded dispatch providers. Every emitted instruction
+object is uniquely owned; no shared call-body array may be remapped twice.
+
+Current donor method dispatch restores `current_this` at its normal tail and
+apply clears `argc` after the call. These lines do not prove exception safety.
+The native boundary must save and restore receiver/argc/extras on normal, tagged
+throw and foreign exception exits, rethrowing the original exception identity.
+Keep any added cleanup distinct from byte-preserving legacy extraction; retain
+a baseline control rather than silently updating an old behavior expectation.
+
+`thenDispatch` is the real `__call_m_then_vararg` producer in
+`closed-method-dispatch.ts`, not an existing `__call_then_dispatch` symbol. Its
+closed methods, accessor closures, field-stored closures and open-object fallback
+must agree with the existing Promise classification inventory. A captured then
+callable must use apply directly and must never be looked up again. Likewise
+`__typeof_function` includes non-wrapper carriers in
+`typeof-natives-finalize.ts`; a closure-root-only predicate is not complete when
+those carriers are selected. Extract those exact donor clauses only if their
+selected demands require them and the lead approves the precise extra hunks;
+otherwise refuse the missing demanded producer before native allocation.
+
+#### Executable acceptance and sequencing
+
+Prove actual canonical resource execution, not only body text: real source-
+produced closures and actual resource-produced settlement/delay closures, with
+real receiver values, captures and function bodies. Cover declared/public arity
+differences, 0/1/2/8 arguments, omitted versus explicit undefined, extra args,
+nested calls, numeric/string/reference/brand results, null receivers, canonical
+void return, tagged and foreign throws followed by another successful call.
+Inspect receiver/argc/extras preservation and exact caught identity. Test all
+selected compiler-created carriers and a nonempty mixed source population.
+No dummy closure bodies, mock C1 pack or raw matching-signature token may stand
+in for a required real producer. If source closure allocation remains an actual
+missing parent join, retain its located failure alongside resource execution.
+
+Pair each successful reservation/fill with wrong-ledger, copied/stale pack,
+missing metadata/capture/dispatch/provider, duplicate key, unsupported conversion,
+late allocation, duplicate fill, changed body/layout and incomplete completion
+controls. Check zero population change on detectable preflight failures and
+actual emitted Wasm validation/execution after freeze. A fresh-process replay
+must not load frontend/codegen from the new runtime/backend owners.
+
+Retain full existing closure ownership/staged, argument-vector and value suites;
+selected legacy complete controls include 3592 apply arity, 4392 accessors, 2664
+arity dispatch, 1712 captured closures, 4082 result boxing, 1058 rest dispatch and
+3673 call/apply. Add precise source/receiver/exception controls, then source TS7
+and ordinary repository gates, after review and the root-coordinated test slot.
+The unchanged async-family consumer matrix remains the eventual acceptance of
+the parent join, not a success inferred from this resource pack alone.
+
+Current status: donor/API inspection and this pre-edit plan only. No source
+implementation, tests, hooks, or success measurements have been performed here.
+
+#### C2 source association extension for lead review (before additional source edits)
+
+The concrete existing producer seam is `prepareClosureTransaction` in
+`src/ir/integration.ts`, which calls `prepareDependencyCompleteClosureSupport`
+and `allocatePreparedDerivedCallableSlots` in `src/ir/prepared-closure-support.ts`.
+Those currently allocate through `CodegenContext`; importing them into a clean
+native owner is not an acceptable shortcut. The complete-program consumer
+already reserves exactly one function per physical unit at
+`src/ir/program-consumer.ts`'s `plan.functions` loop. Those slots remain the sole
+lifted-function allocations. The extension must not reserve duplicate units.
+
+Proposed additional owned files, pending lead review:
+
+- New `src/ir/program/native-source-closure-requirements.ts`: derive the
+  closure signature/capture/occurrence requirements from the existing complete
+  program/projection occurrence census, keeping each original instruction and
+  live allocation association. No second resource census or fabricated owners.
+- New `src/ir/program-native-invocation.ts`: the existing-pattern coordinator
+  calls `assertPreparedIrProgram`, checks exact selected projection and current
+  requirements, then invokes the lower type/association owner. It never imports
+  the legacy closure registry or TypeScript frontend.
+- New `src/backend/wasmgc/resources/native-source-closures.ts`: reserve only
+  exact capture subtype declarations on the existing ledger, reusing issued
+  `NativeClosureReservations` signature wrappers and root. Resolve logical
+  closure/callable signatures against these actual tokens before the existing
+  unit-slot loop; preserve mutable capture semantics through the existing
+  boxed/ref-cell owner rather than inventing primitive copies.
+- Narrow `src/ir/program-physical-plan.ts` and `src/ir/program-consumer.ts`
+  joins: retain the issued closure input privately beside existing native
+  inputs, include its descriptive declarations in the sealed physical plan,
+  resolve logical source signatures before reserving units, and associate
+  those exact slots afterwards. Continue lowering each unit once into that
+  same reserved slot with existing `lowerIrFunctionBody`/`WasmGcEmitter`.
+- The source registry's canonical capture-header construction, if not already
+  available as a pure helper, needs one narrow adapter in
+  `src/ir/closure-struct-registry.ts` plus the shared runtime layout builder;
+  registration/caching/observation order remains in the old caller.
+
+Concrete proposed interfaces are `planNativeSourceClosureRequirements(program,
+projection)`; `reserveNativeSourceClosureTypes(tx, requirements, {closures,
+closurePlan, physicalCarriers})`; `nativeSourceClosureValueType(pack, logical)`;
+`bindNativeSourceClosureUnits(tx, pack, physicalPlan.functions, unitSlots)`; and
+`requireCompletedNativeSourceClosures(tx, pack)`. The binding operation stores
+original unit/function/slot identities and their actual source ABI binding IDs,
+not a signature/name-based permission. Native dispatch may reserve against that
+issued association but completion additionally requires canonical lowering of
+that exact source body and actual ledger completion. The exact completion hook
+must be placed in the existing consumer fill operation; a public function that
+merely accepts arbitrary emitted instructions is not a valid producer proof.
+
+Source closures and runtime-created Promise/delay/thenable callbacks remain
+separate producer categories. The common invocation owner accounts for both;
+source requirements never assert that absent source `closure.new` means no
+compiler-created callable demand. Unsupported source carrier/ref-cell forms
+remain located until their actual owner is joined. Acceptance must include one
+actual producer-generated capturing-function program through the original and
+decoded consumer/replay, with exact lifted function/capture identity and receiver,
+arity and throw controls. Resource-only construction does not satisfy that
+consumer positive.
+
+Two small shared-body dependencies were made explicit during extraction:
+`closure-argument-bodies.ts`, `closure-result-bodies.ts`,
+`closure-receiver-bodies.ts` and `closure-method-body.ts` separate conversion,
+boxing and exception-safe invocation within ordinary budgets. The lead approved
+`codegen/helpers/undefined-receiver.ts` as a narrow legacy adapter. The pure
+receiver and void-result builders use fresh instruction graphs, recording the
+intentional identity-only change from the old branch-sharing/shallow-clone form.
+
+The incoming `4a6cbdf1ee80b5d1618a7c87b014bc792f0fddc7` native-prototype apply
+ownership guard and its companion's ObjVec backing admission are explicit
+forward dependencies. `.tmp/native-invocation-r-20260919/upstream-4a/AUTHORITY.json`
+retains both exact original and upstream Git blobs/full hashes. The fdaa donor
+is retained; its old peer predicate is not reseeded as current behavior. Ordinary
+reverse-call closures must still reach the peer, while locally owned transferred
+native-prototype glue takes its actual local dispatch arm.
+
+#### September 20 connected source control: measured producer prerequisite
+
+The first frozen connected run passed source TS7 but the unchanged real source
+`make(seed): (value: number) => number` failed before preparation, with
+`type-resolution-unsupported: unsupported type in Phase 1 (make)`. The selected
+decoded/GVN-off row failed (0/1; four rows unselected); all 1,613 input pins stayed
+unchanged. Preserve the original source and raw `connected-third` receipts.
+
+Before editing the producer, the bounded correction is to resolve explicitly
+annotated callable parameters/results in `src/ir/program-source.ts` from the
+actual TypeChecker call signature. Require one non-generic call signature,
+reject construct/overload/rest/optional/unresolved or recursive anonymous forms,
+and recursively retain supported nested callable contracts. Use the existing
+`IrType.callable` and `IrClosureSignature` contracts and pass them through the
+existing parameter/result overrides and direct-call map. Do not broaden the
+primitive `from-ast.typeNodeToIr` switch, infer permission from a source spelling,
+or substitute an untyped extern carrier. The existing closure literal producer
+continues to allocate/lift and record provenance. Add a precise located refusal
+for unsupported contracts before any physical reservation.
+
+`tests/issue-3518-native-source-closure-consumer.test.ts` keeps the exact original
+returning-closure source, runs original/decoded and GVN-off/on through the real
+consumer, and runs its encoded artifact in the existing fresh replay process.
+Oracle values will execute that exact TypeScript source through a parent-only
+transpile/isolated VM; child module-census restrictions remain unchanged. The
+new source type owner and coordinator are a source subset, never proof that all
+runtime-created callable categories or native C2 dispatch are complete.
+
+#### September 20 connected source control: canonical population reuse
+
+The next unchanged decoded/GVN-off control (`connected-fourth`) passed source
+TS7 and preparation, then refused in the native string-output census. Its old
+terminal-plus-derived count excludes legitimate lifted source bodies: those
+retain their original nonterminal `inventory.allUnits` IDs rather than acquiring
+pass-derived IDs. Preserve the raw 0/1 selected result (four rows unselected).
+
+Reuse the existing `assertPreparedIrProgramPopulation` check for both actual
+semantic and selected runtime functions. Move its unchanged implementation to
+`src/ir/program/population.ts` with canonical imports and retain the old
+`src/ir/program-population.ts` compatibility export. The output requirements
+continue to reconcile their complete owner/buffer/occurrence census by exact
+borrowed identities; they must not infer authorized owners from observed demand
+rows. The shared validator keeps original inventory/terminal/derived provenance,
+missing-body, duplicate-owner and referenced-body checks. Rerun the same genuine
+returning-closure control first; then add missing terminal/derived and
+unknown/duplicate additional-owner controls before claiming this gate preserved.
+
+The original decoded/GVN-off returning-closure case now passed in
+`connected-seventh`: 1/1 selected, four unselected, source TS7 exit 0 and all
+1,614 inputs unchanged. It runs four seed values against native execution of the
+exact source, checks independent captures/repeated calls, zero imports and exact
+emitted unit ownership. Earlier `connected-fifth` (stable handle/raw-index
+mismatch) and `connected-sixth` (missing declarative ref.func target) remain raw
+failures. The source coordinator now compares the actual issued stable handle,
+reauthenticates that slot, and declares only targets selected by authenticated
+closure allocation associations through the existing ledger API.
+
+Next validation keeps all five original consumer rows, including a fresh child
+with no TypeScript/frontend modules. The two dedicated source callable-contract
+and closure-requirements suites add genuine nested callable-signature ID checks,
+located unsupported annotation forms, lifted nonterminal population positives,
+missing/unknown/duplicate owner negatives, canonical derived-body obligations,
+valid alias evidence, borrowed/duplicated allocation negatives, changed capture
+operands and issued/currentness controls. Requirements retain a complete frozen
+source snapshot as well as exact borrowed identities so changes to unrelated
+nonclosure instructions or removed buffers cannot preserve issued authority.
+None of this certifies native method/apply dispatch or runtime-created carriers.
+
+#### September 20 source population correction after complete compatibility measurement
+
+The `source-cohort-third` frozen measurement passed source TS7 and all 30 new
+source controls, including the full four-cell returning-closure matrix and fresh
+child. The unchanged population/output cohort passed 36/38, with all 1,618 input
+pins unchanged. Preserve both failures: missing-body rejection changed its text,
+and the original extra-owner adversary was incorrectly admitted after canonical
+population reuse. This is not permission to replace that adversary with an
+unknown ID or to restore the terminal-only body restriction.
+
+The retained full-family artifact identifies the extra ID as the first executor
+arrow inside `delay` (entry.ts 12:30, declaration offsets 610–670). The test copies
+`delay` itself under that ID in both views. Certified Promise-delay source
+lowering intentionally elides the executor and timer bodies, so neither has a
+body nor a callable ABI row. The copied body lacks lifted-source provenance.
+Genuine lifted source bodies instead retain `sourceUnit: true`,
+`role: "lifted-closure"`, `parentId` and `ordinal` from
+`allocateLoweredLiftedFunctionArtifact` through `IrFunctionBuilder.finish()`.
+Their parent and ordinal agree with the original inventory. Named nested
+functions retain these same fields without `closureSubtype`; requiring that
+subtype for every support body would break their valid direct-call lowering.
+
+Before changing production, strengthen the shared canonical population check
+for original nonterminal bodies using those existing retained fields and the
+parent's exact source/terminal ownership. Where the prepared output owner has
+its ABI snapshot, additionally check the exact canonical unit callable binding,
+source intent and logical signature. Pre-ABI preparation continues to use the
+same population assertion without an ABI snapshot. Do not infer authorization
+from body names, a matching signature alone, or the observed census count.
+Retain the output owner's population diagnostic prefix while preserving the
+canonical located detail, so the original two controls need no source or
+expectation change. Add actual produced nested-function positives, altered
+source-provenance and missing/wrong ABI controls. This authenticates current
+structural consistency; it cannot reconstruct historical provenance if an
+entire coherent producer snapshot is rewritten.
+
+The pre-correction bytes, the exact copied/genuine body rows and ABI rows, and
+the raw 30/30 plus 36/38 records remain under
+`.tmp/native-invocation-r-20260919/support-population-forward/`. No new run is
+permitted while the parent owns the serial validation slot.
+
+The retained flat fields are now explicit optional data in the AST-free
+`shared/contracts/ir-identity.ts` function identity. The existing complete lifted
+artifact/provenance interfaces moved there byte-for-byte, with compatibility
+type exports from `ir/identity.ts`. This does not change the wire format: builder
+spread, preparation copying and the lossless record codec already retain the
+fields. The new tests compare the fields after both original and decoded
+preparation. `program/callable-results.ts` owns the unchanged existing result
+policy, with the prior module retained as a compatibility export; no duplicate
+async result policy was introduced. Exact move receipts are in the forward
+artifact directory. The next proposed measurement is 43 source rows plus the
+same unchanged 38 population/output rows; counts are expectations until run.
+
+#### September 20 static checkpoint repairs before runtime revalidation
+
+The frozen `static-first` cohort measured 4/8 passing gates (LOC, oracle,
+coercion, lint), all 1,966 inputs unchanged. The function-size gate found
+`planPhysicalSetup` at 318 lines and `materializePhysicalProgram` at 303 against
+the unchanged 300-line threshold. The boundary inventory lacks thirteen exact
+new module records. The legacy preservation report retains all six full/cut
+witnesses and both known nonliteral imports, but correctly refuses one newly
+unreferenced old apply guard. Formatting identifies seventeen changed files.
+All raw gate reports and pre-repair source bytes are retained; no baseline or
+allowance changes are permitted.
+
+The bounded repair extracts source-closure preflight and startup planning into
+local helpers in the existing physical planner, and the scoped physical body
+resolver into a local helper in the existing consumer. Keep validation order,
+reservation ownership and resolver behavior exact. Move the old nullable-apply
+guard implementation into the canonical apply body leaf and retain its old
+export path as a compatibility reexport; the production argument builder calls
+that single implementation. Add only exact boundary module records/floors, with
+the mixed coordinator remaining explicitly mixed, and apply normal formatting.
+B owns the boundary policy edit alone while R owns these source repairs. The
+original legacy compiler stays executable; this checkpoint does not claim
+architecture closure, retirement eligibility or complete native C2 dispatch.
+
+The second static cohort passed 6/8 gates with all 1,966 inputs unchanged.
+Inventory, preservation, format and lint now pass. Normal formatting and the
+explicit upstream ownership guard expose the remaining legacy adapter budgets:
+`object-runtime.ts` 12,046 > 12,032 and `fillApplyClosure` 657 > 649. Preserve
+that report. Move only the existing literal Proxy apply front-guard body into
+the already-owned canonical apply body leaf. The legacy adapter keeps its
+provider/layout reads, both-presence condition and original prepend position;
+the pure helper receives typed indices and emits fresh instructions. No context
+callback, provider permission or reservation order changes. Check exact body
+equivalence and rerun the static cohort before current runtime revalidation.
+
+#### September 20 measured source-closure and legacy-adapter checkpoint
+
+`static-third` passed all eight unchanged gates with all 1,966 inputs unchanged.
+The actual boundary inventory accounts for 1,490 modules and reports
+`inventory-valid-architecture-incomplete`; the mixed invocation coordinator is
+not relabelled clean. Preservation keeps all 6/6 full and 6/6 cut witnesses,
+with the known graph still OPEN and retirement not certified. Static extraction
+receipts prove the five original planning/resolver/nullable-guard sequences and
+the complete inverse of the Proxy-guard adapter; these are static evidence,
+separate from executed controls.
+
+`source-cohort-fourth` passed source TS7, all 43 source controls and all 38
+unchanged population/output controls, with all 1,619 inputs unchanged. The
+returning-closure source passes original/decoded and GVN-off/on plus fresh
+child replay without TypeScript/frontend modules. Genuine named nested bodies
+and altered provenance/ABI controls pass. The original full-family extra-owner
+adversary and its expectations remain byte-identical and now reject the copied
+delay body; neither that failure nor the earlier 36/38 run was erased.
+
+`legacy-adapters-first` then passed all 102 individual rows in the thirteen
+reviewed unchanged suites (not the initially mis-added estimate of 112), with
+all 1,974 inputs unchanged. The actual files cover closure arity and reflection,
+host rest dispatch, reference and BigInt argument/result carriers, strict and
+sloppy receivers, call/apply and Proxy dispatch, Function.prototype bootstrap,
+and ordinary reverse-peer/linked static-call controls. Every selected test is
+byte-identical to exact base `fdaa94315aeeeab5dc85a3596f2b4997b388ac76`.
+Their direct source harness imports do not require a compiler pool or prebuilt
+compiler bundle. No original expectation, allowance or baseline was changed.
+
+The combined measured denominator is 183/183 rows across eighteen distinct
+files, with no pending rows. Full raw records, source pins, exact file lists and
+retained failures are under `.tmp/native-invocation-r-20260919/`; the compact
+receipt is `current-static-source-checkpoint.json`. This remains an uncommitted
+local source-closure subset. Native method/apply ownership, runtime-created
+carriers and the full C2 execution graph are not complete. Keep the legacy
+compiler until everything runs through IR, is tested, and equals the baseline.
+
+
+### September 20 C2 native invocation owner — connected next step (Codex, pre-edit plan)
+
+The preceding checkpoint remains independently frozen: 183/183 executed rows,
+TS7 and eight static gates, with an explicit incomplete-C2 verdict. Its 39 changed
+source/test/policy/issue files are copied with SHA-256 pins under
+`.tmp/native-invocation-r-20260919/native-owner-forward-baseline/`. No legacy
+API, donor fixture or prior failure is retired by this continuation.
+
+The concrete missing join is between the existing source-unit function slots
+and the executable native method/apply dispatcher. The capture type owner alone
+is not callable provenance. Extend that owner with an issued association of the
+actual prepared unit identity, exact capture shape, and the consumer's existing
+function reservation; the coordinator remains the sole canonical lowering/fill
+path and allocates no second copy. A matching signature alone cannot grant an
+entry. The native dispatcher will consume those associations together with the
+actual issued value, string/error and argument-vector packs. Its declaration and
+whole-key preflight precede any allocation; reservation, fill, inventory and
+completion stay on the same physical ledger.
+
+Owned next files are the existing `native-source-closures.ts`,
+`program-native-invocation.ts` and pure `closure-method-body.ts`/
+`closure-apply-body.ts`, a new backend `resources/native-invocation.ts` (split
+only into a cohesive sibling if repository function/file limits require it), a
+new pure requirements leaf if needed, and dedicated native invocation resource
+controls. Consumer/physical-plan joins remain the narrow already-approved C2
+join; any additional producer seam will be recorded explicitly before editing.
+
+The first executable owner must install receiver/argc/extras for each call,
+including nested calls, and restore all three on both return and `catch_all` /
+`rethrow`, preserving the exact exception object or tag payload. Direct method
+calls set their own supplied argument count rather than inheriting an outer
+nonnegative marker. Apply calls use the issued argument-vector layout and exact
+actual length; generic array-like access is admitted only with its real property
+and length providers. Omitted parameters use the canonical undefined value and
+existing typed conversion policy, or receive a located unsupported result when
+the current source ABI cannot represent them. Legacy conversion fallbacks do not
+become native capabilities.
+
+Runtime-created carriers remain a separate, measured population. In particular,
+the actual prepared Promise census and the issued Promise settle metadata,
+capture subtype and resolve/reject function slots must be reconciled before
+those entries can participate; an empty source-unit set is never proof of full
+native invocation support. Until the relevant producer/fill association exists,
+that demanded population remains a located prerequisite, not a constant or
+empty implementation. The initial source-carrier completion certificate names
+its exact denominator and cannot certify the whole C2 graph.
+
+Validation will execute real produced capturing functions through the current
+canonical source lowering, method calls and apply, checking nested differing
+arities, omitted versus explicit undefined, receiver identity, extra arguments,
+and tagged/foreign throws followed by a successful call. Paired foreign/copied/
+stale bindings and layout/provider failures must fail before allocation or body
+publication. Existing source/replay and the 13 unchanged legacy adapter suites
+remain the baseline. Heavy execution is serialized through the parent; source
+work currently proceeds while the conversion diagnostic lane is occupied.
+
+Retirement remains conditional on everything running through IR, tested and
+equal to the retained old compiler. This connected owner is a development step,
+not a full native-family or retirement completion claim.
+
+
+#### Genuine call/apply producer join (September 20, approved before edits)
+
+There will be no public backend mode solely to exercise invocation tests. The
+next producer join uses real source `.call` / `.apply`: a new isolated AST
+planner/lowerer, wired from `program-source.ts` and delegated to by a narrow
+`from-ast.ts` hunk, certifies a checker-resolved fresh local closure, its exact
+primordial Function member, and the complete participating source effect scan.
+Unknown calls/imports, prototype/member writes, escaping closure values, getter
+or nonliteral array-like input invalidate this bounded proof. A const binding
+by itself is insufficient. Dense literal apply arguments become the existing
+`vec<externref>` IR allocation after left-to-right evaluation and semantic
+boxing. Canonical callable references name the semantic method/apply operation;
+physical admission must additionally reconcile the actual SSA operands and
+source-produced carrier association, never grant by spelling alone.
+
+The shared IR closure-body metadata gains an optional affirmative fixed-parameter
+contract issued only when the actual closure AST excludes rest/optional/this
+parameters and agrees with the logical signature. Native invocation requires it
+and checks count/default/public-length consistency; legacy consumers need not
+supply it. The canonical lowerer retains numeric default behavior. Supporting a
+rest carrier is still a distinct missing producer contract, not inferred from
+its absence in IrClosureSignature.
+
+Additional exact seams: `src/ir/core/nodes.ts` for that typed metadata;
+`src/ir/core/closure-invocation-callables.ts` for canonical semantic references;
+`src/ir/source-closure-invocation.ts` for checker/effect planning and lowering;
+`src/ir/program/native-invocation-requirements.ts` for source-free demand
+reconciliation; and the already scoped consumer/physical-plan joins. Existing
+legacy interfaces and the direct typed closure.call path remain available as
+baseline behavior. The required source/decoded replay controls execute genuine
+method/apply uses through consumer-owned reservations, not a manually built
+function population. Full array-like and runtime-created carrier support remain
+open requirements of the parent goal.
+
+
+#### Native number-box provider prerequisite (September 20, approved before edits)
+
+Real call/apply source argument boxing uses the existing `js.number.box`
+semantic intrinsic. The current catalogue has no native synchronous boxer even
+though the issued value owner already fills the actual implementation. Extend
+only the explicit NumberBoundaryPolicy selection with `box: "native"`, its
+canonical provider ID/declaration and exact runtime binding `__box_number`.
+The disabled default and host arm remain unchanged. The callable-target verifier
+already derives its allowed targets from the catalogue; preserve that single
+source rather than add a name whitelist. Own
+`src/runtime/contracts/provider-policy.ts`, `src/ir/runtime/contracts/manifest.ts`,
+`src/ir/runtime/manifest.ts` and only a necessary exact verifier change.
+Standalone WasmGC physical acceptance must join the real source-bound native
+value plan and same-ledger issued pack; unsupported targets/missing layouts
+remain typed refusals. Tests cover native emitted boxes used by actual source
+call/apply, host and disabled selection, and foreign/copied dependency rejection.
+No target inference, default change, duplicate boxing engine or policy allowance
+is authorized by this addition.
+
+#### Closed source-effect proof and selected dispatch population (September 20)
+
+The connected call/apply producer uses a closed syntax/effect walk. Numeric
+coercions require positive primitive provenance from literals, immutable
+initializers, or the selected fresh closure's actual argument/default flow;
+checker flags and casts cannot certify runtime values. The proof preserves
+inert logical negation, typeof, and strict equality while refusing unproven
+coercion, computed keys, spread, iteration, destructuring, ambient reads,
+unknown calls, member mutation, and selected-closure escape. User-supplied
+Function/CallableFunction declarations confer no runtime permission. The
+initial realm and fresh function-literal construction supply the standard
+member; the complete participating source effect proof preserves it.
+
+The dispatcher association is exactly the demanded lifted-unit set from
+issued invocation requirements, not every source function with a compatible
+signature. Unrelated source functions keep the original complete source-body
+lowering/completion population. The new consumer regression includes a real
+Boolean-returning source closure alongside selected numeric call/apply.
+
+Native apply consumes the actual producer-created generic externref vector;
+its backing/carrier stay separate from the owned extras argument vector.
+There is no fabricated shared array descriptor and no generic array-like
+admission. This increment still leaves arbitrary apply lists, source receiver
+reads, selected arity/typeof/then operations, and compiler-created Promise
+settlement associations as explicit C2 work, not completion inferred from
+this source-only subset.
+
+The first frozen native-invocation measurement passed TS7 but stopped the sole
+selected decoded/GVN-off case at canonical program validation: undeclared
+`js.closure.call:2`. The raw second-run receipt retains 0/1 selected runtime
+passes and 22 unselected cases with 1,623 unchanged pins. The narrow repair is
+a pure runtime callable-declaration leaf for exact external-carrier method-N,
+non-null externref-vector apply, and canonical undefined result contracts,
+joined through the existing runtime callable registry and its RuntimeFeature
+type. Existing whole-program signature validation remains the authority; no
+call is exempted and physical provider permission still comes from the issued
+source invocation requirements and actual backend owner.
+
+The fourth bounded measurement passed TS7 and reached physical acceptance, then
+retained a 0/1 selected result (29 unselected, 1,624 unchanged inputs): the host
+number-boundary helper still classified every box as a host import demand. The
+native ABI join already checks the complete selected provider, actual projection
+attachments, issued value plan, recipe role/signature and required binding.
+Restrict the host helper to its import responsibility for the explicit native
+standalone arm; this creates no physical permission. The final physical scan
+must still find the actual native setup and reserved callable for every box.
+Add missing-native-input and altered-attachment controls alongside the genuine
+source call/apply execution, retaining the exact host and disabled arms. No
+runtime run is started while the parent owns the shared validation lane.
+
+The fifth bounded run then passed TS7 and the unchanged original decoded/GVN-off
+execution (1/1 selected, 31 unselected), including actual capture use, native
+method/apply functions, no imports and agreement with an isolated JavaScript
+execution of the exact source. The subsequent complete current suite passed
+32/32 individual rows with zero failed/pending rows; its independent TS7 run also
+passed. Both runs retained all 1,624 input pins unchanged. Raw
+`invocation-connected-fifth-*` and `invocation-all-first-*` records sit beside
+the original failures, which remain preserved. The 32 rows cover the full
+original/decoded × GVN matrix, the unrelated Boolean closure, closed-effect
+refusals, explicit boxing policy, missing native setup and altered attachment.
+
+A read-only hypothesis that logical callable parameters necessarily fail late
+in the native entry builder is withdrawn: the actual source carrier owner and
+coordinator map logical `callable` to `externref`, which that builder accepts.
+No runtime failure was observed for the suggested callback-taking source. Keep
+that source as a future positive control, not a proved blocker or a waived
+requirement. A separate fresh-process replay of the same call/apply source is
+next; neither the measured 32 rows nor a replay result certifies receiver/argc/
+extras restoration through tagged and foreign throws or runtime-created
+Promise callable integration. Those remain explicit C2 completion obligations,
+with legacy compilation retained until full IR coverage is tested and equal.
+
+The separate fresh-process row passed (1/1 selected, 32 unselected) with TS7
+and all 1,624 pins unchanged. Its retained child record
+`.tmp/native-invocation-replay/child-cuvQ92/replay.json` reports actual result 94
+equal to the oracle, 7,035 emitted bytes, 2/2 source/projection units and thirteen
+owned support functions, identical re-encoding, and 630 loaded modules with
+zero TypeScript or frontend modules. This supplements the prior complete 32
+rows; it is not a claim that a newly expanded suite was run in full.
+
+#### Callback execution and C1 invocation bridge (September 20, pre-edit plan)
+
+The next real producer control must use the callback: a local `cb(x)` returning
+`x + 3`, passed to a local `fn(callback)` whose body returns `callback(7)`, then
+invoked through `fn.call(null, cb)`. The exact function-type annotation currently
+becomes internal `closure` and has a located native-carrier gap. Logical
+`callable` already has the issued-root/externref transport needed here.
+
+Own a narrow producer join in `source-closure-invocation.ts`, a cohesive
+`source-closure-callbacks.ts` helper, `source-closure-invocation-effects.ts`, and
+the existing `program-source.ts` / `from-ast.ts` resolver seam. Collect each
+actual callback argument's checker-resolved immutable local function-literal
+declaration, exact receiving parameter and all actual parameter-call sites.
+Only those proved function-type parameters opt into logical `callable`; callers
+that omit the resolver retain the old closure parser. Lower actual closure
+arguments through the existing exact-signature `emitCallablePack`, preserving
+allocation/root identity rather than rebuilding a sibling wrapper. The effect
+walk must recursively check the actual callback bodies and parameter argument
+flow, reject unknown targets, escapes, exports and mutation, and never infer
+executable permission from an annotation or signature alone. Extend the native
+requirements' argument validation to retain the actual callback pack/allocation
+association and signature, including dense vector-apply operands, so transported
+IR cannot substitute a non-callable argument behind an external ABI carrier.
+
+Keep callback execution, a capturing callback, and distinct actual callback
+allocations as positives; malformed arguments/signatures/association, unknown
+callbacks, callback escapes and callback bodies with prototype/coercion effects
+remain paired negatives. The original 32 cases and exact failures remain intact.
+Separately measure omitted/explicit-undefined/defaulted f64 arguments versus
+ordinary NaN before any result-carrier change. In particular, preserving the
+undefined sentinel in method boxing alone does not establish the source call's
+declared-f64 result boundary. Do not change all NaN boxing or legacy recipes.
+
+The separate C1 owner supplies real Get/Has/descriptor getter requirements.
+B owns that issuer and getter/allocation provenance; this lane owns C2's
+consumption adapter. A getter demand is a distinct semantic use, not fabricated
+source `.call` syntax: authenticate the issuing requirements, same program and
+projection, actual possible getter closures and the existing source function
+slots before selecting method0. Expose a reservation-only same-ledger assertion
+for the invocation pack with original requirements/dependency identities and
+current layouts; completion additionally checks actual body/global completion.
+The C1/C2 cycle may reserve functions before filling each side, but neither
+missing getters nor an empty source inventory is a completion certificate.
+
+The first callback execution is now measured: `callback-connected-first`, handle
+93623, finished with TypeScript 7 exit 0 and the one selected decoded callback
+row passing (38 unselected). The exact `cb(x) { return x + 3; }` supplied to
+`fn(callback) { return callback(7); }` returned 10, matching execution of the
+unchanged source in JavaScript. The emitted module has no imports and uses its
+actual method1 resource. All 1,625 pinned inputs stayed unchanged; admission
+load was 1.98. Retain the raw reports and seven source/test files under
+`.tmp/native-invocation-r-20260919/callback-first-source`; this is one actual
+execution, not evidence for the expanded callback matrix.
+
+The next measured cohort adds distinct capturing callbacks through both call
+and dense-vector apply, original/decoded and GVN off/on, plus positive-backed
+transport substitutions of a non-callable or wrong-signature callable operand.
+Those mutations preserve both prepared views and must fail the actual callback
+allocation/signature join before any native owner is reserved. Existing exact
+source tests and the original undefined-omission concern remain intact.
+
+The complete callback/invocation suite subsequently passed all 47 actual rows
+in `callback-all-first` (handle 64512): no failed, pending, or unselected cases;
+TypeScript 7 exit 0; all 1,625 inputs unchanged. This includes all previous
+invocation rows and fresh-process replay, four distinct capturing-callback
+call/apply cases across original/decoded × GVN off/on, four positive-backed
+transported operand refusals, and five callback source-authority/effect
+refusals. Admission load was 2.33. The current seven source/test files are
+retained under `.tmp/native-invocation-r-20260919/callback-complete-source`.
+
+This measured subset does not close receiver/argc/extras observation through
+normal, tagged, and foreign throws; arbitrary array-like apply; runtime-created
+callables and Promise obligations; or C1's genuine descriptor/getter demand.
+The old compiler remains operational until complete IR coverage is tested and
+behaviorally equal.
+
+#### Measured undefined-argument gap and immediate admission correction
+
+`numeric-omission-first` (handle 86982) completed nine exact-source rows with
+exit 1 and all 1,626 inputs unchanged. The exact unannotated source refused at
+its missing closure return annotation; that original source and located error
+remain in the report. Four annotated call/apply rows with omitted or explicit
+undefined non-default f64 parameters executed and returned NaN instead of the
+JavaScript oracle's undefined. Defaulted omitted call/apply returned 7, while
+ordinary and defaulted NaN remained NaN (four matches, four wrong answers, one
+producer refusal). Retain all encoded accepted programs and the full rows in
+`.tmp/native-invocation-r-20260919/numeric-omission-results.json`.
+
+Before further native admission, add a located gap in the existing invocation
+requirements for actual non-default f64 arguments that are omitted or produced
+by the canonical undefined callable. The same check covers dense vector apply
+and transported programs. Keep numeric defaults and ordinary NaN as executed
+positives; the four original wrong-answer sources become explicit capability
+refusals rather than altered expectations. No generic number-boxing or legacy
+sentinel recipe changes. Full undefined value/result carriers remain required
+for migration parity; this refusal is an interim admission correction.
+
+#### Physical ref-cell owner for genuine mutable captures (pre-edit plan)
+
+Keep the source mutable-binding producer with the parent lane. This lane owns
+the physical counterpart of its existing `refcell.new/get/set` and `boxed`
+capture types. The canonical body lowerer already emits all three operations
+through `resolveRefCell`; a new execution engine is unnecessary.
+
+Extract only the real single mutable `value` field layout/key construction
+from `getOrRegisterRefCellType` in `src/codegen/registry/types.ts` into a pure
+`src/runtime/wasmgc/values/ref-cell-layouts.ts` builder. Preserve the legacy
+cache lookup, registration order, name, field type object and returned index;
+retain a fixed authenticated donor/inverse fixture. The native owner supplies
+its own immutable type copy, never borrowed caller objects or compiler context.
+
+Extend the existing issued `native-source-closure-requirements.ts` census with
+actual boxed carrier types and actual `refcell.new` occurrences. Verify the
+allocation registry's live refcell kind/type, raw/resolved IDs, owner and
+program/projection coordinates, and the new value's exact inner type. Admit
+only supported scalar inner types initially; unsupported logical/reference
+carriers remain located gaps. Repeated views must not create duplicate
+executable allocation permission or hide missing/mutated occurrences.
+
+Add `src/backend/wasmgc/resources/native-ref-cells.ts` to preflight all owned
+keys and reserve real types on the same ledger before source closure capture
+types and the existing unit slots. Bind original issued requirement identity,
+current snapshot and exact layout/ledger tokens. Feed those types into the
+existing `native-source-closures.ts` carrier owner and declaration prerequisites,
+then join `resolveRefCell` through `program-native-invocation.ts`; include boxed
+signature conversion and physical-plan census fields in the existing consumer
+and physical planner. There is still one lifted-function slot allocator and
+one canonical body-lowering completion path.
+
+Dedicated tests must execute a real source-produced mutable capturing closure
+repeatedly and independently through original/decoded replay, proving shared
+cell identity and mutation, and emitted Wasm field get/set. Pair it with foreign
+ledger/copied or stale requirement/layout refusal, bad/missing allocation and
+late-key no-allocation controls, a nonzero flattened type index, and exact
+legacy donor preservation. This connects the required mutable trace carrier
+for the unchanged getter712 fixture; descriptor/getter invocation requirements
+remain the separate C1/C2 issuer/consumer join.
+
+The admission correction is now measured in `undefined-admission-first` (handle
+98077): TypeScript 7 exit 0 and all 61 actual invocation rows passed, with all
+1,625 input pins unchanged. The eight original/decoded refusals preserve the
+four measured wrong-answer sources and the JavaScript undefined oracle; six
+executed default/NaN controls and all prior 47 rows remain positive. This
+blocks the unsupported carrier combination without claiming full undefined
+carrier parity. The numeric diagnostic and its four original failures remain.
+
+The ref-cell census is a cohesive new clean helper at
+`src/ir/program/native-ref-cell-requirements.ts`, issued only through the existing
+source-closure requirement owner. Its actual allocation observations, supported
+scalar inner types and refusal details become part of that owner's frozen
+currentness snapshot; there is no independent descriptive-authority token.
+
+The first physical ref-cell control (`ref-cell-connected-first`, handle 88258)
+passed TypeScript 7 and reached real module emission, then failed its test's
+guessed allocation count (2 expected, 6 actual); 0/1 selected and three
+unselected, with all 1,631 inputs unchanged. The result assertions had not yet
+run. Preserve that original failure. Replace the assumed count with an
+independent traversal of every actual owner, both views and each block, checking
+exact instruction identity and one-to-one occurrence coordinates against the
+issued census and physical plan. Retain the complete measured rows before the
+assertions. No production change is implied by this instrumentation correction.
+
+Code-only boundary review found that the clean ref-cell census must not import
+a native-runtime key builder. Its admitted inner carriers are scalar, so its
+logical descriptor ID is the exact scalar kind. The backend and legacy adapter
+retain the canonical physical key builder, including reference/nullability
+keys for legacy callers. The nine production files measured in the first run
+were archived before this boundary correction. Register the three new clean
+leaves in their existing layers and increment only the corresponding inventory
+floors; no dependency edge or allowance changes.
+
+`ref-cell-connected-second` (handle 4240) passed TypeScript 7 and the one
+selected decoded/GVN-off mutable-capture source row (four unselected), with
+all 1,631 input pins unchanged and load 1.43. The original source executed
+repeated mutation and independent factory instances for three seeds, matching
+JavaScript exactly; the module has no imports and contains real mutable-cell
+allocation/read/write instructions. The complete six occurrence rows, checked
+one-to-one against an independent owner/view/block traversal, are retained
+under `.tmp/native-ref-cell-census/gvn-false-decoded-true.json`. This is one
+executed source row; the remaining matrix, fresh child and resource controls
+are not yet measured.
+
+The complete first ref-cell cohort (`ref-cell-full-first`, handle 79671) ended
+33/36 with all 1,631 pins unchanged. All five actual source/replay rows passed,
+including original/decoded × GVN and a fresh child with no frontend/TypeScript
+modules. Retain the three harness failures: manual Wasm used `idx` instead of
+the canonical local instruction's `index` field twice, and the borrowed-owner
+mutant reused an incompatible SSA result before reaching the intended check.
+Correct only test construction: use canonical local coordinates and mutate
+only allocation IDs on existing, independently produced same-typed allocation
+sites. A second real numeric factory call supplies a same-owner site; both
+SSA definitions and operands stay intact. The original test bytes are archived
+under `.tmp/native-invocation-r-20260919/ref-cell-resources-first.test.ts`.
+Production remains unchanged from the successful TS7/source control.
+
+`ref-cell-full-second` (handle 28034) passed TypeScript 7 and 34/36 actual
+rows, with all 1,631 input pins unchanged. The two manual emitted-Wasm
+controls now pass. Preserve the two remaining test-premise failures: the
+resource fixture did not inline the numeric factories into `run`, so selecting
+two cell sites there found zero. Add a real factory whose returned closure
+mutates two directly captured numeric parameters; select that original owner
+and verify both existing SSA definitions, operands, and distinct allocation
+IDs before changing only one allocation ID. The borrowed-owner control uses
+the original numeric factory's actual cell. No optimizer choice or invented
+instruction is required. Retain second-run test bytes in
+`.tmp/native-invocation-r-20260919/ref-cell-resources-second.test.ts`; production
+remains frozen.
+
+`ref-cell-full-third` (handle 56566) passed TypeScript 7 and all 36 actual
+rows: five real source/replay cases and 31 resource/donor controls. Both
+positive-backed duplicate-site and borrowed-owner mutations now reach and pass
+their intended refusal checks. All 1,631 inputs stayed unchanged, including
+the production/policy population already measured by the second run.
+
+The seven-file regression run `ref-cell-regressions-first` (handle 72542) then
+passed all 120 actual rows with all 1,635 inputs unchanged: invocation 61,
+source consumer 5, source requirements 28, eager capture cells 12, lifted cell
+identity split 6, readonly capture ABI 2, and the existing issue-3328 suite 6.
+The proposed 122 denominator was wrong: the actual requirements file contains
+28 cases, not 30. No skipped, pending, or failed rows. Preserve every prior
+failure and its original test bytes; this successful correction did not alter
+production semantics or legacy expectations.
+
+Checkpoint preparation will register the ten subsequent invocation modules
+missing from the prior boundary inventory: seven clean modules (backend 3,
+IR core 1, IR program 1, IR runtime 1, native runtime 1), and three explicit
+AST/source-effect modules as mixed frontend migration debt. Increment only
+the corresponding existing floors; add no allowed edges or budget exemptions.
+The pending static gates apply to this exact current tree and do not inherit
+the earlier checkpoint's results.
+
+Current completion remains bounded: the admitted fixed source call/apply and
+callback subset plus supported scalar mutable cells execute through the real
+consumer and fresh replay. The measured undefined numeric carrier remains a
+located refusal. Genuine C1 getter/semantic-call dispatch, arbitrary array-like
+apply, observed receiver/argc/extras restoration through tagged and foreign
+throws, and runtime-created callable/Promise coverage remain required. Keep
+the legacy compiler operational until everything runs through IR, is tested,
+and is behaviorally equal.
+
+The current eight static gates (`static-refcell-first`, handle 80545) measured
+6/8 passes, with all 1,983 inputs unchanged. Inventory, legacy preservation,
+oracle, coercion, formatting, and lint passed. Retain the exact LOC/function
+failures: physical planner 1,521 lines; method-call dispatcher 860 versus its
+850-line base; physical materializer 337; setup planner 311. No allowances
+were added; existing historical issue allowances are unchanged.
+
+Before rerunning, make only cohesive structural splits: all three existing
+method-call entry sites use a small source-plan wrapper while the established
+method dispatcher retains its original fallback body; move native invocation
+input/gap and descriptive setup construction into the existing invocation ABI
+module; extract private global/unit-slot reservation and export-publication
+helpers from the consumer. Keep the exact requirement, gap, declaration-order,
+binding, allocation, and fill ordering, including the sole existing unit-slot
+allocator. Archive the measured 156-test source before edits and rerun affected
+source/replay checks after these production changes. No new semantic capability
+or legacy retirement is implied by these splits.
+
+Keep global initialization as its own paired private fill helper as well:
+it remains after reservation freeze and source-slot binding, before ABI/body
+fills. This preserves the exact existing global lookup/refusal/default-value
+sequence and gives the materializer one clear operation per lifecycle phase.
+
+The cohesive splits are now measured. `static-refcell-second` (handle 75633)
+passed all eight scoped gates with all 1,983 input pins unchanged: LOC,
+function size, oracle, coercion, boundary inventory, legacy preservation,
+formatting, and lint. The established method dispatcher is byte-identical to
+the exact `fdaa94315aeeeab5dc85a3596f2b4997b388ac76` donor; the three moved
+consumer blocks also retain their exact source text. Preserve the first 6/8
+gate record and the archived pre-split 156-test source. No allowance or
+dependency edge was added.
+
+`static-split-validation-first` (handle 46060) then passed TypeScript 7 and
+all 156 actual test rows across nine files, with all 1,637 inputs unchanged:
+native invocation consumer 61, ref-cell consumer 5, ref-cell resources 31,
+source-closure consumer 5, source-closure requirements 28, and the four
+unchanged legacy cell suites 12 + 6 + 2 + 6. Every individual row passed;
+there are no failed, skipped, or pending tests. The source matrices and fresh
+replay controls therefore measured the post-split production, rather than
+borrowing their earlier results. Raw results and frozen pins remain under
+`.tmp/native-invocation-r-20260919/static-split-validation-first-*`.
+
+These are checkpoint checks, not completed migration proof. Inventory is
+valid while the architecture graph remains open. The preservation gate
+observed 6/6 full and 6/6 cut witnesses and explicitly did not certify
+retirement or deletion. All outstanding C2 behavior listed above remains
+required; legacy execution stays operational. No hooks, commit, publication,
+or default-path change is part of this validation record.

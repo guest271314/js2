@@ -35,6 +35,9 @@ export type RuntimeFeature =
   | HostCallbackWrapRuntimeFeature
   | FunctionPrototypeCallRuntimeFeature
   | NativeAsyncCallableRuntimeFeature
+  | "js.closure.method"
+  | "js.closure.apply-vector"
+  | "js.closure.undefined"
   | VectorCallableRuntimeFeature
   | ReferenceErrorRuntimeFeature;
 
@@ -94,6 +97,7 @@ export type NumericCoercionRuntimeProviderId = (typeof NUMERIC_COERCION_RUNTIME_
 /** (#3526 F1-S1) One provider per admitted number-boundary policy arm. */
 export const NUMBER_BOUNDARY_RUNTIME_PROVIDER_IDS = Object.freeze([
   "host.js.number.box",
+  "native.js.number.box",
   "host.js.number.unbox",
   "native.js.number.unbox",
 ] as const);

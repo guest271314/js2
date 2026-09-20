@@ -105,9 +105,10 @@
         "src/ir/core/type-references.ts",
         "src/ir/core/type-binding-keys.ts",
         "src/ir/core/type-key.ts",
-        "src/ir/core/string-callables.ts"
+        "src/ir/core/string-callables.ts",
+        "src/ir/core/closure-invocation-callables.ts"
       ],
-      "minModules": 21
+      "minModules": 22
     },
     {
       "id": "ir-analysis",
@@ -154,9 +155,10 @@
         "src/ir/runtime/async-attachment.ts",
         "src/ir/runtime/intrinsic-verification.ts",
         "src/ir/runtime/native-async-callables.ts",
-        "src/ir/runtime/vector-callables.ts"
+        "src/ir/runtime/vector-callables.ts",
+        "src/ir/runtime/closure-invocation-callables.ts"
       ],
-      "minModules": 12
+      "minModules": 13
     },
     {
       "id": "ir-program",
@@ -190,9 +192,14 @@
         "src/ir/program/host-import-plan.ts",
         "src/ir/program/host-number-boundary-setup.ts",
         "src/ir/program/runtime-abi-identity.ts",
-        "src/ir/program/native-string-output-requirements.ts"
+        "src/ir/program/native-string-output-requirements.ts",
+        "src/ir/program/callable-results.ts",
+        "src/ir/program/native-source-closure-requirements.ts",
+        "src/ir/program/population.ts",
+        "src/ir/program/native-ref-cell-requirements.ts",
+        "src/ir/program/native-invocation-requirements.ts"
       ],
-      "minModules": 27
+      "minModules": 32
     },
     {
       "id": "runtime-contracts",
@@ -236,9 +243,14 @@
         "src/backend/wasmgc/program/native-string-output.ts",
         "src/backend/wasmgc/resources/native-string-output.ts",
         "src/backend/wasmgc/resources/native-object-layouts.ts",
-        "src/backend/wasmgc/resources/native-symbol-carrier.ts"
+        "src/backend/wasmgc/resources/native-symbol-carrier.ts",
+        "src/backend/wasmgc/resources/native-source-closures.ts",
+        "src/backend/wasmgc/resources/native-ref-cells.ts",
+        "src/backend/wasmgc/program/native-invocation-abi.ts",
+        "src/backend/wasmgc/resources/native-invocation.ts",
+        "src/backend/wasmgc/resources/native-source-closure-callables.ts"
       ],
-      "minModules": 23
+      "minModules": 28
     },
     {
       "id": "native-runtime",
@@ -289,9 +301,19 @@
         "src/runtime/wasmgc/async/prepared-async-frame-engine.ts",
         "src/runtime/wasmgc/async/prepared-async-frame-types.ts",
         "src/runtime/wasmgc/values/object-layouts.ts",
-        "src/runtime/wasmgc/values/symbol-carrier-bodies.ts"
+        "src/runtime/wasmgc/values/symbol-carrier-bodies.ts",
+        "src/runtime/wasmgc/values/closure-apply-body.ts",
+        "src/runtime/wasmgc/values/closure-argument-bodies.ts",
+        "src/runtime/wasmgc/values/closure-capture-layouts.ts",
+        "src/runtime/wasmgc/values/closure-invocation-bodies.ts",
+        "src/runtime/wasmgc/values/closure-invocation-types.ts",
+        "src/runtime/wasmgc/values/closure-method-body.ts",
+        "src/runtime/wasmgc/values/closure-receiver-bodies.ts",
+        "src/runtime/wasmgc/values/closure-result-bodies.ts",
+        "src/runtime/wasmgc/values/ref-cell-layouts.ts",
+        "src/runtime/wasmgc/values/closure-vector-apply-body.ts"
       ],
-      "minModules": 43
+      "minModules": 54
     },
     {
       "id": "standalone-platform",
@@ -1530,6 +1552,34 @@
       "layer": "ir-program",
       "entries": ["src/ir/program/host-import-plan.ts", "src/ir/program/host-number-boundary-setup.ts"],
       "minModules": 2
+    },
+    {
+      "layer": "ir-program",
+      "entries": [
+        "src/ir/program/callable-results.ts",
+        "src/ir/program/native-source-closure-requirements.ts",
+        "src/ir/program/population.ts"
+      ],
+      "minModules": 3
+    },
+    {
+      "layer": "backend-wasmgc",
+      "entries": ["src/backend/wasmgc/resources/native-source-closures.ts"],
+      "minModules": 1
+    },
+    {
+      "layer": "native-runtime",
+      "entries": [
+        "src/runtime/wasmgc/values/closure-apply-body.ts",
+        "src/runtime/wasmgc/values/closure-argument-bodies.ts",
+        "src/runtime/wasmgc/values/closure-capture-layouts.ts",
+        "src/runtime/wasmgc/values/closure-invocation-bodies.ts",
+        "src/runtime/wasmgc/values/closure-invocation-types.ts",
+        "src/runtime/wasmgc/values/closure-method-body.ts",
+        "src/runtime/wasmgc/values/closure-receiver-bodies.ts",
+        "src/runtime/wasmgc/values/closure-result-bodies.ts"
+      ],
+      "minModules": 8
     }
   ],
   "nonModules": [
@@ -12703,6 +12753,148 @@
       "path": "src/backend/wasmgc/resources/native-string-equality.ts",
       "state": "clean",
       "layer": "backend-wasmgc"
+    },
+    {
+      "path": "src/backend/wasmgc/resources/native-source-closures.ts",
+      "state": "clean",
+      "layer": "backend-wasmgc"
+    },
+    {
+      "path": "src/ir/program/callable-results.ts",
+      "state": "clean",
+      "layer": "ir-program"
+    },
+    {
+      "path": "src/ir/program/native-source-closure-requirements.ts",
+      "state": "clean",
+      "layer": "ir-program"
+    },
+    {
+      "path": "src/ir/program/population.ts",
+      "state": "clean",
+      "layer": "ir-program"
+    },
+    {
+      "path": "src/ir/program-native-invocation.ts",
+      "state": "unmigrated",
+      "layer": "mixed-needs-split",
+      "destination": "backend-wasmgc",
+      "owner": "3518-coordinator",
+      "nextBoundary": "Split source-closure binding and physical emission into backend/wasmgc/program after separating mixed prepared validation and generic lowering; retain explicit WasmGC/linear selection outside pure ir/program contracts."
+    },
+    {
+      "path": "src/runtime/wasmgc/values/closure-apply-body.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/closure-argument-bodies.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/closure-capture-layouts.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/closure-invocation-bodies.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/closure-invocation-types.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/closure-method-body.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/closure-receiver-bodies.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/closure-result-bodies.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/ir/program/native-ref-cell-requirements.ts",
+      "state": "clean",
+      "layer": "ir-program"
+    },
+    {
+      "path": "src/backend/wasmgc/resources/native-ref-cells.ts",
+      "state": "clean",
+      "layer": "backend-wasmgc"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/ref-cell-layouts.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/backend/wasmgc/program/native-invocation-abi.ts",
+      "state": "clean",
+      "layer": "backend-wasmgc"
+    },
+    {
+      "path": "src/backend/wasmgc/resources/native-invocation.ts",
+      "state": "clean",
+      "layer": "backend-wasmgc"
+    },
+    {
+      "path": "src/backend/wasmgc/resources/native-source-closure-callables.ts",
+      "state": "clean",
+      "layer": "backend-wasmgc"
+    },
+    {
+      "path": "src/ir/core/closure-invocation-callables.ts",
+      "state": "clean",
+      "layer": "ir-core"
+    },
+    {
+      "path": "src/ir/program/native-invocation-requirements.ts",
+      "state": "clean",
+      "layer": "ir-program"
+    },
+    {
+      "path": "src/ir/runtime/closure-invocation-callables.ts",
+      "state": "clean",
+      "layer": "ir-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/closure-vector-apply-body.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/ir/source-closure-callbacks.ts",
+      "state": "unmigrated",
+      "layer": "mixed-needs-split",
+      "destination": "frontend-ts",
+      "owner": "3518-coordinator",
+      "nextBoundary": "Move complete-source callback allocation and argument provenance under frontend/ts after separating its AST/checker facts from the prepared invocation contract; do not infer callee identity from a type annotation."
+    },
+    {
+      "path": "src/ir/source-closure-invocation-effects.ts",
+      "state": "unmigrated",
+      "layer": "mixed-needs-split",
+      "destination": "frontend-ts",
+      "owner": "3518-coordinator",
+      "nextBoundary": "Move the exhaustive source effect and primordial-member proof under frontend/ts with explicit semantic invocation output; retain conservative refusals for unproven effects and callable escape."
+    },
+    {
+      "path": "src/ir/source-closure-invocation.ts",
+      "state": "unmigrated",
+      "layer": "mixed-needs-split",
+      "destination": "frontend-ts",
+      "owner": "3518-coordinator",
+      "nextBoundary": "Separate checker-certified call/apply source facts and AST lowering adapters under frontend/ts from the neutral closure invocation contract; preserve the actual producer-to-runtime association."
     }
   ]
 }

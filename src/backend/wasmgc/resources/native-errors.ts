@@ -7,7 +7,12 @@ import type {
 } from "../../../wasm/physical/module-reservations.js";
 import { createErrorStructType } from "../../../runtime/wasmgc/values/string-layouts.js";
 import { buildErrorConstructorBody } from "../../../runtime/wasmgc/values/error-bodies.js";
-import { requireNativeStringLiteral, type NativeStringLiteralReservations } from "./native-string-literals.js";
+import {
+  requireNativeStringLiteral,
+  requireCompletedNativeStringLiterals,
+  type NativeStringLiteralReservations,
+} from "./native-string-literals.js";
+import { preparedIrDataMismatch } from "../../../ir/program/data.js";
 
 export interface NativeErrorDependencies {
   readonly strings: NativeStringLiteralReservations;
@@ -18,14 +23,24 @@ export interface NativeErrorReservations {
   readonly type: TypeReservation;
   readonly newTypeError: FunctionReservation;
 }
+export interface NativeErrorRequirements {
+  readonly key: string;
+}
 const owners = new WeakMap<
   NativeErrorReservations,
-  { tx: PhysicalModuleReservations; dependencies: NativeErrorDependencies; filled: boolean }
+  {
+    tx: PhysicalModuleReservations;
+    requirements: NativeErrorRequirements;
+    key: string;
+    sourceDependencies: NativeErrorDependencies;
+    dependencies: NativeErrorDependencies;
+    filled: boolean;
+  }
 >();
 
 export function reserveNativeErrorResources(
   tx: PhysicalModuleReservations,
-  requirements: { readonly key: string },
+  requirements: NativeErrorRequirements,
   dependencies: NativeErrorDependencies,
 ): NativeErrorReservations {
   if (!requirements.key || tx.state !== "reserving") throw new Error("native errors: invalid reservation phase/key");
@@ -39,7 +54,53 @@ export function reserveNativeErrorResources(
     results: [{ kind: "externref" }],
   });
   const pack = Object.freeze({ type, newTypeError });
-  owners.set(pack, { tx, dependencies: Object.freeze({ ...dependencies }), filled: false });
+  owners.set(pack, {
+    tx,
+    requirements,
+    key: requirements.key,
+    sourceDependencies: dependencies,
+    dependencies: Object.freeze({ ...dependencies }),
+    filled: false,
+  });
+  return pack;
+}
+
+/** Read-only cycle join: original producer inputs plus the live ledger layout. */
+export function requireNativeErrorReservations(
+  tx: PhysicalModuleReservations,
+  pack: NativeErrorReservations,
+  expectedRequirements: NativeErrorRequirements,
+  expectedDependencies: NativeErrorDependencies,
+): NativeErrorReservations {
+  const owner = owners.get(pack);
+  if (!owner || owner.tx !== tx) throw new Error("native errors: foreign or forged resource owner");
+  if (
+    owner.requirements !== expectedRequirements ||
+    owner.key !== expectedRequirements.key ||
+    owner.sourceDependencies !== expectedDependencies ||
+    owner.dependencies.strings !== expectedDependencies.strings ||
+    owner.dependencies.typeErrorTag !== expectedDependencies.typeErrorTag
+  )
+    throw new Error("native errors: substituted or stale producer inputs");
+  requireNativeStringLiteral(tx, expectedDependencies.strings, "TypeError");
+  if (tx.state === "reserving") tx.assertTypeReservation(pack.type);
+  else if (tx.physicalIndex(pack.type) !== pack.type.typeIndex)
+    throw new Error("native errors: stale error layout coordinate");
+  if (preparedIrDataMismatch(pack.type.object, createErrorStructType()) !== undefined)
+    throw new Error("native errors: altered error layout");
+  return pack;
+}
+
+export function requireCompletedNativeErrors(
+  tx: PhysicalModuleReservations,
+  pack: NativeErrorReservations,
+  expectedRequirements: NativeErrorRequirements,
+  expectedDependencies: NativeErrorDependencies,
+): NativeErrorReservations {
+  requireNativeErrorReservations(tx, pack, expectedRequirements, expectedDependencies);
+  if (!owners.get(pack)!.filled) throw new Error("native errors: incomplete producer");
+  tx.assertCompletedReservation(pack.newTypeError);
+  requireCompletedNativeStringLiterals(tx, expectedDependencies.strings);
   return pack;
 }
 

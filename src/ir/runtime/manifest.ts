@@ -487,11 +487,9 @@ function numberBoundaryProvider(
 }
 
 /**
- * (#3526 F1-S1) The synchronous number boundary. `js.number.box` is HOST-ONLY
- * by policy in this slice: standalone does define a native `__box_number`
- * through the union-native family, but the current front-end arm is gated on
- * `!nativeStrings`, and support may not be inferred from helper presence. The
- * `$AnyValue` standalone boxing family is explicitly not this intrinsic.
+ * Explicit synchronous number-boundary selection. Native boxing additionally
+ * requires the physical consumer's actual issued value owner; helper presence
+ * or the target alone cannot select it. The disabled default is unchanged.
  */
 export const NUMBER_BOUNDARY_RUNTIME_PROVIDERS: readonly RuntimeProviderDefinition[] = Object.freeze([
   numberBoundaryProvider(
@@ -501,6 +499,17 @@ export const NUMBER_BOUNDARY_RUNTIME_PROVIDERS: readonly RuntimeProviderDefiniti
     { kind: "host-callable", capability: "number.box" },
     ["number.box"],
   ),
+  Object.freeze({
+    ...numberBoundaryProvider(
+      "native.js.number.box",
+      "js.number.box",
+      F64_TO_EXTERNREF_INTRINSIC_SIGNATURE,
+      { kind: "runtime-callable", symbol: "__box_number" },
+      [],
+    ),
+    supportedTargets: Object.freeze(["standalone"] as const),
+    supportedBackends: Object.freeze(["wasmgc"] as const),
+  }),
   numberBoundaryProvider(
     "host.js.number.unbox",
     "js.number.unbox",
@@ -1029,7 +1038,8 @@ function numberBoundaryProviderId(
   feature: NumberBoundaryRuntimeFeature,
   policy: NumberBoundaryPolicy,
 ): NumberBoundaryRuntimeProviderId | null {
-  if (feature === "js.number.box") return policy.box === "host" ? "host.js.number.box" : null;
+  if (feature === "js.number.box")
+    return policy.box === "host" ? "host.js.number.box" : policy.box === "native" ? "native.js.number.box" : null;
   if (policy.unbox === "host") return "host.js.number.unbox";
   return policy.unbox === "native" ? "native.js.number.unbox" : null;
 }
