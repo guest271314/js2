@@ -234,9 +234,11 @@
         "src/backend/wasmgc/program/native-string-output-abi.ts",
         "src/backend/wasmgc/program/native-string-output.ts",
         "src/backend/wasmgc/resources/native-string-output.ts",
-        "src/backend/wasmgc/resources/native-object-layouts.ts"
+        "src/backend/wasmgc/resources/native-object-layouts.ts",
+        "src/backend/wasmgc/resources/native-string-equality.ts",
+        "src/backend/wasmgc/resources/native-symbol-carrier.ts"
       ],
-      "minModules": 21
+      "minModules": 23
     },
     {
       "id": "native-runtime",
@@ -292,9 +294,11 @@
         "src/runtime/wasmgc/values/any-to-string-types.ts",
         "src/runtime/wasmgc/values/to-primitive-bodies.ts",
         "src/runtime/wasmgc/values/to-primitive-method-bodies.ts",
-        "src/runtime/wasmgc/values/to-primitive-wrapper-bodies.ts"
+        "src/runtime/wasmgc/values/to-primitive-wrapper-bodies.ts",
+        "src/runtime/wasmgc/values/string-equality-body.ts",
+        "src/runtime/wasmgc/values/symbol-carrier-bodies.ts"
       ],
-      "minModules": 48
+      "minModules": 50
     },
     {
       "id": "standalone-platform",
@@ -12761,6 +12765,26 @@
       "path": "src/runtime/wasmgc/values/to-primitive-wrapper-bodies.ts",
       "state": "clean",
       "layer": "native-runtime"
+    },
+    {
+      "path": "src/backend/wasmgc/resources/native-symbol-carrier.ts",
+      "state": "clean",
+      "layer": "backend-wasmgc"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/symbol-carrier-bodies.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/string-equality-body.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/backend/wasmgc/resources/native-string-equality.ts",
+      "state": "clean",
+      "layer": "backend-wasmgc"
     }
   ]
 }
