@@ -12,6 +12,8 @@ import type { RuntimeFeature, RuntimeProviderDefinition } from "./contracts/mani
 import type { IntrinsicSignature } from "../core/intrinsic-contracts.js";
 import { irNativeAsyncCallableDeclaration } from "./native-async-callables.js";
 import { irVectorCallableDeclaration } from "./vector-callables.js";
+import { irNumberConversionCallableDeclaration } from "./number-conversion-callable.js";
+import { irOrdinaryObjectCallableDeclaration } from "./ordinary-object-callables.js";
 
 /** Policy-independent callable contracts; physical providers are selected by the manifest. */
 export interface IrRuntimeCallableDeclaration {
@@ -75,5 +77,8 @@ export const REFERENCE_ERROR_RUNTIME_PROVIDERS: readonly RuntimeProviderDefiniti
 export function irRuntimeCallableDeclaration(ref: IrFuncRef): IrRuntimeCallableDeclaration | undefined {
   return ref.binding.kind === "runtime" && ref.binding.symbol === "__new_ReferenceError"
     ? REFERENCE_ERROR_DECLARATION
-    : (irNativeAsyncCallableDeclaration(ref) ?? irVectorCallableDeclaration(ref));
+    : (irNativeAsyncCallableDeclaration(ref) ??
+        irVectorCallableDeclaration(ref) ??
+        irOrdinaryObjectCallableDeclaration(ref) ??
+        irNumberConversionCallableDeclaration(ref));
 }

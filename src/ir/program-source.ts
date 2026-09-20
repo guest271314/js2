@@ -32,6 +32,8 @@ import { unwrapPromiseTypeNode } from "./async-static.js";
 import { postStartupCallableUnits } from "./program-startup-proof.js";
 import { makeIrIdentityImportedFunctionResolver } from "./imported-functions.js";
 import { makeIrPromiseDelayResolver } from "./promise-delay.js";
+import { prepareOrdinaryObjectAccessResolver } from "../frontend/builtins/prepare-ordinary-object-access.js";
+import { prepareNumberConversionResolver } from "../frontend/builtins/prepare-number-conversion.js";
 import { prepareNativeStringOutputResolver } from "../frontend/builtins/prepare-string-output.js";
 import { prepareNativeAsyncSourceFamilies, type NativeAsyncSourceFamilies } from "./program-native-async-source.js";
 import {
@@ -574,6 +576,17 @@ function prepareSourceFunctionSignatures(
 }
 
 /** Build each original source body once, before any backend context or allocator exists. */
+/** Combine source-owned call/read plans; no physical provider is selected here. */
+function prepareSourceBuiltinResolvers(
+  input: IrProgramSourceInput,
+  roots: ts.FunctionDeclaration | readonly ts.Statement[],
+) {
+  return {
+    ...prepareNumberConversionResolver(input.checker, input.sourceFiles, roots),
+    ...prepareOrdinaryObjectAccessResolver(input.checker, input.sourceFiles, roots),
+  };
+}
+
 export function prepareIrProgramSources(
   input: IrProgramSourceInput,
 ): IrProgramSourcePreparation | PreparedIrProgramFailure {
@@ -776,6 +789,13 @@ export function prepareIrProgramSources(
         ? makeModuleInitSynthetic(identity.moduleInitPopulationBySourceFile.get(source) ?? [])
         : identity.declarationByUnitId.get(unit.id)!;
       if (!ts.isFunctionDeclaration(declaration)) unsupported(`missing declaration producer for ${unit.kind}`);
+      Object.assign(
+        resolver,
+        prepareSourceBuiltinResolvers(
+          input,
+          moduleInit ? (identity.moduleInitPopulationBySourceFile.get(source) ?? []) : declaration,
+        ),
+      );
       const signature = signatures.get(unit.id);
       const lowered = lowerFunctionAstToIr(declaration, {
         ownerUnitId: unit.id,

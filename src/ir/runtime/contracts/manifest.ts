@@ -36,6 +36,8 @@ export type RuntimeFeature =
   | FunctionPrototypeCallRuntimeFeature
   | NativeAsyncCallableRuntimeFeature
   | VectorCallableRuntimeFeature
+  | OrdinaryObjectRuntimeFeature
+  | "js.number.from-value"
   | ReferenceErrorRuntimeFeature;
 
 export type HostCapabilityId = RuntimeHostCapabilityId;
@@ -388,6 +390,19 @@ export const VECTOR_CALLABLE_RUNTIME_FEATURES = Object.freeze(["js.vector.elem-s
 export type VectorCallableRuntimeFeature = (typeof VECTOR_CALLABLE_RUNTIME_FEATURES)[number];
 export const VECTOR_CALLABLE_RUNTIME_PROVIDER_IDS = Object.freeze(["native.js.vector.elem-set.externref"] as const);
 export type VectorCallableRuntimeProviderId = (typeof VECTOR_CALLABLE_RUNTIME_PROVIDER_IDS)[number];
+
+/** Semantic declarations only; no physical provider is granted by this catalogue. */
+export const ORDINARY_OBJECT_RUNTIME_FEATURES = Object.freeze([
+  "js.object.create-default",
+  "js.object.create-null",
+  "js.object.create-with-prototype",
+  "js.object.define-data",
+  "js.object.define-accessor",
+  "js.object.define-attributes",
+  "js.object.get",
+  "js.object.has",
+] as const);
+export type OrdinaryObjectRuntimeFeature = (typeof ORDINARY_OBJECT_RUNTIME_FEATURES)[number];
 
 export type RuntimeProviderId =
   | MathRuntimeProviderId

@@ -10945,3 +10945,122 @@ The current join has passing evidence for all 609 distinct preservation cases
 peer/conversion cases, and the3 array-like positive controls: 667 passing cases
 and15 reproduced main failures across26 suites. TS7 and eight static gates pass.
 Normal hooks remain required; full IR parity and main delivery remain unproven.
+
+### September 20 ordinary descriptor producer — implementation plan (Codex root)
+
+Separate worktree codex/3518-ordinary-object-ir-producer-20260920 starts at
+signed2e89b4cf. Preserve the exact unannotated getter/capture fixture returning712.
+Current structural object.new/get/set are fixed-field operations and must retain
+that meaning. Introduce formally declared, backend-neutral ordinary-object
+semantic intrinsics through existing call/provider machinery: create with explicit
+prototype semantics, ordered data/accessor descriptor definition, Get with a
+separate original receiver, and Has without getter invocation. Use existing open
+Object and logical callable representations; neither type nor helper name is
+authority to accept a native object provider. No new broad IR type is needed.
+
+Root owns the vocabulary/contracts and descriptor-aware frontend plan, narrow
+selector/object-literal lowering hooks, exact accessor/returned-function inferred
+signatures, and getter/setter lifted identity handling. Reuse checker information
+only at the frontend; prepared data must be AST-free and codec-stable. Preserve
+source evaluation order, descriptor absence versus undefined, getter installation
+versus execution, prototype mode and source allocation provenance. Keep mutable
+trace captures as real shared refcells. Do not annotate or rewrite the fixture
+into easier method/direct-call syntax.
+
+R owns source callback parameter opt-in and call/apply effects proof, canonical
+closure slots, refcell capture support, semantic getter-call consumption and
+its invocation state. Root's from-ast work avoids R's resolver callback flag and
+FunctionType parameter parser hunk; program-source joins require explicit union.
+B owns executable ordinary property access and pure demand provenance from the
+actual prepared operations. Its ordinary read status2 means an implicit companion
+is still required, never absence. Actual getters require authenticated descriptor
+allocation to getter/source-slot associations; no invented source.call demand.
+
+Propagate semantic intrinsics through effect/throw contracts, runtime vocabulary
+and manifests, demand collection, prepared support, physical planning and backend
+legality. Existing codec generic data encoding should remain unchanged; validate
+decoded projection regeneration and reject malformed/changed descriptor contracts.
+Ordinary creation/definition/Get remain effectful; no constant folding or purity
+claim may erase getter, prototype or exception observations.
+
+Validation begins with the actual native712 oracle and current producer refusal.
+Then require real descriptor installation, getter execution, returned closure
+invocation and shared capture update on original and decoded programs, followed
+by receiver/order/prototype/throw controls. Existing structural object tests and
+legacy compiler behavior remain intact. Runtime owners, refcell and dynamic Get
+callable population are genuine dependencies; a contract-only or synthetic module
+check cannot certify fixture execution or full IR parity.
+
+September 20 producer implementation evidence (in progress): the original
+fixture remains byte-preserved (source SHA c0550b99175c0eb61afa7d5d110a287f3fe90e9fc8e581c6d58a19fe0a971ba9),
+with native JavaScript result712 and the baseline typed GetAccessor rejection
+retained under .tmp/ordinary-object-producer. The eight semantic contracts and
+existing native-family contract regressions passed48/48 with1491 inputs unchanged;
+that checkpoint passed TS7. Source-ordered descriptor installation, real accessor
+source identities and checker-inferred nested callable signatures are now drafted.
+Their first TS7 exposed two type integration errors (capture helper declaration
+union and missing-signature narrowing); the failed run is retained, not counted
+as a passing producer run. Real descriptor creation/definition resources, C1
+getter associations and runtime ToPrimitive Get demand edges remain necessary.
+No old compiler code is retired; no main delivery or full parity is claimed.
+
+Producer follow-up run46381 completed: TS7 passed,45/45 contract/signature/capture
+cases passed,1495 source/test/fixture inputs unchanged. The exact712 fixture now
+passes descriptor syntax, inferred getter/returned-closure signatures and trace
+capture lowering; preparation next refuses the genuine Number(object) call:
+call-graph-closure, no exact AST-site plan for Number. The scalar positive remains
+prepared. Baseline and both successive located refusals are retained separately.
+Capture cells are allocated at declaration using checker-symbol identity, not
+conditionally at first closure construction; already-boxed sibling captures keep
+the shared cell. This is producer evidence, not emitted712 execution or main
+delivery. Next root work is the genuine Number conversion plan and its runtime
+ToPrimitive demand edge; B owns descriptor resources/C1 and R owns C2/refcell
+materialization. The exact original fixture remains unchanged.
+
+September 20 Number conversion producer plan (root): preserve the exact
+Number(object) call rather than rewrite it as unary plus or a direct getter call.
+Bind actual AST call sites to the checker-owned ambient Number declaration,
+reject shadowed/imported/lookalike callees and preserve evaluation of every
+argument before conversion. Number() produces positive zero; a supplied argument
+uses a separate full Number-value semantic contract, which includes ToPrimitive
+and BigInt conversion and must not alias the existing partial numeric unbox.
+A declaration does not authorize a physical provider. Runtime ToPrimitive reads
+must be genuine demanded edges into B's Get owner and R's invocation owner.
+Validate the real fixture at source and whole-program preparation boundaries;
+retain located physical gaps and the original fixture.
+
+Number/source first run37457: TS7 passed and68/69 tests passed with1499
+inputs unchanged. The argument-order control exposed an existing empty-void
+function rejection in mark():void{}, before reaching the Number call. Preserve
+the failing source and run. Repair empty synchronous zero-result completion
+in the source builder; do not rewrite the control with a filler statement.
+Value-returning and async/generator empty-body rules remain separate.
+
+Connected C1 producer step: add actual explicit numeric property-read lowering
+for descriptor literals and exact const bindings to those literals. The source
+planner authenticates checker symbols and actual AST sites; fixed structural
+objects remain on existing object.get. Emit js.object.get(object,key,receiver)
+with the original receiver and retain source create/define/closure operations
+for C1 provenance. This supplies an actual Get control, never a fabricated Get
+for Number(object); Number's runtime ToPrimitive read edges remain separate.
+Other result carriers require their own boxing contracts.
+
+Final producer checkpoint before commit: run10753 passed TS7 and83/83 cases
+with1501 source/test/fixture inputs unchanged after the helper extraction.
+This includes real source-produced create/define/Get edges and original Number
+getters, plus original/decoded native Wasm execution for four scalar/startup/void
+controls with zero imports. Whole preparation of the unchanged712 source now
+reaches the number-boxing policy gap in its throw99 body; R's separately measured
+invocation delta contains the general native number-box provider needed to join.
+The original712 has NOT executed, and no prepared backend capability is inferred
+from the source tests. Number source binding excludes visible rebinding but is
+not a whole-world proof against arbitrary external mutation of Number; physical
+admission still needs owned runtime/effect policy.
+
+LOC, function budget (after cohesive helper extraction), coercion and oracle
+gates pass against exact parent2e89. Dead-export preservation mode exits0 but
+explicitly reports open dynamic-import graph edges and DOES NOT certify
+retirement. Initial function-budget failure remains in gates/functions.log;
+functions-second.log records the successful extraction. No budgets/gates were
+weakened, no fixture or old compiler path removed. Full normal commit hooks
+remain required.
