@@ -12555,3 +12555,22 @@ Preservation correction45049: TS7pass,67/67 across the two affected suites,
 evidence, not a claim of a fresh808 run. Six B integration gates50596 pass,
 1624 unchanged, against exact parent85750eeee0. Preservation audit remains OPEN
 for whole-migration architecture; no retirement certificate. Normal hooks next.
+
+
+B integration40e596a70fb259bddea60e05e7f9e29eeb12a80e is signed and clean;
+normal hooks691/691 across8 changed suites,34 exact committed pins unchanged.
+Both integrated owners remain incomplete for full source Get/Number/712 parity.
+Fresh GitHub main verification and exact fetch:62221769a87acdc32759c656702eede64936feb5,
+three commits after200f7e2. Only the differential baseline and4444 ES2015 issue
+changed; both merge cleanly and are retained. No compiler source changes in this
+main refresh. No push/main-delivery claim for these local checkpoints.
+
+Next connected implementation retains the full original712/general-prototype
+requirements: issue C1 getter demand separately from actual source .call uses;
+authenticate original allocation/descriptor/Get occurrences and captured values;
+select real C2 method-zero and source slots on the sole reservation ledger.
+Complete descriptor installation and public Get (status0/1/2 handling), including
+real default-prototype companion ownership rather than replacing it with a
+fresh-local-object-only carve-out. Support-resource planning must include actual
+TypeError and invocation diagnostic strings for semantic getter demand. Preserve
+original source/codec executions, mutations, exceptions and legacy comparison.
