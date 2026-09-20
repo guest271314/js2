@@ -3,6 +3,7 @@ import { applyClosureApplyExtraction } from "./object-runtime-apply-extraction.j
 import { applyFnctorGuardForward } from "./object-runtime-fnctor-guard-forward.js";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { invertObjectWriteSource, replayObjectWriteSource, writeExtractionPath } from "./native-object-write-donor.js";
 import {
   applyObjectRuntimeMainComposition,
   invertObjectRuntimeMainComposition,
@@ -155,20 +156,30 @@ export function authenticatedProtoIndexReadSource(reader: Reader = readConversio
   return reader(protoIndexReadPath);
 }
 
-export function invertConversionSource(path: string, source: string, reader: Reader = readConversionSource): string {
+/** Historical entry for mutation controls, after authenticating and undoing the write layer. */
+export function invertPreWriteConversionSource(
+  path: string,
+  source: string,
+  reader: Reader = readConversionSource,
+): string {
   const { receipt, forward, presence } = authenticateConversionComposition(reader);
   const row = receipt.records.find((r) => r.path === path);
   if (!row) throw new Error("unrecorded conversion source");
-  if (path === objectRuntimePath)
-    source = invertObjectRuntimeMainComposition(
-      applyFnctorGuardForward(applyClosureApplyExtraction(source, true), true),
-    );
+  if (path === objectRuntimePath) source = invertObjectRuntimeMainComposition(source);
   if (path === protoIndexStorePath) {
     authenticatedProtoIndexReadSource(reader);
     source = replacePresence(source, presence.store, true);
   }
   source = applyConversionSpans(source, forward.records.find((r) => r.path === path)!.spans, true);
   return applyConversionSpans(source, row.spans, true);
+}
+
+export function invertConversionSource(path: string, source: string, reader: Reader = readConversionSource): string {
+  if (path === objectRuntimePath) {
+    source = applyFnctorGuardForward(applyClosureApplyExtraction(source, true), true);
+    source = invertObjectWriteSource(path, source, reader(writeExtractionPath), reader);
+  }
+  return invertPreWriteConversionSource(path, source, reader);
 }
 
 /** Exact 0ef8 reconstruction plus reciprocal replay; no historical file is substituted. */
@@ -184,7 +195,15 @@ export function verifyConversionComposition(reader: Reader = readConversionSourc
     if (row.path === protoIndexStorePath) replay = replacePresence(replay, presence.store, false);
     if (row.path === objectRuntimePath)
       replay = applyClosureApplyExtraction(
-        applyFnctorGuardForward(applyObjectRuntimeMainComposition(replay, false), false),
+        applyFnctorGuardForward(
+          replayObjectWriteSource(
+            row.path,
+            applyObjectRuntimeMainComposition(replay, false),
+            reader(writeExtractionPath),
+            reader,
+          ),
+          false,
+        ),
         false,
       );
     if (replay !== current) throw new Error("conversion forward replay mismatch");

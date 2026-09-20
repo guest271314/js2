@@ -24,19 +24,24 @@ import {
   readConversionSource,
   verifyConversionComposition,
 } from "./helpers/conversion-source-composition.js";
-import { verifyObjectRuntimeComposition as verifyCurrentObjectRuntimeComposition } from "./helpers/object-get-key-composition.js";
+import {
+  verifyObjectRuntimeComposition,
+  verifyPreWriteObjectRuntimeComposition,
+} from "./helpers/object-get-key-composition.js";
+import { invertObjectWriteSource, replayObjectWriteSource } from "./helpers/native-object-write-donor.js";
 
 const receipt = authenticateObjectRuntimeMainComposition();
-const rawCurrent = readConversionSource(objectRuntimePath);
-const current = applyFnctorGuardForward(applyClosureApplyExtraction(rawCurrent, true), true);
-// The old 19-span controls continue to mutate their exact historical layer.
-function verifyObjectRuntimeComposition(source: string) {
-  return verifyCurrentObjectRuntimeComposition(
-    applyClosureApplyExtraction(applyFnctorGuardForward(source, false), false),
-  );
-}
+const actual = readConversionSource(objectRuntimePath);
+const rawCurrent = actual;
+const verifyCurrentObjectRuntimeComposition = verifyObjectRuntimeComposition;
+// Every historical mutant starts from the actual candidate's authenticated write inverse.
+const current = invertObjectWriteSource(
+  objectRuntimePath,
+  applyFnctorGuardForward(applyClosureApplyExtraction(actual, true), true),
+);
 describe("fixed main changes precede the unchanged conversion and getter/key inverses", () => {
   it("reconstructs the entire signed integration and reciprocally reproduces the actual merge", () => {
+    verifyObjectRuntimeComposition(actual);
     const integration = verifyObjectRuntimeMainComposition(current);
     expect(conversionSha(integration)).toBe("2cc32a6af0e913340ac8a27c77befb6b345a61688893aa1cb3fc29d6161719b7");
     expect(integration).not.toBe(current);
@@ -49,7 +54,7 @@ describe("fixed main changes precede the unchanged conversion and getter/key inv
     verifyObjectRuntimeMainComposition(current);
     const conversions = verifyConversionComposition();
     expect(conversions).toHaveLength(2);
-    const original = verifyObjectRuntimeComposition(current).original;
+    const original = verifyPreWriteObjectRuntimeComposition(current).original;
     expect(conversionSha(original)).toBe(receipt.base.sha256);
     const main = applyObjectRuntimeMainComposition(original, false);
     expect(conversionSha(main)).toBe("45b31c33b9524059163ddf8de9945848db3685437d72454a63e5107207fadd35");
@@ -71,7 +76,7 @@ describe("fixed main changes precede the unchanged conversion and getter/key inv
       const changed = current.replace(span.after, replacement);
       expect(changed).not.toBe(current);
       expect(() => verifyObjectRuntimeMainComposition(changed)).toThrow("span missing or duplicated");
-      expect(() => verifyObjectRuntimeComposition(changed)).toThrow("span missing or duplicated");
+      expect(() => verifyPreWriteObjectRuntimeComposition(changed)).toThrow("span missing or duplicated");
     }
   });
 
@@ -84,19 +89,19 @@ describe("fixed main changes precede the unchanged conversion and getter/key inv
     const changed = current.replace(first, token).replace(last, first).replace(token, last);
     expect(changed).not.toBe(current);
     expect(() => verifyObjectRuntimeMainComposition(changed)).toThrow("span order mismatch");
-    expect(() => verifyObjectRuntimeComposition(changed)).toThrow("span order mismatch");
+    expect(() => verifyPreWriteObjectRuntimeComposition(changed)).toThrow("span order mismatch");
   });
 
   it("positive first: source outside all main spans remains visible to the old checks", () => {
     verifyObjectRuntimeMainComposition(current);
-    verifyObjectRuntimeComposition(current);
+    verifyPreWriteObjectRuntimeComposition(current);
     const retained = 'name: "previousActive"';
     expect(current).toContain(retained);
     expect(receipt.spans.every((span) => !span.after.includes(retained))).toBe(true);
     const changed = current.replace(retained, 'name: "changedActive"');
     expect(changed).not.toBe(current);
     expect(() => verifyObjectRuntimeMainComposition(changed)).toThrow("retained source mismatch");
-    expect(() => verifyObjectRuntimeComposition(changed)).toThrow("signed peer source mismatch");
+    expect(() => verifyPreWriteObjectRuntimeComposition(changed)).toThrow("signed peer source mismatch");
   });
 
   it("positive first: changed receipt bytes cannot replace signed history", () => {
@@ -118,7 +123,10 @@ describe("committed fnctor prototype guard composes outside historical main", ()
     const historical = verifyObjectRuntimeMainComposition(current);
     expect(
       applyClosureApplyExtraction(
-        applyFnctorGuardForward(applyObjectRuntimeMainComposition(historical, false), false),
+        applyFnctorGuardForward(
+          replayObjectWriteSource(objectRuntimePath, applyObjectRuntimeMainComposition(historical, false)),
+          false,
+        ),
         false,
       ),
     ).toBe(rawCurrent);
@@ -151,9 +159,13 @@ describe("signed apply extraction outside prior main receipts", () => {
     const inverse = applyClosureApplyExtraction(rawCurrent, true);
     expect(inverse).not.toBe(rawCurrent);
     expect(applyClosureApplyExtraction(inverse, false)).toBe(rawCurrent);
-    expect(conversionSha(verifyObjectRuntimeMainComposition(applyFnctorGuardForward(inverse, true)))).toBe(
-      "2cc32a6af0e913340ac8a27c77befb6b345a61688893aa1cb3fc29d6161719b7",
-    );
+    expect(
+      conversionSha(
+        verifyObjectRuntimeMainComposition(
+          invertObjectWriteSource(objectRuntimePath, applyFnctorGuardForward(inverse, true)),
+        ),
+      ),
+    ).toBe("2cc32a6af0e913340ac8a27c77befb6b345a61688893aa1cb3fc29d6161719b7");
   });
   it.each(
     extraction.spans.flatMap((span) => ["missing", "altered", "duplicated"].map((mutation) => ({ span, mutation }))),

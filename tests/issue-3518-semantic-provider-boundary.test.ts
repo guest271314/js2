@@ -651,6 +651,26 @@ const mergedInvocationAdditions: Readonly<Record<string, readonly string[]>> = {
     "src/runtime/wasmgc/values/closure-vector-apply-body.ts",
   ],
 };
+// Independently authenticated against signed B890cd3b5 and its parent;
+// overlap with the existing ordinary-object catalogue is excluded.
+const mergedObjectStorageAdditions: Readonly<Record<string, readonly string[]>> = {
+  "ir-program": ["src/ir/program/native-object-access-requirements.ts"],
+  "backend-wasmgc": [
+    "src/backend/wasmgc/resources/native-object-access-declarations.ts",
+    "src/backend/wasmgc/resources/native-object-access.ts",
+    "src/backend/wasmgc/resources/native-object-storage.ts",
+  ],
+  "native-runtime": [
+    "src/runtime/wasmgc/values/object-same-value-body.ts",
+    "src/runtime/wasmgc/values/ordinary-object-access-bodies.ts",
+    "src/runtime/wasmgc/values/ordinary-object-descriptor-accessor.ts",
+    "src/runtime/wasmgc/values/ordinary-object-descriptor-common.ts",
+    "src/runtime/wasmgc/values/ordinary-object-descriptor-data.ts",
+    "src/runtime/wasmgc/values/ordinary-object-key-definitions.ts",
+    "src/runtime/wasmgc/values/ordinary-object-storage-bodies.ts",
+    "src/runtime/wasmgc/values/ordinary-object-storage-definitions.ts",
+  ],
+};
 const mergedInvocationActivations = [
   {
     layer: "ir-program",
@@ -863,6 +883,7 @@ describe("semantic verification and provider ownership boundary", () => {
       if (id === "native-runtime") additions.push("src/runtime/wasmgc/values/bigint-primitive-bodies.ts");
       if (id === "ir-runtime") additions.push(...semanticCallableAdditions);
       additions.push(...(mergedInvocationAdditions[id] ?? []));
+      additions.push(...(mergedObjectStorageAdditions[id] ?? []));
       const signedEntries = additions.length ? layer.entries.slice(0, -additions.length) : layer.entries;
       if (additions.length) expect(layer.entries.slice(-additions.length)).toEqual(additions);
       const receipt = signedLayerComposition[id as keyof typeof signedLayerComposition];

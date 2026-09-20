@@ -47,6 +47,7 @@ export function reserveNativeErrorResources(
   // ABI invariant, not a replacement catalog. The parent supplies the canonical value.
   if (dependencies.typeErrorTag !== -11) throw new Error("native errors: incorrect TypeError tag");
   requireNativeStringLiteral(tx, dependencies.strings, "TypeError");
+  tx.assertReservationKeysAvailable([`${requirements.key}:type`, `${requirements.key}:new-TypeError`]);
   const type = tx.reserveType(`${requirements.key}:type`, createErrorStructType());
   tx.internFunctionType([{ kind: "externref" }], [{ kind: "externref" }], "__new_TypeError_type");
   const newTypeError = tx.reserveFunction(`${requirements.key}:new-TypeError`, "__new_TypeError", {
@@ -84,8 +85,11 @@ export function requireNativeErrorReservations(
     throw new Error("native errors: substituted or stale producer inputs");
   requireNativeStringLiteral(tx, expectedDependencies.strings, "TypeError");
   if (tx.state === "reserving") tx.assertTypeReservation(pack.type);
-  else if (tx.physicalIndex(pack.type) !== pack.type.typeIndex)
-    throw new Error("native errors: stale error layout coordinate");
+  else {
+    if (tx.physicalIndex(pack.type) !== pack.type.typeIndex)
+      throw new Error("native errors: stale error layout coordinate");
+    tx.physicalIndex(pack.newTypeError);
+  }
   if (preparedIrDataMismatch(pack.type.object, createErrorStructType()) !== undefined)
     throw new Error("native errors: altered error layout");
   return pack;
@@ -98,7 +102,7 @@ export function requireCompletedNativeErrors(
   expectedDependencies: NativeErrorDependencies,
 ): NativeErrorReservations {
   requireNativeErrorReservations(tx, pack, expectedRequirements, expectedDependencies);
-  if (!owners.get(pack)!.filled) throw new Error("native errors: incomplete producer");
+  if (!owners.get(pack)!.filled) throw new Error("native errors: incomplete producer; missing canonical fill");
   tx.assertCompletedReservation(pack.newTypeError);
   requireCompletedNativeStringLiterals(tx, expectedDependencies.strings);
   return pack;
@@ -107,6 +111,7 @@ export function requireCompletedNativeErrors(
 export function fillNativeErrorResources(tx: PhysicalModuleReservations, pack: NativeErrorReservations): void {
   const owner = owners.get(pack);
   if (!owner || owner.tx !== tx) throw new Error("native errors: foreign or forged resource owner");
+  requireNativeErrorReservations(tx, pack, owner.requirements, owner.sourceDependencies);
   if (owner.filled) throw new Error("native errors: duplicate fill");
   tx.physicalIndex(pack.type);
   const name = requireNativeStringLiteral(tx, owner.dependencies.strings, "TypeError");

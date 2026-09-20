@@ -26,6 +26,7 @@ import { createEmptyModule } from "../src/ir/types.js";
 import type { CodegenContext } from "../src/codegen/context/types.js";
 import type { Instr } from "../src/wasm/model/instructions.js";
 import { invertObjectRuntimeMainComposition } from "./helpers/object-runtime-main-composition.js";
+import { invertObjectWriteSource } from "./helpers/native-object-write-donor.js";
 
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
@@ -766,7 +767,9 @@ function currentForwardSource(path: string): string {
   if (path === presenceExtraction.store.path) return restorePresenceStore();
   const source = read(path);
   return path === "src/codegen/object-runtime.ts"
-    ? invertObjectRuntimeMainComposition(applyFnctorGuardForward(applyClosureApplyExtraction(source, true), true))
+    ? invertObjectRuntimeMainComposition(
+        invertObjectWriteSource(path, applyFnctorGuardForward(applyClosureApplyExtraction(source, true), true)),
+      )
     : source;
 }
 function presenceDeclaration(source: string, name: string, owner?: string) {

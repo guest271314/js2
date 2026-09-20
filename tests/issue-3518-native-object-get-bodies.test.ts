@@ -118,6 +118,10 @@ function functionText(source: string, name: string) {
 function reconstruct(source: string, index: number) {
   if (index === 0) source = invertObjectRuntimePeer(source, "key");
   if (index === 5) source = invertConversionSource(protoIndexStorePath, source);
+  return reconstructDonorSource(source, index);
+}
+// Historical mutations use a source obtained from the current candidate's exact inverse.
+function reconstructDonorSource(source: string, index: number) {
   const donor = donors[index]!;
   const span = scope(source, index === 0 || index === 5 ? donor.name : captures[index]!);
   let end = span.end;
@@ -662,34 +666,42 @@ describe("C1 initial object-get fixed donor preservation", () => {
   });
 
   it("rejects a change to the retained Reflect receiver wrapper", () => {
-    const source = read(donors[0]!.file);
-    reconstruct(source, 0);
+    const current = read(donors[0]!.file);
+    reconstruct(current, 0);
+    const source = invertObjectRuntimePeer(current, "key");
+    reconstructDonorSource(source, 0);
     expect(source).toContain('name: "previousActive"');
-    expect(() => reconstruct(source.replace('name: "previousActive"', 'name: "corruptedActive"'), 0)).toThrow(
-      "outside owned donor",
-    );
+    expect(() =>
+      reconstructDonorSource(source.replace('name: "previousActive"', 'name: "corruptedActive"'), 0),
+    ).toThrow("outside owned donor");
   });
 
   it("rejects an altered early template dependency argument", () => {
-    const source = read(donors[0]!.file);
-    reconstruct(source, 0);
+    const current = read(donors[0]!.file);
+    reconstruct(current, 0);
+    const source = invertObjectRuntimePeer(current, "key");
+    reconstructDonorSource(source, 0);
     const changed = source.replace(
       "    ctx.templateVecTypeIdx,\n    strFlattenIdx,",
       "    ctx.anyStrTypeIdx,\n    strFlattenIdx,",
     );
     expect(changed).not.toBe(source);
-    expect(() => reconstruct(changed, 0)).toThrow("adapter import/site mismatch");
+    expect(() => reconstructDonorSource(changed, 0)).toThrow("adapter import/site mismatch");
   });
 
   it("rejects duplicate or attributed runtime imports after a positive inverse", () => {
-    const source = read(donors[0]!.file);
-    reconstruct(source, 0);
+    const current = read(donors[0]!.file);
+    reconstruct(current, 0);
+    const source = invertObjectRuntimePeer(current, "key");
+    reconstructDonorSource(source, 0);
     const statement = 'import { buildObjectGetBody } from "../runtime/wasmgc/values/object-get-bodies.js";';
     expect(source).toContain(statement);
-    expect(() => reconstruct(source.replace(statement, `${statement}\n${statement}`), 0)).toThrow("import count");
-    expect(() => reconstruct(source.replace(statement, statement.slice(0, -1) + ' with { type: "json" };'), 0)).toThrow(
-      "import contract",
+    expect(() => reconstructDonorSource(source.replace(statement, `${statement}\n${statement}`), 0)).toThrow(
+      "import count",
     );
+    expect(() =>
+      reconstructDonorSource(source.replace(statement, statement.slice(0, -1) + ' with { type: "json" };'), 0),
+    ).toThrow("import contract");
   });
 
   it("keeps both pure builders limited to canonical data dependencies", () => {
@@ -1327,11 +1339,11 @@ describe("authenticated signed key/getter composition", () => {
   });
 
   it("rejects corruption outside both signed peer deltas", () => {
-    const source = read(donors[0]!.file);
-    verifyObjectRuntimeComposition(source);
+    const source = historicalPeerSource();
+    verifyHistoricalObjectRuntimeComposition(source);
     expect(source).toContain('name: "previousActive"');
     expect(() =>
-      verifyObjectRuntimeComposition(source.replace('name: "previousActive"', 'name: "corruptedActive"')),
+      verifyHistoricalObjectRuntimeComposition(source.replace('name: "previousActive"', 'name: "corruptedActive"')),
     ).toThrow("signed peer source mismatch");
   });
 
