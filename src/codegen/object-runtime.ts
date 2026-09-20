@@ -116,6 +116,7 @@ import { buildClosureRefTestArms } from "./closure-classifier.js"; // (#3140) __
 import * as bc from "./builtin-ctor-callable.js"; // (#4394/#4656) constructor [[Call]] arms
 import { buildApplyClosureArityWidening, buildTransferredCharAtApplyArm } from "./closure-exports.js"; // (#3592) under-application widening
 import {
+  buildTransferredNativeProtoOwnedBitInstrs,
   buildTransferredNativeProtoVariadicApplyInstrs,
   collectTransferredNativeProtoReceivers,
 } from "./closures/transferred-native-proto.js";
@@ -125,6 +126,8 @@ import { reserveAccessorGetDriver, reserveAccessorSetDriver } from "./accessor-d
 import { registerDescriptorHasOwn } from "./carrier-bag-hasown.js"; // (#4055) descriptor-scoped HasProperty over the #3468 bag
 import { buildNonObjectDeleteArms, reserveCarrierBagDelete } from "./carrier-bag-delete.js"; // (#4010 S2) OrdinaryDelete over the carrier bags
 import {
+  CARRIER_BAG_HAS,
+  CARRIER_BAG_OF,
   bagHasIfAbsent,
   bagKeysTail,
   buildBagPushKeys,
@@ -209,7 +212,11 @@ import { buildStrictSetHelper } from "./object-runtime-strict-set.js"; // (#3983
 import { exposedClosedStructFieldName, isOpenDescriptorShape } from "./property-descriptor-shape.js";
 import type { PresenceSlot } from "./fnctor-presence-bits.js"; // (#3780) packed own-presence flags
 import { presenceSlotOf, presenceTestInstrs } from "./fnctor-presence-bits.js";
-import { buildObjectEnumerationHelpers, fillObjectAssignProxySourceArm } from "./object-runtime-enumeration.js"; // (#3274 wave-B) enumeration/array-like/object-static helper builders
+import {
+  buildArrayLikeToLengthFromExternref,
+  buildObjectEnumerationHelpers,
+  fillObjectAssignProxySourceArm,
+} from "./object-runtime-enumeration.js"; // (#3274 wave-B) enumeration/array-like/object-static helper builders
 import { fillObjectIntegrityProxyArms } from "./object-integrity-proxy.js"; // (#5268 step 2)
 import { buildObjectPrototypeHelpers } from "./object-runtime-prototype.js"; // (#3274 wave-B) prototype-chain helper builders
 import * as fnctorArray from "./fnctor-array-prototype.js";
@@ -6800,12 +6807,44 @@ export function fillApplyClosure(ctx: CodegenContext): void {
   // the existing local dispatch unchanged.
   const linkedStandaloneCallableKindIdx = standaloneLinkBoundaryPeerIndex(ctx, "callableKind");
   const linkedStandaloneApplyIdx = standaloneLinkBoundaryPeerIndex(ctx, "apply");
+  // (#6643) …but NEVER for one of THIS module's own native-prototype method
+  // closures. The arm is unshifted AHEAD of the local dispatcher and the peer's
+  // predicate is not a statement about OWNERSHIP — the peer's `__is_callable`
+  // is structural, so it answers 1 for a closure that crossed INTO it too.
+  // `f.apply(thisArg, args)` resolves `apply` to this module's own
+  // `%Function.prototype%` glue (#6630) whenever `%Function.prototype%` is
+  // materialized and `.apply` has been read as a value, and
+  // `__closure_method_call` then hands that GLUE closure to this bridge — where
+  // the peer arm claimed it and shipped the whole operation to the provider,
+  // which cannot run a consumer closure and answered the null sentinel.
+  // Measured against the real `@js-temporal/polyfill` provider: every
+  // `Temporal.PlainDate.from.apply(…)` spelling returned `null` WITHOUT the
+  // provider function ever being entered (a deliberately invalid argument that
+  // must throw returned `null` instead) — the first assertion of test262's
+  // `checkSubclassingIgnoredStatic`. With the conjunct the glue takes its own
+  // local dispatch and the `__apply_closure(target, …)` INSIDE it, where
+  // `target` really is provider-owned, takes the peer arm as #6420 intended.
+  //
+  // The predicate is deliberately NOT "is locally callable": that would also
+  // exclude an ORDINARY consumer closure invoked inside the provider, which is
+  // the reverse-call case #6605/#6616 exist for and which MUST reach the peer
+  // (measured — those two witnesses fail on the broader predicate). It is the
+  // narrow "this module has a dedicated dispatch arm for this exact callee",
+  // sharing `buildTransferredNativeProtoCallInstrs`'s own claim test.
+  const nativeProtoOwnedBit = buildTransferredNativeProtoOwnedBitInstrs(
+    ctx,
+    collectTransferredNativeProtoReceivers(ctx, 0),
+    0,
+  );
   if (linkedStandaloneCallableKindIdx !== undefined && linkedStandaloneApplyIdx !== undefined) {
     body.unshift(
       { op: "local.get", index: 0 },
       { op: "call", funcIdx: linkedStandaloneCallableKindIdx },
       { op: "i32.const", value: 1 },
       { op: "i32.and" },
+      ...(nativeProtoOwnedBit === undefined
+        ? []
+        : ([...nativeProtoOwnedBit, { op: "i32.eqz" }, { op: "i32.and" }] as Instr[])),
       {
         op: "if",
         blockType: { kind: "empty" },
@@ -8996,6 +9035,7 @@ export function fillClosedStructExternGetArms(ctx: CodegenContext): void {
   const equalsIdx = ctx.nativeStrHelpers.get("__str_equals");
   const boxNumberIdx = ctx.funcMap.get("__box_number");
   const boxBooleanIdx = ctx.funcMap.get("__box_boolean");
+  const boxSymbolIdx = ctx.funcMap.get("__box_symbol");
   const boxedNumberTypeIdx = ctx.nativeBoxNumberTypeIdx;
   if (!fn || flattenIdx === undefined || equalsIdx === undefined) return;
   const allocatedTypes = allocatedStructTypeIndices(ctx.mod);
@@ -9015,12 +9055,25 @@ export function fillClosedStructExternGetArms(ctx: CodegenContext): void {
     shapeRange?: { shapeFieldIdx: number; stampLo: number; stampCount: number };
   };
   const byField = new Map<string, Entry[]>();
+  // Descriptor defines on user shapes live in the identity-keyed carrier bag,
+  // not in their physical Wasm slots. Record the exact admitted receiver types
+  // independently of exposed fields: `{ raw: {} }` has no physical `length`,
+  // but a bag-only accessor must still win an ordinary dynamic read.
+  const bagCarrierTypeIdxs = new Set<number>();
   for (const [structName, fields] of ctx.structFields) {
-    if (isSyntheticStructName(structName) || isOpenDescriptorShape(structName, fields)) continue;
     const typeIdx = ctx.structMap.get(structName);
-    if (typeIdx === undefined || !allocatedTypes.has(typeIdx)) continue;
     const shapeFieldIdx = fields.findIndex((field) => field?.name === "$shape");
     const shapeId = ctx.shapeIdByStructName.get(structName);
+    if (
+      !isSyntheticStructName(structName) &&
+      isUserDeclaredStruct(ctx, structName) &&
+      typeIdx !== undefined &&
+      allocatedTypes.has(typeIdx)
+    ) {
+      bagCarrierTypeIdxs.add(typeIdx);
+    }
+    if (isSyntheticStructName(structName) || isOpenDescriptorShape(structName, fields)) continue;
+    if (typeIdx === undefined || !allocatedTypes.has(typeIdx)) continue;
     for (let fieldIdx = 0; fieldIdx < fields.length; fieldIdx++) {
       const field = fields[fieldIdx];
       // `exposedClosedStructFieldName` owns the special `$constructor` →
@@ -9041,7 +9094,11 @@ export function fillClosedStructExternGetArms(ctx: CodegenContext): void {
         field.type.kind === "ref_null" ||
         (field.type.kind === "f64" && boxNumberIdx !== undefined) ||
         (field.type.kind === "i32" &&
-          (field.jsBoolean || field.type.boolean ? boxBooleanIdx !== undefined : boxNumberIdx !== undefined));
+          (field.jsBoolean || field.type.boolean
+            ? boxBooleanIdx !== undefined
+            : field.type.symbol === true
+              ? boxSymbolIdx !== undefined
+              : boxNumberIdx !== undefined));
       if (!boxable) continue;
       const presenceSlot = presenceSlotOf(fields, field.name);
       let entries = byField.get(exposedFieldName);
@@ -9125,7 +9182,51 @@ export function fillClosedStructExternGetArms(ctx: CodegenContext): void {
       for (const name of info.residFieldNames) appendFamilyArms(name);
     }
   }
-  if (byField.size === 0) return;
+  // A descriptor in a carrier bag has ordinary-own-property precedence over a
+  // physical field. `__carrier_bag_has` is presence-based (not value-based), so
+  // a getter/data descriptor returning `undefined` remains a hit. Read the bag
+  // through the existing Reflect.get wrapper to bind an accessor's `this` to the
+  // original closed receiver rather than its backing `$Object` bag.
+  const bagHasIdx = ctx.funcMap.get(CARRIER_BAG_HAS);
+  const bagOfIdx = ctx.funcMap.get(CARRIER_BAG_OF);
+  const reflectGetReceiverIdx = ctx.funcMap.get("__reflect_get_receiver");
+  const bagOverrideArms: Instr[] = [];
+  if (bagHasIdx !== undefined && bagOfIdx !== undefined && reflectGetReceiverIdx !== undefined) {
+    for (const typeIdx of [...bagCarrierTypeIdxs].sort((a, b) => a - b)) {
+      bagOverrideArms.push(
+        { op: "local.get", index: 0 },
+        { op: "any.convert_extern" },
+        { op: "ref.test", typeIdx },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: 0 },
+            { op: "local.get", index: 1 },
+            { op: "call", funcIdx: bagHasIdx },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                // A positive `__carrier_bag_has` proves `__carrier_bag_of`
+                // has the screened bag for this receiver.
+                { op: "local.get", index: 0 },
+                { op: "call", funcIdx: bagOfIdx },
+                { op: "local.get", index: 1 },
+                { op: "local.get", index: 0 },
+                { op: "call", funcIdx: reflectGetReceiverIdx },
+                { op: "return" },
+              ],
+            },
+          ],
+        },
+      );
+    }
+  }
+  if (byField.size === 0) {
+    if (bagOverrideArms.length > 0) fn.body.unshift(...bagOverrideArms);
+    return;
+  }
   // A closed struct's f64 field may carry the identity-preserving undefined
   // sentinel.  The native computed getter returns externref, so reserve one
   // scratch f64 local for the exact-bit test before boxing.  Keep this local
@@ -9195,6 +9296,7 @@ export function fillClosedStructExternGetArms(ctx: CodegenContext): void {
       );
     } else if (entry.fieldType.kind === "i32") {
       if (entry.jsBoolean) read.push({ op: "call", funcIdx: boxBooleanIdx! });
+      else if (entry.fieldType.symbol === true) read.push({ op: "call", funcIdx: boxSymbolIdx! });
       else read.push({ op: "f64.convert_i32_s" }, { op: "call", funcIdx: boxNumberIdx! });
     } else if (entry.fieldType.kind !== "externref" && entry.fieldType.kind !== "ref_extern") {
       read.push({ op: "extern.convert_any" });
@@ -9433,6 +9535,7 @@ export function fillClosedStructExternGetArms(ctx: CodegenContext): void {
     }
   }
   fn.body.unshift(
+    ...bagOverrideArms,
     // (#4098 G1 s1) Screen ahead of every field arm (see fillClosedStructHasOwnArms).
     // Fresh Instr objects: finalize remaps bodies in place, a shared tree twice.
     ...buildTombstoneScreen(ctx, [
@@ -10714,7 +10817,7 @@ export function fillExternSetVecArms(ctx: CodegenContext): void {
  * that field (its index reads as a miss, same as before the fill).
  */
 function boxClosedStructFieldToExternref(ctx: CodegenContext, fieldType: ValType): Instr[] | null {
-  if (fieldType.kind === "externref") return [];
+  if (fieldType.kind === "externref" || fieldType.kind === "ref_extern") return [];
   if (fieldType.kind === "f64") {
     const boxNumIdx = ctx.funcMap.get("__box_number");
     return boxNumIdx === undefined ? null : [{ op: "call", funcIdx: boxNumIdx }];
@@ -10724,10 +10827,21 @@ function boxClosedStructFieldToExternref(ctx: CodegenContext, fieldType: ValType
       const boxBoolIdx = ctx.funcMap.get("__box_boolean");
       if (boxBoolIdx !== undefined) return [{ op: "call", funcIdx: boxBoolIdx }];
     }
+    if ((fieldType as { symbol?: boolean }).symbol === true) {
+      const boxSymbolIdx = ctx.funcMap.get("__box_symbol");
+      if (boxSymbolIdx !== undefined) return [{ op: "call", funcIdx: boxSymbolIdx }];
+    }
     const boxNumIdx = ctx.funcMap.get("__box_number");
     return boxNumIdx === undefined ? null : [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: boxNumIdx }];
   }
-  if (fieldType.kind === "ref" || fieldType.kind === "ref_null") return [{ op: "extern.convert_any" }];
+  if (
+    fieldType.kind === "anyref" ||
+    fieldType.kind === "eqref" ||
+    fieldType.kind === "ref" ||
+    fieldType.kind === "ref_null"
+  ) {
+    return [{ op: "extern.convert_any" }];
+  }
   return null;
 }
 
@@ -10781,7 +10895,20 @@ export function fillExternArrayLikeStructArms(ctx: CodegenContext): void {
   const getIdxFn = findFn("__extern_get_idx");
   const hasIdxFn = findFn("__extern_has_idx");
   if (!lenFn && !getIdxFn && !hasIdxFn) return;
+  const ordinaryExternGetIdx = ctx.funcMap.get("__extern_get");
+  const ordinaryNumberToStringIdx = ctx.funcMap.get("number_toString");
+  const ordinaryExternHasIdx = ctx.funcMap.get("__extern_has");
   const unboxNumIdx = ctx.funcMap.get("__unbox_number");
+  // Keep the established physical-reader fallback if a partial runtime lacks
+  // any part of the shared ordinary-read trio. Normal standalone modules have
+  // all four helpers; the guard only avoids turning a missing helper into a
+  // new regression in a reduced profile.
+  const ordinaryReaderReady =
+    ctx.standalone &&
+    ordinaryExternGetIdx !== undefined &&
+    ordinaryNumberToStringIdx !== undefined &&
+    ordinaryExternHasIdx !== undefined &&
+    unboxNumIdx !== undefined;
   // (#3317) OBJECT-valued `length` fields (`{1:true, length:{toString(){…}}}`,
   // the test262 `-3-19/-3-20/-3-21/-3-22` indexOf/lastIndexOf family plus
   // includes/return-abrupt-tonumber-length) run the observable §7.1.20
@@ -10870,6 +10997,19 @@ export function fillExternArrayLikeStructArms(ctx: CodegenContext): void {
   // #5205) and is `ref.test`-guarded per type like every other arm, so no
   // other receiver shape changes.
   const tupleTypeIdxs = new Set(ctx.tupleTypeMap.values());
+  // User-declared closed structs may carry descriptor overrides in the
+  // identity-keyed bag. Route them through ordinary Get/Has rather than a
+  // physical slot scan so accessor abrupt completion, descriptor precedence,
+  // Symbol identity, and present `undefined` all survive the array-like ABI.
+  const ordinaryReadTypeIdxs = new Set<number>();
+  if (ordinaryReaderReady) {
+    const allocatedTypes = allocatedStructTypeIndices(ctx.mod);
+    for (const [structName] of ctx.structFields) {
+      if (isSyntheticStructName(structName) || !isUserDeclaredStruct(ctx, structName)) continue;
+      const typeIdx = ctx.structMap.get(structName);
+      if (typeIdx !== undefined && allocatedTypes.has(typeIdx)) ordinaryReadTypeIdxs.add(typeIdx);
+    }
+  }
   for (const [structName, fields] of ctx.structFields) {
     const typeIdx = ctx.structMap.get(structName);
     if (typeIdx !== undefined && !seen.has(typeIdx) && tupleTypeIdxs.has(typeIdx)) {
@@ -10889,6 +11029,10 @@ export function fillExternArrayLikeStructArms(ctx: CodegenContext): void {
       continue;
     }
     if (typeIdx === undefined || seen.has(typeIdx)) continue;
+    if (ordinaryReadTypeIdxs.has(typeIdx)) {
+      seen.add(typeIdx);
+      continue;
+    }
     if (
       structName.startsWith("Wrapper") ||
       structName === "$AnyValue" ||
@@ -10930,8 +11074,9 @@ export function fillExternArrayLikeStructArms(ctx: CodegenContext): void {
     if (protoGlobalIdx !== undefined) fnctorProtoGlobals.set(typeIdx, protoGlobalIdx);
     cands.push({ typeIdx, lengthFieldIdx, lengthFieldType: fields[lengthFieldIdx]!.type, numericFields });
   }
-  if (cands.length === 0) return;
+  if (cands.length === 0 && ordinaryReadTypeIdxs.size === 0) return;
   cands.sort((a, b) => a.typeIdx - b.typeIdx);
+  const ordinaryReadTypeIdxsSorted = [...ordinaryReadTypeIdxs].sort((a, b) => a - b);
 
   const idxMiss = (): Instr[] => undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" }];
   // (#4160) Arm-level miss for a closed-struct receiver — every own integer
@@ -10975,9 +11120,83 @@ export function fillExternArrayLikeStructArms(ctx: CodegenContext): void {
     fn.body[1]?.op === "any.convert_extern" &&
     fn.body[2]?.op === "local.set";
 
+  // User carriers deliberately take the ordinary dynamic path. Unlike a
+  // physical scan it observes bag descriptors first; using the same key
+  // conversion in Get and Has keeps an accessor-only numeric key visible to
+  // every array-like consumer without treating `undefined` as absence.
+  const ordinaryLengthArms = (): Instr[] => {
+    if (!ordinaryReaderReady) return [];
+    const arms: Instr[] = [];
+    for (const typeIdx of ordinaryReadTypeIdxsSorted) {
+      arms.push(
+        { op: "local.get", index: 1 },
+        { op: "ref.test", typeIdx },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: 0 },
+            ...nativeStringLiteralInstrs(ctx, "length"),
+            { op: "extern.convert_any" },
+            { op: "call", funcIdx: ordinaryExternGetIdx! },
+            ...buildArrayLikeToLengthFromExternref(ctx, symbolTypeIdx),
+            { op: "return" },
+          ],
+        },
+      );
+    }
+    return arms;
+  };
+  const ordinaryGetIdxArms = (): Instr[] => {
+    if (!ordinaryReaderReady) return [];
+    const arms: Instr[] = [];
+    for (const typeIdx of ordinaryReadTypeIdxsSorted) {
+      arms.push(
+        { op: "local.get", index: 2 },
+        { op: "ref.test", typeIdx },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: 0 },
+            // Do not truncate: ToPropertyKey of a numeric index is its
+            // canonical ToString form, matching `buildExternGetIdxBody`.
+            { op: "local.get", index: 1 },
+            { op: "call", funcIdx: ordinaryNumberToStringIdx! },
+            { op: "call", funcIdx: ordinaryExternGetIdx! },
+            { op: "return" },
+          ],
+        },
+      );
+    }
+    return arms;
+  };
+  const ordinaryHasIdxArms = (): Instr[] => {
+    if (!ordinaryReaderReady) return [];
+    const arms: Instr[] = [];
+    for (const typeIdx of ordinaryReadTypeIdxsSorted) {
+      arms.push(
+        { op: "local.get", index: 2 },
+        { op: "ref.test", typeIdx },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: 0 },
+            { op: "local.get", index: 1 },
+            { op: "call", funcIdx: ordinaryNumberToStringIdx! },
+            { op: "call", funcIdx: ordinaryExternHasIdx! },
+            { op: "return" },
+          ],
+        },
+      );
+    }
+    return arms;
+  };
+
   // ── __extern_length arms (locals: 1=any, 2=lenF64, 3=lenTrunc) ──
   if (lenFn && hasPreamble(lenFn)) {
-    const arms: Instr[] = [];
+    const arms: Instr[] = ordinaryLengthArms();
     let lenPrimLocalAdded = false; // (#3317) L_PRIM scratch appended at most once
     for (const cand of cands) {
       // (#5383 S2l) A tuple carrier's length is its field count — a constant,
@@ -11117,7 +11336,7 @@ export function fillExternArrayLikeStructArms(ctx: CodegenContext): void {
 
   // ── __extern_get_idx arms (params: 1=idx f64; locals: 2=any) ──
   if (getIdxFn && hasPreamble(getIdxFn)) {
-    const arms: Instr[] = [];
+    const arms: Instr[] = ordinaryGetIdxArms();
     const getIdxSelfIdx = ctx.funcMap.get("__extern_get_idx");
     for (const cand of cands) {
       const fieldChecks: Instr[] = [];
@@ -11163,7 +11382,7 @@ export function fillExternArrayLikeStructArms(ctx: CodegenContext): void {
 
   // ── __extern_has_idx arms (params: 1=idx f64; locals: 2=any) ──
   if (hasIdxFn && hasPreamble(hasIdxFn)) {
-    const arms: Instr[] = [];
+    const arms: Instr[] = ordinaryHasIdxArms();
     const hasIdxSelfIdx = ctx.funcMap.get("__extern_has_idx");
     for (const cand of cands) {
       const protoGlobalIdx = fnctorProtoGlobals.get(cand.typeIdx);

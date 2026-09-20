@@ -23,6 +23,7 @@ import { definedFuncAt, replaceDefinedFuncAt } from "../src/codegen/func-space.j
 import { createEmptyModule } from "../src/ir/types.js";
 import type { CodegenContext } from "../src/codegen/context/types.js";
 import type { Instr } from "../src/wasm/model/instructions.js";
+import { invertObjectRuntimeMainComposition } from "./helpers/object-runtime-main-composition.js";
 
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
@@ -760,7 +761,9 @@ function restorePresenceStore(
   return source;
 }
 function currentForwardSource(path: string): string {
-  return path === presenceExtraction.store.path ? restorePresenceStore() : read(path);
+  if (path === presenceExtraction.store.path) return restorePresenceStore();
+  const source = read(path);
+  return path === "src/codegen/object-runtime.ts" ? invertObjectRuntimeMainComposition(source) : source;
 }
 function presenceDeclaration(source: string, name: string, owner?: string) {
   const sf = ts.createSourceFile("presence.ts", source, ts.ScriptTarget.Latest, true);

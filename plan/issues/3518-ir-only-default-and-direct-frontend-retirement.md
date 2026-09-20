@@ -10894,3 +10894,54 @@ suite (495 distinct tests). TS7 passes. All eight static gates pass with 1,892
 inputs checked for stability; see the retained gate receipt for the exact count.
 Both parents' 53 source/test files remain byte-identical. Receipts are in
 .tmp/runtime-conversion-join/. Normal signed merge hooks remain required.
+
+### September 20 current-main composition plan (Codex)
+
+Signed prerequisite merge 20dd4850644dc3b42802d31fa15ddbc3ee0a4800 retains all
+53 parent source/test files byte-for-byte. Full hooks passed 610/610 tests in
+16 suites. Freshly read main 35e040c08ed10f793faf26bb0f0eac55be662627 has now
+merged cleanly without committing; its object-runtime changes include transferred
+prototype ownership and String.raw ordinary property access. Preserve all peer
+source, tests, acceptance manifests, and baseline updates.
+
+Before validating this composition, add an outer exact main-delta inverse to
+the historical source checks: authenticate base and main Git blobs, all 19
+ordered source spans, and reciprocal reconstruction against signed 20dd4850.
+B owns only the new receipt/helper/test and minimal existing test joins; root
+owns integration and this record. Keep all original donor fixtures and mutation
+controls unchanged. Run unchanged String.raw regression controls plus conversion,
+getter/key, bag/accessor, Symbol and relevant array-like coverage on the joined
+source, followed by typecheck and normal gates/hooks. No full IR parity claim.
+
+Main composition measurement: all eight static gates pass against exact main
+35e040c0 (1,895 inputs unchanged). Initial regression admission refused at load
+13.196 before any child; retained under main-validation/. The admitted 16-suite
+run completed 607/609 with 1,583 inputs unchanged: only two newly added corruption
+controls failed because trimming an initial newline allowed adjacent whitespace
+to recreate the span. Change only the new test's mutation to alter its first
+non-whitespace character; keep exact rejection assertions. Its 24/24 rerun and
+TS7 pass with 1,569 inputs unchanged; no production code changed. Formatting and
+lint were rechecked for this sole changed test. Original fixtures remain intact.
+
+The ten-suite peer/legacy run completed 58/73 with 1,578 inputs unchanged.
+All 15 failures are in the two unchanged array-like callback suites (2640/2773,
+18 total cases); all String.raw, linked-provider and six conversion suites pass.
+Do not relabel these failures as pre-existing without measurement: run both full
+array-like suites on isolated exact main, retain their three passing controls,
+and compare every row and observed value before deciding the next repair.
+Raw results remain under .tmp/runtime-conversion-join/main-validation2/ and
+main-validation3/. Main merge remains uncommitted pending this attribution.
+
+Exact-main attribution is now measured: isolated clean35e control completed
+18 cases, 3 passed and 15 failed, with all 1,505 inputs unchanged. Root compared
+every case by file and full name: all statuses and failure diagnostic texts
+(including observed values) match the joined run exactly. No additional failure
+is introduced in this measured set; these existing main defects remain recorded,
+not suppressed or treated as passing. See root-arraylike-comparison.json and
+the separate arraylike-main-control worktree's complete raw results.
+
+The current join has passing evidence for all 609 distinct preservation cases
+(the corrected new24-case suite rerun separately), 55 additional unchanged
+peer/conversion cases, and the3 array-like positive controls: 667 passing cases
+and15 reproduced main failures across26 suites. TS7 and eight static gates pass.
+Normal hooks remain required; full IR parity and main delivery remain unproven.

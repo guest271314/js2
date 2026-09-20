@@ -1,5 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { describe, expect, it } from "vitest";
+import { invertObjectRuntimeMainComposition } from "./helpers/object-runtime-main-composition.js";
 import {
   applyConversionSpans,
   authenticateConversionComposition,
@@ -49,7 +50,11 @@ describe("conversion changes compose before the unchanged getter/key donor chain
     verifyConversionComposition();
     const row = record.receipt.records[0]!;
     const forward = record.forward.records.find((r) => r.path === row.path)!;
-    const measured = applyConversionSpans(readConversionSource(row.path), forward.spans, true);
+    const measured = applyConversionSpans(
+      invertObjectRuntimeMainComposition(readConversionSource(row.path)),
+      forward.spans,
+      true,
+    );
     expect(conversionSha(measured)).toBe(row.extractionSha256);
     const original = applyConversionSpans(measured, row.spans, true);
     expect(conversionSha(original)).toBe(row.baseSha256);

@@ -1,6 +1,10 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import {
+  applyObjectRuntimeMainComposition,
+  invertObjectRuntimeMainComposition,
+} from "./object-runtime-main-composition.js";
 
 export const conversionBase = "0ef8e0ea4c23829a4eba37dca6dd6822aa95265e";
 export const objectRuntimePath = "src/codegen/object-runtime.ts";
@@ -153,6 +157,7 @@ export function invertConversionSource(path: string, source: string, reader: Rea
   const { receipt, forward, presence } = authenticateConversionComposition(reader);
   const row = receipt.records.find((r) => r.path === path);
   if (!row) throw new Error("unrecorded conversion source");
+  if (path === objectRuntimePath) source = invertObjectRuntimeMainComposition(source);
   if (path === protoIndexStorePath) {
     authenticatedProtoIndexReadSource(reader);
     source = replacePresence(source, presence.store, true);
@@ -172,6 +177,7 @@ export function verifyConversionComposition(reader: Reader = readConversionSourc
     if (conversionSha(replay) !== row.extractionSha256) throw new Error("conversion extraction replay mismatch");
     replay = applyConversionSpans(replay, forward.records.find((r) => r.path === row.path)!.spans, false);
     if (row.path === protoIndexStorePath) replay = replacePresence(replay, presence.store, false);
+    if (row.path === objectRuntimePath) replay = applyObjectRuntimeMainComposition(replay, false);
     if (replay !== current) throw new Error("conversion forward replay mismatch");
     return { path: row.path, original, current };
   });
