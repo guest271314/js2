@@ -8,12 +8,34 @@ import {
   RUNTIME_HOST_CAPABILITY_RECORDS,
   type RuntimeHostCapabilityValueType,
 } from "./host-capabilities.js";
-import type { RuntimeFeature, RuntimeProviderDefinition } from "./contracts/manifest.js";
+import {
+  NATIVE_ASYNC_CALLABLE_RUNTIME_FEATURES,
+  type RuntimeFeature,
+  type RuntimeProviderDefinition,
+} from "./contracts/manifest.js";
 import type { IntrinsicSignature } from "../core/intrinsic-contracts.js";
-import { irNativeAsyncCallableDeclaration } from "./native-async-callables.js";
-import { irVectorCallableDeclaration } from "./vector-callables.js";
+import { irClosureInvocationCallableDeclaration } from "./closure-invocation-callables.js";
+import {
+  NATIVE_ASYNC_CALLABLE_RUNTIME_PROVIDERS,
+  nativeAsyncProviderMismatch,
+  nativeAsyncCallablePolicyMismatch,
+  irNativeAsyncCallableDeclaration,
+} from "./native-async-callables.js";
+import {
+  VECTOR_CALLABLE_RUNTIME_PROVIDERS,
+  vectorProviderMismatch,
+  vectorCallablePolicyMismatch,
+  irVectorCallableDeclaration,
+} from "./vector-callables.js";
 import { irNumberConversionCallableDeclaration } from "./number-conversion-callable.js";
-import { irOrdinaryObjectCallableDeclaration } from "./ordinary-object-callables.js";
+import {
+  ORDINARY_OBJECT_RUNTIME_PROVIDERS,
+  ordinaryObjectProviderMismatch,
+  ordinaryObjectCallablePolicyMismatch,
+  irOrdinaryObjectCallableDeclaration,
+} from "./ordinary-object-callables.js";
+
+import type { RuntimeManifestPolicy } from "../../runtime/contracts/provider-policy.js";
 
 /** Policy-independent callable contracts; physical providers are selected by the manifest. */
 export interface IrRuntimeCallableDeclaration {
@@ -80,5 +102,30 @@ export function irRuntimeCallableDeclaration(ref: IrFuncRef): IrRuntimeCallableD
     : (irNativeAsyncCallableDeclaration(ref) ??
         irVectorCallableDeclaration(ref) ??
         irOrdinaryObjectCallableDeclaration(ref) ??
-        irNumberConversionCallableDeclaration(ref));
+        irNumberConversionCallableDeclaration(ref) ??
+        irClosureInvocationCallableDeclaration(ref));
+}
+
+/** Canonical symbolic callable families; physical materialization remains a separate obligation. */
+export const SEMANTIC_CALLABLE_RUNTIME_PROVIDERS: readonly RuntimeProviderDefinition[] = Object.freeze([
+  ...NATIVE_ASYNC_CALLABLE_RUNTIME_PROVIDERS,
+  ...VECTOR_CALLABLE_RUNTIME_PROVIDERS,
+  ...ORDINARY_OBJECT_RUNTIME_PROVIDERS,
+]);
+
+export function semanticCallableProviderMismatch(provider: RuntimeProviderDefinition): string | undefined {
+  return (
+    nativeAsyncProviderMismatch(provider) ??
+    vectorProviderMismatch(provider) ??
+    ordinaryObjectProviderMismatch(provider)
+  );
+}
+
+export function semanticCallablePolicyMismatch(
+  feature: RuntimeFeature,
+  policy: RuntimeManifestPolicy,
+): string | undefined {
+  return NATIVE_ASYNC_CALLABLE_RUNTIME_FEATURES.some((entry) => entry === feature)
+    ? nativeAsyncCallablePolicyMismatch(feature, policy)
+    : (vectorCallablePolicyMismatch(feature, policy) ?? ordinaryObjectCallablePolicyMismatch(feature, policy));
 }

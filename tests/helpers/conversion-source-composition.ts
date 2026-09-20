@@ -1,4 +1,5 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import { applyClosureApplyExtraction } from "./object-runtime-apply-extraction.js";
 import { applyFnctorGuardForward } from "./object-runtime-fnctor-guard-forward.js";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -158,7 +159,10 @@ export function invertConversionSource(path: string, source: string, reader: Rea
   const { receipt, forward, presence } = authenticateConversionComposition(reader);
   const row = receipt.records.find((r) => r.path === path);
   if (!row) throw new Error("unrecorded conversion source");
-  if (path === objectRuntimePath) source = invertObjectRuntimeMainComposition(applyFnctorGuardForward(source, true));
+  if (path === objectRuntimePath)
+    source = invertObjectRuntimeMainComposition(
+      applyFnctorGuardForward(applyClosureApplyExtraction(source, true), true),
+    );
   if (path === protoIndexStorePath) {
     authenticatedProtoIndexReadSource(reader);
     source = replacePresence(source, presence.store, true);
@@ -179,7 +183,10 @@ export function verifyConversionComposition(reader: Reader = readConversionSourc
     replay = applyConversionSpans(replay, forward.records.find((r) => r.path === row.path)!.spans, false);
     if (row.path === protoIndexStorePath) replay = replacePresence(replay, presence.store, false);
     if (row.path === objectRuntimePath)
-      replay = applyFnctorGuardForward(applyObjectRuntimeMainComposition(replay, false), false);
+      replay = applyClosureApplyExtraction(
+        applyFnctorGuardForward(applyObjectRuntimeMainComposition(replay, false), false),
+        false,
+      );
     if (replay !== current) throw new Error("conversion forward replay mismatch");
     return { path: row.path, original, current };
   });

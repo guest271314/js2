@@ -1,4 +1,5 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import { applyClosureApplyExtraction } from "./helpers/object-runtime-apply-extraction.js";
 import { applyFnctorGuardForward } from "./helpers/object-runtime-fnctor-guard-forward.js";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -765,7 +766,7 @@ function currentForwardSource(path: string): string {
   if (path === presenceExtraction.store.path) return restorePresenceStore();
   const source = read(path);
   return path === "src/codegen/object-runtime.ts"
-    ? invertObjectRuntimeMainComposition(applyFnctorGuardForward(source, true))
+    ? invertObjectRuntimeMainComposition(applyFnctorGuardForward(applyClosureApplyExtraction(source, true), true))
     : source;
 }
 function presenceDeclaration(source: string, name: string, owner?: string) {

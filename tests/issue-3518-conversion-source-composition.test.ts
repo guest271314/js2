@@ -1,4 +1,5 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import { applyClosureApplyExtraction } from "./helpers/object-runtime-apply-extraction.js";
 import { applyFnctorGuardForward } from "./helpers/object-runtime-fnctor-guard-forward.js";
 import { describe, expect, it } from "vitest";
 import { invertObjectRuntimeMainComposition } from "./helpers/object-runtime-main-composition.js";
@@ -52,7 +53,9 @@ describe("conversion changes compose before the unchanged getter/key donor chain
     const row = record.receipt.records[0]!;
     const forward = record.forward.records.find((r) => r.path === row.path)!;
     const measured = applyConversionSpans(
-      invertObjectRuntimeMainComposition(applyFnctorGuardForward(readConversionSource(row.path), true)),
+      invertObjectRuntimeMainComposition(
+        applyFnctorGuardForward(applyClosureApplyExtraction(readConversionSource(row.path), true), true),
+      ),
       forward.spans,
       true,
     );

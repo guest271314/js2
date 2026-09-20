@@ -35,6 +35,9 @@ export type RuntimeFeature =
   | HostCallbackWrapRuntimeFeature
   | FunctionPrototypeCallRuntimeFeature
   | NativeAsyncCallableRuntimeFeature
+  | "js.closure.method"
+  | "js.closure.apply-vector"
+  | "js.closure.undefined"
   | VectorCallableRuntimeFeature
   | OrdinaryObjectRuntimeFeature
   | "js.number.from-value"
@@ -96,6 +99,7 @@ export type NumericCoercionRuntimeProviderId = (typeof NUMERIC_COERCION_RUNTIME_
 /** (#3526 F1-S1) One provider per admitted number-boundary policy arm. */
 export const NUMBER_BOUNDARY_RUNTIME_PROVIDER_IDS = Object.freeze([
   "host.js.number.box",
+  "native.js.number.box",
   "host.js.number.unbox",
   "native.js.number.unbox",
 ] as const);
@@ -403,6 +407,17 @@ export const ORDINARY_OBJECT_RUNTIME_FEATURES = Object.freeze([
   "js.object.has",
 ] as const);
 export type OrdinaryObjectRuntimeFeature = (typeof ORDINARY_OBJECT_RUNTIME_FEATURES)[number];
+export const ORDINARY_OBJECT_RUNTIME_PROVIDER_IDS = Object.freeze([
+  "native.js.object.create-default",
+  "native.js.object.create-null",
+  "native.js.object.create-with-prototype",
+  "native.js.object.define-data",
+  "native.js.object.define-accessor",
+  "native.js.object.define-attributes",
+  "native.js.object.get",
+  "native.js.object.has",
+] as const);
+export type OrdinaryObjectRuntimeProviderId = (typeof ORDINARY_OBJECT_RUNTIME_PROVIDER_IDS)[number];
 
 export type RuntimeProviderId =
   | MathRuntimeProviderId
@@ -422,6 +437,7 @@ export type RuntimeProviderId =
   | FunctionPrototypeCallRuntimeProviderId
   | ReferenceErrorRuntimeProviderId
   | NativeAsyncCallableRuntimeProviderId
+  | OrdinaryObjectRuntimeProviderId
   | VectorCallableRuntimeProviderId
   | AsyncRuntimeProviderId;
 

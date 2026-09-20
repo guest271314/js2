@@ -257,7 +257,13 @@ import {
 import { ensureProxyRuntime } from "./object-runtime-proxy.js";
 import { ensureArgcGlobal } from "./statements/nested-declarations.js";
 import { buildLazyNativeProtoGetInstrs, flushPendingNativeProtoSeeders, getBuiltinBrand } from "./native-proto.js";
-import { applyUndefinedInstrs, guardNullableApplyArguments } from "./apply-closure-args.js";
+import { applyUndefinedInstrs } from "./apply-closure-args.js";
+import {
+  buildClosureApplyArgument,
+  buildClosureApplyCallArm,
+  buildClosureApplyLength,
+  buildClosureApplyProxyGuard,
+} from "../runtime/wasmgc/values/closure-apply-body.js";
 import { vecConstructorArmInstrs } from "./vec-constructor-carrier.js"; // (#4220) runtime `<array>.constructor`
 import {
   registerStringExoticHasOwn,
@@ -6601,45 +6607,36 @@ export function fillApplyClosure(ctx: CodegenContext): void {
 
   // Locals: 0=fn 1=recv 2=args; 3=n, then widening/result/carrier locals.
   const ARG_OF = (k: number): Instr[] => {
-    let fallback: Instr[] = hasGenericArgsReader
-      ? [
-          { op: "local.get", index: 2 },
-          { op: "f64.const", value: k },
-          { op: "call", funcIdx: externGetIdxArr! },
-        ]
-      : applyUndefinedInstrs(ctx, getUndefinedIdx);
-    // Under-applied widening reads out-of-bounds as undefined (#3592).
-    const oob = (): Instr[] => applyUndefinedInstrs(ctx, getUndefinedIdx);
-    const fastRead = (dataLocal: number, lenLocal: number, arrTypeIdx: number, prior: Instr[]): Instr[] => [
-      { op: "local.get", index: dataLocal },
-      { op: "ref.is_null" },
-      {
-        op: "if",
-        blockType: { kind: "val", type: { kind: "externref" } },
-        then: prior,
-        else: [
-          { op: "i32.const", value: k },
-          { op: "local.get", index: lenLocal },
-          { op: "i32.lt_s" },
-          {
-            op: "if",
-            blockType: { kind: "val", type: { kind: "externref" } },
-            then: [
-              { op: "local.get", index: dataLocal },
-              { op: "ref.as_non_null" },
-              { op: "i32.const", value: k },
-              { op: "array.get", typeIdx: arrTypeIdx },
-            ],
-            else: oob(),
+    const fallbackUndefined = hasGenericArgsReader ? [] : applyUndefinedInstrs(ctx, getUndefinedIdx);
+    const object = fastObjArgs
+      ? {
+          carrier: {
+            typeIdx: objVecTypeIdx,
+            arrayTypeIdx: objVecArrTypeIdx,
+            dataLocal: objArgDataLocal,
+            lengthLocal: objArgLenLocal,
           },
-        ],
-      },
-    ];
-    if (fastObjArgs) fallback = fastRead(objArgDataLocal, objArgLenLocal, objVecArrTypeIdx, fallback);
-    if (fastDirectArgs) {
-      fallback = fastRead(directArgDataLocal, directArgLenLocal, directVecArrTypeIdx, fallback);
-    }
-    return guardNullableApplyArguments(oob(), fallback);
+          undefinedValue: applyUndefinedInstrs(ctx, getUndefinedIdx),
+        }
+      : undefined;
+    const direct = fastDirectArgs
+      ? {
+          carrier: {
+            typeIdx: directVecTypeIdx,
+            arrayTypeIdx: directVecArrTypeIdx,
+            dataLocal: directArgDataLocal,
+            lengthLocal: directArgLenLocal,
+          },
+          undefinedValue: applyUndefinedInstrs(ctx, getUndefinedIdx),
+        }
+      : undefined;
+    return buildClosureApplyArgument(k, {
+      genericIndex: hasGenericArgsReader ? externGetIdxArr : undefined,
+      fallbackUndefined,
+      object,
+      direct,
+      nullishUndefined: applyUndefinedInstrs(ctx, getUndefinedIdx),
+    });
   };
 
   const buildArm = (n: number): Instr[] => {
@@ -6650,14 +6647,9 @@ export function fillApplyClosure(ctx: CodegenContext): void {
       // a valid body: return the undefined sentinel.
       return linkedFallback();
     }
-    // __call_fn_method_N(recv, fn, arg0..arg{N-1})
-    const ops: Instr[] = [
-      { op: "local.get", index: 1 },
-      { op: "local.get", index: 0 },
-    ];
-    for (let k = 0; k < n; k++) ops.push(...ARG_OF(k));
-    ops.push({ op: "call", funcIdx: idx });
-    return ops;
+    const argumentsBody: Instr[][] = [];
+    for (let k = 0; k < n; k++) argumentsBody.push(ARG_OF(k));
+    return buildClosureApplyCallArm(idx, argumentsBody);
   };
 
   // if n==0 .. n==APPLY_CLOSURE_MAX_ARITY else undefined. Nest as if/else chain.
@@ -6678,35 +6670,25 @@ export function fillApplyClosure(ctx: CodegenContext): void {
 
   // n = args.len. Prefer a native carrier read, then retain the historical
   // generic array-like reader for other callers of __apply_closure.
-  let computeN: Instr[] = hasGenericArgsReader
-    ? [{ op: "local.get", index: 2 }, { op: "call", funcIdx: externLengthIdx! }, { op: "i32.trunc_f64_s" }]
-    : [{ op: "i32.const", value: 0 }];
-  const fastLength = (carrierTypeIdx: number, dataLocal: number, lenLocal: number, prior: Instr[]): Instr[] => [
-    { op: "local.get", index: 2 },
-    { op: "any.convert_extern" },
-    { op: "ref.test", typeIdx: carrierTypeIdx },
-    {
-      op: "if",
-      blockType: { kind: "val", type: { kind: "i32" } },
-      then: [
-        { op: "local.get", index: 2 },
-        { op: "any.convert_extern" },
-        { op: "ref.cast", typeIdx: carrierTypeIdx },
-        { op: "struct.get", typeIdx: carrierTypeIdx, fieldIdx: 1 },
-        { op: "local.set", index: dataLocal },
-        { op: "local.get", index: 2 },
-        { op: "any.convert_extern" },
-        { op: "ref.cast", typeIdx: carrierTypeIdx },
-        { op: "struct.get", typeIdx: carrierTypeIdx, fieldIdx: 0 },
-        { op: "local.tee", index: lenLocal },
-      ],
-      else: prior,
-    },
-  ];
-  if (fastObjArgs) computeN = fastLength(objVecTypeIdx, objArgDataLocal, objArgLenLocal, computeN);
-  if (fastDirectArgs) {
-    computeN = fastLength(directVecTypeIdx, directArgDataLocal, directArgLenLocal, computeN);
-  }
+  const computeN = buildClosureApplyLength({
+    genericLength: hasGenericArgsReader ? externLengthIdx : undefined,
+    object: fastObjArgs
+      ? {
+          typeIdx: objVecTypeIdx,
+          arrayTypeIdx: objVecArrTypeIdx,
+          dataLocal: objArgDataLocal,
+          lengthLocal: objArgLenLocal,
+        }
+      : undefined,
+    direct: fastDirectArgs
+      ? {
+          typeIdx: directVecTypeIdx,
+          arrayTypeIdx: directVecArrTypeIdx,
+          dataLocal: directArgDataLocal,
+          lengthLocal: directArgLenLocal,
+        }
+      : undefined,
+  });
 
   // Preserve the raw call-site count in `__argc` before widening only the
   // dispatcher selector. This keeps omitted formals undefined without turning
@@ -6753,22 +6735,7 @@ export function fillApplyClosure(ctx: CodegenContext): void {
   const proxyApplyIdx = ctx.funcMap.get("__proxy_apply_dispatch");
   const proxyGuardTypeIdx = ctx.objectRuntimeTypes?.proxyTypeIdx;
   if (proxyApplyIdx !== undefined && proxyGuardTypeIdx !== undefined) {
-    body.unshift(
-      { op: "local.get", index: 0 },
-      { op: "any.convert_extern" },
-      { op: "ref.test", typeIdx: proxyGuardTypeIdx },
-      {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [
-          { op: "local.get", index: 0 },
-          { op: "local.get", index: 1 },
-          { op: "local.get", index: 2 },
-          { op: "call", funcIdx: proxyApplyIdx },
-          { op: "return" },
-        ],
-      },
-    );
+    body.unshift(...buildClosureApplyProxyGuard(proxyGuardTypeIdx, proxyApplyIdx));
   }
 
   // Native-first keeps a caller-owned JavaScript function as that exact

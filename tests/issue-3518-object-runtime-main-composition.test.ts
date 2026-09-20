@@ -1,5 +1,11 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import {
+  applyClosureApplyExtraction,
+  authenticateApplyExtraction,
+  readApplyBuilderSource,
+  applyExtractionReceiptText,
+} from "./helpers/object-runtime-apply-extraction.js";
+import {
   applyFnctorGuardForward,
   authenticateFnctorGuardReceipt,
   fnctorGuardReceiptText,
@@ -22,10 +28,12 @@ import { verifyObjectRuntimeComposition as verifyCurrentObjectRuntimeComposition
 
 const receipt = authenticateObjectRuntimeMainComposition();
 const rawCurrent = readConversionSource(objectRuntimePath);
-const current = applyFnctorGuardForward(rawCurrent, true);
+const current = applyFnctorGuardForward(applyClosureApplyExtraction(rawCurrent, true), true);
 // The old 19-span controls continue to mutate their exact historical layer.
 function verifyObjectRuntimeComposition(source: string) {
-  return verifyCurrentObjectRuntimeComposition(applyFnctorGuardForward(source, false));
+  return verifyCurrentObjectRuntimeComposition(
+    applyClosureApplyExtraction(applyFnctorGuardForward(source, false), false),
+  );
 }
 describe("fixed main changes precede the unchanged conversion and getter/key inverses", () => {
   it("reconstructs the entire signed integration and reciprocally reproduces the actual merge", () => {
@@ -108,7 +116,12 @@ describe("committed fnctor prototype guard composes outside historical main", ()
     verifyCurrentObjectRuntimeComposition(rawCurrent);
     verifyConversionComposition();
     const historical = verifyObjectRuntimeMainComposition(current);
-    expect(applyFnctorGuardForward(applyObjectRuntimeMainComposition(historical, false), false)).toBe(rawCurrent);
+    expect(
+      applyClosureApplyExtraction(
+        applyFnctorGuardForward(applyObjectRuntimeMainComposition(historical, false), false),
+        false,
+      ),
+    ).toBe(rawCurrent);
   });
   it.each(["missing", "altered", "duplicated"])("refuses %s guard after the live positive", (mutation) => {
     verifyCurrentObjectRuntimeComposition(rawCurrent);
@@ -127,5 +140,49 @@ describe("committed fnctor prototype guard composes outside historical main", ()
   it("refuses changed guard provenance", () => {
     verifyCurrentObjectRuntimeComposition(rawCurrent);
     expect(() => authenticateFnctorGuardReceipt(fnctorGuardReceiptText + " ")).toThrow("receipt digest mismatch");
+  });
+});
+
+describe("signed apply extraction outside prior main receipts", () => {
+  const extraction = authenticateApplyExtraction();
+  it("reconstructs the original full source and reciprocally replays actual merged bytes", () => {
+    verifyCurrentObjectRuntimeComposition(rawCurrent);
+    verifyConversionComposition();
+    const inverse = applyClosureApplyExtraction(rawCurrent, true);
+    expect(inverse).not.toBe(rawCurrent);
+    expect(applyClosureApplyExtraction(inverse, false)).toBe(rawCurrent);
+    expect(conversionSha(verifyObjectRuntimeMainComposition(applyFnctorGuardForward(inverse, true)))).toBe(
+      "2cc32a6af0e913340ac8a27c77befb6b345a61688893aa1cb3fc29d6161719b7",
+    );
+  });
+  it.each(
+    extraction.spans.flatMap((span) => ["missing", "altered", "duplicated"].map((mutation) => ({ span, mutation }))),
+  )("refuses $mutation apply extraction span $span.id after live positive", ({ span, mutation }) => {
+    verifyCurrentObjectRuntimeComposition(rawCurrent);
+    const replacement =
+      mutation === "missing"
+        ? span.before
+        : mutation === "duplicated"
+          ? span.after + span.after
+          : span.after.replace(
+              /\bbuildClosureApply(?:Argument|CallArm|Length|ProxyGuard)\b/,
+              (name) => `${name}Corrupted`,
+            );
+    expect(replacement).not.toBe(span.after);
+    const changed = rawCurrent.replace(span.after, replacement);
+    expect(changed).not.toBe(rawCurrent);
+    if (mutation === "altered") expect(changed).not.toContain(span.after);
+    expect(() => verifyCurrentObjectRuntimeComposition(changed)).toThrow("apply extraction span missing or duplicated");
+  });
+  it("rejects actual runtime builder mutation independently of unchanged adapter source", () => {
+    verifyCurrentObjectRuntimeComposition(rawCurrent);
+    const builder = readApplyBuilderSource();
+    const changed = builder.replace('op: "ref.is_null"', 'op: "i32.eqz"');
+    expect(changed).not.toBe(builder);
+    expect(() => applyClosureApplyExtraction(rawCurrent, true, changed)).toThrow("actual builder mismatch");
+  });
+  it("rejects edited extraction provenance", () => {
+    verifyCurrentObjectRuntimeComposition(rawCurrent);
+    expect(() => authenticateApplyExtraction(applyExtractionReceiptText + " ")).toThrow("receipt digest mismatch");
   });
 });
