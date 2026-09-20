@@ -12607,3 +12607,29 @@ remain intact; new recipe/adapter is still only a prototype-owner prerequisite.
 Prototype six-gate73726 passes LOC/functions/coercion/oracle/inventory/
 preservation exports,1623 inputs unchanged, against exact65448565c7.
 No retirement inference: the graph audit is preservation-only and remains OPEN.
+
+
+### Canonical prototype brand contract (root, base50f57b7141)
+
+The native prototype owner needs the same append-only brand identities as the
+retained compiler without importing its codegen graph. Move the two pure brand
+leaves to runtime/contracts, preserving all values and lookup behavior, and
+retain explicit compatibility re-exports at both old paths. Do not duplicate
+registries or freeze previously mutable objects as part of this move. Pin all
+48 occupied slots, the reserved zero slot and 49-slot capacity; verify identity
+through both legacy facades and collection tags. Add clean boundary inventory
+entries without changing historical receipts or allowed dependency edges.
+This enables the native resource owner; it does not certify prototype coverage.
+The companion checkpoint50f57b7141 passed normal hooks448/448, with ten exact
+committed pins unchanged; broader composition511/511 remains scoped evidence.
+
+Brand contract run99879: TS7 passes and351/351 across the new identity/ABI
+contract suite and complete semantic boundary suite, zero skipped;1625 frozen
+inputs unchanged. The original511-row companion composition report is retained
+byte-for-byte after isolating a reporter destination collision (runner note in
+.tmp/prototype/brand-contract). Normal hooks and remaining gates pending; no
+main delivery or full native prototype completion claim.
+
+Brand contract six-gate44493 passed LOC/functions/coercion/oracle/inventory/
+preservation exports against50f57b7141;1624 inputs unchanged. Historical
+activation and dependency allowances remain unchanged. Normal signed hooks next.

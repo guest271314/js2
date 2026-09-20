@@ -885,6 +885,8 @@ describe("semantic verification and provider ownership boundary", () => {
       additions.push(...(mergedInvocationAdditions[id] ?? []));
       additions.push(...(mergedObjectStorageAdditions[id] ?? []));
       if (id === "native-runtime") additions.push("src/runtime/wasmgc/values/prototype-companion-body.ts");
+      if (id === "runtime-contracts")
+        additions.push("src/runtime/contracts/builtin-brands.ts", "src/runtime/contracts/collection-kind.ts");
       const signedEntries = additions.length ? layer.entries.slice(0, -additions.length) : layer.entries;
       if (additions.length) expect(layer.entries.slice(-additions.length)).toEqual(additions);
       const receipt = signedLayerComposition[id as keyof typeof signedLayerComposition];

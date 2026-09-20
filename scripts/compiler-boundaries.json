@@ -214,9 +214,11 @@
         "src/runtime/contracts/async-provider-schema.ts",
         "src/runtime/contracts/provider-policy.ts",
         "src/runtime/contracts/index.ts",
-        "src/runtime/contracts/timer-capability.ts"
+        "src/runtime/contracts/timer-capability.ts",
+        "src/runtime/contracts/builtin-brands.ts",
+        "src/runtime/contracts/collection-kind.ts"
       ],
-      "minModules": 5
+      "minModules": 7
     },
     {
       "id": "backend-wasmgc",
@@ -13138,6 +13140,16 @@
       "path": "src/runtime/wasmgc/values/prototype-companion-body.ts",
       "state": "clean",
       "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/contracts/builtin-brands.ts",
+      "state": "clean",
+      "layer": "runtime-contracts"
+    },
+    {
+      "path": "src/runtime/contracts/collection-kind.ts",
+      "state": "clean",
+      "layer": "runtime-contracts"
     }
   ]
 }
