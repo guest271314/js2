@@ -154,9 +154,11 @@
         "src/ir/runtime/async-attachment.ts",
         "src/ir/runtime/intrinsic-verification.ts",
         "src/ir/runtime/native-async-callables.ts",
-        "src/ir/runtime/vector-callables.ts"
+        "src/ir/runtime/vector-callables.ts",
+        "src/ir/runtime/number-conversion-callable.ts",
+        "src/ir/runtime/ordinary-object-callables.ts"
       ],
-      "minModules": 12
+      "minModules": 14
     },
     {
       "id": "ir-program",
@@ -236,9 +238,10 @@
         "src/backend/wasmgc/resources/native-string-output.ts",
         "src/backend/wasmgc/resources/native-object-layouts.ts",
         "src/backend/wasmgc/resources/native-string-equality.ts",
-        "src/backend/wasmgc/resources/native-symbol-carrier.ts"
+        "src/backend/wasmgc/resources/native-symbol-carrier.ts",
+        "src/backend/wasmgc/resources/native-booleans.ts"
       ],
-      "minModules": 23
+      "minModules": 24
     },
     {
       "id": "native-runtime",
@@ -296,9 +299,11 @@
         "src/runtime/wasmgc/values/to-primitive-method-bodies.ts",
         "src/runtime/wasmgc/values/to-primitive-wrapper-bodies.ts",
         "src/runtime/wasmgc/values/string-equality-body.ts",
-        "src/runtime/wasmgc/values/symbol-carrier-bodies.ts"
+        "src/runtime/wasmgc/values/symbol-carrier-bodies.ts",
+        "src/runtime/wasmgc/values/boolean-bodies.ts",
+        "src/runtime/wasmgc/values/bigint-primitive-bodies.ts"
       ],
-      "minModules": 50
+      "minModules": 52
     },
     {
       "id": "standalone-platform",
@@ -1536,6 +1541,26 @@
     {
       "layer": "ir-program",
       "entries": ["src/ir/program/host-import-plan.ts", "src/ir/program/host-number-boundary-setup.ts"],
+      "minModules": 2
+    },
+    {
+      "layer": "native-runtime",
+      "entries": ["src/runtime/wasmgc/values/boolean-bodies.ts"],
+      "minModules": 1
+    },
+    {
+      "layer": "backend-wasmgc",
+      "entries": ["src/backend/wasmgc/resources/native-booleans.ts"],
+      "minModules": 1
+    },
+    {
+      "layer": "native-runtime",
+      "entries": ["src/runtime/wasmgc/values/bigint-primitive-bodies.ts"],
+      "minModules": 1
+    },
+    {
+      "layer": "ir-runtime",
+      "entries": ["src/ir/runtime/number-conversion-callable.ts", "src/ir/runtime/ordinary-object-callables.ts"],
       "minModules": 2
     }
   ],
@@ -12785,6 +12810,55 @@
       "path": "src/backend/wasmgc/resources/native-string-equality.ts",
       "state": "clean",
       "layer": "backend-wasmgc"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/boolean-bodies.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/backend/wasmgc/resources/native-booleans.ts",
+      "state": "clean",
+      "layer": "backend-wasmgc"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/bigint-primitive-bodies.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/ir/runtime/number-conversion-callable.ts",
+      "state": "clean",
+      "layer": "ir-runtime"
+    },
+    {
+      "path": "src/ir/runtime/ordinary-object-callables.ts",
+      "state": "clean",
+      "layer": "ir-runtime"
+    },
+    {
+      "path": "src/ir/ordinary-object-closure-signatures.ts",
+      "state": "unmigrated",
+      "layer": "mixed-needs-split",
+      "destination": "frontend-ts",
+      "owner": "3518-coordinator",
+      "nextBoundary": "Source-owned AST/checker preparation; isolate checker/library identity dependencies before certifying the complete frontend boundary."
+    },
+    {
+      "path": "src/frontend/builtins/prepare-ordinary-object-access.ts",
+      "state": "unmigrated",
+      "layer": "mixed-needs-split",
+      "destination": "frontend-ts",
+      "owner": "3518-coordinator",
+      "nextBoundary": "Source-owned AST/checker preparation; isolate checker/library identity dependencies before certifying the complete frontend boundary."
+    },
+    {
+      "path": "src/frontend/builtins/prepare-number-conversion.ts",
+      "state": "unmigrated",
+      "layer": "mixed-needs-split",
+      "destination": "frontend-ts",
+      "owner": "3518-coordinator",
+      "nextBoundary": "Source-owned AST/checker preparation; isolate checker/library identity dependencies before certifying the complete frontend boundary."
     }
   ]
 }

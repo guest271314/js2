@@ -11064,3 +11064,113 @@ retirement. Initial function-budget failure remains in gates/functions.log;
 functions-second.log records the successful extraction. No budgets/gates were
 weakened, no fixture or old compiler path removed. Full normal commit hooks
 remain required.
+
+September 20 Boolean dependency plan: descriptor SameValue needs the actual
+native Boolean type predicate and typed carrier reader. Extract both exact
+registry/imports.ts bodies from signed producer parent7de4c2f421 into pure
+boolean-bodies.ts and keep the legacy registrations calling those same builders.
+The existing historical full-module and comment receipts must reconstruct the
+old bodies, with original hashes unchanged. This reader deliberately retains
+its typed-carrier semantics; it is not general ToBoolean. Next add authenticated
+physical reservations against the existing Boolean type owner and execution
+controls for true/false, null and non-Boolean carriers. BigInt remains a separate
+mandatory dependency; no stub satisfies SameValue. Source extraction is drafted,
+not yet tested; R owns the serialized runtime-test lane.
+
+Full Number runtime dependency review against7de4c2f4: no existing complete
+provider exists. Reuse pure ToPrimitive and primitive string/number bodies only
+through authenticated owners. Number must run ToPrimitive(number), then reject
+a genuine Symbol, convert a genuine BigInt, and otherwise perform primitive
+numeric conversion. Abstract ToNumber cannot supply Number(BigInt). The legacy
+BigInt layout holds signed i64; that is not arbitrary-precision BigInt coverage.
+ToPrimitive also requires actual dynamic methods obtained through descriptor Get
+with the original receiver, capture and exception behavior, plus selected
+wrapper/array/class branches and its cycle with AnyToString. Reserve the cycle
+before filling it. C1/C2 source-only success cannot authorize that runtime graph.
+The unchanged712 fixture remains the first connected target; no fake source Get
+is inserted into Number(object), no physical provider is granted by declaration.
+
+Boolean extraction first validation46720: TS7 passed;111 selected tests ran,
+67 passed and44 failed,1497 inputs unchanged. All10 new actual-Wasm Boolean
+body controls passed with zero imports. The44 failures are in historical
+source-reconstruction checks: the new inverse was ordered/printed incompatibly
+with earlier exact-span inversions. Preserve the failed output and fix the
+reconstruction to restore the signed donor before earlier inversions, validating
+actual builder bodies; do not replace donor hashes or weaken negative controls.
+This is not yet a passing extraction checkpoint or physical owner completion.
+
+Boolean owner implementation: a separate two-function resource owner reuses
+the actual NativeValueReservations Boolean layout. R's exact reservation-only
+assertion delta is applied, retaining original dependency identity and unchanged
+value reservation/fill ordering. Private ownership binds ledger, value pack,
+plan and dependencies; completion requires actual primitive and Boolean fills.
+Twelve owner controls are drafted including genuine source-plan execution,
+foreign/cloned owners, substituted dependencies, external prefill, altered
+layout/body, duplicate fill and missing completion. Validation pending; no
+prepared-program provider is enabled by this local owner alone.
+
+Next prerequisite dispatched: pure exact signed-i64 BigInt layout, boxer and
+classifier extraction from signed7de4 registry/imports.ts with independent donor
+spans and executed carrier controls. Root retains legacy adapter ownership.
+This representation work does not establish arbitrary-precision BigInt or full
+ToBigInt; descriptor SameValue still needs a typed reader with canonical error
+dependencies, and full Number needs the distinct signed numeric conversion.
+
+Boolean run51105:126 selected tests,82 passed and44 failed. All12 Boolean
+resource-owner controls and10 body controls passed; the three new exact Boolean
+inverse controls passed. The same44 older source-receipt cases remain failing
+at callable-placeholder-registration (earlier than historical donor hashes).
+Reconstructing7de4 alone is insufficient; diagnose its earlier forward-receipt
+chain against authoritative signed sources. Do not weaken those checks.
+TS7 exited0 but the concurrently drafted BigInt source changed one of1500
+pinned inputs during the run; this is NOT certified unchanged-input typecheck
+evidence. Preserve the run and repeat validation after the source freeze.
+
+Frozen primitive-owner run75230: TS7 exits0;42/42 selected Boolean body,
+Boolean owner and BigInt body tests pass. All production and selected test
+inputs remain unchanged. The sole changed pin is the unselected native-value
+receipt test being repaired concurrently; tsconfig.ts7.json extends src-only
+tsconfig.json, excluding tests. This supports the42-row and src-only typecheck
+result, not a green combined receipt suite. The next combined run must freeze
+all selected tests before launch.
+
+Fresh upstream verification: canonical main is200f7e2c8bc00dfb9a9c50dcc4b6570413f8a567,
+fetched read-only from loopdive/js2. Compared with35e040c,51 files changed.
+Preserve the fnctor live-prototype exclusion in fillExternArrayLikeStructArms
+(#5994), new linked static inheritance implementation/regressions, and its
+unmigrated boundary row on the next clean integration. No dirty worktree merge
+has occurred; prior main comparison evidence does not certify this new base.
+
+Combined primitive run46885 completed: TS7 passes,500/505 tests pass,1508
+inputs unchanged,0 pending. Breakdown: BigInt20/20, Boolean bodies10/10,
+Boolean owner12/12, historical native-value receipts115/118, architecture
+boundary343/345. Three new missing-span mutants invalidated syntax before the
+intended exact-span check; replace with independently parseable reversions,
+retaining the failures. Boundary positive fixture omits five actual dependencies
+(native string-output requirements/program/resources, Number and ordinary-object
+callable declarations); complete the actual fixture and exact classification,
+without allowing missing edges or reducing floors. The original historical
+hashes now pass through all authenticated delivered-main inverses.
+
+R regression evidence independently read from actual terminal/JSON records:
+120/120 across seven suites,1635 unchanged inputs,0 pending. The earlier122
+forecast was incorrect because source-closure requirements contains28 rows, not30.
+This complements the separate36/36 ref-cell run; it is not full IR parity.
+
+Focused correction74798 passes12/12 selected cases with1508 unchanged inputs;
+494 cases are unselected, not counted as passing. This covers the valid
+missing-span reversions and both prior boundary positives. The completed actual
+boundary fixture contains117 modules and475 type/value edges; no unresolved
+relative dependency is silently omitted. Full normal hooks still must execute
+the current506-case changed-file population before checkpoint certification.
+
+Inventory preflight identifies three source-planning modules introduced by7de4
+without exact rows. Record them explicitly as unmigrated frontend work:
+ordinary-object-closure-signatures, prepare-ordinary-object-access and
+prepare-number-conversion. Their AST/checker identities are not a clean runtime
+boundary; no clean floor or edge allowance is used to conceal this debt.
+
+Primitive checkpoint gates34251: LOC/function/coercion/oracle/inventory and
+dead-export preservation checks all exit0,1505 inputs unchanged. Preservation
+mode does not certify removal; runtime reachability remains an open graph.
+Normal commit hooks will now run the complete506 changed-file test population.
