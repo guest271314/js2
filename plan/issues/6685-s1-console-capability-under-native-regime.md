@@ -128,6 +128,16 @@ value" — reported by the #6687 lane). Three changes:
    no import back into runtime.ts) so a Wasm-owned primitive arrives as its JS
    value (bool variants untouched). runtime.ts is net 0 lines.
 
+Owned-adapter ceiling (2026-09-26): `src/runtime/console-host-marshal.ts` is
+added to `ownedAdapterPaths` in `scripts/check-host-import-policy.ts` and
+`runtimeSource.maximumOwnedAdapterLines` in
+`plan/audit/host-import-policy-baseline.json` is raised 917 → 952, measured:
++35 lines = exactly that file — the console value-adapter marshal
+(`wrapConsoleForHost`) that left runtime.ts (`runtimeTsLines` stays 20214). It
+is value-adapter surface (Wasm-owned primitive → JS value at the console
+capability), not semantic debt: no new import, 426 imports / 0 legacy / 0
+unknown unchanged.
+
 Guards (base = upstream/main @ fcb3ed03e7, which already contains S1):
 
 | guard | before | after |
