@@ -4155,9 +4155,9 @@ export function registerNativeGenerator(
   }
 
   // (#6651 A2) A `for-of-step` header drives the SAME delegation runtime
-  // (`__gen_delegate_start`/`_step`) from the same frame-slot family, so it has
-  // to flip this flag too — it is what reserves those helpers
-  // (`ensureNativeDelegatedResultHelpers`) and the `executing` re-entrancy field.
+  // (`__gen_delegate_start`/`_step`), so it reserves those helpers too
+  // (`ensureNativeDelegatedResultHelpers`). (#6651 SG1) It no longer gates the
+  // `executing` field — §27.5.3 applies to every generator, delegating or not.
   // (#1691) The JS-host protocol arm drives host imports, not these helpers.
   const nativeDelegates =
     noJsHostTarget(ctx) &&
@@ -4168,8 +4168,8 @@ export function registerNativeGenerator(
           state.terminator.delegationKind === "iterable" &&
           state.terminator.protocol),
     );
-  const executingFieldIdx = nativeDelegates ? stateFields.length : undefined;
-  if (nativeDelegates) stateFields.push({ name: "executing", type: { kind: "i32" }, mutable: true });
+  const executingFieldIdx = noJsHostTarget(ctx) ? stateFields.length : undefined;
+  if (executingFieldIdx !== undefined) stateFields.push({ name: "executing", type: { kind: "i32" }, mutable: true });
 
   // (#3032 W6) NOMINAL BRAND for the state struct. Two generators with the
   // same shape (e.g. `function* g1() { yield; }` and `function* g2() {

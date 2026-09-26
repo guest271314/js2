@@ -182,6 +182,34 @@ loc-budget-allow:
   # with — written anywhere else it is a fact about a slot the reader cannot see.
   # 4 of the 25 lines are the import statement prettier splits once it names a
   # fourth symbol from `tuple-rest.js`. Inlined, the same change was +56.
+  # 2026-09-26 — lane SG1 (generator singletons: §27.5.3 `executing` guard,
+  # §27.5.1.5 iteration-result prototype, §19.2.1.3 eval var/lex conflict in a
+  # generator body). Two god-files, +13 and +3. The two new MECHANISMS live in
+  # subsystem modules, not here: the `%Object.prototype%` arm for the iteration
+  # result is ~90 lines in `generators-native-protocol.ts`, and the syntactic
+  # scope walk is ~63 lines in `direct-eval-environment.ts` (the module that
+  # already owns `currentDirectEvalLexicalBindingNames`, the function whose empty
+  # answer the walk disambiguates). `generators-native.ts` is net **+0** — the
+  # gate decoupling was rewritten to occupy the same two lines and its rationale
+  # folded into the adjacent comment block.
+  #   - `src/codegen/expressions/eval-inline.ts` +13: an import that prettier
+  #     splits across 5 lines once it names a third symbol, one optional
+  #     parameter on `foldedEvalLowerLexicalCollision` with the 3 comment lines
+  #     saying what its absence means, the 2-line fallback expression, and the
+  #     2 call sites that now pass the eval call node. What cannot move is the
+  #     call: `varNames` and `fctx` are built inside `tryStaticEvalInline` and
+  #     the §EvalDeclarationInstantiation decision is read a few lines later, so
+  #     the "which lexical names are intervening" question has to be answerable
+  #     at that point. Inlined here the same change was +73.
+  #   - `src/codegen/index.ts` +3: the import plus the ONE finalize call, at each
+  #     of the two finalize entry points (`generateModule` /
+  #     `generateMultiModule`). Two entry points is this file's established
+  #     pattern for a prepend-an-arm phase — the neighbouring
+  #     `prependIterRecPrototypeArm` (#6484 S3) is wired identically — and the
+  #     arm must run at both or a multi-module compile silently keeps the old
+  #     `null` answer.
+  - src/codegen/expressions/eval-inline.ts
+  - src/codegen/index.ts
   # 2026-09-26 — lane C1 (§15.7 own `constructor`). Two god-files, +12 and +10.
   #   - `src/codegen/object-ops.ts` +12: 6 comment lines and one 4-line `if` that
   #     adds `"constructor"` to the two own-key sets. The RULE and all of its
@@ -779,6 +807,19 @@ func-budget-allow:
   # (`patternBindsRestAtAnyDepth`) and the whole WAT-verified rationale live in
   # `src/codegen/tuple-rest.ts`. Splitting the function is out of this slice's
   # scope and would move code the slice does not otherwise touch.
+  # 2026-09-26 — lane SG1. Three functions, +1 line each — the minimum a
+  # prepend-an-arm phase and one extra argument can cost.
+  #   - `tryStaticEvalInline` +1: the reflowed
+  #     `foldedEvalLowerLexicalCollision(..., expr)` call. The predicate itself
+  #     moved OUT of this file into `direct-eval-environment.ts`; this is the
+  #     argument that reaches it.
+  #   - `generateModule` / `generateMultiModule` +1 each: the single
+  #     `prependNativeGeneratorResultPrototypeArm(ctx)` finalize call, beside the
+  #     `prependIterRecPrototypeArm` it mirrors. It has to be in both, or a
+  #     multi-module compile keeps answering `null` for an iteration result.
+  - src/codegen/expressions/eval-inline.ts::tryStaticEvalInline
+  - src/codegen/index.ts::generateModule
+  - src/codegen/index.ts::generateMultiModule
   # 2026-09-26 — lane C1 (§15.7 own `constructor`). One function, +12 lines, of
   # which 6 are comment: `compilePropertyIntrospection` gains the single `if`
   # that admits `"constructor"` into its own-key sets. The predicate itself is a
@@ -13880,3 +13921,212 @@ exit **1** on five files this branch never touches:
 still records 2509 — so the diff-against-`origin/main` reads this branch's
 inherited copy as growth. Both gates exit **0** against this branch's own base.
 The dispatcher's catch-up merge of `origin/main` resolves it; nothing to fix here.
+
+## Lane SG1 receipt — generator singletons (2026-09-26)
+
+Branch `issue-6651-sg1-generator-singletons`, base `807812e182`. Batched
+because cost-per-fix in this bucket is cost-per-control-run, not cost-per-line.
+
+### Rows fixed — +8 standalone, +3 host, 0 losses
+
+**ES2015-tagged subset: 6 of the 8 standalone rows.** Each carries
+`features: [generators]` (two also `let`), so `classifyEdition` = 2015. The two
+`AsyncGeneratorPrototype` rows carry `features: [async-iteration]` ⇒ **ES2018**,
+free collateral from cause 2, not ES2015 credit.
+
+| row | target | cause |
+| --- | --- | --- |
+| `GeneratorPrototype/next/from-state-executing` | standalone | 1 |
+| `GeneratorPrototype/return/from-state-executing` | standalone | 1 |
+| `GeneratorPrototype/throw/from-state-executing` | standalone | 1 |
+| `GeneratorPrototype/next/result-prototype` | standalone | 2 |
+| `AsyncGeneratorPrototype/next/iterator-result-prototype` (ES2018) | standalone | 2 |
+| `AsyncGeneratorPrototype/return/iterator-result-prototype` (ES2018) | standalone | 2 |
+| `language/statements/generators/scope-body-lex-distinct` | **both** | 3 |
+| `language/expressions/generators/scope-body-lex-distinct` | standalone | 3 |
+| `language/expressions/function/scope-body-lex-distinct` | host | 3 |
+| `language/eval-code/direct/var-env-lower-lex-non-strict` | host | 3 |
+
+`next/from-state-executing` was **not** in the dispatch list and was not a wrong
+answer — it was unbounded recursion. It came free with the same field.
+
+### Cause 1 — §27.5.3 GeneratorValidate: the `executing` field was never minted
+
+Recorded as "the executing mechanism is missing". It was **not** missing. The
+guard `nativeGeneratorExecutingCheck` and its 1-on-entry / 0-on-every-exit
+maintenance already existed and were already wired at all five entry points
+(`generators-native.ts:6067`, `generators-native-consumer.ts:150/187/198/709`).
+Every one of those readers is a silent no-op when `info.executingFieldIdx ===
+undefined`, and the field was pushed only when `nativeDelegates` was true —
+i.e. only for a generator that carries a `yield *` / `for-of-step` site. A plain
+generator therefore had no re-entrancy guard at all.
+
+`nativeDelegates` could not simply be widened: it *also* reserves the delegation
+runtime helpers (`ensureNativeDelegatedResultHelpers`). Fix introduces a separate
+`executingFieldIdx` condition (`noJsHostTarget(ctx)`) and leaves `nativeDelegates`
+untouched. The field stays the **last** push into `stateFields`, so no existing
+field index moves — checked against the `frame-core.ts` ABI
+(`STATE/SENT/MODE/ABRUPT/ERROR` + `PARAM_FIELD_OFFSET`) and the spill/delegation
+slots that are appended after it.
+
+Host: `return`/`throw` already passed and still pass; `next` is unchanged (the
+host lane has its own `__gen_*` substrate). Host net +0 for this cause.
+`src/codegen/generators-native.ts`, net **+0 lines**.
+
+### Cause 2 — §27.5.1.5 CreateIterResultObject has no `[[Prototype]]`
+
+A native generator's result is a closed WasmGC struct
+(`__NativeGeneratorResult_<kind>`, one per element kind, #2171) with no `$proto`
+field, so `Object.getPrototypeOf(g.next())` answered `null` while
+`hasOwnProperty("value")` already answered off the struct shape.
+
+**First attempt was wrong and is recorded here so nobody repeats it.** A static
+fold in `__getPrototypeOf`'s caller, keyed on the compiled argument's `ValType`,
+never fired: traced, the corpus spelling compiles the argument to a bare
+`externref` with `typeIdx: undefined`, because the binding is widened before the
+call. Reverted from a file copy and rewritten as a finalize-time **runtime** arm.
+
+`prependNativeGeneratorResultPrototypeArm` (new, in
+`generators-native-protocol.ts`, +91) prepends to `__getPrototypeOf` one
+`ref.test` per distinct `__NativeGeneratorResult_*` struct type, answering the
+`OBJECT_PROTO_SINGLETON` — the singleton, so `=== Object.prototype` holds — and
+**falling through** when the singleton is null rather than returning null. Same
+"prepend an arm on a native at finalize" shape as `prependIterRecPrototypeArm`
+(#6484 S3), which is the template. Three narrowings: standalone/wasi only, the
+struct-name screen is deduped through `ctx.typeIdxToStructName` so an aliased
+name cannot emit two arms, and it no-ops when either `funcMap` lookup misses.
+
+Wired at both finalize sites in `index.ts` (`generateModule` and
+`generateMultiModule`), +3 lines total.
+
+### Cause 3 — §19.2.1.3 step 5.d: the pre-pass never reaches a resume function
+
+The direct-eval binding pre-pass populates `directEvalBindingNames` /
+`directEvalActivationBindings` while lowering a function **declaration**. A
+generator body does not lower as one — it compiles into a synthetic resume
+function (`__gen_resume_<g>`), which never receives the pre-pass. So
+`currentDirectEvalLexicalBindingNames(fctx)` answered the **empty set**, the
+var/let collision test found nothing, and the step-5.d SyntaxError was never
+raised.
+
+What localised it: the plain-function and arrow members of the same five-row
+test262 family PASSED. A defect in the collision test itself would have taken
+all five.
+
+**Correction to the dispatch brief:** it describes `scope-body-lex-distinct` as
+"an early SyntaxError that should not be raised". It is the opposite — a
+**runtime** SyntaxError that **should** be raised and was not. Lane GEN1's record
+was right.
+
+The empty answer is ambiguous between "no lexical bindings here" and "this
+lowering never got the pre-pass", and only the empty case is ambiguous. So the
+fallback fires *only* then: `enclosingLexicalDeclaredNames`
+(`direct-eval-environment.ts`, +71 — the module that already owns
+`currentDirectEvalLexicalBindingNames`) walks the AST outward from the `eval`
+call collecting `let`/`const`/`class` names, stopping at the nearest
+function-like ancestor *after* scanning its body block. A syntactic read is sound
+here because a SyntaxError decision needs no reified environment — nothing is
+looked up, only named. `eval-inline.ts` +13: the two `tryStaticEvalInline` call
+sites pass the `ts.CallExpression` through.
+
+### Dropped, with the cause named — not papered over
+
+- **`generator-property-desc` / `name-property-desc` (closed-struct `delete`
+  visibility).** `delete` on a closed struct clears the field but leaves it
+  *visible*: `hasOwnProperty` answers off the struct shape, not off a liveness
+  bit. Proved `clearField` genuinely executes by injecting an unconditional
+  `unreachable` at its head. Fixing visibility first would violate #4098's
+  ordering law — *own-property VISIBILITY cannot ship before own-property
+  DELETABILITY* — which is what the −684 receipt bought. Needs the instance
+  tombstone substrate, not a patch here.
+  *Methodology note:* four hand-written TS probes all PASSED; the row only
+  reproduces through `runTest262File` (harness-assembled `verifyProperty` with
+  captured primordials). A hand probe is not a reproduction for a
+  `propertyHelper` row.
+- **`GeneratorFunction/instance-length`, `instance-name`.** These call
+  `%GeneratorFunction%` as a constructor; that is CreateDynamicFunction, which
+  `generator-function-intrinsic.ts` documents as out of scope under
+  "## What is NOT modelled". The callee is fully dynamic. Substrate change —
+  dropped per the brief.
+- **`yield-star-before-newline`.** Still real, still a #2170 delegation-slot
+  layout/emit disagreement: `local.tee[0] expected (ref null 90), found
+  ref.as_non_null of (ref eq)`. Compile-time invalid Wasm, not a semantics bug.
+  Pinned spec-wrong in the test file.
+
+**Not reached** (time, after the three causes above landed): the two
+`scope-*param-elem-var-close` rows, `scope-gen-meth-param-rest-elem-var-close`,
+and GEN1's `[[...x] = "ab"]` residual in
+`tests/issue-6651-gen1-nested-rest-binding-slot.test.ts` — that pin is untouched
+and still valid.
+
+### Control run — one wide run, both targets, per-row set diff
+
+1,909 rows: the union of the three blast radii —
+`language/{statements,expressions}/generators/` (556),
+`built-ins/GeneratorPrototype/` (61), `built-ins/GeneratorFunction/` (23),
+`language/expressions/object/method-definition/` (303),
+`built-ins/Object/getPrototypeOf/` (39), `built-ins/Reflect/getPrototypeOf/`
+(10), `language/eval-code/` (816), `built-ins/eval/` (10),
+`built-ins/AsyncGenerator{Function,Prototype}/` (71),
+`class/definition/methods-gen` (17), the 5 `scope-body-lex-distinct` rows.
+Lane: `runTest262Chunk` from a gitignored `tests/probe-sg1.test.ts`,
+`TEST262_IT_TIMEOUT_MS=120000`, forks pool 2.
+
+| | base | after | Δ |
+| --- | --- | --- | --- |
+| standalone | 1706 pass / 127 fail / 76 CE | 1714 / 119 / 76 | **+8 / −0** |
+| host | 1476 pass / 433 fail | 1479 / 430 | **+3 / −0** |
+
+Per-row diff both ways: gained as tabled, **LOST 0**, other-status-change 0,
+row sets identical (no only-in-base / only-in-after). Both sides are runs this
+lane executed on this box, not a joined committed baseline.
+
+**The revert-key check earned its keep.** After the base run I rebuilt the fixed
+tree and the provider key came back `e9256d9b023eed79`, not the
+`01e49a6dab6e048d` the first pair of "after" runs had printed. Cause: the
+LOC-budget refactor (moving the scope walk out of `eval-inline.ts`) landed while
+the first standalone run was in flight, so **both** original after-runs measured
+bundle `d0fb81559752e8d0` — behaviourally the same tree, textually not the
+committed one. Both were re-run on the committed tree and reproduced the same
+numbers and the same per-row sets. Keys, all three printed by the provider build
+and by the worker banner: base `b11ae67b59e4dcf1` (bundle `028969b32b131a40`),
+committed `e9256d9b023eed79` (bundle `2810c842b98277d8`).
+Do not edit `src/` while a control run is in flight — the run reads the bundle,
+not the tree, so the mismatch is silent.
+
+### Tests
+
+`tests/issue-6651-sg1-generator-singletons.test.ts` — 15 cases, all passing on
+the committed tree: 3 + 1 control for the executing guard, 2 + 1 control for the
+iteration-result prototype, 2 + 3 controls for the eval collision, 3 residual
+pins. Needs `VITEST_FORK_MAX_OLD_SPACE_SIZE=4096`; at the default heap the fork
+OOMs at ~510 MB before running a case (the known `issue-tests` OOM, not a
+failure).
+
+The eval cases carry `sloppy: true`, which sets
+`inferModuleStrictArguments: false`. **That flag is load-bearing, not tidiness:**
+the vitest module lane is strict, the collision check is gated on
+`!evalIsStrict`, and without it all five eval cases — including the control that
+mirrors a passing test262 row — are vacuously green.
+
+### Gates — each run bare, exit code read directly
+
+`check-loc-budget` 0 · `check-func-budget` 0 · `check-coercion-sites` 0 ·
+`check:oracle-ratchet` 0 · `check:dead-exports` 0 · `check-host-import-policy` 0 ·
+`check-compiler-boundaries --mode inventory --base HEAD^1` 0 · `typecheck` 0.
+No new `src/` file, so no `compiler-boundaries.json` registration. No
+`scripts/*-baseline.json` touched.
+
+Growth: `eval-inline.ts` +13, `index.ts` +3, and three functions +1/+2, all
+granted dated above in this file. `generators-native.ts` is net **+0** — the gate
+decoupling was rewritten to occupy the same two lines, with its rationale folded
+into the adjacent comment block at that block's original length, rather than
+taking a grant for a god-file.
+
+**Both budget gates fail when re-run with `LOC_GATE_BASE=origin/main`
+(`d8786be299`), on files this diff does not touch:** `closure-exports.ts` +1,
+`registry/imports.ts::addUnionImportsAsNativeFuncs` +8,
+`expressions/calls.ts::tryEmitInlineDynamicCall` +2,
+`closure-exports.ts::emitClosureCallExportN` +1 / `…MethodCallExportN` +1. That
+is main drift between base `807812e182` and the current tip; it belongs to the
+integrator's catch-up merge, which this lane was told not to perform.
