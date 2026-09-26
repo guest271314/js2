@@ -864,3 +864,74 @@ export function currentDirectEvalBindings(ctx: CodegenContext, fctx: FunctionCon
   }
   return { activation, lexical, outer };
 }
+/**
+ * (#6651 SG1) The lexically-declared names in scope at `node`, read from the
+ * AST, up to (and including) the body of the nearest enclosing function.
+ *
+ * This is the fallback for a lowering whose FunctionContext never received the
+ * direct-eval binding pre-pass. `collectDirectEvalBindingNames` is applied in
+ * `function-body.ts` (and the lifted-closure sites) to the function DECLARATION,
+ * but a native generator body is compiled into a synthetic resume function
+ * (`__gen_resume_<g>`) that is built directly, so its `fctx` has an empty
+ * `directEvalBindingNames` and `currentDirectEvalLexicalBindingNames` — whose
+ * whole test is "the live local differs from the persistent activation cell" —
+ * necessarily answers the empty set. Measured on this branch's base, standalone,
+ * for the two `generators/scope-body-lex-distinct.js` rows:
+ *
+ *     fn=f               vars=x lexical=x bindingNames=arguments,x   → throws (correct)
+ *     fn=__gen_resume_g  vars=x lexical=  bindingNames=              → silent (wrong)
+ *
+ * The plain-function and arrow-function members of the same family PASS, which is
+ * what localises this to the resume-function lowering rather than to eval.
+ *
+ * Reading the scope chain syntactically is sound here because the question is a
+ * §19.2.1.3 step 5.d SyntaxError decision, not a value lookup: no environment
+ * has to be reified to answer it, and the answer cannot depend on the frame
+ * representation. Only `let` / `const` / `class` are collected — a `var` or a
+ * parameter of the same name is NOT a conflict (it lives in the very
+ * VariableEnvironment the eval declaration targets), and Annex B block functions
+ * are handled by their own cancellation rule at the call site.
+ *
+ * The walk stops at the nearest function-like ancestor, AFTER that function's
+ * body block has been scanned: a direct eval inside a nested function targets
+ * that function's VariableEnvironment, so an outer function's `let` is not an
+ * intervening record for it.
+ */
+export function enclosingLexicalDeclaredNames(node: ts.Node): Set<string> {
+  const names = new Set<string>();
+  const addBound = (name: ts.BindingName): void => {
+    if (ts.isIdentifier(name)) {
+      names.add(name.text);
+      return;
+    }
+    for (const element of name.elements) {
+      if (!ts.isOmittedExpression(element)) addBound(element.name);
+    }
+  };
+  const addFrom = (statements: readonly ts.Statement[]): void => {
+    for (const statement of statements) {
+      if (ts.isVariableStatement(statement)) {
+        const flags = statement.declarationList.flags;
+        if ((flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) === 0) continue;
+        for (const declaration of statement.declarationList.declarations) {
+          addBound(declaration.name);
+        }
+      } else if (ts.isClassDeclaration(statement) && statement.name) {
+        names.add(statement.name.text);
+      }
+    }
+  };
+  for (let parent = node.parent; parent; parent = parent.parent) {
+    if (ts.isBlock(parent) || ts.isCaseClause(parent) || ts.isDefaultClause(parent)) addFrom(parent.statements);
+    if (ts.isForStatement(parent) || ts.isForInStatement(parent) || ts.isForOfStatement(parent)) {
+      const initializer = parent.initializer;
+      if (initializer && ts.isVariableDeclarationList(initializer)) {
+        if ((initializer.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) !== 0) {
+          for (const declaration of initializer.declarations) addBound(declaration.name);
+        }
+      }
+    }
+    if (ts.isFunctionLike(parent) || ts.isSourceFile(parent)) break;
+  }
+  return names;
+}

@@ -169,6 +169,34 @@ assignee: "ttraenkler/fable-es2015-plan"
 #     `$__ta_ctor`, which the Int8Array `$Object` carrier is not). The first cut
 #     inlined the arm here and cost +68 / +65; extracting it left these 8.
 loc-budget-allow:
+  # 2026-09-26 — lane SG1 (generator singletons: §27.5.3 `executing` guard,
+  # §27.5.1.5 iteration-result prototype, §19.2.1.3 eval var/lex conflict in a
+  # generator body). Two god-files, +13 and +3. The two new MECHANISMS live in
+  # subsystem modules, not here: the `%Object.prototype%` arm for the iteration
+  # result is ~90 lines in `generators-native-protocol.ts`, and the syntactic
+  # scope walk is ~63 lines in `direct-eval-environment.ts` (the module that
+  # already owns `currentDirectEvalLexicalBindingNames`, the function whose empty
+  # answer the walk disambiguates). `generators-native.ts` is net **+0** — the
+  # gate decoupling was rewritten to occupy the same two lines and its rationale
+  # folded into the adjacent comment block.
+  #   - `src/codegen/expressions/eval-inline.ts` +13: an import that prettier
+  #     splits across 5 lines once it names a third symbol, one optional
+  #     parameter on `foldedEvalLowerLexicalCollision` with the 3 comment lines
+  #     saying what its absence means, the 2-line fallback expression, and the
+  #     2 call sites that now pass the eval call node. What cannot move is the
+  #     call: `varNames` and `fctx` are built inside `tryStaticEvalInline` and
+  #     the §EvalDeclarationInstantiation decision is read a few lines later, so
+  #     the "which lexical names are intervening" question has to be answerable
+  #     at that point. Inlined here the same change was +73.
+  #   - `src/codegen/index.ts` +3: the import plus the ONE finalize call, at each
+  #     of the two finalize entry points (`generateModule` /
+  #     `generateMultiModule`). Two entry points is this file's established
+  #     pattern for a prepend-an-arm phase — the neighbouring
+  #     `prependIterRecPrototypeArm` (#6484 S3) is wired identically — and the
+  #     arm must run at both or a multi-module compile silently keeps the old
+  #     `null` answer.
+  - src/codegen/expressions/eval-inline.ts
+  - src/codegen/index.ts
   # 2026-09-26 — lane C1 (§15.7 own `constructor`). Two god-files, +12 and +10.
   #   - `src/codegen/object-ops.ts` +12: 6 comment lines and one 4-line `if` that
   #     adds `"constructor"` to the two own-key sets. The RULE and all of its
@@ -757,6 +785,19 @@ loc-budget-allow:
   # `dataview-native.ts` +17 (the callable disjunct of the §23.2.5.1 object-arm
   # guard; that guard exists only inside `emitTaDynCtorConstructFromLocals`).
 func-budget-allow:
+  # 2026-09-26 — lane SG1. Three functions, +1 line each — the minimum a
+  # prepend-an-arm phase and one extra argument can cost.
+  #   - `tryStaticEvalInline` +1: the reflowed
+  #     `foldedEvalLowerLexicalCollision(..., expr)` call. The predicate itself
+  #     moved OUT of this file into `direct-eval-environment.ts`; this is the
+  #     argument that reaches it.
+  #   - `generateModule` / `generateMultiModule` +1 each: the single
+  #     `prependNativeGeneratorResultPrototypeArm(ctx)` finalize call, beside the
+  #     `prependIterRecPrototypeArm` it mirrors. It has to be in both, or a
+  #     multi-module compile keeps answering `null` for an iteration result.
+  - src/codegen/expressions/eval-inline.ts::tryStaticEvalInline
+  - src/codegen/index.ts::generateModule
+  - src/codegen/index.ts::generateMultiModule
   # 2026-09-26 — lane C1 (§15.7 own `constructor`). One function, +12 lines, of
   # which 6 are comment: `compilePropertyIntrospection` gains the single `if`
   # that admits `"constructor"` into its own-key sets. The predicate itself is a
