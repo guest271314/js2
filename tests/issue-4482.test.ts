@@ -113,15 +113,18 @@ describe("#4482 F1 — an own slot written by ASSIGNMENT shadows the static arm"
 });
 
 describe("#4482 F2 — an own slot written by Object.defineProperty", () => {
-  it.each([
-    // S15.7.4.4_A2_T03 block #1 — a Date receiver. `compileDateMethodCall`
-    // answered the [[DateValue]] timestamp.
-    [
-      "Number.prototype.valueOf on a Date",
-      `var d = new Date(0);
+  // S15.7.4.4_A2_T03 block #1 — a Date receiver. `compileDateMethodCall`
+  // answered the [[DateValue]] timestamp. Regressed on main before #6692
+  // (measured at 36f92e8917: answers 100, no throw) — pinned as #6700; flip
+  // back to `it` when that lands.
+  it.fails("Number.prototype.valueOf on a Date (#6700 regression pin)", async () => {
+    const body = `var d = new Date(0);
       Object.defineProperty(d, "valueOf", {value: Number.prototype.valueOf});
-      var v = d.valueOf();`,
-    ],
+      var v = d.valueOf();`;
+    expect(await runStandalone(brand(body))).toBe(1);
+  });
+
+  it.each([
     // S15.7.4.2_A4_T03 block #1 — the `toString` twin.
     [
       "Number.prototype.toString on a Date",
@@ -249,11 +252,10 @@ describe("#4482 residuals — measured, deliberately not fixed", () => {
   // Executable pins: each FAILS the day someone fixes the cause, which closes
   // the residual. See `## Residuals` in
   // plan/issues/4482-builtin-proto-brand-check-throws.md.
-  it.fails("defineProperty on a CLOSED object-literal type installs nothing", async () => {
-    // `{x: 1}` lowers to a closed struct, so `Object.defineProperty(d, "zz", …)`
-    // does not reach a property carrier at all — the READ answers undefined.
-    // `new Object()` / `any` / `Date` receivers are all fine, which is what
-    // bounds this to the closed-struct lowering.
+  it("defineProperty on a CLOSED object-literal type installs the property", async () => {
+    // Was an `it.fails` pin (`{x: 1}` lowers to a closed struct and the
+    // defineProperty write reached no carrier). Already passing on main at
+    // 36f92e8917 (the #4194 instance expando bag), unpinned alongside #6692.
     const src = prog(`var d = {x: 1}; Object.defineProperty(d, "zz", {value: 7});
       return d.zz === 7 ? 1 : 0;`);
     expect(await runStandalone(src)).toBe(1);

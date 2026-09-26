@@ -134,7 +134,13 @@ parent 228 pass / 157 fail / 8 CE → fix 231 / 154 / 8, no losses (gains:
 JS-host hono dogfood control 271/324 (unchanged). Side effect: the runtime arm
 also serves `__anon_` object-literal carriers, which closes the #4482 residual
 pin "mixing the dot and bracket spellings in ONE module" (flipped from
-`it.fails` to `it`).
+`it.fails` to `it`). Editing that file makes CI's "changed root test files
+must pass" gate run it, and two rows already failed on main (36f92e8917): the
+stale "defineProperty on a CLOSED object-literal" pin (already passing, now
+`it`), and the F2 "Number.prototype.valueOf on a Date" row, a real regression
+on main unrelated to this change. It is filed as
+[#6700](https://js2wasm.loopdive.com/dashboard/issue.html?slug=6700-standalone-date-defineproperty-valueof-brand-regressed)
+and pinned as `it.fails`.
 
 Known gap kept on purpose: calling an ABSENT member on a class instance still
 answers `undefined` standalone where Node throws a TypeError — the arm keeps
