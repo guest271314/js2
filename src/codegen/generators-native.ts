@@ -67,6 +67,7 @@ import { bodyNeedsArgumentsObject } from "./helpers/body-uses-arguments.js";
 import { bodyReferencesOwnThis, findOwnThisReference } from "./helpers/body-references-own-this.js";
 import { isSimpleParameterList, isStrictFunction } from "./helpers/is-strict-function.js";
 import { resolveSpillLocalValType } from "./statements/variables.js";
+import { collectParamScopeEvalVarNames, readPossiblyBoxedLocal } from "./direct-eval-environment.js";
 import { addIteratorImports, ensureExnTag } from "./registry/imports.js";
 import { buildTargetTaggedTry } from "../ir/try-table.js";
 // (#2895 PR1) The frame ABI (state-struct field offsets + resume modes) and the
@@ -2650,6 +2651,21 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
       }
       addSpill(id.text);
     }
+  }
+
+  // (#6651 SC1) A `var` a PARAMETER-LIST direct eval introduces belongs to the
+  // BODY's VariableEnvironment (§10.2.11 step 20 → step 28 `varEnv`), and the
+  // static-eval-inline splice (#1163) creates it as a FACTORY local — a different
+  // wasm frame from the resume function that runs the body. Carry it exactly like
+  // a destructuring-param binding (#3386): `externref` because the splice's local
+  // type is not knowable here, undef-widened because the checker resolves this
+  // name to the OUTER declaration whose type says nothing about the eval-created
+  // value. Full argument in `collectParamScopeEvalVarNames`.
+  for (const name of collectParamScopeEvalVarNames(decl, ctx.oracle)) {
+    if (spillSet.has(name)) continue;
+    patternParamSpillTypes.set(name, { kind: "externref" });
+    undefWidenedPatternBindings.add(name);
+    addSpill(name);
   }
 
   if (!lowerStatements(decl.body.statements, [], true)) return null;
@@ -6433,8 +6449,12 @@ export function compileNativeGeneratorFunction(
     const spillType = info.spillTypes[i]!;
     const bindLocal = info.patternParamBindings?.has(spillName) ? fctx.localMap.get(spillName) : undefined;
     if (bindLocal !== undefined) {
-      const localType = getLocalType(fctx, bindLocal);
-      fctx.body.push({ op: "local.get", index: bindLocal });
+      // (#6651 SC1) Read through the ref cell when a parameter-list closure boxed
+      // this binding — packing the carrier would hand the resume function a cell
+      // where it expects a value. Un-boxed locals keep the direct read.
+      const read = readPossiblyBoxedLocal(fctx, spillName, bindLocal);
+      const localType = read.valType;
+      fctx.body.push(...read.instrs);
       if (localType && !valTypesMatch(localType, spillType)) {
         // ref → ref_null of the same struct is a pure subtype widening — no
         // instruction needed; anything else routes through the coercion engine

@@ -169,6 +169,22 @@ assignee: "ttraenkler/fable-es2015-plan"
 #     `$__ta_ctor`, which the Int8Array `$Object` carrier is not). The first cut
 #     inlined the arm here and cost +68 / +65; extracting it left these 8.
 loc-budget-allow:
+  # 2026-09-26 — lane SC1 (a generator body could not see a `var` a
+  # PARAMETER-LIST direct eval introduced; receipt at the end of this file).
+  # `src/codegen/generators-native.ts` +20 (path already listed below, restated
+  # here because a grant is only honoured when the PR modifies the issue file that
+  # carries it — the stranded-grant rule). Both mechanisms live in
+  # `src/codegen/direct-eval-environment.ts`, which is under budget and already
+  # owns the direct-eval reification this reuses: the name collector
+  # (`collectParamScopeEvalVarNames`, with its own narrow constant-string resolver
+  # rather than an import cycle back into `eval-inline.ts`) and the boxed-local
+  # reader (`readPossiblyBoxedLocal`). What is left in the god-file is two call
+  # sites that cannot move: the spill registration has to sit in
+  # `buildNativeGeneratorPlan` beside the destructuring-param registration it
+  # copies (it writes that function's local `patternParamSpillTypes` /
+  # `undefWidenedPatternBindings` / `addSpill`), and the pack-site read has to sit
+  # inside the `struct.new` operand sequence, where the value is pushed. The first
+  # cut inlined both and cost +41.
   # 2026-09-26 — lane GEN1 (a rest binding inside a nested pattern was given TWO
   # local slots; see the receipt at the end of this file).
   # `src/codegen/destructuring-params.ts` +25 (path already listed below,
@@ -770,6 +786,16 @@ loc-budget-allow:
   # `dataview-native.ts` +17 (the callable disjunct of the §23.2.5.1 object-arm
   # guard; that guard exists only inside `emitTaDynCtorConstructFromLocals`).
 func-budget-allow:
+  # 2026-09-26 — lane SC1: `buildNativeGeneratorPlan` +15 as the gate measures it
+  # (path already listed below, restated per the stranded-grant rule), of which 9
+  # are the comment
+  # stating §10.2.11's step 20 → step 28 `varEnv` rule and why the spill is typed
+  # `externref` and undef-widened. The code is a 5-line `for` that registers the
+  # eval-introduced names exactly as the destructuring-param loop 80 lines above
+  # registers pattern bindings, and it cannot move behind a seam for the same
+  # reason that loop cannot: it writes three collections that are locals of this
+  # function and are read by its own spill-typing pass further down. The collector
+  # it calls, and the whole argument, live in `direct-eval-environment.ts`.
   # 2026-09-26 — lane GEN1: `destructureParamArray` +20 (path already listed
   # below, restated per the stranded-grant rule). The growth is the one arm of
   # this function's tuple-struct lane that chooses the recursion's element type,
@@ -13605,3 +13631,267 @@ change was +56.
   standalone lowering gap is worth 0 until the shared front-end semantics move.
 - **No sweep outside the 123-row bucket and its 1,842-row control.** Nothing
   here may be read as corpus-wide evidence.
+
+---
+
+## Lane SC1 receipt — the `scope-*param-*elem-var-close` family (2026-09-26)
+
+**Count first, and the family is not a destructuring family at all.** Every one
+of the 14 rows whose filename matches
+`scope-*param-*elem-var-close` is a **sloppy direct `eval` in a formal
+parameter's initializer that introduces a `var`**, asserted visible both to
+closures built in the parameter list and to the function body. Nothing in them
+turns on destructuring; the `elem` in the name is the pattern the harness happens
+to use.
+
+| | rows |
+| --- | ---: |
+| filename-matched candidates (`scope-*param-*elem-var-close`) | 14 |
+| of those, already passing on standalone | 6 |
+| of those, failing on host too (not a standalone gap) | 5 |
+| of those, **standalone-only** (not-pass on standalone, pass on host) | **3** |
+| **standalone rows FIXED here** (measured, per-row set diff) | **3** |
+| — of which standalone-only | 2 |
+| — of which also red on host, and now green on BOTH axes | 1 |
+| **attempted and DROPPED** | **1** (`expressions/object/scope-gen-meth-param-rest-elem-var-close`, the third standalone-only row) |
+
+**ES2015-tagged subset: all 3 gained rows and the 1 dropped row carry
+`features: [generators]` and no later-edition tag**, so `classifyEdition`'s
+highest-mapped-year rule puts every one of them in ES2015. Checked per row, not
+inferred from the directory — so the ES2015 subset here is the whole set, 3 of 3.
+
+The three gained rows:
+
+| row | standalone | host |
+| --- | --- | --- |
+| `expressions/generators/scope-param-elem-var-close` | fail → **pass** | pass → pass |
+| `expressions/object/scope-gen-meth-param-elem-var-close` | fail → **pass** | pass → pass |
+| `statements/generators/scope-param-elem-var-close` | fail → **pass** | fail → **pass** |
+
+The first two are standalone-only rows the brief named. The third was red on both
+axes and the same fix closes both, so it is a host gain as well — the only one.
+
+### Causes, one line each
+
+| rows | cause | spec |
+| ---: | --- | --- |
+| 3 | A native-lowered generator's BODY could not see a `var` introduced by a direct eval in its own PARAMETER list. The binding is created by the static-eval-inline splice (#1163, `hoistVarDeclarations`) as a local of the function being compiled — correct for a plain function, but a generator evaluates its formals in the FACTORY and runs its body in a separate RESUME function, so the body's read fell through to the outer binding. **FIXED.** | §10.2.11 step 20 (separate parameter environment) → step 28 `varEnv`; §19.2.1.1 PerformEval |
+| 1 | `scope-gen-meth-param-rest-elem-var-close` is a COMPILE ERROR, and neither eval nor destructuring is involved: a **rest parameter on any generator** fails `isNativeGeneratorCandidate`'s `param.dotDotDotToken` bail (documented there as the #2920/#3386 "separate follow-up"), which routes to the host-generator eager-buffer path and leaks `env::__create_generator` & co. **DROPPED** — see below. | §10.2.11 step 21.b / §27.5 |
+
+### What `functionMayReachDirectEval` cannot see, and the disproof probe
+
+`functionMayReachDirectEval` / `functionOwnScopeMayReachDirectEval` both start
+their walk at `decl.body`, by construction — so an `eval` that appears only in a
+formal's initializer is invisible to every existing reification. That is why the
+gap had no owner.
+
+The path that DOES create the binding was proved rather than assumed, per the
+method rule: an unconditional `throw` at the top of `compileInlinedEvalStatements`
+turned all four probe shapes (generator expression, generator declaration, plain
+function expression, plain function declaration) into
+`SC1_PROBE_static_eval_inline_reached`. Every one of them goes through the
+static-inline splice.
+
+Three probes localised the failure, and each of them corrects a plausible wrong
+guess:
+
+- **It is not about closures.** `got = x` read DIRECTLY in the generator body
+  fails identically. The `probe1`/`probe2` closures built in the PARAMETER list
+  were already correct on the base tree; only `probeBody` was wrong.
+- **It is not about destructuring.** The minimal repro has no pattern at all:
+  `(function*(_ = eval('var x = "inside";')) { got = x; yield 1; }()).next()`.
+- **It is not about eval-in-generators.** `eval` in the generator BODY was already
+  correct — there the splice runs inside the resume function itself.
+
+### The fix
+
+`collectParamScopeEvalVarNames` (in `src/codegen/direct-eval-environment.ts`,
+which already owns the #2925 direct-eval reification) parses the constant-string
+argument of each direct eval in the parameter list and returns the `var` names it
+hoists, minus the names `decl` itself binds. `buildNativeGeneratorPlan` registers
+those names as native-generator SPILLS exactly as it registers a
+destructuring-param binding (#3386): the factory packs the value into the spill
+field at `struct.new` and the resume function's ordinary spill-load loop
+rehydrates it on every entry, so the binding also survives a suspension.
+
+Three details are load-bearing and each is pinned in
+`tests/issue-6651-sc1-param-scope-eval-var.test.ts`:
+
+- **The factory must DEREFERENCE a boxed local.** A parameter-list closure that
+  captures the name boxes it into a one-field ref cell (`boxedCaptures`), and
+  packing the cell stores the carrier where the resume function expects a value.
+  `readPossiblyBoxedLocal` does the read, with the same two-sided staleness guard
+  `reifyCurrentDirectEvalBindings` uses (metadata AND live local type must agree).
+- **The spill is `externref` and undef-widened.** The checker resolves this name
+  to the OUTER declaration, whose type says nothing about the eval-created value,
+  so a resume-state read must skip the checker-type unbox narrowing.
+- **The constant-string resolver is deliberately narrow** — string literal,
+  substitution-free template, `+` of those. A wider resolver would be worse than
+  useless: naming a binding the splice does not actually create would shadow the
+  outer binding with an inert frame slot. Under-approximating only leaves a row at
+  today's answer, and the non-constant case is pinned in that state.
+
+The change is **not** standalone-gated (the plan builder runs in both lanes), so
+host was measured, not assumed.
+
+### Dropped: the rest-parameter bail, and why the trade is bad
+
+`scope-gen-meth-param-rest-elem-var-close` needs `function* g(...a)` to lower
+natively. Measured scope of lifting that bail:
+
+- 54 corpus rows have a genuine generator REST PARAMETER (TS-parser check, not a
+  regex — a rest BINDING ELEMENT inside a pattern param is a different thing and
+  already lowers natively). 48 already pass; the 6 that do not are exactly this
+  `scope-*param-rest-elem-var-{open,close}` family, and only **1** of those 6 is
+  host-passing.
+- So the bail costs **1 standalone-only row**, and the other 5 need a separate
+  shared front-end fix (their host failures are `dereferencing a null pointer`,
+  a different bug).
+- Lifting it is not local: it needs the `dotDotDotToken` bail removed from BOTH
+  shape gates (`isNativeGeneratorCandidate`, `isNativeGeneratorExpressionShape`),
+  the declaration site's generator branch taught the vec-typed rest lowering plus
+  the `ctx.funcRestParams` registration it currently skips, and the plan builder
+  taught to spill the rest identifier — and it changes the lowering path for
+  rest-param generators in the class / object-literal / fn-expr / declaration
+  lanes on the HOST target as well as standalone.
+
+One row against a four-site change with that blast radius is not a trade this
+lane can justify, and it is not something to guess at: the bail's own comment
+already calls it a separate follow-up. Pinned in its current state (the bare
+`function* g(...a){}` compile error, plus the two controls that localise it to
+`dotDotDotToken` meeting `*`) so a later lane lifting it gets a failing assertion
+here rather than moving an unrecorded boundary.
+
+### Nearby residuals this lane deliberately did not take
+
+- **The `-var-open` twins** (`scope-*param-elem-var-open`: 3 non-rest rows, plus 3
+  more behind the rest bail) require a closure built BEFORE the eval, earlier in
+  the same parameter list, to see the eval's binding. All 3 non-rest ones fail on
+  HOST too and were unmoved by this change (they are in the belt), so the gap is
+  shared front-end ORDERING — the reification would have to run before the
+  defaults, not after — not the generator frame. Out of this fix's mechanism.
+- **`statements/generators/scope-param-elem-var-close` on HOST** stays red. This
+  slice makes it pass on standalone; the host failure is a different path.
+- **The GEN1 pin was NOT flipped.** `[[...x] = "ab"]` — a rest over a STRING
+  default — still answers a non-2 length on standalone;
+  `tests/issue-6651-gen1-nested-rest-binding-slot.test.ts` is green unmodified on
+  this tree, so the recorded residual is unchanged and correctly still recorded.
+
+### Control run
+
+Authoritative lane: `tests/test262-shared.ts::runTest262Chunk` from a gitignored
+`tests/probe-sc1.test.ts` under `TEST262_PATH_FILTER_FILE`,
+`TEST262_IT_TIMEOUT_MS=120000`, `COMPILER_POOL_SIZE=2`,
+`VITEST_FORK_MAX_OLD_SPACE_SIZE=4096`, `--isolate`, forks max 2. All three
+artifacts (`build:compiler-bundle` → `build:runtime-bundle` →
+`scripts/build-quickjs-eval-provider.mjs`) rebuilt after every `src/` edit and on
+both sides of the A/B. **Shard-completion manifest checked on every sweep quoted
+below** (`registeredTests = recordedRows = canonicalVerdicts`,
+`allCallbacksSettled: true`).
+
+Adapter keys, and the reason the run below was done TWICE:
+
+| tree | compiler bundle | QuickJS adapter key | sweeps |
+| --- | --- | --- | --- |
+| base, first build | `af727ccac8594733` | `458095b247c54f72` | — |
+| fix, first cut | `e463ca909305e4ae` | `ea873bd2432f2fb2` | first A/B |
+| base, after revert (re-derived) | `af727ccac8594733` | `458095b247c54f72` | **base standalone + base host** |
+| **fix, committed tree** | `266ef5a51a332dc6` | `5c6213ca49a41d3b` | **fix standalone + fix host** |
+
+The revert was exact — re-deriving the base build reproduced both the bundle hash
+and the adapter key, byte for byte. The re-derivation on the COMMITTED tree then
+caught a real mismatch: after the first A/B the change was refactored (the two
+mechanisms moved into `direct-eval-environment.ts` to keep the god-file at +20),
+which moved the bundle to `266ef5a51a332dc6`. The first "after" sweeps therefore
+measured a tree that is not the one being handed over, so both were re-run on the
+committed tree and only those numbers are quoted. They reproduce the first cut's
+verdicts exactly, but that is a result, not an assumption.
+
+One caveat stated plainly: the compile itself comes from `src/` (the runner
+imports `../src/index.js`); the bundle/adapter key pins the QuickJS eval PROVIDER,
+which is the artifact whose staleness silently zeroes an eval-dependent lane.
+
+Belt: 635 rows = the 116 rows whose source has a generator with `eval` in its
+parameter list (the direct blast radius, TS-parser selected) + 59 further
+`scope-*param*` rows + 460 generator `dstr` rows whose element default builds a
+closure (the shapes that can BOX a packed pattern-param binding, which is what
+the pack-site change touches).
+
+Per-row set diff, not a count comparison. `LOST` is stated explicitly in both
+lanes and is **0** in both.
+
+**standalone — 635-row belt** (`registeredTests = recordedRows =
+canonicalVerdicts = 635`, `allCallbacksSettled: true` on both sides)
+
+| | pass | fail | compile_error |
+| --- | ---: | ---: | ---: |
+| base | 610 | 19 | 6 |
+| fix | **613** | 16 | 6 |
+
+| change | row |
+| --- | --- |
+| GAINED `fail → pass` | `test/language/expressions/generators/scope-param-elem-var-close.js` |
+| GAINED `fail → pass` | `test/language/expressions/object/scope-gen-meth-param-elem-var-close.js` |
+| GAINED `fail → pass` | `test/language/statements/generators/scope-param-elem-var-close.js` |
+| **LOST** | **none (0)** |
+| other status changes / set mismatches | none (0) |
+
+**host — the same 635-row belt** (same manifest identity on both sides)
+
+| | pass | fail |
+| --- | ---: | ---: |
+| base | 609 | 26 |
+| fix | **610** | 25 |
+
+| change | row |
+| --- | --- |
+| GAINED `fail → pass` | `test/language/statements/generators/scope-param-elem-var-close.js` |
+| **LOST** | **none (0)** |
+| other status changes / set mismatches | none (0) |
+
+**standalone — the 14-row filename family in isolation**, measured first, before
+any edit, and again after: `6 pass / 5 fail / 3 CE` → `9 pass / 2 fail / 3 CE`,
+the same three rows gained, 0 lost. The base run reproduced the committed
+`test262-standalone-current.jsonl` artifact on all 14 rows with zero status drift,
+and the HOST axis was RUN on the same commit the same day rather than joined from
+the committed host baseline.
+
+Unit A/B, `tests/issue-6651-sc1-param-scope-eval-var.test.ts` (16 cases) plus
+`tests/issue-6651-gen1-nested-rest-binding-slot.test.ts` (8 cases, unmodified):
+**6 RED on reverted sources, 24/24 GREEN with the fix.** Every case labelled
+`[green on base too]` is green on both sides, which is what makes it a control.
+The GEN1 pin needed no flip — its recorded residual (`[[...x] = "ab"]`, a rest
+over a STRING default) is unchanged on this tree.
+
+### Gates
+
+Each run BARE, never piped:
+
+| gate | result |
+| --- | --- |
+| `node scripts/check-loc-budget.mjs` | OK — `generators-native.ts` 6528 → 6548 (+20), granted by this file |
+| `node scripts/check-func-budget.mjs` | OK — `buildNativeGeneratorPlan` 2264 → 2279 (+15), granted by this file |
+| `node scripts/check-coercion-sites.mjs` | OK — no net vocabulary growth |
+| `npm run -s check:oracle-ratchet` | OK — `getTypeAtLocation +0`, `ctx.checker +0` |
+| `npm run -s check:dead-exports` | OK |
+| `npx tsx scripts/check-host-import-policy.ts` | OK — 0 new host imports (`src/runtime.ts` untouched) |
+| `node --max-old-space-size=2048 scripts/check-compiler-boundaries.mjs --mode inventory --base origin/main` | OK — `inventoryValid: true` (no new `src/` file, so no `compiler-boundaries.json` entry needed) |
+| `npm run -s typecheck` | OK |
+| `npx biome lint --diagnostic-level=error` on the three touched files | OK |
+| `npx prettier --write` on the three touched files | both `src/` files already canonical; the test file formatted |
+
+**Simulating CI's base (`LOC_GATE_BASE=origin/main`) — one PRE-EXISTING failure,
+not from this change, flagged for the integrator.** `check-loc-budget` passes.
+`check-func-budget` fails on
+`src/codegen/object-runtime.ts::fillClosedStructExternGetArms: 539 > 519 (+20)` —
+a file this change does not touch. `origin/main` is 16 commits ahead of this
+branch's base and SHRANK that function by 19 lines there, so the gate is comparing
+this branch's older copy against the new, smaller ceiling. Merging `origin/main`
+into the branch resolves it; it is not a grant this lane should take.
+
+### Not done
+
+- **Only the 635-row belt and the 14-row family were swept.** Nothing here may be
+  read as corpus-wide evidence.
+- **The rest-parameter bail is untouched** (1 standalone-only row, reasoned above).
+- **A non-constant eval argument is out of scope** by design, and pinned.
