@@ -79,6 +79,7 @@ import { BFN_ID_FIELD_IDX, BFN_STATE_FIELD_IDX } from "./builtin-fn-meta.js"; //
 import { ensureNativeCharCodeAtHelper } from "./char-code-at-helpers.js";
 import { getFuncRefWrapperRootTypeIdx } from "./closures/funcref-wrapper-types.js"; // (#3673 round 19b)
 import { lazyStrFlattenEnabled, redundantFlattenCall } from "./lazy-str-flatten.js"; // (#4157)
+import { buildHashBucketDispatch } from "./hash-bucket-dispatch.js"; // (#6698) bounded nesting
 import {
   ensureAnyToStringHelper,
   ensureNativeStringBoundaryBridge,
@@ -10638,34 +10639,14 @@ export function fillClosedStructExternGetArms(ctx: CodegenContext): void {
       }
       bucket.push([fieldName, entries]);
     }
-    const orderedBuckets = [...buckets.entries()].sort((a, b) => a[0] - b[0]);
-    const bucketCount = orderedBuckets.length;
-    // br_table depth map: bucket ordinal j breaks out of the j-th nested
-    // block (landing on that bucket's probes); an empty slot takes depth
-    // `bucketCount` — the wrapper block — skipping every arm (a miss).
-    const targets: number[] = new Array<number>(tableSize).fill(bucketCount);
-    orderedBuckets.forEach(([slot], ordinal) => {
-      targets[slot] = ordinal;
-    });
-    let dispatchTree: Instr[] = [
-      { op: "local.get", index: fkeyHashLocal },
-      { op: "i32.const", value: tableMask },
-      { op: "i32.and" },
-      { op: "br_table", targets, defaultDepth: bucketCount },
-    ];
-    for (let ordinal = 0; ordinal < bucketCount; ordinal++) {
-      const probes: Instr[] = [];
-      for (const [fieldName, entries] of orderedBuckets[ordinal]![1])
-        probes.push(...buildNameProbe(fieldName, entries));
-      dispatchTree = [
-        { op: "block", blockType: { kind: "empty" }, body: dispatchTree },
-        ...probes,
-        // Probes exhausted without a hit: skip the outer buckets' probes. The
-        // last bucket falls through to the wrapper block end naturally.
-        ...(ordinal === bucketCount - 1 ? [] : ([{ op: "br", depth: bucketCount - 1 - ordinal }] satisfies Instr[])),
-      ];
-    }
-    stringKeyArms.push({ op: "block", blockType: { kind: "empty" }, body: dispatchTree });
+    // (#6698) Occupied slots in ascending order; the dispatch bounds its own
+    // block nesting (one flat ladder up to 256 buckets, two levels past it).
+    const orderedBuckets = [...buckets.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(
+        ([slot, names]) => [slot, names.flatMap(([fieldName, entries]) => buildNameProbe(fieldName, entries))] as const,
+      );
+    stringKeyArms.push(buildHashBucketDispatch(fkeyHashLocal, tableMask, orderedBuckets));
   }
   const numericKeyArms: Instr[] = [];
   const i31NumericKeyArms: Instr[] = [];
