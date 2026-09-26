@@ -269,12 +269,11 @@ describe("#4482 residuals — measured, deliberately not fixed", () => {
     expect(await runStandalone(src)).toBe(1);
   });
 
-  it.fails("mixing the dot and bracket spellings in ONE module breaks the dot call", async () => {
-    // Each spelling is correct on its own (both controls in F3 pass). Put both
-    // in the same module and `o.g()` answers `undefined` while `o["g"]()` still
-    // answers 7. Measured on the BASE commit as well — this predates #4482 and
-    // is not caused by the new bracket arm; it is pinned here because F3's
-    // controls are deliberately one-spelling-per-module because of it.
+  it("mixing the dot and bracket spellings in ONE module keeps both calls working", async () => {
+    // Was an `it.fails` pin (one of the two calls answered `undefined` once
+    // both spellings shared a module). Closed by #6692: `__extern_method_call`'s
+    // non-`$Object` branch now consults the instance expando bag, which an
+    // `__anon_` object-literal struct owns, so the call finds the stored closure.
     const src = prog(`var o = {x: 1}; o.g = function () { return 7; };
       var a = o.g(); var b = o["g"]();
       return (a === 7 && b === 7) ? 1 : 0;`);

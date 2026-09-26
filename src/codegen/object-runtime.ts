@@ -134,6 +134,7 @@ import { buildVecNumericKeyGetArm, buildVecNumericKeyHasArm } from "./vec-numeri
 // (#4194) instance expando substrate — composes AROUND the #3537/#3468 arms and
 // splices the declared-field write-through prologue onto `__extern_set`.
 import {
+  buildInstanceOrVecOrClosurePropMethodCallElseArm, // (#6692)
   buildInstanceOrVecOrClosurePropSetMissArm,
   buildInstancePropGetArm,
   reserveInstanceProps,
@@ -156,7 +157,6 @@ import {
 // arms (vec test first, unchanged closure arm as fallthrough).
 import {
   buildVecOrClosurePropGetMissArm,
-  buildVecOrClosurePropMethodCallElseArm,
   buildVecOrClosurePropSetMissArm,
   reserveVecPropHelpers,
 } from "./vec-props.js";
@@ -6784,7 +6784,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
           ...(reverseMethodCallIdx !== undefined && boundaryCallResultLocal !== undefined
             ? reverseMethodCallArmInstrs(reversePeerHops, boundaryCallResultLocal)
             : []),
-          ...buildVecOrClosurePropMethodCallElseArm(ctx, externGetIdx, applyClosureIdx, resolvedMethodGuard),
+          ...buildInstanceOrVecOrClosurePropMethodCallElseArm(ctx, externGetIdx, applyClosureIdx, resolvedMethodGuard),
         ],
       },
     ];
