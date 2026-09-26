@@ -1,9 +1,11 @@
 ---
 id: 6686
 title: "S2: the JS value boundary (strings, admitted objects, callbacks, errors) works under the native regime"
-status: ready
+status: done
+completed: 2026-09-26
 created: 2026-09-26
 updated: 2026-09-26
+assignee: ttraenkler/opus-6686
 priority: high
 horizon: l
 feasibility: hard
@@ -16,6 +18,19 @@ sprint: current
 parent: 5385
 depends_on: [6685]
 related: [4397, 4399, 4401]
+# 2026-09-26 (#6686): the jsValueBoundary helper must sit next to
+# hostFreeEnvironment in context/types.ts (per the #5385 v2 design rule); the
+# other growth is 1-6 lines of import/re-key per file (net +22 lines).
+loc-budget-allow:
+  - src/codegen/context/types.ts
+  - src/codegen/expressions/calls.ts
+  - src/codegen/native-strings.ts
+  - src/codegen/index.ts
+  - src/codegen/object-runtime.ts
+# 2026-09-26 (#6686): +1 line — the host callback arm is composed behind the
+# Wasm-owned test (composeHostCallFallback lives in host-call-fallback.ts).
+func-budget-allow:
+  - src/codegen/expressions/calls.ts::buildInlineDynamicDispatch
 ---
 
 # #6686 — S2: JS value boundary under the native regime
@@ -82,13 +97,59 @@ measured reason stated in the PR.
 
 ## Acceptance
 
-- [ ] `tests/issue-4396-target-profile.test.ts` byte-identity test green
-      (default `gc`/`standalone`/`wasi` unchanged).
-- [ ] `JS2WASM_NATIVE_REGIME_JS=1 npx vitest run tests/issue-4397-native-semantic-js-host.test.ts tests/issue-4399*.test.ts tests/issue-4401-host-import-policy.test.ts`:
-      4397 15/16 (only "parse and URI string globals", pre-existing on main,
-      stays red); 4399 suites green; 4401 unchanged.
-- [ ] `JS2WASM_NATIVE_REGIME_JS=1 pnpm run check:host-import-policy` green with
-      zero legacy/unknown imports.
-- [ ] 321-row sample ≥ the S1 number (record it).
-- [ ] `wrapCompiledExports` live-view / copied-value / opaque-handle policies
-      unchanged (`tests/issue-4399*`).
+- [x] `tests/issue-4396-target-profile.test.ts` byte-identity test green
+      (default `gc`/`standalone`/`wasi` unchanged) — 12/12.
+- [x] `JS2WASM_NATIVE_REGIME_JS=1 npx vitest run tests/issue-4397-native-semantic-js-host.test.ts tests/issue-4399*.test.ts tests/issue-4401-host-import-policy.test.ts`:
+      4397 **29/30** (was 12/30 after S1; the file has 30 tests now, not 16).
+      "parse and URI string globals" is now GREEN under the regime. The one
+      red is `assignmentRest` in "object-rest CopyDataProperties…"
+      (`illegal cast`) — it fails identically with plain `--target
+      standalone`, so it is a native object-rest provider defect, not a
+      boundary arm (out of S2 scope). The boundary half of that test
+      (`boundaryRest`) passes. 4399 green; 4401 unchanged (same 2 reds before
+      and after, both pre-existing under the regime).
+- [x] `JS2WASM_NATIVE_REGIME_JS=1 pnpm run check:host-import-policy` green with
+      zero legacy/unknown imports (the script now sets the env var itself).
+      `nativeFirst.maximumImports` raised 395 → 426, measured: promise +14 and
+      generators +14 (the regime lowers them through the native object
+      runtime, which registers the 14-import admitted-object MOP — the same
+      set core/regexp/errors already carry), date +3 (string bridge),
+      functionBind +2 (callable-kind), typedArrays/errors −1 each
+      (instance-wiring). All added imports are `value-adapter`.
+- [x] 321-row sample 219/321 — equal to the S1 before-state, per-test
+      identical (0 lost, 0 gained).
+- [x] `wrapCompiledExports` live-view / copied-value / opaque-handle policies
+      unchanged (`tests/issue-4399*` green; no runtime.ts change).
+
+## Test Results (2026-09-26)
+
+Re-keyed to `jsValueBoundary(ctx)` (≡ `hostValueInterop === "required"`, i.e.
+JS embedder + bridge on; `"enabled"` is the host-free `hostBridge: "always"`
+projection the standalone test262 harness uses, which may not import `env::*`
+value adapters):
+
+1. `ensureNativeStringBoundaryBridge` (native-strings.ts) — string marshal at
+   exports. Alone this flipped 14 of the 18 regime reds.
+2. `__ir_dyn_call_boundary_extern` (dyn-ops.ts) — a JS object reaches tag 6 as
+   a parked non-eq externref; hand it back instead of a null receiver (fixes
+   `any`-receiver method calls on admitted objects: DataView, dynamic ops).
+3. `tryEmitInlineDynamicCall` / `buildInlineDynamicDispatch` (calls.ts) — the
+   `__boundary_callback_call_N` fallback arms; under the regime the host arm
+   is composed behind a Wasm-owned (`ref.test eq`) test so native closures
+   keep the in-Wasm apply fallback (without that guard the sample dropped
+   219 → 179: "value is not an admitted JavaScript boundary callback"). The
+   `__is_callable` guard now registers `__boundary_object_callable_kind`
+   (new `ensureBoundaryCallableKind`, shared with `ensureNativeProxyRuntime`).
+4. `needsHostFacadeUnwrap` (closure-exports.ts, both sites) — a compiled
+   object handed back into a closure export arrives as a host facade.
+5. Leak scan (index.ts) keyed on `targetProfile.target === "standalone"` —
+   the #2961 audit of the standalone deliverable — not on the regime.
+
+Not changed (provider-question arms): struct-field Symbol exports
+(`__box_symbol`/`__unbox_symbol` vs native `$Symbol` — the regime already
+round-trips symbol fields correctly), `hostStringBridgeUsable` (owned by the
+S1 console follow-up), `js-errors.ts` (error translation already green once
+strings marshal).
+
+New regression test: `tests/issue-6686-js-value-boundary-regime.test.ts`
+(5 tests; sets the env var itself, 4 fail on the base).
