@@ -13791,3 +13791,19 @@ Fresh PR inventory: #6103 “feat(#6651 E8): standalone toLocaleString value bod
 The getter checkpoint2e6e22252e was integrated by fast-forward after verifying its SSH signature and exact77d0 parent. All sixteen nonshared getter source/test files remain byte-identical. The prototype draft was saved in hashed worktree-local backups, restored without a stash, and only its three metadata deltas were composed with the getter inventory/issue/test additions. Fresh combined validation87074 passed TS7 and365/365 rows (16 prototype provenance +349 boundary), with no reporting errors and all2,175 pinned inputs unchanged. Earlier getter evidence remains516/516 clean independent checks and8/8 gates; its normal hook run recorded412/412 assertions plus one reporting timeout, retained separately. No complete prototype provider or legacy-retirement claim is made.
 
 Final prototype gates62518 passed8/8. Preservation has6/6 full and cut witnesses; core execution12/12 and core types10/10 pass. Production-rooted strict closure remains open at the two dynamic-import owners, so retirement is not certified. No allowance or gate was weakened.
+
+### Sept 27: pure NativeProto layout and lazy singleton construction
+
+Extract the exact six-field layout and lazy initializer instruction recipe from
+signed88e1975 native-proto.ts. Retain glue lookup/type/global registration,
+CSV/name preregistration, recursive parent cycle guard and real seeder effects
+in the legacy adapter at their original construction points. A closed recipe
+protocol requests parent instructions, CSV/name operands and final companion
+binding; low-level instruction data preserves pending literal node identities
+that legacy import finalization patches later. These recipe inputs are not
+native provider authority. The future native owner must supply issued resources.
+Preserve singleton publication before companion initialization, absent/cyclic
+parent behavior, complete source receipts and acquisition traces. Descriptor
+seeders remain separate; no placeholders or native completion claim.
+
+Singleton extraction validation on signed 38faddb8f6c4a515238eddc1e74e6d1a800c1433: the native-proto donor remains byte-identical to signed 88e1975, so the original receipt and donor hashes remain unchanged. First frozen run passed TS7 and 375/376 rows (24 donor controls, 349 boundary controls, 2/3 Wasm controls); the remaining identity-negative assertion caused Vitest to inspect an opaque Wasm object. Preserved first evidence under .tmp/singleton/first. The corrected assertion checks Object.is directly without changing the identity expectation; the complete singleton cohort then passed 27/27 plus TS7, with 1,738 unchanged inputs. The first eight-gate run passed seven gates, including preservation reachability; only inventory JSON formatting failed. Formatting corrected before final gates. Actual Wasm seed observers demonstrate publication/reentry only, not completed intrinsic descriptor seeders or native prototype ownership. Legacy remains operational; retirement requires complete tested IR parity.

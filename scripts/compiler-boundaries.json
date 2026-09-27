@@ -352,9 +352,11 @@
         "src/runtime/wasmgc/values/bigint-carrier-body.ts",
         "src/runtime/wasmgc/values/bigint-carrier-layouts.ts",
         "src/runtime/wasmgc/values/bigint-finalized-layouts.ts",
-        "src/runtime/wasmgc/values/ordinary-object-descriptor-definitions.ts"
+        "src/runtime/wasmgc/values/ordinary-object-descriptor-definitions.ts",
+        "src/runtime/wasmgc/values/prototype-layouts.ts",
+        "src/runtime/wasmgc/values/prototype-singleton-bodies.ts"
       ],
-      "minModules": 78
+      "minModules": 80
     },
     {
       "id": "standalone-platform",
@@ -13871,6 +13873,16 @@
       "path": "src/ir/program/native-prototype-requirements.ts",
       "state": "clean",
       "layer": "ir-program"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/prototype-layouts.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/prototype-singleton-bodies.ts",
+      "state": "clean",
+      "layer": "native-runtime"
     }
   ]
 }
