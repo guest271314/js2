@@ -1,10 +1,10 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import { readBeforePrototypeRead } from "./helpers/prototype-read-extraction.js";
 import { describe, expect, it } from "vitest";
 import {
   applyResumeMainComposition,
   authenticateResumeMainComposition,
   readBeforeResumeMain,
-  readMergedSource,
   resumeMainCompositionText,
   resumeMainFixturePath,
   resumeMainPaths,
@@ -16,7 +16,8 @@ import {
 const receipt = authenticateResumeMainComposition();
 type Row = (typeof receipt.records)[number];
 function positive(row: Row) {
-  const current = readMergedSource(row.path);
+  // Inspect the authenticated main layer before the later prototype extraction.
+  const current = readBeforePrototypeRead(row.path);
   expect(resumeMainSha(current)).toBe(row.mergedSha256);
   const prior = applyResumeMainComposition(row.path, current, true);
   expect(resumeMainSha(prior)).toBe(row.prior.sha256);

@@ -12843,3 +12843,52 @@ compared the broad branch. Its strict direct 31-case run is the test evidence.
 Capture integration now sets the existing CHANGED_ROOT_TESTS_BASE option to
 exact f52, so normal hooks execute the actual Boolean and capture changes.
 Retain both independent issue histories and all original failures.
+
+
+### 2026-09-27 prototype read extraction current-main port (Codex)
+
+Port signed `35abcb44da354098411720da12e5b42cf110ff6b` onto signed
+`f52f6ae020d6d5ddb07e69a3b18811a5b4f86c24` in the isolated prototype-resume
+worktree. Apply only its authenticated two extraction spans; preserve current
+Symbol wrapper brand routing and canonical brand contracts. Keep both pure
+runtime builders and the original extraction fixture byte-identical.
+
+Preservation order is prototype-read inverse, resume-main inverse, then existing
+companion/presence/conversion inverses. Centralize the new outer inverse in the
+preservation reader; do not apply it again in downstream callers. Existing
+resume-main tests explicitly inspect the pre-extraction source view, while a
+new composition control proves full current bytes reconstruct and replay through
+both independent receipts, including Symbol fixes and refusal of unowned edits.
+The original35 extraction tests retain their signed-source hashes by transporting
+the current source through the authenticated main inverse and extraction replay.
+No historical hashes are reseeded and no unrelated119 failure cleanup is included.
+
+Add exactly two native-runtime inventory entries/floor increments; preserve all
+current activation history and allowed edges. Validate focused recipes, affected
+preservation suites, original prototype behavior and current Symbol-brand tests
+with pinned Node25/singlefork4GB/EH; no commit or push until validation review.
+Legacy compiler retirement/default changes and native owner completion remain
+outside this extraction.
+
+Port validation measured **786/787** assertions across 12 complete files; source
+TS7 passed and all 1,711 pinned inputs stayed unchanged. Original35 recipe tests
+and five new current-main composition controls passed40/40; companion12,
+main-composition143, conversion16, getter91, boundary349, wrapper87,4160=10,
+4176=13,4491=5,6651Symbol=11 all passed. The unchanged5194 cohort passed9/10:
+its standalone F1/F2/F3 control rejected two imports before instance execution.
+Exact signed-f52 detached parent control reproduced9/10 with identical ten row
+identities/statuses and the same failure first line; 1,696 parent pins unchanged.
+The test bytes match (`89d6f62bff42b227a8cc3948ac8752bd0f267fdf45812b8fc9e49eb7e8eb4e08`).
+This is retained parent behavior, not a claimed fix or full standalone pass.
+Candidate evidence: `.tmp/prototype-resume/first/{before,tests,terminal}.json`.
+Parent evidence: sibling `codex-3518-prototype-parent-control-20260927` worktree,
+`.tmp/prototype-resume/second/{before,tests,terminal}.json`; first attempt's
+sandbox nice-priority refusal preceded any test child and is retained separately.
+
+Integration checkpoint9247be1b8801e56510253d2377c7de4176b8dd31 is signed
+and clean with both Boolean BOX and transitive captures. Normal exact-base
+hooks passed 54/54 (31 Boolean BOX +23 captures), with no bypass or mass skip.
+Now integrate signed prototype checkpoint0d96ff4770, preserving its exact
+source/test blobs and main's Symbol brand changes; only the independent issue
+appends conflict. Legacy remains operational and all documented baseline
+failures remain open.
