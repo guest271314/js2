@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   bindNativePrototypeSeederResources,
   buildNativePrototypeSeedDescriptorTail,
@@ -19,6 +19,8 @@ import {
   seederDescriptorModule,
   seederDescriptorRuntime,
 } from "./helpers/native-prototype-seeder-fixture.js";
+
+afterEach(() => new Promise<void>((resolve) => setImmediate(resolve)));
 
 const method = { kind: "method", member: "valueOf" } as const;
 const requireBinding = (f: ReturnType<typeof seederBindingFixture>) =>

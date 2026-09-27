@@ -14084,3 +14084,33 @@ with the existing layout and own-property checkpoints. Original activation
 history, dependency edges, donor receipts and signature checks remain intact.
 Combined-base gates and full normal signed hooks remain pending their own
 measured runs; no legacy retirement or complete native prototype is claimed.
+
+
+## 2026-09-27 B: combined-base checks and normal-hook reporting failure
+
+The delivery candidate at parent `532bbc79de13b9e334d7a4983496d35f98469035`
+passed TS7 and all eight selected quality gates with 2,186 unchanged input
+pins. The unchanged complete flowing-prototype legacy suite separately passed
+7/7 on this combined base, with 2,190 unchanged pins and no suite or unhandled
+errors. Preservation and reachability checks do not certify strict retirement;
+the native prototype provider gaps above remain open.
+
+Normal signed commit hooks ran all four changed root suites: bindings 49/49,
+seeder bodies 53/53, extraction 50/50 and boundary preservation 349/349, totaling
+501/501 assertions. The binding suite also reported one unhandled
+`[vitest-worker]: Timeout calling "onTaskUpdate"` error. The existing repository
+hook passes `--dangerouslyIgnoreUnhandledErrors`, so Git continued and created
+signed commit `a4ebb2dd93a0544d5825d7ef2e007ae7e325e3c3` with sole parent
+`532bbc79de13b9e334d7a4983496d35f98469035`. The outer runner correctly returned
+verdict 1 despite Git exit 0. All 2,185 input pins remained unchanged and the
+working tree was clean. This commit and its raw failure evidence are retained;
+the reporting error is not counted as a green run or erased by an amendment.
+
+The earlier 535-case runner yielded a macrotask after each row. The normal
+hook had no equivalent setup, and the binding suite performs long sequences
+of synchronous ledger verification. Add the same `afterEach`/`setImmediate`
+yield already used by the native object-storage and getter-invocation suites
+to the binding test itself. This preserves every test name, assertion, fixture,
+35-second limit, production byte and normal hook command. No timeout or error
+suppression changes. The correction is a forward test-only change and requires
+its own measured normal-hook run before delivery.
