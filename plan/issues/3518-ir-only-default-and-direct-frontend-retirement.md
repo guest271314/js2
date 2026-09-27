@@ -12970,3 +12970,27 @@ providers currently advertise only WasmGC; linear remains explicitly unsupported
 This checkpoint supplies contracts only: keyed Get-result proofs and physical
 owner joins are still in the getter lane, so no full Get/Boolean coverage or
 retirement is claimed. No global/default policy change.
+
+### Sept 27: authenticate argument-vector preservation composition
+
+The retained attempt5 report has77 argument-vector rows,43 failures beginning
+at the Symbol input forward span. Repair only its source reader and add a
+purpose-named authenticated composition layer. Reuse existing later extraction
+inverses, identify each independently signed missing prepared-terminal span,
+and retain all old donor/main/prepared fixtures and full hashes. No production
+changes, shared helper edits, or whole-file substitution. Preserve original
+failure rows; validation requires all original77 plus meaningful composition
+mutation controls and existing source proofs.
+
+Source analysis authenticated the complete750 object source through existing
+conversion/getter/key inverses. Its18 later main hunks modify seven prepared
+span contexts (reverse peer, prototype/extensibility and numeric-key changes);
+all18 invert to the independently committed5b594 source. That source has every
+old prepared span once but predates6432. Explicitly replay the unchanged signed
+Symbol receipt to its already-pinned projected SHA, allowing the original suite
+to invert it itself. Reciprocal tests prove this reordering; no production
+change or opaque whole-file replacement is used.
+
+Frozen first validation passed138/138: all77 original argument-vector tests
+and61 new composition controls. All1,700 inputs remained unchanged; original
+attempt5 evidence (43/77 failures) remains retained in the integration tree.
