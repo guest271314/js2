@@ -85,6 +85,7 @@ import { emitArrayLikeNativeMemberBody } from "./array-like-native.js";
 // brands (a reflective member closure must degrade to a catchable TypeError, not
 // a hard compile error — #2193 PR-C).
 import { emitObjectProtoOrRefusal as emitProtoMemberBodyRefusal } from "./object-proto-tostring.js";
+import { emitObjectProtoOwnPredicateBody } from "./object-proto-has-own-property.js";
 // (#4491) `Object.prototype.isPrototypeOf` — the §20.1.3.3 chain walk, routed
 // to the same `__isPrototypeOf` native the typed call path uses.
 import { emitObjectProtoIsPrototypeOfBody } from "./object-proto-is-prototype-of.js";
@@ -2725,6 +2726,9 @@ function makeGlue(
                   // OrdinaryToPrimitive walk reaches; refusing it made ToPrimitive
                   // throw where the spec just falls through to `toString`.
                   (name === "Object" ? emitObjectProtoValueOfBody(c, fctx, member) : null) ??
+                  // (#6684) `hasOwnProperty` / `propertyIsEnumerable` as VALUES
+                  // (lodash-es: `var hasOwnProperty = objectProto.hasOwnProperty`).
+                  (name === "Object" ? emitObjectProtoOwnPredicateBody(c, fctx, member) : null) ??
                   emitProtoMemberBodyRefusal(c, fctx, name, member))),
   };
 }

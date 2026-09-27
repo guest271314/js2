@@ -67,6 +67,7 @@ import { reportSilentFallback } from "../fallback-telemetry.js";
 import { reportError } from "../context/errors.js";
 import { isUnaliasedNodeFsImportBinding } from "../node-fs-binding-identity.js";
 import { sourceFunctionHandleForDeclaration } from "../program-abi-source-callable-planning.js";
+import { moduleGlobalIsForeignToFunctionRead } from "./foreign-module-global-shadow.js";
 import { annexBReadEscapesFunctionScope, annexBReadIsUnbound, collectAnnexBCancelSites } from "../annexb-cancel.js";
 import { emitAnnexBUnboundReferenceError } from "../js-errors.js";
 import {
@@ -1528,7 +1529,7 @@ function compileIdentifierCore(
 
   // Check module-level globals (top-level let/const declarations)
   const moduleIdx = graphNameRegistryUnavailable ? undefined : ctx.moduleGlobals.get(name);
-  if (moduleIdx !== undefined) {
+  if (moduleIdx !== undefined && !moduleGlobalIsForeignToFunctionRead(ctx, id, resolvedValueDeclaration)) {
     // TDZ check: throw ReferenceError if let/const variable accessed before initialization
     // Apply static analysis for module-level globals
     emitModuleTdzReadCheck(ctx, fctx, id);
