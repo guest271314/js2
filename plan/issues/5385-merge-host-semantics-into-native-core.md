@@ -4,7 +4,7 @@ title: "Merge JS-host and standalone modes: one native semantic core, host seman
 status: in-progress
 assignee: ttraenkler/codex-5385
 created: 2026-09-07
-updated: 2026-09-26
+updated: 2026-09-27
 priority: high
 horizon: xl
 feasibility: hard
@@ -588,6 +588,88 @@ provider question, because S1/S2 moved the environment/boundary ones).
 - Making host-assisted output faster or smaller; the small-binary property is
   #2514's shared-runtime packaging.
 - Any change to the standalone/WASI targets' semantics.
+
+### 2026-09-26 evening checkpoint — S1, S1b, S2, S3-a landed; two spec corrections
+
+Merged to main today (all byte-identical for default `gc`/`standalone`/`wasi`;
+the regime stays behind `JS2WASM_NATIVE_REGIME_JS=1`):
+
+| PR    | slice | what it moved                                                                                                                                     |
+| ----- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| #6147 | S1    | `hostFreeEnvironment(ctx)`; console lowers to the `console_log_*` capability in a JS env; runner drains `__stdout_*` by feature, not target name |
+| #6156 | S1b   | Wasm-owned strings reach the host console (`hostStringBridgeUsable` keyed on environment; `src/runtime/console-host-marshal.ts`, injected converter); async-function sample 31 → 65 / 74 |
+| #6153 | S2    | `jsValueBoundary(ctx)`; string marshal at exports, admitted-object reads, JS callbacks/bind, closure-export unwrap; boundary suite 12 → 29 / 30; policy ratchet measures the regime by default |
+| #6152 | S3-a  | `__box_number` minted as a #1916 stable handle (the index went stale during async-resume compilation); ~600-row invalid-Wasm cluster validates |
+| #6159 | #6697 | `tests/issue-3520-…` moved its host-free compiles to a child process; the 512 MB pinned-test fork no longer OOMs when closure files are touched |
+
+**Spec corrections (keep these, they supersede the text above):**
+
+- `jsValueBoundary(ctx)` is `hostValueInterop === "required"`, not `!== "off"`.
+  The standalone test262 lane compiles with `hostBridge: "always"`, which is
+  `"enabled"` without a JS embedder; `!== "off"` would have made that lane
+  import `env::*` adapters.
+- The standalone leak scan (`src/codegen/index.ts` ≈ L7100) keys on
+  `targetProfile.target === "standalone"`, not `hostFreeEnvironment`, because
+  non-strict WASI builds would otherwise start warning.
+- S3-a's root cause was **not** a pre-shift read in `destructuring-params.ts`:
+  the index was fresh at emit and went stale while `__async_resume_fmethod`
+  compiled and three JS-env late imports landed with the method body out of
+  reach of every shifter root. Fix was the stable-handle regime, not a re-read.
+- The boundary suite has 30 tests, not 16; the one residual red
+  (`assignmentRest`, `illegal cast`) fails identically under plain
+  `--target standalone` — a native object-rest provider defect, not a
+  boundary arm.
+
+**Next:** S3-c (#6689, `__extern_set_decide` cast) is specced and claimed,
+dispatch waits on box load; the first nightly after these merges re-baselines
+the lane (expect the 2,121 async-marker rows and the ~600 `C_method` rows to
+move); then S5 (regime on by default for `native-first`) is evaluated against
+that number.
+
+### 2026-09-27 — S5 evidence and flip: the regime lane now leads both lanes
+
+Nightly 36305955119 (main @ `7443ab4826`, with S1/S1b/S2/S3-a/S3-c/#6697 in;
+S4 #6186 not yet), 48,735 rows incl. proposals, `census.py` join by `file|strict`:
+
+| lane                                                 |       pass |
+| ---------------------------------------------------- | ---------: |
+| host (`gc`, host-assisted)                           |     34,099 |
+| standalone (host-free)                               |     35,237 |
+| **native regime in JS env**                          | **35,384** |
+
+Official-scope summary (48,232 rows): regime 35,149 pass / 10,626 fail /
+2,419 compile errors. Lane agreement: all three 29,630 · regime+standalone
+only 3,911 · host only 2,314 · host+standalone but not regime 1,195 ·
+regime+host only 960 · regime only 883 · standalone only 501. The
+host-passes-but-regime-fails set fell **6,109 → 3,509**; the async-marker
+(2,121) and `C_method` invalid-Wasm (~600) buckets are gone. What remains,
+by signature:
+
+| rows | signature                                                            | owner                  |
+| ---: | -------------------------------------------------------------------- | ---------------------- |
+|  509 | policy rejected `__gen_*` / `__create_async_generator` / `SharedArrayBuffer_new` / `__array_from_async` | #3178 carriers, SAB deferred |
+|  473 | eval refusal tier                                                    | S4 #6186 (in CI)       |
+|  192 | `m should be an own property`                                        | #3468                  |
+| ~200 | `Array.prototype.reduce/reduceRight … not yet callable as a value`  | S3-b (to spec)         |
+|  129 | `Expected a TypeError … no exception`                                | S3-d triage            |
+|  116 | `called value is not a function`                                     | S3-d triage            |
+|   82 | `async continuation threw … illegal cast [in __call_fn_method_N]`   | NEW — S3-e candidate (class-method trampoline under the regime) |
+|   74 | native generator lowering (sequential numeric yields only)           | #3178                  |
+|  ~150 | Temporal (`until`/`since`/`round`, `Temporal is not defined`)       | S4 part B (blocked on `env::__exn` under native-first, see #6706) |
+
+**S5 flip (this checkpoint's PR):** `resolveCompileTargetProfile` now sets
+`nativeRegime` for `semanticProviders: "native-first"` in a JS environment
+by default; `JS2WASM_NATIVE_REGIME_JS=0` is the one-release kill switch.
+Guards on the flip: byte identity 12/12 (default `gc`/`standalone`/`wasi`
+unchanged — the default policy is still host-assisted), boundary/slice
+suites 55/56 (the one red is the known `assignmentRest` standalone provider
+defect), `check:host-import-policy` green with no ceiling change, ratchet
+gates green, 321-row sample **227/321**.
+
+**Program acceptance after S5:** rows 1 (lanes exist) and 3 (regime ≥ host)
+now hold; row 2 (perf) is still unmeasured on the full workload — schedule
+it before S6; rows 4–7 (default policy flip, `legacy-semantic` as a
+universal error, deletion, docs) are S6/S7.
 
 ### Program acceptance
 
