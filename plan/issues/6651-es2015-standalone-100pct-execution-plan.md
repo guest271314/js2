@@ -15159,3 +15159,54 @@ restated here. One allowance taken: `expressions/identifiers.ts` +7, granted in
 this file's `loc-budget-allow` with its rationale. No new file under `src/`, so
 `scripts/compiler-boundaries.json` is untouched; no `scripts/*-baseline.json`
 touched; `src/runtime.ts` untouched (no host-import line growth).
+
+## 2026-09-27 — the merge queue's `class/elements` cluster is PR #6175, not baseline drift
+
+A four-PR pile-up in the merge queue (#6175, #6177, #6178, #6179) all parked on
+the same required step — `merge shard reports` → Standalone regression guard
+(#1897), then the deferred #2097 high-water breach — with the **identical**
+regression bucket signature `35b87da5771c11f6`: 125 wasm-change regressions, 124
+of them `assertion_fail`, split 64 in `test/language/statements/class/elements`
+and 60 in `test/language/expressions/class/elements`, plus the same
+`illegal_cast 238 → 239` naming
+`built-ins/Proxy/apply/trap-is-missing-target-is-proxy.js`.
+
+**The diff report's own drift heuristic misleads here, and I followed it before
+checking.** It prints "Same signature on another PR ⇒ identical cluster ⇒ likely
+baseline drift". That inference assumes the PRs share only a *baseline*. When
+the queue speculates a **stack**, they also share *commits*, and the group
+branch names say so — `gh-readonly-queue/main/pr-<N>-<base sha>`:
+
+| group | base sha is |
+| --- | --- |
+| #6175 | main (`2a58b9fe9f`) |
+| #6177 | #6175's merge commit (`7ee2f19b99`) |
+| #6178 | #6175's merge commit (`7ee2f19b99`) |
+| #6179 | descends from `7ee2f19b99` |
+
+#6175 is in the merged state of all four, and **its own single-PR group against
+clean main already produces the whole cluster** (41,132 → 41,009). So read the
+group bases before reading the signature: two PRs sharing a cluster is drift
+evidence only if their groups do not share a commit.
+
+**Control run, which is what actually settled it.** All 1,951 `class/elements`
+rows the published standalone baseline marks `pass`, run on main + the #6179
+diff (i.e. **without** #6175), standalone target, `TEST262_IT_TIMEOUT_MS=120000`,
+pool 3: **1,951 / 1,951 pass**, 1995 s. So main passes them and the baseline's
+41,132 is correct — the two hypotheses worth naming (promote over-counts; main
+genuinely regressed) are both dead, and **re-promoting the baseline would have
+banked a regression**.
+
+**Plausible mechanism in #6175**, from its file list rather than its title: it
+adds `src/codegen/object-proto-has-own-property.ts` (+73, a new standalone
+`Object.prototype.hasOwnProperty` value body) and changes
+`src/codegen/closure-prototype-edge.ts` (+21/−1). `class/elements` rows assert
+field and accessor *placement* through `Object.prototype.hasOwnProperty.call(o,
+"x")` and own-vs-prototype checks, which is the shape that yields plain
+`assertion_fail`s rather than traps. Not bisected here — that is #6175's to do,
+and the row list in its run's `test262-merged-report` artifact confirms it in
+one pass.
+
+**Note for the next lane in this file:** #6175 also touches
+`src/codegen/closure-prototype-edge.ts`, which the VR1/SP1 pair extends by +157,
+so those two conflict there.
