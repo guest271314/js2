@@ -65,6 +65,7 @@ import {
 import { emitTaDynViewElementSet, emitTaViewElementSet } from "../dataview-native.js"; // (#3054 B1) shared-backing TA view write; (#3057) dynamic view element write
 import { buildDestructureNullThrow, emitNativeObjectRest, patternIteratorStepCount } from "../destructuring-params.js";
 import { tryEmitSpecOrderedArrayAssignDrive } from "../dstr-assign-iterator-drive.js"; // (#6651 G1) §13.15.5.2 lazy drive
+import { isProvablyNonIterableStructSource } from "../dstr-non-iterable-guard.js"; // (#6651 G4)
 import { resolveComputedKeyExpression } from "../literals.js";
 import { resolveReceiverStruct } from "../fnctor-escape-gate.js"; // (#2681/#2686 A3) pinned-struct write dispatch
 import { presenceSetInstrs, presenceSlotOf } from "../fnctor-presence-bits.js"; // (#3780) packed own-presence flags
@@ -2067,6 +2068,13 @@ function compileArrayDestructuringAssignment(
   // §13.15.5.2 calls GetIterator on it. Reading its fields positionally bound
   // `[a, b] = { [Symbol.iterator]() {…}, next() {…} }` to the struct's FIELDS.
   if (!isVecStruct && !isTupleShapedStruct(ctx, typeIdx, typeDef.fields)) {
+    // (#6651 G4) …unless it provably has no `@@iterator`: GetIterator throws.
+    if (isProvablyNonIterableStructSource(ctx, value)) {
+      fctx.body.push({ op: "drop" });
+      emitThrowTypeError(ctx, fctx, "value is not iterable");
+      fctx.body.push({ op: "ref.null.extern" });
+      return { kind: "externref" };
+    }
     fctx.body.push({ op: "extern.convert_any" });
     return compileExternrefArrayDestructuringAssignment(ctx, fctx, target, { kind: "externref" }, true);
   }
