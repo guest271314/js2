@@ -14114,3 +14114,57 @@ to the binding test itself. This preserves every test name, assertion, fixture,
 35-second limit, production byte and normal hook command. No timeout or error
 suppression changes. The correction is a forward test-only change and requires
 its own measured normal-hook run before delivery.
+
+
+## 2026-09-27: publication blocked by numeric addition proof regression
+
+The user approved publishing signed checkpoint `eb4f6f316e6d1ca6def03d5340c70ed95aa3d189`
+through the personal fork. Normal pre-push checks remain mandatory. The default
+local oracle comparison resolved old `merge-base(origin)`
+`62cb4a2b060a5a20880ea45d9dc671ff383aaf38`; using freshly fetched upstream main
+`44c2fb086278cd6d0b24efdaa061112452f901f1` passed the full 43-file codegen
+change set with zero net checker-query growth. No allowance or gate changed.
+
+The next normal pre-push check ran all 18 unchanged numeric-local tests and
+failed one: the typed tokenizer twins still contain `call $__to_primitive`.
+A clean isolated checkout of the exact upstream main passed 18/18 with unchanged
+inputs. This is a checkpoint regression, not an attributed parent failure.
+The original checkpoint, test and failed push evidence are retained.
+
+The late native `any` addition admission must respect the same grounded numeric
+field and method-return proof already used by the earlier AnyValue admission.
+Reuse that proof without making unknown operands numeric or disabling actual
+dynamic string addition. Keep the original numeric-local assertions, kill
+switch and generic addition regression coverage. Validate and fix forward;
+never suppress the pre-push gate or rewrite the signed checkpoint.
+
+The first numeric-proof repair passed all 18 numeric-local rows, six nominal
+ToPrimitive rows and five function-addition parity rows. The complete carrier
+addition suite passed 28/35, for 57/64 overall. An unchanged exact-checkpoint
+control also passed 28/35 with all 35 statuses identical; the numeric repair
+did not introduce those seven failures. Exact upstream `44c2fb08` passed 33/35:
+only the two Date valueOf number-hint failures reproduce upstream. The five
+callable-to-string differences are checkpoint regressions and block delivery.
+Preserve the original failures and repair the native string interception's
+reuse of the existing callable-carrier admission proof before publication.
+
+The callable repair keeps the existing non-closure callable rendering per
+operand at its ordered conversion point. It evaluates each expression once,
+keeps dynamic siblings on default-hint conversion and preserves pairwise nested
+addition. Four additional native-JavaScript oracle controls cover mixed operands
+in both directions and both nested associations; existing cases are unchanged.
+The complete five-suite run measured 105/107 (18 numeric-local, 33/35 carrier
+addition, six nominal conversion, five function parity, 43 default-hint). Only
+the two attributed upstream Date failures remain. All 2,188 pinned inputs stayed
+unchanged. Typecheck and six of eight quality gates passed with 2,183 unchanged
+inputs; the two size gates rejected exactly two parameter lines in string-ops.
+Move this dispatch into the addition subsystem, retaining both gate ceilings,
+then revalidate the final layout. Original failed gate evidence is preserved.
+
+Final routing layout: typecheck and all eight quality gates pass with 2,183
+unchanged inputs; no size allowance or checker query added. The full five-suite
+rerun remains 105/107 with all 107 statuses and failure messages identical to
+the previous run, all 2,188 inputs unchanged, and no observed unhandled-error
+markers. Original numeric and five callable regressions are fixed. The two
+upstream Date failures remain explicit failures. The retained legacy compiler
+and incomplete IR parity boundary are unchanged.

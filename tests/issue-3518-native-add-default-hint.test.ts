@@ -119,6 +119,22 @@ const cases = [
     name: "property compound addition reads RHS then writes once",
     body: 'let trace=0; let stored:any="L"; const holder:any={get value(){trace=trace*10+1;return stored;},set value(v:any){trace=trace*10+4;stored=v;}}; function right():any{trace=trace*10+2;return {valueOf(){trace=trace*10+3;return "R";}};} holder.value+=right(); return trace*10+(stored==="LR"?1:0);',
   },
+  {
+    name: "native callable left preserves dynamic right default conversion",
+    body: 'let trace=0; const value:any={valueOf(){trace=trace*10+3;return "R";},toString(){trace=trace*10+9;return "wrong";}}; const text=(trace=trace*10+1,Array)+(trace=trace*10+2,value as string); return trace*10+(text.indexOf("[native code]")>=0 && text.slice(-1)==="R"?1:0);',
+  },
+  {
+    name: "native callable right preserves dynamic left default conversion",
+    body: 'let trace=0; const value:any={valueOf(){trace=trace*10+3;return "L";},toString(){trace=trace*10+9;return "wrong";}}; const text=(trace=trace*10+1,value as string)+(trace=trace*10+2,Array); return trace*10+(text.indexOf("[native code]")>=0 && text.charAt(0)==="L"?1:0);',
+  },
+  {
+    name: "native callable left-associated conversion precedes outer evaluation",
+    body: 'let trace=0; const value:any={valueOf(){trace=trace*10+3;return "V";},toString(){trace=trace*10+9;return "wrong";}}; function tail():string{trace=trace*10+4;return "T";} const text=((trace=trace*10+1,Array)+(trace=trace*10+2,value as string))+tail(); return trace*10+(text.indexOf("[native code]")>=0 && text.slice(-2)==="VT"?1:0);',
+  },
+  {
+    name: "native callable right-associated evaluation precedes outer conversion",
+    body: 'let trace=0; const value:any={valueOf(){trace=trace*10+4;return "V";},toString(){trace=trace*10+9;return "wrong";}}; function tail():string{trace=trace*10+3;return "T";} const text=(trace=trace*10+1,value as string)+((trace=trace*10+2,Array)+tail()); return trace*10+(text.indexOf("[native code]")>=0 && text.charAt(0)==="V" && text.slice(-1)==="T"?1:0);',
+  },
 ] as const;
 it.each(cases)("native addition preserves $name", async ({ body }) => {
   const source = `export function run():number { ${body} }`;

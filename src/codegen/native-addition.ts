@@ -5,6 +5,8 @@ import type { Instr, ValType } from "../ir/types.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import { addOperandCallableSourceText, emitAddOrdinaryToPrimitiveResidue } from "./add-to-primitive.js";
+import { admitsObjectAddition } from "./addition-to-primitive.js";
+import { callableToStringLiteral } from "./callable-to-string.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { stringConstantExternrefInstrs, ensureNativeStringHelpers } from "./native-strings.js";
 import { resolveStructNameForExpr, resolveStructName } from "./property-access.js";
@@ -14,15 +16,68 @@ import { ensureObjectRuntime } from "./object-runtime.js";
 import { ensureLateImport } from "./expressions/late-imports.js";
 import { buildThrowJsErrorInstrs, noJsHost } from "./expressions/helpers.js";
 import { collectConcatOperands } from "./native-batched-concat.js";
+import { compileStringBinaryOp } from "./string-ops.js";
+
+// (#3753 S2) An `any`-typed operand the whole-program fixpoint already PROVED
+// numeric is not really `any` for arithmetic purposes. Inside a fnctor
+// prototype method `this` is untyped, so `this.acc + this.nextCode()` reads
+// as any+any and routes to the generic `__any_add` — boxing BOTH operands
+// into `$AnyValue` and tag-dispatching the result back out, five box/unbox
+// operations per iteration on values that are f64 on both sides (#3753).
+//
+// `numericPropertyNames` (#3683 S4a) and `numericFunctionNames` are verdicts
+// from the same fixpoint that already gave `this.acc` a physical f64 slot —
+// so trusting them here is consistent with the representation those fields
+// ALREADY have, not a new claim. Standalone-only, like the verdicts.
+export function provenNumericOperand(ctx: CodegenContext, e: ts.Expression): boolean {
+  if (!ctx.standalone || process.env.JS2WASM_NUMERIC_OPERANDS === "0") return false;
+  const bare = ts.isParenthesizedExpression(e) ? e.expression : e;
+  // `this.f` where every write to `f` is numeric.
+  if (
+    ts.isPropertyAccessExpression(bare) &&
+    bare.expression.kind === ts.SyntaxKind.ThisKeyword &&
+    ctx.numericPropertyNames?.has(bare.name.text) === true
+  ) {
+    return true;
+  }
+  // `<recv>.m()` where `m` provably returns a number on every path.
+  //
+  // (#3744) The receiver is deliberately NOT constrained to `this`. The
+  // verdict is a WHOLE-PROGRAM property of the method NAME — "every function
+  // named `m` returns a number on every path" — so it holds for any
+  // receiver. Restricting it to `this` was an accident of where #3753 was
+  // measured (a tokenizer, whose calls are all `this.next()`); the `method`
+  // axis calls `p.inc()` on a plain local and got none of the benefit.
+  if (
+    ts.isCallExpression(bare) &&
+    ts.isPropertyAccessExpression(bare.expression) &&
+    ctx.numericFunctionNames?.has(bare.expression.name.text) === true
+  ) {
+    return true;
+  }
+  return false;
+}
 
 /** Admit any/unknown operands through the existing host or native string-capable addition lane. */
-export function admitsAnyAdditionOperands(ctx: CodegenContext, left: ts.Type, right: ts.Type): boolean {
+export function admitsAnyAdditionOperands(
+  ctx: CodegenContext,
+  expr: ts.BinaryExpression,
+  left: ts.Type,
+  right: ts.Type,
+): boolean {
   if (
     ctx.anyValueTypeIdx < 0 ||
     (ctx.targetProfile.semanticProviders === "native-first" && ctx.nativeStrings && ctx.anyStrTypeIdx >= 0)
   ) {
-    const leftIsAnyish = (left.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
-    const rightIsAnyish = (right.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+    // The earlier AnyValue arm uses this proof only for nonnegative indices.
+    // Keep the original negative-index admission unchanged.
+    const usesGroundedProof = ctx.anyValueTypeIdx >= 0;
+    const leftIsAnyish =
+      (left.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0 &&
+      (!usesGroundedProof || !provenNumericOperand(ctx, expr.left));
+    const rightIsAnyish =
+      (right.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0 &&
+      (!usesGroundedProof || !provenNumericOperand(ctx, expr.right));
     return leftIsAnyish || rightIsAnyish;
   }
   return false;
@@ -92,6 +147,20 @@ interface DeferredAddOperand {
   readonly rawLocal: number;
   readonly rawType: ValType;
   readonly targetLocal: number;
+  readonly callableText?: string;
+}
+
+function saveDeferredAddOperand(
+  fctx: FunctionContext,
+  rawType: ValType,
+  deferred: DeferredAddOperand[],
+  callableText?: string,
+): number {
+  const rawLocal = allocTempLocal(fctx, rawType);
+  const targetLocal = allocTempLocal(fctx, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: rawLocal });
+  deferred.push({ rawLocal, rawType, targetLocal, callableText });
+  return targetLocal;
 }
 
 function emitAddOperand(
@@ -99,8 +168,18 @@ function emitAddOperand(
   fctx: FunctionContext,
   expr: ts.Expression,
   deferred: DeferredAddOperand[],
+  callableText?: string,
 ): number | null {
   const noJsHost = ctx.targetProfile.semanticProviders === "native-first";
+  if (noJsHost && callableText !== undefined) {
+    // Match the existing concat operand's physical-carrier check. Evaluate the
+    // original expression once, even when its callable has no closure carrier;
+    // defer its established NativeFunction rendering until both sides exist.
+    const opType = compileExpression(ctx, fctx, expr);
+    if (!opType) return null;
+    const isReference = opType.kind === "externref" || opType.kind === "ref" || opType.kind === "ref_null";
+    return saveDeferredAddOperand(fctx, opType, deferred, isReference ? callableText : undefined);
+  }
   // Unwrap `as`/parenthesized/non-null/satisfies wrappers (e.g. `(o as any)`):
   // the wrappers are type-only / identity, but they make TS report the operand
   // type as `any` (so the struct name can't be resolved) and make
@@ -183,11 +262,7 @@ function emitAddOperand(
     if (!opType) return null;
     // Save the physical value without invoking user conversion. Both source
     // expressions must finish before either operand's ToPrimitive runs.
-    const rawLocal = allocTempLocal(fctx, opType);
-    const targetLocal = allocTempLocal(fctx, { kind: "externref" });
-    fctx.body.push({ op: "local.set", index: rawLocal });
-    deferred.push({ rawLocal, rawType: opType, targetLocal });
-    return targetLocal;
+    return saveDeferredAddOperand(fctx, opType, deferred);
   }
 
   // Status-quo path: externref hint keeps runtime strings boxed for §13.15.3.
@@ -201,18 +276,23 @@ function emitAddOperand(
   return tmp;
 }
 
-/** Materialize one saved nominal operand at its ordered conversion point. */
+/** Materialize one saved operand at its ordered conversion point. */
 function finishDeferredAddOperand(ctx: CodegenContext, fctx: FunctionContext, operand: DeferredAddOperand): void {
   const { rawLocal, rawType, targetLocal } = operand;
-  fctx.body.push({ op: "local.get", index: rawLocal });
-  if (rawType.kind === "ref" || rawType.kind === "ref_null") {
-    coerceType(ctx, fctx, rawType, { kind: "f64" }, "default");
-    addUnionImports(ctx);
-    const boxIdx = ctx.funcMap.get("__box_number");
-    if (boxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: boxIdx });
-    else coerceType(ctx, fctx, { kind: "f64" }, { kind: "externref" });
-  } else if (rawType.kind !== "externref") {
-    coerceType(ctx, fctx, rawType, { kind: "externref" });
+  if (operand.callableText !== undefined) {
+    addStringConstantGlobal(ctx, operand.callableText);
+    fctx.body.push(...stringConstantExternrefInstrs(ctx, operand.callableText));
+  } else {
+    fctx.body.push({ op: "local.get", index: rawLocal });
+    if (rawType.kind === "ref" || rawType.kind === "ref_null") {
+      coerceType(ctx, fctx, rawType, { kind: "f64" }, "default");
+      addUnionImports(ctx);
+      const boxIdx = ctx.funcMap.get("__box_number");
+      if (boxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: boxIdx });
+      else coerceType(ctx, fctx, { kind: "f64" }, { kind: "externref" });
+    } else if (rawType.kind !== "externref") {
+      coerceType(ctx, fctx, rawType, { kind: "externref" });
+    }
   }
   fctx.body.push({ op: "local.set", index: targetLocal });
   releaseTempLocal(fctx, rawLocal);
@@ -236,7 +316,12 @@ function finishDeferredAddOperand(ctx: CodegenContext, fctx: FunctionContext, op
  * paths — a boxed number-or-string the caller stores into the `any` slot — or
  * `f64` for the legacy numeric fallback).
  */
-export function emitAnyAdd(ctx: CodegenContext, fctx: FunctionContext, expr: ts.BinaryExpression): ValType {
+export function emitAnyAdd(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.BinaryExpression,
+  callableText?: readonly [string | undefined, string | undefined],
+): ValType {
   const noJsHost = ctx.targetProfile.semanticProviders === "native-first";
 
   // #1988: in standalone/WASI the §13.15.3 string-vs-numeric decision must be
@@ -256,9 +341,9 @@ export function emitAnyAdd(ctx: CodegenContext, fctx: FunctionContext, expr: ts.
   // retain their actual physical type in a raw local; the ordered runtime
   // reduction below performs that conversion only after RHS evaluation.
   const deferred: DeferredAddOperand[] = [];
-  const lTmp = emitAddOperand(ctx, fctx, expr.left, deferred);
+  const lTmp = emitAddOperand(ctx, fctx, expr.left, deferred, callableText?.[0]);
   if (lTmp === null) return { kind: "externref" };
-  const rTmp = emitAddOperand(ctx, fctx, expr.right, deferred);
+  const rTmp = emitAddOperand(ctx, fctx, expr.right, deferred, callableText?.[1]);
   if (rTmp === null) {
     for (const operand of deferred) releaseTempLocal(fctx, operand.rawLocal);
     releaseTempLocal(fctx, lTmp);
@@ -507,13 +592,15 @@ export function isPrimitiveConcatProducer(expression: ts.Expression): boolean {
   return false;
 }
 
-/** Undefined alone means not handled; an actual result must never be compiled twice. */
-export function tryCompileNativeStringAddition(
+/** Preserve cached source types while choosing ordered addition or the existing string operation. */
+export function compileStringBinaryOpWithNativeAddition(
   ctx: CodegenContext,
   fctx: FunctionContext,
   expr: ts.BinaryExpression,
   op: ts.SyntaxKind,
-): ValType | undefined {
+  leftType: ts.Type,
+  rightType: ts.Type,
+): ValType | null {
   if (
     op !== ts.SyntaxKind.PlusToken ||
     !noJsHost(ctx) ||
@@ -521,7 +608,15 @@ export function tryCompileNativeStringAddition(
     ctx.anyStrTypeIdx < 0 ||
     collectConcatOperands(ctx, expr).every(isPrimitiveConcatProducer)
   )
-    return undefined;
+    return compileStringBinaryOp(ctx, fctx, expr, op);
+  // The existing object-addition arm declines callables whose runtime closure
+  // carrier is unproved (builtins, reassigned bindings, callable Proxies).
+  // Preserve their existing concat rendering per operand, without sending a
+  // dynamic sibling back through string-hint conversion or flattening a chain.
+  const callableText = (operand: ts.Expression, type: ts.Type): string | undefined => {
+    const text = callableToStringLiteral(type);
+    return text !== undefined && !admitsObjectAddition(ctx, type, type, operand, operand) ? text : undefined;
+  };
   // Return the runtime representation, not the type asserted on the source.
-  return emitAnyAdd(ctx, fctx, expr);
+  return emitAnyAdd(ctx, fctx, expr, [callableText(expr.left, leftType), callableText(expr.right, rightType)]);
 }

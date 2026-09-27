@@ -4,7 +4,12 @@
  * Handles binary expression compilation including numeric, i32, i64,
  * bitwise, modulo, boolean, and any-typed binary operations.
  */
-import { admitsAnyAdditionOperands, emitAnyAdd } from "./native-addition.js";
+import {
+  admitsAnyAdditionOperands,
+  compileStringBinaryOpWithNativeAddition,
+  emitAnyAdd,
+  provenNumericOperand,
+} from "./native-addition.js";
 export { emitAnyAdd, emitAnyAddFromExternTemps } from "./native-addition.js";
 import { expressionHasWidenedPropertyType } from "./strict-eq-stale-type.js";
 import { isInertUndefinedLiteral } from "./void-undefined-operand.js"; // (#6604)
@@ -61,7 +66,7 @@ import { coerceType, compileExpression, ensureAnyHelpers, flushLateImportShifts,
 import { isLogicalAssignNamedEvalNameRead } from "./property-access.js";
 import { compileNullishObservedExpression } from "./property-nullish-read.js";
 import { foldVoidOperandEquality } from "./equality-void-operand.js";
-import { compileStringBinaryOp, emitHoistedCharCodeAtRead, matchHoistedCharRead } from "./string-ops.js";
+import { emitHoistedCharCodeAtRead, matchHoistedCharRead } from "./string-ops.js";
 import {
   emitAnyEqFromExternTemps,
   emitLooseEq,
@@ -1383,47 +1388,8 @@ export function compileBinaryExpression(
   // skip AnyValue and compile with a numeric hint so operands unbox to f64
   // directly, avoiding the overhead of AnyValue tag dispatch.
   if (ctx.anyValueTypeIdx >= 0) {
-    // (#3753 S2) An `any`-typed operand the whole-program fixpoint already PROVED
-    // numeric is not really `any` for arithmetic purposes. Inside a fnctor
-    // prototype method `this` is untyped, so `this.acc + this.nextCode()` reads
-    // as any+any and routes to the generic `__any_add` — boxing BOTH operands
-    // into `$AnyValue` and tag-dispatching the result back out, five box/unbox
-    // operations per iteration on values that are f64 on both sides (#3753).
-    //
-    // `numericPropertyNames` (#3683 S4a) and `numericFunctionNames` are verdicts
-    // from the same fixpoint that already gave `this.acc` a physical f64 slot —
-    // so trusting them here is consistent with the representation those fields
-    // ALREADY have, not a new claim. Standalone-only, like the verdicts.
-    const provenNumericOperand = (e: ts.Expression): boolean => {
-      if (!ctx.standalone || process.env.JS2WASM_NUMERIC_OPERANDS === "0") return false;
-      const bare = ts.isParenthesizedExpression(e) ? e.expression : e;
-      // `this.f` where every write to `f` is numeric.
-      if (
-        ts.isPropertyAccessExpression(bare) &&
-        bare.expression.kind === ts.SyntaxKind.ThisKeyword &&
-        ctx.numericPropertyNames?.has(bare.name.text) === true
-      ) {
-        return true;
-      }
-      // `<recv>.m()` where `m` provably returns a number on every path.
-      //
-      // (#3744) The receiver is deliberately NOT constrained to `this`. The
-      // verdict is a WHOLE-PROGRAM property of the method NAME — "every function
-      // named `m` returns a number on every path" — so it holds for any
-      // receiver. Restricting it to `this` was an accident of where #3753 was
-      // measured (a tokenizer, whose calls are all `this.next()`); the `method`
-      // axis calls `p.inc()` on a plain local and got none of the benefit.
-      if (
-        ts.isCallExpression(bare) &&
-        ts.isPropertyAccessExpression(bare.expression) &&
-        ctx.numericFunctionNames?.has(bare.expression.name.text) === true
-      ) {
-        return true;
-      }
-      return false;
-    };
-    const leftIsAny = (leftTsType.flags & ts.TypeFlags.Any) !== 0 && !provenNumericOperand(expr.left);
-    const rightIsAny = (rightTsType.flags & ts.TypeFlags.Any) !== 0 && !provenNumericOperand(expr.right);
+    const leftIsAny = (leftTsType.flags & ts.TypeFlags.Any) !== 0 && !provenNumericOperand(ctx, expr.left);
+    const rightIsAny = (rightTsType.flags & ts.TypeFlags.Any) !== 0 && !provenNumericOperand(ctx, expr.right);
     // (#745 S3) A local whose static type is (or whose DECLARED symbol type
     // is) a heterogeneous primitive union compiles to `ref_null $AnyValue`
     // under `unionAnyRep` (S2 mapping) — no legacy path (string/numeric/
@@ -1675,7 +1641,7 @@ export function compileBinaryExpression(
     // At least one side is the union/error-read/named-eval form (else the plain-string path below handles it)
     (!isStringType(leftTsType) || !isStringType(rightTsType))
   ) {
-    return compileStringBinaryOp(ctx, fctx, expr, op);
+    return compileStringBinaryOpWithNativeAddition(ctx, fctx, expr, op, leftTsType, rightTsType);
   }
 
   // (#2503) The FORWARD shape `"lit" == any` (static-string LEFT against an
@@ -1759,10 +1725,10 @@ export function compileBinaryExpression(
       op === ts.SyntaxKind.PlusToken ||
       (!isRelational && !isNumberType(rightTsType) && !isBooleanType(rightTsType) && !isBigIntType(rightTsType)))
   ) {
-    return compileStringBinaryOp(ctx, fctx, expr, op);
+    return compileStringBinaryOpWithNativeAddition(ctx, fctx, expr, op, leftTsType, rightTsType);
   }
   if (!wrapperEquality && op === ts.SyntaxKind.PlusToken && isStringType(rightTsType) && !isBigIntType(leftTsType)) {
-    return compileStringBinaryOp(ctx, fctx, expr, op);
+    return compileStringBinaryOpWithNativeAddition(ctx, fctx, expr, op, leftTsType, rightTsType);
   }
   // (#2503b) The reversed shape `any == "lit"` (a non-numeric/`any` LEFT against
   // a statically string-typed RIGHT) is deliberately NOT routed to
@@ -2053,7 +2019,7 @@ export function compileBinaryExpression(
       // numeric add — route to the string path which calls ToString on the
       // BigInt side (`1n + "" === "1"` per §13.15.4).
       if (op === ts.SyntaxKind.PlusToken && (isStringType(leftTsType) || isStringType(rightTsType))) {
-        return compileStringBinaryOp(ctx, fctx, expr, op);
+        return compileStringBinaryOpWithNativeAddition(ctx, fctx, expr, op, leftTsType, rightTsType);
       }
       // (#3481) BigInt wrapper / ToPrimitive-yields-BigInt. When the NON-bigint
       // operand is dynamically an object/any (`Object(2n)`, `{valueOf(){return
@@ -2174,7 +2140,7 @@ export function compileBinaryExpression(
   // addition path, and the OBJECT arm (#4564) is native-only. Both preserve
   // default-hint conversion before deciding whether the result is a string.
   if (op === ts.SyntaxKind.PlusToken && !isBigIntType(leftTsType) && !isBigIntType(rightTsType)) {
-    if (admitsAnyAdditionOperands(ctx, leftTsType, rightTsType)) return emitAnyAdd(ctx, fctx, expr);
+    if (admitsAnyAdditionOperands(ctx, expr, leftTsType, rightTsType)) return emitAnyAdd(ctx, fctx, expr);
   }
 
   // (#4491 T4) …and the OBJECT arm of the same §13.15.3 dispatch. `emitAnyAdd`

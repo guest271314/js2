@@ -16,7 +16,6 @@ import {
 } from "./any-helpers.js";
 import { bigIntToStringIdx } from "./bigint-string-context.js";
 import { compileNumericBinaryOp } from "./binary-ops.js";
-import { tryCompileNativeStringAddition } from "./native-addition.js";
 import { callableToStringLiteral } from "./callable-to-string.js";
 import { ensureTaDynProtoMethodHelper, hasTaDynProtoMethodHelper } from "./ta-dyn-proto-methods.js"; // (#5194 r3-2) dyn-view search helpers
 import { reserveClosedMethodDispatch } from "./closed-method-dispatch.js";
@@ -2077,8 +2076,6 @@ export function compileStringBinaryOp(
   expr: ts.BinaryExpression,
   op: ts.SyntaxKind,
 ): ValType | null {
-  const dynamicAddition = tryCompileNativeStringAddition(ctx, fctx, expr, op);
-  if (dynamicAddition !== undefined) return dynamicAddition;
   // §7.1.17 ToString(Symbol) throws — `str + sym` / `sym + str` must throw
   // TypeError before any concat lowering (native, batched, or host) runs.
   if (op === ts.SyntaxKind.PlusToken) {
