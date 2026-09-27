@@ -1,4 +1,5 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import { readBeforeResumeMain } from "./helpers/resume-main-composition.js";
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import ts from "typescript";
@@ -15,7 +16,7 @@ const fixture = JSON.parse(
   readFileSync(new URL("./fixtures/issue-3518-native-any-to-string-donor.json", import.meta.url), "utf8"),
 );
 const original = fixture.source as string;
-const current = readFileSync(new URL("../src/codegen/native-strings.ts", import.meta.url), "utf8");
+const current = readBeforeResumeMain("src/codegen/native-strings.ts");
 const adapterImports = [
   'import { buildAnyToStringBody } from "../runtime/wasmgc/values/any-to-string-body.js";\n',
   'import type { AnyToStringResponse } from "../runtime/wasmgc/values/any-to-string-types.js";\n',

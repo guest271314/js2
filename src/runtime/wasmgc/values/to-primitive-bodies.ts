@@ -27,6 +27,7 @@ export interface ToPrimitiveBodyBindings {
     | {
         readonly vecBaseTypeIdx: number;
         readonly arrayToPrimIdx: number;
+        readonly vecOwnToPrimIdx?: number;
         readonly classToPrimIdx: number;
         readonly arguments: ToPrimitiveArgumentsBindings | undefined;
       }
@@ -195,7 +196,16 @@ export function buildToPrimitiveBody(bindings: ToPrimitiveBodyBindings): Instr[]
               {
                 op: "if",
                 blockType: { kind: "empty" },
-                then: [{ op: "local.get", index: 0 }, { op: "call", funcIdx: arrayToPrimIdx }, { op: "return" }],
+                then: [
+                  { op: "local.get", index: 0 },
+                  ...(bindings.array?.vecOwnToPrimIdx !== undefined && bindings.array.vecOwnToPrimIdx >= 0
+                    ? ([
+                        { op: "local.get", index: 1 },
+                        { op: "call", funcIdx: bindings.array.vecOwnToPrimIdx },
+                      ] satisfies Instr[])
+                    : ([{ op: "call", funcIdx: arrayToPrimIdx }] satisfies Instr[])),
+                  { op: "return" },
+                ],
               },
               // (#2638) A nominal CLASS instance is neither `$Object` nor `$Vec`.
               // Route it through `__class_to_primitive(obj, stringHint)`, which

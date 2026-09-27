@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import { readBeforeResumeMain } from "./helpers/resume-main-composition.js";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { setImmediate } from "node:timers/promises";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
@@ -246,7 +246,7 @@ it("public one-result ABI preserves null while the private ABI distinguishes a m
   expect(Object.is(ex.__class_to_primitive!(missing, 0), missing)).toBe(true);
 });
 
-const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
+const read = readBeforeResumeMain;
 const refNumberText = read("tests/fixtures/issue-3518-runtime-ref-number-forward.json");
 function refNumberReceipt(text: string) {
   if (sha(text) !== "69fc2f126cd05f4c6ae4b6e9f35ae22cddb53c8d17b4210259f4aadbea014bb8")

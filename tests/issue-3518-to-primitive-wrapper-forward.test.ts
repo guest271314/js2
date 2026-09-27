@@ -1,9 +1,9 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import { readBeforeResumeMain } from "./helpers/resume-main-composition.js";
 import { applyPrototypeCompanionExtraction } from "./helpers/prototype-companion-extraction.js";
 import { applyClosureApplyExtraction } from "./helpers/object-runtime-apply-extraction.js";
 import { applyFnctorGuardForward } from "./helpers/object-runtime-fnctor-guard-forward.js";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import { setImmediate } from "node:timers/promises";
 import ts from "typescript";
@@ -30,7 +30,7 @@ import { invertObjectRuntimeMainComposition } from "./helpers/object-runtime-mai
 import { invertObjectWriteSource } from "./helpers/native-object-write-donor.js";
 
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
-const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
+const read = readBeforeResumeMain;
 afterEach(async () => {
   vi.restoreAllMocks();
   await setImmediate();

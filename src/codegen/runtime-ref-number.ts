@@ -2,6 +2,7 @@
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { addUnionImports } from "./registry/imports.js";
 import { coerceType } from "./shared.js";
+import { emitStandaloneObjectToNumber } from "./tonumber-fast-paths.js";
 
 /** Actual runtime carriers use their canonical numeric path, not a nominal default. */
 export function tryRuntimeRefToNumber(
@@ -11,6 +12,7 @@ export function tryRuntimeRefToNumber(
   hint: "number" | "string" | "default" | undefined,
 ): boolean {
   if (typeIdx === ctx.objectRuntimeTypes?.objectTypeIdx) {
+    if (ctx.standalone) return emitStandaloneObjectToNumber(ctx, fctx, hint ?? "number");
     // $Object has no nominal class name. Preserve the object and invoke the
     // existing ordered ToPrimitive/ToNumber path instead of dropping it for 0.
     fctx.body.push({ op: "extern.convert_any" });

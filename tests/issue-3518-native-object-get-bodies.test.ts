@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import { readBeforeResumeMain } from "./helpers/resume-main-composition.js";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import { createEmptyModule, type Instr, type LocalDef, type ValType } from "../src/ir/types.js";
@@ -21,7 +21,7 @@ import {
 } from "./helpers/conversion-source-composition.js";
 
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
-const read = (file: string) => readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+const read = readBeforeResumeMain;
 const fixtureText = read("tests/fixtures/issue-3518-native-object-get-donor.json");
 const fixtureHash = "ba22b31f3a4b283f044beaf13b07bb8f4fc36e39e40a003f3df17fd4cde8e065";
 interface Donor {

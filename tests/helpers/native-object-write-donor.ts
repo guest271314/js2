@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import { readBeforeResumeMain } from "./resume-main-composition.js";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
 import ts from "typescript";
 import * as storage from "../../src/runtime/wasmgc/values/ordinary-object-storage-bodies.js";
 import * as keys from "../../src/runtime/wasmgc/values/object-key-bodies.js";
@@ -9,7 +9,7 @@ import { buildOrdinaryObjectAccessorDescriptorBody } from "../../src/runtime/was
 import { buildObjectSameValueBody } from "../../src/runtime/wasmgc/values/object-same-value-body.js";
 import type { Instr, LocalDef, ValType } from "../../src/wasm/model/instructions.js";
 
-export const readWriteSource = (file: string) => readFileSync(new URL("../../" + file, import.meta.url), "utf8");
+export const readWriteSource = readBeforeResumeMain;
 export const writeSourceHash = (source: string) => createHash("sha256").update(source).digest("hex");
 export const writeDonorPath = "tests/fixtures/issue-3518-native-object-write-donor.json";
 export const writeExtractionPath = "tests/fixtures/issue-3518-native-object-write-extraction.json";

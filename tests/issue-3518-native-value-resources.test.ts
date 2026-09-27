@@ -1,4 +1,5 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import { readBeforeResumeMain } from "./helpers/resume-main-composition.js";
 
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -436,10 +437,7 @@ const sourcePaths = {
 type Sources = Record<keyof typeof sourcePaths, string>;
 function liveSources(): Sources {
   return Object.fromEntries(
-    Object.entries(sourcePaths).map(([key, path]) => [
-      key,
-      readFileSync(resolve(import.meta.dirname, "..", path), "utf8"),
-    ]),
+    Object.entries(sourcePaths).map(([key, path]) => [key, readBeforeResumeMain(path)]),
   ) as Sources;
 }
 function parsed(text: string): ts.SourceFile {

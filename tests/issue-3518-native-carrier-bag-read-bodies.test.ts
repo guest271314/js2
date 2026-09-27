@@ -1,4 +1,5 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import { readBeforeResumeMain } from "./helpers/resume-main-composition.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -13,7 +14,7 @@ const BASE = "cfff0f5cebb19e3b3773a4b892b0619ac2e511e3";
 const SOURCE_SHA = "67101d82b65e733bb1e48e1ee15895375112a40127d1b809d803d2cbe27bd096";
 const FIXTURE_SHA = "7f74045ebaf6255ff7becaf006d1c1048ea1d3a62164f0e94fc6e4b4b380e01c";
 const fixtureText = readFileSync(new URL("./fixtures/issue-3518-carrier-bag-read-donor.json", import.meta.url), "utf8");
-const adapter = readFileSync(new URL("../src/codegen/carrier-bag-visibility.ts", import.meta.url), "utf8");
+const adapter = readBeforeResumeMain("src/codegen/carrier-bag-visibility.ts");
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 interface Receipt {
   schemaVersion: number;

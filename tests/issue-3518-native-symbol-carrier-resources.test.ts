@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import { readBeforeResumeMain } from "./helpers/resume-main-composition.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import ts from "typescript";
 import { createEmptyModule } from "../src/ir/types.js";
@@ -23,7 +23,7 @@ import {
 } from "../src/backend/wasmgc/resources/native-symbol-carrier.js";
 
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
-const read = (path: string) => readFileSync(new URL("../" + path, import.meta.url), "utf8");
+const read = readBeforeResumeMain;
 const fixtureText = read("tests/fixtures/issue-3518-native-symbol-carrier-donor.json");
 const FIXTURE_SHA = "aa7beec33888dd1ddc7bf8fdb9ac515ed9ba7a5ae0e8e3489215ab9572b5bca1";
 const SOURCE_SHA = "5685b9fc944573b6f01026bb0295170a4788facee478a3463af0e2408c95bce6";

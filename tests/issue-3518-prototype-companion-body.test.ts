@@ -1,12 +1,12 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { applyPrototypeCompanionExtraction } from "./helpers/prototype-companion-extraction.js";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readBeforeResumeMain } from "./helpers/resume-main-composition.js";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import { buildPrototypeCompanionBody } from "../src/runtime/wasmgc/values/prototype-companion-body.js";
 
-const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
+const read = readBeforeResumeMain;
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 const text = read("tests/fixtures/issue-3518-prototype-companion-extraction.json");
 if (sha(text) !== "edf78072c621f8dd72ed74307c33857772beb4ee82ffdba118e67c73b97be739")

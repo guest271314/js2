@@ -1,4 +1,5 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import { readBeforeResumeMain } from "./helpers/resume-main-composition.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -503,7 +504,7 @@ it("observes actual hash collisions and lookup crossing a deleted production tab
 });
 
 it("reconstructs every original key donor from the authenticated signed getter/key composition", () => {
-  const current = readFileSync(new URL("../src/codegen/object-runtime.ts", import.meta.url), "utf8");
+  const current = readBeforeResumeMain("src/codegen/object-runtime.ts");
   const restored = verifyObjectRuntimeComposition(current);
   expect(sha(restored.original)).toBe(SOURCE_SHA);
   expect(authenticate(receiptText).spans).toHaveLength(8);

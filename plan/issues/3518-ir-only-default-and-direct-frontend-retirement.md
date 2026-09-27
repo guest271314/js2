@@ -12633,3 +12633,101 @@ main delivery or full native prototype completion claim.
 Brand contract six-gate44493 passed LOC/functions/coercion/oracle/inventory/
 preservation exports against50f57b7141;1624 inputs unchanged. Historical
 activation and dependency allowances remain unchanged. Normal signed hooks next.
+
+
+### Resume against canonical main (2026-09-27)
+
+Restore signed rootc2014e6 in durable worktree after temporary files disappeared.
+Merge freshly fetched and API-verified mainbb18c35e839bc35f8294b76123e231b253405127.
+Resolve six conflicted files by preserving main semantic repairs and shared
+IR recipes, with exact boundary unions and preservation receipts retained.
+Recover uncommitted source from surviving snapshots/index blobs separately;
+do not overwrite the dirty root or claim unrecovered changes as delivered.
+Legacy stays operational until full IR implementation, testing and equivalence.
+
+
+### Resume-main preservation composition (2026-09-27, B)
+
+The signed candidate `c2014e6da1fd49da71f5d3e57722f35bee73ecc0` is being
+joined with canonical main `bb18c35e839bc35f8294b76123e231b253405127`
+(common base `62221769a87acdc32759c656702eede64936feb5`). The integration
+owner resolves production code in the separate resume-main worktree. This
+worktree owns only the outer preservation receipt, its helper and corruption
+controls, and minimal historical-test source-reader joins. No production
+change, old donor reseed, commit, or publication is authorized here.
+
+Implementation plan:
+
+1. Authenticate exact prior Git blobs and upstream base/main blobs, and freeze
+   the actual resolved production bytes. Record ordered, unique, nonoverlapping
+   contextual before/after spans with independent hashes and UTF-16 offsets.
+2. Invert only those declared spans and require the complete prior-source hash;
+   replay the same spans forward and require exact equality with the actual
+   merged source. Do not substitute a historical complete source file.
+3. Apply this outer inverse at preservation-only readers before the existing
+   invocation/storage/main/conversion/getter chains. Retain every historical
+   fixture, full-source digest and mutation assertion. Runtime imports and
+   compiler execution continue to use current production code.
+4. Cover the shared ToPrimitive vec-own dispatch port, registry BigInt adapter,
+   native-number reference helper and type coercion, plus upstream changes to
+   every affected full-source donor reader. Distinguish this reconstruction
+   proof from runtime parity; the integration owner retains current semantic
+   regressions and the observed unrelated String/BigInt failure.
+5. Add positive-first controls for every declared span: nonwhitespace damage,
+   removal, duplication, reordering, changed retained source, historical-source
+   substitution, changed receipt and unknown paths. Forward and inverse must
+   both authenticate their inputs and preserve exact prior checks.
+6. Format the bounded test delta and report source/fixture pins. Heavy tests
+   require the shared-lane grant; no tests, typecheck, hooks or source edits
+   run while another owner holds it. Existing OOM/failure records remain.
+
+### Canonical main merge validation (2026-09-27, integration)
+
+Canonical main `bb18c35e839bc35f8294b76123e231b253405127` is resolved
+against the signed IR checkpoint `c2014e6da1fd49da71f5d3e57722f35bee73ecc0`.
+Legacy remains operational: retirement requires complete tested IR equivalence.
+The six conflict resolutions retain main's fixes and the IR shared recipes.
+Boundary records are the union of 1539 prior and 77 disjoint main records,
+without changing activation grants, clean floors or allowed edges.
+
+Typecheck passed. The first focused attempt exhausted an inherited 512 MB
+fork heap; that failed attempt is preserved. With explicit 4 GB single-fork
+configuration, 144/157 rows passed, with 12 historical source-composition
+failures, one collection failure and one BigInt runtime failure. The new
+outer preservation receipt is being validated without changing old fixtures.
+
+The BigInt `narrowedString` failure was independently reproduced in an
+unmodified exact-main checkout: both main and this merge passed the same
+24/25 rows, with the same sole `expected +0 to be 1` failure. This is an
+existing main failure, not a newly introduced regression or a parity credit.
+The merged vec ToPrimitive regression suite passed 11/11 and native-first
+lane providers passed 8/8. No full conformance or main delivery is claimed.
+
+Merge validation completion: the 20-file cohort measured 913/1032 passing,
+including all 143 new outer-composition controls. All 1731 inputs remained
+unchanged. The 119 remaining failures belong to argument-vector (43/77),
+closure (52/100) and string-output (24/24) preservation suites. An exact
+untouched c201 control measured the same 82 passing and 119 failing rows
+across those three suites (201 total), with all row identities, statuses
+and first diagnostics identical. Full diagnostics differ only in 43 stack
+line offsets caused by the additional reader import. Its 1636 inputs stayed
+unchanged. These pre-existing preservation gaps remain open; no old fixture
+or hash was changed to conceal them. The string-output follow-up requires
+the signed f75 equality-extraction inverse before its older concat inverse.
+
+LOC, function, coercion, boundary inventory and dead-export gates passed.
+The oracle gate's automatic base, while the merge was uncommitted, included
+three checker sites from incoming main; using the exact canonical main
+`bb18c35e839bc35f8294b76123e231b253405127` as the documented gate base
+passes with zero net checker growth. Normal commit hooks use this same base,
+not a bypass. Existing admission refusals and failed runs remain recorded.
+The full test cohort used one explicit 4 GB fork; the machine has 10 logical
+CPUs and 24 GiB, so the initial self-imposed load8 admission was relaxed to
+load10. The three-suite resource control used one low-priority worker.
+
+The transitive capture draft was reconstructed separately from exact50f
+and recorded file edits, retaining all 23 drafted rows and the original
+callable-Get failure. It is untested and not part of this main merge. The
+signed prototype-read extraction35ab also remains a subsequent integration.
+Legacy retirement and IR-default activation remain prohibited until complete
+IR implementation, testing and behavioral equivalence.

@@ -1,9 +1,9 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import { readBeforeResumeMain } from "./resume-main-composition.js";
 import { applyPrototypeCompanionExtraction } from "./prototype-companion-extraction.js";
 import { applyClosureApplyExtraction } from "./object-runtime-apply-extraction.js";
 import { applyFnctorGuardForward } from "./object-runtime-fnctor-guard-forward.js";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { invertObjectWriteSource, replayObjectWriteSource, writeExtractionPath } from "./native-object-write-donor.js";
 import {
   applyObjectRuntimeMainComposition,
@@ -19,7 +19,7 @@ const forwardPath = "tests/fixtures/issue-3518-to-primitive-wrapper-forward.json
 const presencePath = "tests/fixtures/issue-3518-to-primitive-presence-extraction.json";
 const extractionPath = "tests/fixtures/issue-3518-to-primitive-extraction-baseline.json";
 const RECEIPT_SHA = "1acca724b0809163b370921d8ad5860ee45b39f356a1ba5078515c0026ae7e35";
-export const readConversionSource = (path: string) => readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
+export const readConversionSource = readBeforeResumeMain;
 type Reader = typeof readConversionSource;
 export const conversionSha = (text: string) => createHash("sha256").update(text).digest("hex");
 interface Span {
