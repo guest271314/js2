@@ -1,6 +1,6 @@
 ---
 id: 6713
-title: "standalone: calling or constructing the RegExp constructor carrier as a dynamic value does not yield a RegExp (lodash `reIsNative`)"
+title: "standalone: calling or constructing a builtin constructor carrier held as a dynamic value (RegExp, Error, TypeError) does not yield an instance (lodash `reIsNative`)"
 status: ready
 sprint: current
 created: 2026-09-27
@@ -74,6 +74,17 @@ dynamic `[[Construct]]` path so `new R(p)` builds a fresh RegExp. Check the
 runtime compiler accepts lodash's `reIsNative` source (lazy `.*?`, escaped
 `\(\) \{ \[native code\] \}`) — if it defers ("poisoned" simple compile), that
 is the next link.
+
+Same family, next in line for lodash: the `Error` / `TypeError` carriers held
+as values (`var Error = context.Error`) also fail — `var E = globalThis.Error;
+new E('x')` traps with `illegal cast` (uncatchable), and a lodash probe
+`throw new Error('…')` placed inside `runInContext` rendered only as
+`[object WebAssembly.Exception]`. A lodash probe after the `reIsNative`
+definition confirmed `reIsNative == null || typeof reIsNative.test !=
+'function'` holds at module init. Scope the fix as dynamic `[[Call]]` /
+`[[Construct]]` for the builtin constructor carriers that lodash's
+`runInContext` aliases (`RegExp`, `Error`, `TypeError`, `Date`, `String`,
+`Object`, `Function`), RegExp first.
 
 Separately observed (not a lodash blocker): `typeof Function.prototype` reads
 `"object"` in standalone (spec: `"function"`), and

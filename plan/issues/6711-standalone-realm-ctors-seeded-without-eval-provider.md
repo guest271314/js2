@@ -82,7 +82,11 @@ Executed 2026-09-27:
   value (`var RegExp = context.RegExp; RegExp(src)`) does not produce a RegExp,
   so lodash's `reIsNative` is not a RegExp and `baseIsNative`'s
   `pattern.test(…)` throws.
-- Scope: only modules compiled with `runtimeEvalProvider: false` change. The
-  test262 standalone lane and JS-host are byte-identical (the predicate is
-  false there); see the PR for the scoped standalone test262 run and the
-  npm-compat standalone-dynamic lanes re-measured with the fix.
+- Scope: only modules compiled with `runtimeEvalProvider: false` change; the
+  test262 standalone lane (provider linked) and JS-host (`!standalone`) take
+  the old path. Scoped standalone test262 (`built-ins/global` +
+  `built-ins/Function/prototype/*.js`, 46 rows, quickjs provider): parent
+  41 pass / 5 fail, fix 41 / 5, identical non-pass sets.
+- npm-compat standalone-dynamic lanes that were `measured` before stay
+  `measured`, 0 imports, with the fix: moment, hono, redux, clsx, cookie, uuid,
+  marked, acorn, react.
