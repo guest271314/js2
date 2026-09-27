@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-09-27T14:57:09.585Z",
-  "baseline_generated_at": "2026-09-27T14:57:09.585Z",
-  "baseline_sha": "bc73c88a67b017522c4e1d53a28a1d675bec3e5b",
+  "timestamp": "2026-09-27T22:16:21.341Z",
+  "baseline_generated_at": "2026-09-27T22:16:21.341Z",
+  "baseline_sha": "a3b82d4c80d3f29a81db01460590b2842199b0ba",
   "oracle_version": 14,
   "mode": {
     "target": "standalone",
@@ -1463,15 +1463,15 @@
         "sample_files": [
           "test/built-ins/JSON/stringify/value-tojson-object-circular.js",
           "test/built-ins/JSON/stringify/replacer-function-result-undefined.js",
-          "test/built-ins/JSON/parse/reviver-wrapper.js",
           "test/built-ins/JSON/stringify/value-function.js",
+          "test/built-ins/JSON/parse/reviver-wrapper.js",
           "test/built-ins/JSON/stringify/value-object-abrupt.js"
         ],
         "sample_signatures": [
           "assertion_fail:Test262Error: Expected a TypeError to be thrown but no exception was thrown at all",
           "assertion_fail:Test262Error: Expected SameValue(«\"#\"», «undefined») to be true",
-          "assertion_fail:Test262Error: [[Set]] should not be called.",
           "assertion_fail:Test262Error: Expected SameValue(«\"null\"», «undefined») to be true",
+          "assertion_fail:Test262Error: [[Set]] should not be called.",
           "assertion_fail:Test262Error: Expected a Test262Error to be thrown but no exception was thrown at all"
         ]
       },
@@ -1985,8 +1985,8 @@
           "host_free_pass": 0
         },
         "error_categories": {
-          "null_deref": 4,
           "assertion_fail": 999,
+          "null_deref": 4,
           "illegal_cast": 176,
           "type_error": 192,
           "host_import_leak": 179,
@@ -1997,8 +1997,8 @@
         "by_edition": {
           "ES2024": 57,
           "ES2015": 103,
-          "ES2023": 89,
           "ES2022": 274,
+          "ES2023": 89,
           "ES2020": 246,
           "Unclassified (untagged)": 546,
           "ES2026": 115,
@@ -2010,18 +2010,18 @@
           "ES2025": 4
         },
         "sample_files": [
-          "test/built-ins/TypedArrayConstructors/internals/DefineOwnProperty/detached-buffer.js",
           "test/built-ins/TypedArrayConstructors/internals/Set/BigInt/null-tobigint.js",
+          "test/built-ins/TypedArrayConstructors/internals/DefineOwnProperty/detached-buffer.js",
           "test/built-ins/TypedArrayConstructors/internals/Set/key-is-in-bounds-receiver-is-not-typed-array.js",
-          "test/built-ins/TypedArray/prototype/with/negative-index-resize-to-out-of-bounds.js",
-          "test/built-ins/TypedArray/prototype/at/index-non-numeric-argument-tointeger-invalid.js"
+          "test/built-ins/TypedArray/prototype/at/index-non-numeric-argument-tointeger-invalid.js",
+          "test/built-ins/TypedArray/prototype/with/negative-index-resize-to-out-of-bounds.js"
         ],
         "sample_signatures": [
-          "null_deref:dereferencing a null pointer [in __closure_140() ← testWithAllTypedArrayConstructors ← __fn_tramp_testWithAllTypedArrayConstructors_cached ← __call_fn_method_4]",
           "assertion_fail:Test262Error: Expected a TypeError to be thrown but no exception was thrown at all (Testing with BigInt64Array and makeArray.)",
+          "null_deref:dereferencing a null pointer [in __closure_140() ← testWithAllTypedArrayConstructors ← __fn_tramp_testWithAllTypedArrayConstructors_cached ← __call_fn_method_4]",
           "assertion_fail:Test262Error: value assigned to receiver[#] Expected SameValue(«[object Object]», «[object Object]») to be true",
-          "assertion_fail:Test262Error: Expected a RangeError to be thrown but no exception was thrown at all (Testing with Float64Array and makeArray.)",
-          "assertion_fail:Test262Error: Expected a TypeError to be thrown but no exception was thrown at all (Testing with Float64Array and makeArray.)"
+          "assertion_fail:Test262Error: Expected a TypeError to be thrown but no exception was thrown at all (Testing with Float64Array and makeArray.)",
+          "assertion_fail:Test262Error: Expected a RangeError to be thrown but no exception was thrown at all (Testing with Float64Array and makeArray.)"
         ]
       },
       {
@@ -2808,7 +2808,7 @@
           "assertion_fail:Test262Error: Expected true but got false",
           "other:[object WebAssembly.Exception]",
           "type_error:TypeError: Cannot convert undefined or null to object",
-          "other:L#:## ':' expected.; L#:## '=>' expected.; L#:## Declaration or statement expected.; L#:## Declaration or statement expected.; L#:## Declaration or statement expected."
+          "other:L#:## Unexpected keyword or identifier.; L#:## Identifier expected.; L#:## Unexpected keyword or identifier.; L#:## Identifier expected.; L#:## Unexpected keyword or identifier.; L#:## Identifier expected.; L#:## Unexpected keyword or ident"
         ]
       },
       {
@@ -2911,8 +2911,8 @@
         "sample_files": [
           "test/language/identifiers/part-unicode-16.0.0-escaped.js",
           "test/language/identifiers/start-unicode-17.0.0-class.js",
-          "test/language/identifiers/start-unicode-16.0.0-escaped.js",
           "test/language/identifiers/part-unicode-17.0.0-class.js",
+          "test/language/identifiers/start-unicode-16.0.0-escaped.js",
           "test/language/identifiers/start-unicode-17.0.0.js"
         ],
         "sample_signatures": [
