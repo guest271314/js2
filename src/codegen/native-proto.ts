@@ -32,6 +32,16 @@
 
 import { buildNativePrototypeType } from "../runtime/wasmgc/values/prototype-layouts.js";
 import { buildPrototypeSingletonRead } from "../runtime/wasmgc/values/prototype-singleton-bodies.js";
+import {
+  buildPrototypeSeedAccessorTail,
+  buildPrototypeSeedDataPropertyTail,
+  buildPrototypeSeedDataTail,
+  buildPrototypeSeedMemberTail,
+  buildPrototypeSeedNumberValue,
+  buildPrototypeSeedReceiver,
+  buildPrototypeSeedSymbolKey,
+  PROTOTYPE_SEED_FLAGS,
+} from "../runtime/wasmgc/values/prototype-seeder-bodies.js";
 import type { Instr, ValType } from "../ir/types.js";
 import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3b) stable-regime minting
 import type { CodegenContext, FunctionContext } from "./context/types.js";
@@ -579,35 +589,7 @@ export function seededNativeProtoSymbolMembersByBrand(ctx: CodegenContext): Read
   return out;
 }
 
-/**
- * §17 attributes for a builtin prototype METHOD, in the
- * `__defineProperty_value` host flag encoding: `{writable: true, enumerable:
- * false, configurable: true}` — value bits `0b101` + all three "specified"
- * bits + hasValue. This is the exact constant `emitBuiltinNamespaceObject`
- * (builtin-static-globals.ts) uses for builtin statics; kept as one shared
- * spelling rather than re-derived, since the two tables describe the same
- * §17 rule.
- */
-const PROTO_METHOD_DEFINE_FLAGS = 0xbd;
-
-/** §17 attributes for an intrinsic `Symbol.toStringTag` data property. */
-const PROTO_SYMBOL_TAG_DEFINE_FLAGS = 0xbc;
-
-/**
- * (#5194 step 1) Attributes for a prototype's own numeric CONSTANT —
- * `<View>.prototype.BYTES_PER_ELEMENT` (§23.2.7.1) is the only one today, and
- * unlike a §17 method it is `{writable:false, enumerable:false,
- * configurable:false}`. Same encoding as `PROTO_METHOD_DEFINE_FLAGS` with the
- * writable (bit 0) and configurable (bit 2) value bits cleared.
- */
-const PROTO_CONST_DEFINE_FLAGS = 0xb8;
-
-/** §17 accessor attributes in `__defineProperty_accessor`'s flag encoding. */
-const PROTO_ACCESSOR_DEFINE_FLAGS = (1 << 4) | (1 << 5) | (1 << 2);
-
-// Accessors use `__defineProperty_accessor`'s SEPARATE `computeRuntimeFlags`
-// word, not the value encoding above. Same constant as `ACCESSOR_FLAGS` in
-// class-proto-accessors.ts.
+// Descriptor attribute words are shared with the pure prototype seeder recipes.
 
 /**
  * (#2175 V2-S3b-1) Ensure a `__nativeproto_seed_<brand>(externref companion)`
@@ -700,7 +682,7 @@ export function ensureNativeProtoCompanionSeeder(ctx: CodegenContext, brand: num
   // Emitted before the member loop so the carrier's own late imports, if any,
   // shift `__defineProperty_value` before the loop bakes it.
   let installed = 0;
-  if (pushCompanionConstructorSeed(ctx, seedFctx, glue.name, PROTO_METHOD_DEFINE_FLAGS)) {
+  if (pushCompanionConstructorSeed(ctx, seedFctx, glue.name, PROTOTYPE_SEED_FLAGS.method)) {
     installed = 1;
     nativeProtoSeededConstructorBrands(ctx).add(brand);
   }
@@ -739,33 +721,16 @@ export function ensureNativeProtoCompanionSeeder(ctx: CodegenContext, brand: num
       const symbolId = Number(member.slice(2));
       const boxSymbolIdx = ctx.funcMap.get("__box_symbol");
       if (!Number.isInteger(symbolId) || boxSymbolIdx === undefined) continue;
-      body.push({ op: "local.get", index: 0 });
-      body.push({ op: "i32.const", value: symbolId }, { op: "call", funcIdx: boxSymbolIdx });
+      body.push(...buildPrototypeSeedReceiver());
+      body.push(...buildPrototypeSeedSymbolKey(symbolId, boxSymbolIdx));
     } else {
-      body.push({ op: "local.get", index: 0 });
+      body.push(...buildPrototypeSeedReceiver());
       addStringConstantGlobal(ctx, member);
-      for (const instr of stringConstantExternrefInstrs(ctx, member)) body.push(instr);
+      body.push(...stringConstantExternrefInstrs(ctx, member));
     }
 
     for (const instr of pushBuiltinFnSingletonValueInstrs(ctx, closure)) body.push(instr);
-    body.push({ op: "extern.convert_any" });
-    if (kind === "getter") {
-      // [obj, key, getter, null-setter, flags] → §17 accessor entry.
-      body.push({ op: "ref.null.extern" });
-      body.push({ op: "f64.const", value: PROTO_ACCESSOR_DEFINE_FLAGS });
-      body.push({ op: "call", funcIdx: defineIdx });
-    } else {
-      // [obj, key, value, flags] → §17 data entry.
-      // `<X>.prototype[Symbol.toPrimitive]` is the one native-proto method
-      // whose initial descriptor is read-only — for Symbol (§20.4.3.5) and
-      // (#5156) for Date (§21.4.4.45) alike. Keep its configurable bit so the
-      // companion still observes replacement/deletion exactly like the spec,
-      // while every ordinary method retains the historical flags.
-      const defineFlags = member === "@@3" ? PROTO_SYMBOL_TAG_DEFINE_FLAGS : PROTO_METHOD_DEFINE_FLAGS;
-      body.push({ op: "f64.const", value: defineFlags });
-      body.push({ op: "call", funcIdx: defineIdx });
-    }
-    body.push({ op: "drop" }); // the helper returns the target
+    body.push(...buildPrototypeSeedMemberTail(member, kind, defineIdx));
     installed++;
   }
 
@@ -780,20 +745,16 @@ export function ensureNativeProtoCompanionSeeder(ctx: CodegenContext, brand: num
     const boxNumberIdx = typeof value === "number" ? ctx.funcMap.get("__box_number") : undefined;
     if (typeof value === "number" && boxNumberIdx === undefined) continue;
     const body = seedFctx.body;
-    body.push({ op: "local.get", index: 0 });
+    body.push(...buildPrototypeSeedReceiver());
     addStringConstantGlobal(ctx, key);
-    for (const instr of stringConstantExternrefInstrs(ctx, key)) body.push(instr);
+    body.push(...stringConstantExternrefInstrs(ctx, key));
     if (typeof value === "number") {
-      body.push({ op: "f64.const", value }, { op: "call", funcIdx: boxNumberIdx! });
+      body.push(...buildPrototypeSeedNumberValue(value, boxNumberIdx!));
     } else {
       addStringConstantGlobal(ctx, value);
-      for (const instr of stringConstantExternrefInstrs(ctx, value)) body.push(instr);
+      body.push(...stringConstantExternrefInstrs(ctx, value));
     }
-    body.push({
-      op: "f64.const",
-      value: typeof value === "number" ? PROTO_CONST_DEFINE_FLAGS : PROTO_METHOD_DEFINE_FLAGS,
-    });
-    body.push({ op: "call", funcIdx: defineIdx }, { op: "drop" });
+    body.push(...buildPrototypeSeedDataPropertyTail(typeof value === "number" ? "number" : "string", defineIdx));
     installed++;
   }
 
@@ -809,15 +770,14 @@ export function ensureNativeProtoCompanionSeeder(ctx: CodegenContext, brand: num
     const setter = ensureStandaloneNativeMethodClosure(ctx, brand, set, "method");
     if (!getter || !setter) continue;
     const body = seedFctx.body;
-    body.push({ op: "local.get", index: 0 });
+    body.push(...buildPrototypeSeedReceiver());
     addStringConstantGlobal(ctx, key);
     for (const instr of stringConstantExternrefInstrs(ctx, key)) body.push(instr);
     for (const instr of pushBuiltinFnSingletonValueInstrs(ctx, getter)) body.push(instr);
     body.push({ op: "extern.convert_any" });
     for (const instr of pushBuiltinFnSingletonValueInstrs(ctx, setter)) body.push(instr);
     body.push({ op: "extern.convert_any" });
-    body.push({ op: "f64.const", value: PROTO_ACCESSOR_DEFINE_FLAGS });
-    body.push({ op: "call", funcIdx: defineIdx }, { op: "drop" });
+    body.push(...buildPrototypeSeedAccessorTail(defineIdx));
     installed++;
   }
 
@@ -834,12 +794,11 @@ export function ensureNativeProtoCompanionSeeder(ctx: CodegenContext, brand: num
     const defineIdx = ctx.funcMap.get("__defineProperty_value") ?? defineValueIdx;
     if (boxSymbolIdx !== undefined && defineIdx !== undefined) {
       const body = seedFctx.body;
-      body.push({ op: "local.get", index: 0 });
-      body.push({ op: "i32.const", value: 4 }, { op: "call", funcIdx: boxSymbolIdx });
+      body.push(...buildPrototypeSeedReceiver());
+      body.push(...buildPrototypeSeedSymbolKey(4, boxSymbolIdx));
       addStringConstantGlobal(ctx, glue.symbolTag);
       body.push(...stringConstantExternrefInstrs(ctx, glue.symbolTag));
-      body.push({ op: "f64.const", value: PROTO_SYMBOL_TAG_DEFINE_FLAGS });
-      body.push({ op: "call", funcIdx: defineIdx }, { op: "drop" });
+      body.push(...buildPrototypeSeedDataTail(defineIdx, PROTOTYPE_SEED_FLAGS.symbolTag));
       installed++;
     }
   }

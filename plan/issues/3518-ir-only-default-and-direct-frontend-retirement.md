@@ -13822,3 +13822,265 @@ Final corrected historical cohort passed918/918 across10 full files, including b
 Base: signed `89f9f3d71941f51a0567ea0400c77beae8164b6c`. Implement only a backend owner for the existing `buildNativePrototypeType` six mutable fields. Declare a frozen symbolic recipe, reserve through the canonical physical ledger, and authenticate exact requirements/plan/pack/token identities and current physical shape on every read. Add real Wasm construction, mutation and read controls for every field plus phase/foreign/copied/stale/substituted negatives. Add one backend inventory entry without changing historical evidence or allowances. No legacy source changes. Singleton, constructors, members, seeders and public Get remain pending; layout authority does not attest executable providers. No tests or hooks until the lead assigns the runtime lane.
 
 Validation: first frozen run handle38251 completed exit0: source TS7 passed; all17 native prototype layout rows and349 unchanged semantic-provider boundary rows passed (366/366), all1,747 inputs unchanged. Gates handle15218 completed exit0 with8/8 checks and1,744 unchanged inputs. Both runner and Vitest process were verified nice10, single4GB/EH fork. Evidence: worktree-local `.tmp/prototype-layout/{first,gates}`. Normal hooks/signing have not run; checkpoint awaits lead review. These results attest layout declaration/reservation/currentness and actual six-field Wasm mutation only, not public Get or completed prototype providers.
+
+
+## 2026-09-27 B: actual prototype companion seeder recipe plan
+
+Parent authorized a new isolated branch from signed descriptor checkpoint
+`d55fba79f766e52d66a0b214fdc65ebf93c460bb`. The original descriptor worktree
+stays clean. This step owns pure instruction construction for the real legacy
+prototype companion seeders, not public Get admission or a complete native
+prototype provider. No tests, typecheck or hooks run before the shared lane is
+granted.
+
+The exact donor seams are `ensureNativeProtoCompanionSeeder` in
+`src/codegen/native-proto.ts` (lines 688–911 at this commit) and
+`pushCompanionConstructorSeed` in `src/codegen/builtin-proto-constructor-seed.ts`
+(lines 83–113). Full source Git blobs, full SHA-256 hashes, selected offsets and
+selected hashes are recorded before edits in this branch's ignored donor
+receipt preparation. A fixed checked-in receipt will preserve these donors and
+the relevant attribute constants without replacing complete current files.
+
+Owned new paths for the first pure-body stage:
+
+- `src/runtime/wasmgc/values/prototype-seeder-bodies.ts`;
+- `tests/helpers/prototype-seeder-donor.ts`;
+- `tests/fixtures/issue-3518-prototype-seeder-donor.json`;
+- `tests/issue-3518-prototype-seeder-bodies.test.ts`;
+- this issue append only among existing tracked files.
+
+The reviewer currently owns the upper layout/lazy-singleton extraction in
+`native-proto.ts`. Neither that file nor the constructor adapter is edited in
+this first stage. Root will coordinate the exact lower adapter hunks after its
+singleton checkpoint. Any later adapter wiring gets a separate authenticated
+ordered inverse/replay receipt and the existing historical checks stay intact.
+
+The pure input is an ordered list of resolved seed entries: constructor,
+string/symbol method, getter-only member, string/numeric data member, paired
+accessor and Symbol.toStringTag. Keys and values carry explicit operand data
+for existing literal and identity-stable callable/constructor values, plus the
+real numeric/Symbol boxing and descriptor function indices. The body builders
+receive no CodegenContext, AST, callback or fabricated resource authority.
+Their operand graphs are deeply copied per occurrence. A complete ordered body
+builder shares the same per-entry construction used by the eventual adapter.
+Small staged operand/tail builders preserve the original places at which the
+legacy adapter appends instructions and acquires each resource.
+
+Compiler planning stays in the adapter: standalone/member-dirty/TypedArray
+admission, pending seeder registration, recursion guard, live glue callbacks,
+Date.toGMTString and cross-brand alias selection, closure generation, refusal
+and partial-build handling, lazy callable singleton/global acquisition,
+constructor carrier selection/coercion/late-shift flush, and final function
+registration. The acquisition trace must retain the donor sequence rather than
+resolve every function/type/literal early. Constructor installation remains
+first; the original member, data, paired-accessor and tag order remains exact.
+The constructor's live descriptor target is captured after its existing flush.
+The other families retain their own original capture points even where a later
+helper may mutate the function map.
+
+Flags stay exact: ordinary methods/constructors/string data 0xbd, numeric
+constants 0xb8, Symbol.toStringTag and exactly the @@3 method spelling 0xbc,
+and accessor flags 0x34. The seeder's descriptor calls return the target and
+are followed by drop. The current native descriptor owner's public void
+wrappers are not interchangeable with that internal ABI; native integration
+needs an authenticated accessor to the actual internal descriptor reservation
+or a separately proven adapter. Controlled test imports are only observers.
+
+Planned controls compare all selected pure instruction definitions with the
+fixed donor, exercise each family and ordered mixtures, preserve exact flags,
+constructor and method singleton identity, skip/decline branches, aliases and
+symbol keys, and detect nested operand sharing. A donor acquisition harness
+will perturb function/type handles at the actual acquisition points, including
+a constructor flush and Symbol acquisition. Emitted-Wasm observer controls will
+record each real descriptor invocation and resulting values in order, alongside
+positive mutations which remove or alter a seed. Once adapters may be wired,
+whole-source reciprocal reconstruction and actual unchanged legacy prototype
+behavior suites are required; pure recipe tests alone do not establish legacy
+execution equivalence.
+
+The legacy code still deliberately supports partial seeding and refusal-body
+method values. Preserving those bytes does not certify a complete native brand.
+A future issued prototype pack must account for every demanded constructor,
+method body, accessor half, tag, alias, parent and singleton dependency and must
+refuse missing obligations explicitly. No empty table, missing seeder, partial
+brand or status-2 implicit prototype result becomes successful absence.
+
+The first code-only draft now contains the pure entry/fragment builders, an
+immutable two-source donor receipt with seven precise proposed adapter spans,
+and a proposed 53-case focused suite. The receipt status explicitly says that
+the legacy adapter is not installed; no production codegen file changed. The
+helpers compare the staged candidate against the actual fixed donor, including
+constructor flushes and changing live handles, while separate emitted-Wasm
+controls use labelled descriptor observers. These observers confer no native
+provider authority. Scoped formatting, lint and diff whitespace checks pass;
+typechecking and all runtime tests remain unrun pending the shared-lane grant.
+
+## 2026-09-27 B: authenticated seeder descriptor binding
+
+The preserved five-file draft was ported to an isolated worktree at signed
+`a6c6ca690422be5b42279f361a8f27f8743766d2`. Its four new source/test/receipt
+files retain their exact prior SHA-256 hashes; only the earlier issue append
+was appended to the current issue, preserving root's later evidence. Port
+receipts remain in the worktree-local ignored evidence directory.
+
+The apparent descriptor ABI blocker is resolved by the existing
+`nativeObjectDescriptorReservationInventory`: it authenticates the original
+descriptor pack and dependency object and exposes the actual internal
+data-body/accessor-body reservations at indices 0/1. Their signatures return
+the target, and canonical completion authenticates all five descriptor bodies
+and their real dependencies. No new descriptor accessor, public-void wrapper
+adapter, raw-handle grant or duplicate reservation is required.
+
+Own the new `src/backend/wasmgc/resources/native-prototype-seeder-bindings.ts`
+and `tests/issue-3518-native-prototype-seeder-bindings.test.ts`, plus a focused
+test helper if the actual-Wasm construction needs one. The binding joins an
+issued, current prototype requirement to the descriptor owner's exact access
+identity and same physical ledger before emitting any descriptor-call tail.
+It retains every prototype gap. Private ownership records reject copied or
+foreign packs, changed dependencies and changed descriptors. Tail emission
+requires real descriptor completion, reuses the preserved pure tail recipes,
+and retains the return-target/drop ABI and exact attribute encodings.
+
+This is explicitly descriptor-binding scope. It reserves no seeder function
+and cannot certify a whole prototype: authentic constructor/member singleton
+and executable-provider owners are still missing. In particular, the three
+refusal member paths and unseeded `__proto__` accessor recorded above remain
+unresolved. Arbitrary instruction operands, caller-written descriptor records,
+matching function signatures and controlled observer callbacks confer no
+provider authority. Do not manufacture source descriptor demands for builtin
+members or make an empty companion successful.
+
+New tests will derive the binding from the unchanged genuine getter source,
+pair positive ownership/completion checks with copied, foreign, stale and
+wrong-access negatives, and execute descriptor-call tails against the actual
+completed native descriptor graph with no host imports. Runtime observer
+wrappers inspect stored values, flags, order and accessor halves; they do not
+claim builtin callable ownership. Existing donor fixture hashes remain fixed.
+No native-proto adapter or shared metadata file is changed until root's signed
+singleton integration; no heavy validation runs before the lane is granted.
+
+The binding candidate now adds a proposed 33-case suite: genuine reservation
+and completion positives, retained source/owner identity controls, completed
+data/accessor body mutation refusals, and explicit same-signature foreign-ledger
+token refusals. The cloned-source mutation control is issuer-currentness only;
+it does not claim a previously bound cloned descriptor graph. Runtime wrappers
+use actual native descriptor bodies and reject an omitted return-target drop.
+Scoped formatting, six-file lint and diff whitespace checks pass. The original
+four donor/recipe/test files retain their prior hashes. Neither the proposed
+53 old draft cases nor these 33 new cases has run in this candidate yet.
+
+## 2026-09-27 B: compose the seeder adapter with signed singleton recipes
+
+The eight-file descriptor-binding candidate remains frozen in its a6c6 tree.
+A separate port starts from signed `637a810dc268bb7aa516aaffd08c0f72379d7c43`,
+which integrates the cfe singleton checkpoint. All seven new files were copied
+only after checking the frozen hashes, and only the issue suffix was appended.
+
+Apply the seven already recorded lower-seeder construction replacements in
+`src/codegen/native-proto.ts` and `src/codegen/builtin-proto-constructor-seed.ts`,
+with explicit recipe imports. Keep all compiler planning, resource acquisition,
+recursion and pending-demand branches at their original positions. The current
+singleton adapter and its recipes remain exact. Verify the parent Git blobs
+before edits and record exact ordered spans, source hashes and reciprocal replay
+in a new outer seeder-extraction receipt. Neither older donor receipt changes.
+
+The new inverse runs before the existing singleton inverse for that historical
+reader. The original seeder donor reader similarly reconstructs only these
+declared changes; actual current adapter functions also execute in the donor
+acquisition harness, so historical reconstruction is not the runtime evidence.
+Deferred literal operands must preserve instruction identity where the compiler
+can subsequently patch them. Add identity/order observations, current-source
+corruption controls and real legacy prototype execution to the focused suite.
+
+Own the two adapter files, new seeder-extraction helper/receipt/test, minimal
+joins in the existing donor/singleton test helpers, and the two source inventory
+rows with their boundary-test entries. Preserve the base native floor 80 and
+backend floor 35, adding only these two classified modules. The descriptor
+binding still grants no constructor/member implementation or full prototype
+completion. Heavy validation waits for root's explicit shared-lane grant.
+
+The actual adapter uses eleven authenticated spans: eight in native-proto and
+three in constructor seeding, including imports and moved flag declarations.
+Its new receipt pins native-proto parent blob `fd892b096eb3d98166971f5225cd67ddfd4f55a4`
+and constructor-seed blob `d6fc988ad8018016ec6e2cb90e2801238e3e8ee3`.
+Independent static replay reconstructs both exact Git parent files and returns
+both current files; the old seeder and singleton receipts and singleton recipe
+hashes are unchanged. The original candidate's literal-copy proposal remains
+in its historical receipt. The installed adapter instead retains borrowed
+nodes directly and calls an operand-free member-tail recipe.
+
+The new extraction suite proposes fifty cases, including twenty-five actual
+adapter/donor acquisition scenarios, later mutation of borrowed instruction
+nodes, and a removed-tail observation. Twelve-file lint and scoped formatting
+pass. Runtime and TS7 remain unmeasured; the first requested cohort will include
+both new seeder suites, the installed-adapter suite, both unchanged singleton
+suites, the unchanged seven-case flowing-prototype legacy suite, and boundary
+preservation. Native provider and whole-prototype gaps remain as recorded.
+
+## 2026-09-27 B: first seeder measurement and bounded batch construction
+
+The first frozen seven-file run completed TS7 successfully and measured
+515/519 tests, with all 2,187 input pins unchanged and no unhandled errors.
+The original donor 53/53, installed extraction 50/50, singleton 27/27,
+flowing-prototype legacy 7/7, and boundary 349/349 suites passed. The new
+descriptor-binding suite measured 29/33: four rows exceeded the unchanged
+35-second limit. Full first-run sources, reports and failure rows remain in
+the validation1 artifact directory. The initially refused nice request was
+recorded and corrected to priority 10 on the same verified processes; no run
+was restarted or stopped.
+
+The two genuine module materializations took 36.8 and 47.1 seconds; the drop
+control rebuilt two modules and took 83.2 seconds. Foreign-token rows each
+rebuilt two fully completed descriptor graphs, taking 32.8 and 38.0 seconds.
+Each module requested eight tails separately. Every tail repeated reservation
+and completion dependency checks, which repeatedly call the ledger's complete
+body snapshot verification. A one-second native stack sample showed recursive
+JavaScript serialization/Set work; it did not identify a named JavaScript
+function, so the source call chain, not the sample alone, attributes the work.
+
+Add a synchronous batch-tail API in the existing binding leaf. Copy the entire
+dense batch into owned primitive construction records before authenticating
+requirements, dependencies and real descriptor completion. Reject accessors
+and unsafe shapes. Build all tails from the copied records, without later
+caller callbacks or cached authority. The existing single-tail entry delegates
+a one-row batch and retains its current ownership and completion checks.
+Neither the ledger nor its mutation checks change.
+
+Keep all 33 original test names and assertions. Add separate bounded positive
+rows for the two real completed graphs shared only by read-only foreign-token
+controls, with before/after module comparisons and all post-refusal positives.
+The two real module rows now use one eight-family batch. Reuse only their
+private frozen valid bytes for the drop positive; the missing-drop negative
+still materializes an actual malformed module. Add plain-copy acceptance,
+accessor/unsafe-data refusal, selection-time body mutation, next-call dependency
+mutation, independent output arrays, and both accessor families at zero offset.
+Own-property pollution controls cover inherited kind, member and descriptor
+value fields. The proposed binding denominator is 49, and the complete
+seven-file denominator is 535. Test timeouts and assertions remain unchanged; no result is claimed
+before a new granted run.
+
+Validation2 stopped at TS7 with one mapped-array descriptor typing error:
+`Object.getOwnPropertyDescriptors(array).length` was inferred as a number.
+No test ran, and all 2,188 pins remained unchanged. Its complete candidate and
+logs are retained. Passing the already validated array as `object` requests
+the ordinary descriptor-map type; this one-line annotation changes no emitted
+JavaScript, construction order, runtime check, assertion or timeout. A new
+frozen attempt will rerun TS7 before the complete 535-row cohort.
+
+The preserved 637a candidate subsequently passed TS7 and all 535/535 tests
+across the exact seven-file cohort, with 2,188 unchanged input pins, no suite
+errors and no unhandled errors. The binding suite passed 49/49 (all 33 original
+rows plus 16 additions). Genuine module materialization rows took 10.25 and
+11.27 seconds, and the missing-drop control took 9.24 seconds; all remain within
+the unchanged 35-second limit. These are observed run timings, not a controlled
+performance benchmark. The original 515/519 result and the intervening TS7
+typing failure remain preserved in the donor worktree.
+
+Delivery starts in a separate worktree at signed
+`532bbc79de13b9e334d7a4983496d35f98469035`. Thirteen nonshared owned files retain
+the tested bytes. Only this issue append, the two new inventory entries/floors
+(backend 37, native runtime 82), and their two boundary-test entries compose
+with the existing layout and own-property checkpoints. Original activation
+history, dependency edges, donor receipts and signature checks remain intact.
+Combined-base gates and full normal signed hooks remain pending their own
+measured runs; no legacy retirement or complete native prototype is claimed.

@@ -265,9 +265,10 @@
         "src/backend/wasmgc/resources/native-bigint.ts",
         "src/backend/wasmgc/resources/native-object-same-value.ts",
         "src/backend/wasmgc/resources/native-object-descriptors.ts",
-        "src/backend/wasmgc/resources/native-prototype-layouts.ts"
+        "src/backend/wasmgc/resources/native-prototype-layouts.ts",
+        "src/backend/wasmgc/resources/native-prototype-seeder-bindings.ts"
       ],
-      "minModules": 36
+      "minModules": 37
     },
     {
       "id": "native-runtime",
@@ -356,9 +357,10 @@
         "src/runtime/wasmgc/values/ordinary-object-descriptor-definitions.ts",
         "src/runtime/wasmgc/values/prototype-layouts.ts",
         "src/runtime/wasmgc/values/prototype-singleton-bodies.ts",
-        "src/runtime/wasmgc/values/own-property-bodies.ts"
+        "src/runtime/wasmgc/values/own-property-bodies.ts",
+        "src/runtime/wasmgc/values/prototype-seeder-bodies.ts"
       ],
-      "minModules": 81
+      "minModules": 82
     },
     {
       "id": "standalone-platform",
@@ -13895,6 +13897,16 @@
       "path": "src/backend/wasmgc/resources/native-prototype-layouts.ts",
       "state": "clean",
       "layer": "backend-wasmgc"
+    },
+    {
+      "path": "src/backend/wasmgc/resources/native-prototype-seeder-bindings.ts",
+      "state": "clean",
+      "layer": "backend-wasmgc"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/prototype-seeder-bodies.ts",
+      "state": "clean",
+      "layer": "native-runtime"
     }
   ]
 }

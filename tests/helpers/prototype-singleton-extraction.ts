@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { applyPrototypeSeederExtraction } from "./prototype-seeder-extraction.js";
 const read = (path: string) => readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 export const prototypeSingletonReceiptPath = "tests/fixtures/issue-3518-prototype-singleton-extraction.json";
@@ -21,7 +22,7 @@ export function prototypeSingletonReceipt(reader = read) {
   return receipt;
 }
 /** Outer extraction normalization; callers still enforce every historical hash. */
-export function applyPrototypeSingletonExtraction(source: string, inverse: boolean, reader = read): string {
+function applyOriginalPrototypeSingletonExtraction(source: string, inverse: boolean, reader = read): string {
   const receipt = prototypeSingletonReceipt(reader);
   if (sha(source) !== (inverse ? receipt.afterSha256 : receipt.baseSha256))
     throw new Error("prototype singleton source mismatch");
@@ -38,4 +39,21 @@ export function applyPrototypeSingletonExtraction(source: string, inverse: boole
   if (sha(source) !== (inverse ? receipt.baseSha256 : receipt.afterSha256))
     throw new Error("prototype singleton result mismatch");
   return source;
+}
+
+/** Compose the later lower-seeder extraction around the unchanged singleton proof. */
+export function applyPrototypeSingletonExtraction(source: string, inverse: boolean, reader = read): string {
+  const path = "src/codegen/native-proto.ts";
+  return inverse
+    ? applyOriginalPrototypeSingletonExtraction(
+        applyPrototypeSeederExtraction(path, source, true, reader),
+        true,
+        reader,
+      )
+    : applyPrototypeSeederExtraction(
+        path,
+        applyOriginalPrototypeSingletonExtraction(source, false, reader),
+        false,
+        reader,
+      );
 }

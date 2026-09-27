@@ -906,6 +906,7 @@ describe("semantic verification and provider ownership boundary", () => {
           "src/backend/wasmgc/resources/native-object-same-value.ts",
           "src/backend/wasmgc/resources/native-object-descriptors.ts",
           "src/backend/wasmgc/resources/native-prototype-layouts.ts",
+          "src/backend/wasmgc/resources/native-prototype-seeder-bindings.ts",
         );
       if (id === "native-runtime")
         additions.push(
@@ -916,6 +917,7 @@ describe("semantic verification and provider ownership boundary", () => {
           "src/runtime/wasmgc/values/prototype-layouts.ts",
           "src/runtime/wasmgc/values/prototype-singleton-bodies.ts",
           "src/runtime/wasmgc/values/own-property-bodies.ts",
+          "src/runtime/wasmgc/values/prototype-seeder-bodies.ts",
         );
       if (id === "runtime-contracts")
         additions.push("src/runtime/contracts/builtin-brands.ts", "src/runtime/contracts/collection-kind.ts");
