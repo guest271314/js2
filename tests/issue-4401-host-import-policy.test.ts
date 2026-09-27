@@ -83,17 +83,38 @@ describe("#4401 host import policy inventory", () => {
       }
     `;
 
+    // (#5385 S5) Under the native regime — the default for native-first in a JS
+    // environment — this source lowers on the native Promise provider and
+    // publishes with zero legacy/unknown imports.
     const native = await compile(source, {
-      fileName: "issue-4401-native-first-refusal.ts",
+      fileName: "issue-4401-native-first-regime.ts",
       semanticProviders: "native-first",
     });
-    expect(native.success).toBe(false);
-    expect(native.binary).toHaveLength(0);
-    const diagnostic = native.errors.map((error) => error.message).join("; ");
-    expect(diagnostic).toContain("Native-first semantic-provider policy rejected");
-    expect(diagnostic).toContain("env::__new_Promise (legacy-semantic");
-    expect(diagnostic).toContain("env::__tag_user_class (unknown");
-    expect(diagnostic).not.toContain("FileSystemDirectoryHandle_resolve");
+    expect(native.success, native.errors.map((error) => error.message).join("; ")).toBe(true);
+    expect(native.hostImportSummary?.byClassification["legacy-semantic"]).toBe(0);
+    expect(native.hostImportSummary?.byClassification.unknown).toBe(0);
+
+    // The kill switch restores the pre-regime per-family reroute, where the
+    // same source is refused BEFORE publication rather than silently recovering
+    // the host Promise semantic fallback.
+    const previous = process.env.JS2WASM_NATIVE_REGIME_JS;
+    process.env.JS2WASM_NATIVE_REGIME_JS = "0";
+    try {
+      const refused = await compile(source, {
+        fileName: "issue-4401-native-first-refusal.ts",
+        semanticProviders: "native-first",
+      });
+      expect(refused.success).toBe(false);
+      expect(refused.binary).toHaveLength(0);
+      const diagnostic = refused.errors.map((error) => error.message).join("; ");
+      expect(diagnostic).toContain("Native-first semantic-provider policy rejected");
+      expect(diagnostic).toContain("env::__new_Promise (legacy-semantic");
+      expect(diagnostic).toContain("env::__tag_user_class (unknown");
+      expect(diagnostic).not.toContain("FileSystemDirectoryHandle_resolve");
+    } finally {
+      if (previous === undefined) Reflect.deleteProperty(process.env, "JS2WASM_NATIVE_REGIME_JS");
+      else process.env.JS2WASM_NATIVE_REGIME_JS = previous;
+    }
 
     const compatibility = await compile(source, {
       fileName: "issue-4401-compatibility-promise-subclass.ts",
