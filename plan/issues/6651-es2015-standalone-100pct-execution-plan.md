@@ -209,6 +209,28 @@ loc-budget-allow:
   #     `nativeProtoBrandForInterface` lookup declined — and the rationale for
   #     admitting a member has to sit beside the members already admitted or the
   #     next lane cannot tell an enumerated ladder from an open family.
+  # 2026-09-27 — lane B18 (`.name` folded from the `PropertyDescriptor` slot a
+  # function was read out of; receipt at the end of this file).
+  # `src/codegen/property-access-dispatch.ts` +57 (path already listed below,
+  # restated here per the stranded-grant rule), of which 45 are comment and the
+  # function that carries the §20.2.4.2 `.name` peephole — `tryLengthAndNameReads`,
+  # which has ZERO func-budget headroom — is net **+0**. Both new functions are
+  # module-level: `symbolIsPropertyDescriptorAccessorSlot` (the predicate) and
+  # `nameFoldTypeSymbolIsDeclarationArtefact` (which now names the ENUMERATED set
+  # of type symbols whose name is a declaration artefact rather than the
+  # function's — TypeScript's `__computed` placeholder from #5149 cluster B, which
+  # the peephole already declined inline, plus this descriptor slot). Folding the
+  # pre-existing `__computed` test into that helper is what makes the call site a
+  # 1-for-1 line replacement instead of a prettier-split four-line condition, and
+  # it is also where the set belongs: two decline conditions for one reason read
+  # as a rule, two inline `||`s read as an accident.
+  # Most of the comment is the DISPROOF, and it is the deliverable as much as the
+  # fix: the recorded diagnosis for this row blamed a runtime gOPD synthesising an
+  # anonymous getter, split by static vs parameter RECEIVER. Measured 2026-09-27,
+  # both halves are wrong — a STATIC receiver under the same guard was equally
+  # wrong, a PARAMETER receiver without a guard was already right, and the two
+  # descriptor reads answer the identical function object. Written anywhere but
+  # beside the predicate, the next lane re-derives it.
   # 2026-09-26 — lane GEN1 (a rest binding inside a nested pattern was given TWO
   # local slots; see the receipt at the end of this file).
   # `src/codegen/destructuring-params.ts` +25 (path already listed below,
@@ -15210,3 +15232,224 @@ one pass.
 **Note for the next lane in this file:** #6175 also touches
 `src/codegen/closure-prototype-edge.ts`, which the VR1/SP1 pair extends by +157,
 so those two conflict there.
+---
+
+## Lane B18 receipt — three residuals: one fixed, two disproved (2026-09-27)
+
+**1 row fixed on BOTH targets (ES2015-tagged). 2 targets dropped after
+measurement, both because the recorded cause was wrong — not because the fix was
+hard.** Of the three hypotheses handed to this lane, exactly one survived contact
+with a probe, and the two disproofs are the larger part of the deliverable: both
+named causes would have sent the next lane into work that buys nothing.
+
+| target | recorded hypothesis | verdict |
+| --- | --- | --- |
+| C — `Symbol.species` getter `.name` | runtime gOPD synthesises an anonymous getter; a STATIC receiver reads the name correctly, a PARAMETER receiver does not | **half right, half wrong — FIXED anyway.** The synthesis half is wrong (both spellings return the IDENTICAL function object) and the receiver half is wrong (a static receiver was equally wrong; a parameter receiver without a guard was already right). Real cause: a compile-time `.name` fold publishing a TypeScript DECLARATION SLOT name. |
+| B — `filter/BigInt/speciesctor-get-species-custom-ctor-invocation` | §23.2.3.9 step 9 passes the wrong `count` to the species constructor | **DISPROVED. `count` is correct.** Also not ES2015 (`features: [BigInt, …]` ⇒ `classifyEdition` 2020) and it fails on HOST identically. Needs two BigInt substrate fixes; dropped. |
+| A — property-store sibling of the VR1 evolving-any carrier | `o2.v = ctorThis` fails for the same reason `ctorThis instanceof S` did | **DISPROVED as a sibling.** The `typeof o2.v === "number"` reading is real, but the broken carrier is the DESTINATION, not the source: `var o = {v: 0}; o.v = new S();` — no auto binding anywhere — coerces to f64 just the same. Identical on host. Dropped. |
+
+### Target C — FIXED. §20.2.4.2 `.name` must not be folded from the §6.2.6 descriptor slot a function was read out of
+
+`test/built-ins/Symbol/species/builtin-getter-name.js` (es6id 21.2.4.2 ⇒ ES2015)
+reads, verbatim:
+
+```js
+var getter = Object.getOwnPropertyDescriptor(obj, Symbol.species).get;
+return getter && getter.name;                  // answered "get"
+```
+
+The `.name` peephole in `tryLengthAndNameReads`
+(`src/codegen/property-access-dispatch.ts`, function at `:3009`, the fold's entry
+condition at `:3213`) resolves a function's name from its TYPE SYMBOL. For a value
+read out of a property descriptor that symbol is `PropertyDescriptor.get` — a
+declaration slot in `lib.es5.d.ts` — while §6.2.6 puts whatever function was
+installed in the slot. So the fold published the slot's name.
+
+**Why the recorded diagnosis pointed elsewhere, and how the real discriminator
+was found.** Sixteen spellings were probed on the base tree in one instrumented
+corpus row. Thirteen were already CORRECT, including the two the record said
+should fail (a descriptor read behind a helper taking the constructor as a
+parameter, and a parameter receiver read inline). The three that failed share
+nothing with the receiver:
+
+| spelling | base |
+| --- | --- |
+| `g.name`, `g["name"]`, `(g && g).name`, `(g \|\| g).name`, `(g ? g : g).name`, `(0, g).name`, `{f: g}.f.name`, `[g][0].name`, `f(g)` where `f(x){return x.name}`, `gOPD(g,"name").value`, `g.length` | **correct** |
+| `g && g.name` | **`"get"`** |
+| `g ? g.name : "x"` | **`"get"`** |
+| `d && d.get && d.get.name` | **`"get"`** |
+
+The discriminator is not the receiver and not `&&` — it is whether control flow
+narrowed the slot's `undefined` away AT the `.name` read. `lib.es5.d.ts` declares
+`get?(): any`, so the plain spelling keeps the union `(() => any) | undefined` and
+the fold's own pre-existing UNION exclusion already declined it; a guard narrows
+`g` to the bare signature and the fold fires. `(g && g).name` is correct for the
+same reason in reverse — the joined expression is a union again.
+
+That also explains why four of six spellings looked fine to the earlier reading:
+the defect is invisible except under the one idiom the corpus actually writes.
+
+**Fix** — one decline condition, `src/codegen/property-access-dispatch.ts`:
+`nameFoldTypeSymbolIsDeclarationArtefact` (module level) now names the ENUMERATED
+set of type symbols whose name is an artefact rather than the function's own name:
+TypeScript's `__computed` placeholder (#5149 cluster B, which the peephole already
+declined inline) and, new, a `PropertyDescriptor` `get`/`set` slot
+(`symbolIsPropertyDescriptorAccessorSlot`). Declining costs only the fold; the
+ordinary property read answers from the closure's own `$fnmeta` host-free and
+from `__extern_get(v, "name")` on the JS host.
+
+**Unconditional, not `ctx.standalone`-gated, because the host was wrong in the
+same direction** — measured, not assumed: the base host run answers `"get"` for
+the same three spellings and the row fails there too. One fix, +1 row on each
+axis.
+
+It is not only the builtin getter: a user accessor installed as a NAMED function
+expression (`{ get: function realGet() {} }`) also read back as `"get"` on base
+and now reads `"realGet"`. The anonymous case (`{ get: function () {} }`) answers
+`"get"` on both trees — which is SPEC-CORRECT (§13.2.5.5 NamedEvaluation names it
+after the property key) — and is pinned as a negative control so a later widening
+cannot quietly break it.
+
+### Target B — DISPROVED, and out of scope twice over
+
+The row's failure message on base is `[0] is the new captured length Expected
+SameValue(«0», «2»)`. `count` is not wrong: the captured length really is 0,
+because the filter callback's `v === 42n` never matched. Two independent defects
+under it, both established with instrumented corpus rows:
+
+1. **standalone: a dynamic-receiver BigInt view has no element values.** Through
+   the harness's `TA` parameter, `new TA([40n,42n,42n])` yields `length 3` with
+   every element reading back `0` **as a `number`**, and `d[0] = 42n; d[0]` is
+   `0:number` too. A STATICALLY spelled `new BigInt64Array(...)` does not even
+   compile standalone — `standalone target emitted host imports:
+   env::BigInt64Array_new (#2961)`.
+2. **both axes: `<bigint param> === <bigint literal>` answers false.** On host
+   every value arrives correctly (`s0=40:bigint`,
+   `forEach=40:bigint|42:bigint|42:bigint`) and the comparison is still wrong.
+   Narrowed to the parameter: `42n === 42n`, `a === 42n`, `a === b` and
+   `g(42n,42n)` are all correct, but `function f(v){return v === 42n} f(42n)` is
+   **false**. That single fact is what fails the row on host.
+
+Neither is a species or a `count` concern. The row also classifies **ES2020**
+(`FEATURE_EDITION.BigInt = 2020`, and `classifyEdition` takes the max mapped
+feature year), so it is not in this lane's ES2015 scope at all. Handed off as its
+own slice; (2) looks cheap and is plausibly worth rows across the BigInt bucket.
+
+### Target A — DISPROVED as a VR1 sibling; it is the destination carrier, on both axes
+
+The reading in the brief is real — after `o2.v = cap`, `typeof o2.v` is
+`"number"` and `o2.v === obs.self` is false — but the evolving-`any` source has
+nothing to do with it. Measured on the VR1-merged tree, standalone, two
+instrumented rows:
+
+| shape | answer | want |
+| --- | --- | --- |
+| `var o = {v: 0}; o.v = new S();` | **number** | object |
+| `var o = {v: 0}; o.v = "hi";` | **number, NaN** | string, "hi" |
+| `var c = new S(); o.v = c;` | **number** | object |
+| `var c; c = new S(); o.v = c;` (same function, CFA sees it) | **number** | object |
+| `function st(o,v){o.v=v} st({v:0}, new S())` | **number** | object |
+| `var o = {v: {}}; o.v = cap;` · `var o = {}; o.v = cap;` | object ✓ | object |
+| `var a = [0]; a[0] = cap;` | **number** | object |
+| `cap.w = 1; cap.w` · `cap === obs.self` · `cap instanceof S` · `typeof cap` · `cap` as a call argument | all correct ✓ | |
+
+Every store shape fails, including ones with no auto binding and a
+perfectly-typed RHS, and the ones that work are those whose literal field was
+*initialized* with an object. So this is the typed-struct carrier chosen from an
+object literal's INITIALIZER, with a later heterogeneous store coerced into it —
+the territory `markIndexedPropertyStale` /
+`objectLiteralIndexedAssignedPropertyTypes` exists to widen, not reached here. The
+JS-host run is the same table row for row, so it is not a standalone gap either.
+
+Two consequences worth recording. First, **no test262 row is known to ride it**:
+the shape came from SP1's own instrumented probe, not from a corpus row, and if
+real rows depended on it the failure count would be far larger than the 711 the
+ES2015 standalone remainder actually has. Second, this is value-representation
+architecture — the same wall SP1 and VR1 both stopped at — and **not** the
+one-line sibling the record implies. Deliberately left; it should not be
+scheduled as a residual.
+
+### Control run
+
+Authoritative lane only: `tests/test262-shared.ts::runTest262Chunk(0, 1)` driven
+from a gitignored `tests/probe-b18.test.ts` under `TEST262_PATH_FILTER_FILE`,
+`--isolate`, `TEST262_IT_TIMEOUT_MS=120000`, `COMPILER_POOL_SIZE=2`.
+`scripts/run-test262-paths.mts` was not used. `TEST262_ORACLE_MODE` left unset, so
+the host numbers are the honest whole-assembly lane, not CI's linked-harness lane.
+
+Belt = **810 registered rows** (852 paths, 42 dropped by the runner's own
+filters): every corpus file naming BOTH `getOwnPropertyDescriptor` and `.name`
+(126 — the true reachable set for a descriptor-slot fold), plus all
+`**/Symbol.species/**`, all `built-ins/Symbol/**`, all
+`built-ins/Object/getOwnPropertyDescriptor/**`, and the `built-ins/Function`
+`*name*` + `prototype/**` rows as the collateral surface for the `.name` fold
+itself.
+
+| run | target | bundle hash | adapter key | rows | pass |
+| --- | --- | --- | --- | --- | --- |
+| before | standalone | `af536009f98f24f3` | `6d634bf4ab9a0299` | 810 | **728** |
+| after | standalone | `2e0b40694f5ae0d8` | `432df68433e84e0c` | 810 | **729** |
+| before | host (`gc`) | `af536009f98f24f3` | `6d634bf4ab9a0299` | 810 | **687** |
+| after | host (`gc`) | `2e0b40694f5ae0d8` | `432df68433e84e0c` | 810 | **688** |
+| **final (committed tree)** | standalone | `a03d5a74436fff5e` | `75e2fa144b6243ef` | 810 | **729** |
+
+Shard-completion manifest on all five runs: `registeredTests == recordedRows ==
+canonicalVerdicts == callbacksStarted == callbacksSettled` (810/810),
+`allCallbacksSettled: true`. The `before` side was produced by restoring
+`.tmp/b18/ab/base-property-access-dispatch.ts` and rebuilding all three artifacts
+in order (`build:compiler-bundle` → `build:runtime-bundle` →
+`scripts/build-quickjs-eval-provider.mjs`); it re-derived the ORIGINAL base bundle
+and adapter key exactly, which is the evidence the revert was byte-exact.
+
+The `final` row exists because the fix was restructured AFTER the after-run to
+keep `tryLengthAndNameReads` inside its func budget (it had zero headroom): the
+decline moved into the module-level `nameFoldTypeSymbolIsDeclarationArtefact`,
+absorbing the pre-existing `__computed` test. A restructure is a claim, not a
+measurement, so the belt was re-run on the committed tree: **`final` vs `after` is
+GAINED 0 / LOST 0 / CHANGED 0**, and `final` vs `before` is the same +1/−0 below.
+The row was also re-confirmed `pass` on host on the committed tree (1/1).
+
+Per-row diff, identical on both targets:
+
+```
+GAINED (1):
+  + test/built-ins/Symbol/species/builtin-getter-name.js
+LOST (0):
+CHANGED-but-still-not-pass (0):
+```
+
+### Tests
+
+`tests/issue-6651-b18-descriptor-accessor-name.test.ts` — 7 cases, all passing;
+**4 of the 7 FAIL on the base tree**, verified by an A/B file swap, so the file is
+a real guard and not a restatement. Two assert the fix (the row's `&&` spelling
+across all five @@species owners; a ternary guard with a STATIC receiver — the
+case that disproves the receiver half of the record). One is the before/after
+control on the spellings that never reached the fold. Three are negative controls:
+the anonymous object-literal `get` key that is CORRECTLY named `"get"`, a NAMED
+accessor (`realGet` / `realSet` — both were wrong on base), and a named function
+read out of an ORDINARY `get`-keyed property, which pins that the guard keys on
+the `PropertyDescriptor` declaration and not on the key text. The last case
+asserts the fixed read stays host-free on `--target standalone`.
+
+### Gates — each run bare, exit code read directly
+
+`check-loc-budget` 0 · `check-func-budget` 0 · `check-coercion-sites` 0 ·
+`check:oracle-ratchet` 0 (`getTypeAtLocation +0, ctx.checker +0` — the predicate
+reads the type symbol already in hand and navigates the AST, adding no checker
+call) · `check:dead-exports` 0 · `check-host-import-policy` 0 ·
+`check-compiler-boundaries --mode inventory --base HEAD^1` 0 · `typecheck` 0.
+Re-run with `LOC_GATE_BASE=$(git rev-parse origin/main)`: both budget gates **0**.
+No new `src/` file, so `scripts/compiler-boundaries.json` is untouched; no
+`scripts/*-baseline.json` touched; `src/runtime.ts` untouched.
+
+Growth: `property-access-dispatch.ts` +57, granted dated in this file's
+frontmatter; `tryLengthAndNameReads` itself is net **+0**.
+
+### Not done
+
+- **Only the 810-row belt was swept.** Nothing here is corpus-wide evidence.
+- Targets A and B are left with the diagnoses above; neither is a residual, and
+  both are priced in place so the next lane does not re-derive them.
+- The branch carries the VR1 predecessor commit (`772ddd4421`) as a merge, because
+  target A was defined against it. Nothing else was taken from it.
