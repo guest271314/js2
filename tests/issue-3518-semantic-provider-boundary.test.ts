@@ -892,6 +892,7 @@ describe("semantic verification and provider ownership boundary", () => {
       additions.push(...(mergedInvocationAdditions[id] ?? []));
       additions.push(...(mergedObjectStorageAdditions[id] ?? []));
       if (id === "ir-program") additions.push(...getterResultAdditions);
+      if (id === "ir-program") additions.push("src/ir/program/native-prototype-requirements.ts");
       if (id === "native-runtime")
         additions.push(
           "src/runtime/wasmgc/values/prototype-companion-body.ts",

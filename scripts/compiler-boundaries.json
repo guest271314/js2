@@ -203,9 +203,10 @@
         "src/ir/program/native-object-access-requirements.ts",
         "src/ir/program/native-getter-invocation-requirements.ts",
         "src/ir/program/native-object-result-requirements.ts",
-        "src/ir/program/native-object-result-values.ts"
+        "src/ir/program/native-object-result-values.ts",
+        "src/ir/program/native-prototype-requirements.ts"
       ],
-      "minModules": 36
+      "minModules": 37
     },
     {
       "id": "runtime-contracts",
@@ -13865,6 +13866,11 @@
       "path": "src/runtime/wasmgc/values/ordinary-object-descriptor-definitions.ts",
       "state": "clean",
       "layer": "native-runtime"
+    },
+    {
+      "path": "src/ir/program/native-prototype-requirements.ts",
+      "state": "clean",
+      "layer": "ir-program"
     }
   ]
 }
