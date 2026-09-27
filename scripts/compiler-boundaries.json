@@ -264,9 +264,10 @@
         "src/backend/wasmgc/resources/native-object-storage.ts",
         "src/backend/wasmgc/resources/native-bigint.ts",
         "src/backend/wasmgc/resources/native-object-same-value.ts",
-        "src/backend/wasmgc/resources/native-object-descriptors.ts"
+        "src/backend/wasmgc/resources/native-object-descriptors.ts",
+        "src/backend/wasmgc/resources/native-prototype-layouts.ts"
       ],
-      "minModules": 35
+      "minModules": 36
     },
     {
       "id": "native-runtime",
@@ -13889,6 +13890,11 @@
       "path": "src/runtime/wasmgc/values/own-property-bodies.ts",
       "state": "clean",
       "layer": "native-runtime"
+    },
+    {
+      "path": "src/backend/wasmgc/resources/native-prototype-layouts.ts",
+      "state": "clean",
+      "layer": "backend-wasmgc"
     }
   ]
 }

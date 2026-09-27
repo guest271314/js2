@@ -905,6 +905,7 @@ describe("semantic verification and provider ownership boundary", () => {
           "src/backend/wasmgc/resources/native-bigint.ts",
           "src/backend/wasmgc/resources/native-object-same-value.ts",
           "src/backend/wasmgc/resources/native-object-descriptors.ts",
+          "src/backend/wasmgc/resources/native-prototype-layouts.ts",
         );
       if (id === "native-runtime")
         additions.push(
