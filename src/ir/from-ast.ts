@@ -108,7 +108,11 @@ import {
 import { irCountedStringAppendSiteIdIsCurrent } from "./counted-string-append-provenance.js";
 import { timerArg, timerResult } from "./timer-shim-lowering.js";
 import { irBool, irTypeIsBoolean, lowerBooleanToString } from "./boolean-brand.js";
-import { collectOuterWrites, isCapturedByOrdinaryDescriptor } from "./closure-captures.js";
+import {
+  collectOuterWrites,
+  collectTransitiveClosureCaptures,
+  isCapturedByOrdinaryDescriptor,
+} from "./closure-captures.js";
 import { planArrayLiteralSpread } from "./array-spread-shape.js";
 import { objectLiteralDataPropertyName } from "./property-key-fold.js";
 import { collectDynamicStringLocalWidening } from "./dynamic-local-widening.js";
@@ -15676,9 +15680,14 @@ function analyseCaptures(
   }
 
   const visit = (node: ts.Node): void => {
-    // Don't descend into nested function-likes — they have their own
-    // capture analysis run when they're lowered.
+    // Descendants lower separately, but their free outer bindings must first
+    // be transported through this closure's environment.
     if (node !== fn && (ts.isFunctionDeclaration(node) || ts.isArrowFunction(node) || ts.isFunctionExpression(node))) {
+      if (cx.checker) {
+        const transitive = collectTransitiveClosureCaptures(node, fn, cx.checker);
+        transitive.referenced.forEach((name) => referenced.add(name));
+        transitive.written.forEach((name) => written.add(name));
+      }
       return;
     }
     if (ts.isIdentifier(node)) {
