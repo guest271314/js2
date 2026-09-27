@@ -12769,3 +12769,77 @@ selected getter/data result occurrences. A checker type or the presence of a
 reachable Boolean getter is insufficient, because the native unbox returns
 false for foreign carriers. Preserve true/false invocation counts, mixed-key
 getters, descriptor overwrite/inheritance and foreign/forged controls.
+
+
+### Transitive capture draft resumed on merged main (2026-09-27)
+
+Port only the recovered four-file capture draft onto signed merged-main base
+`f52f6ae020d6d5ddb07e69a3b18811a5b4f86c24`. Preserve the reviewed helper,
+the checker-guarded producer join, and all 23 drafted rows. The following
+recovered notes retain historical evidence; no current-tree test result is
+claimed. Fresh validation is required before integration. Keep the original
+callable Get failure open and the legacy path operational.
+
+
+### Transitive getter captures (root, base50f57b7141)
+
+R's unchanged source `const captured=7; const object={get value(){return
+function(){return captured;};}}; return object.value` fails while lowering the
+returned closure because analyseCaptures skips its body when preparing the
+getter's environment. Preserve that source and measured failure. Collect free
+lexical symbols used by descendant functions, excluding bindings declared
+inside the enclosing closure and property-name symbols; transport the real
+outer binding through each environment. Transitive writes must retain shared
+refcell storage, not snapshot a scalar. Test parameter/local/catch shadowing,
+shorthand reads, nested default initializers and descendant writes.
+
+Separately expand actual ordinary property result-carrier planning beyond f64
+for Boolean/callable reads; do not infer physical authority from checker types
+or erase the original source failures. General getter/prototype/712 execution
+remains required and legacy stays operational.
+
+Capture run49418: TS7 and53/53 across four complete suites, zero skipped;1625
+inputs unchanged. The actual getter-to-returned-closure source now lifts both
+environments. Original callable property-result and Boolean Get gaps remain
+open. Review found descendant destructuring/logical/for-in/of writes also need
+shared-cell classification; add nine controls before committing, preserving the
+first result as scoped evidence. No physical execution parity is claimed yet.
+
+
+### Get result carrier continuation (reviewed source contract)
+
+Keep js.object.get's externref result. Boolean projection requires an explicit
+js.boolean.unbox contract, actual branded getter result provenance, and native
+Boolean boxing through the issued canonical type/singletons; the legacy unbox
+false fallback is not ToBoolean. R owns the shared exact box recipe/resource;
+root owns semantic vocabulary and source/provenance integration.
+Callable results require an explicit identity projection from the exact Get
+occurrence and authenticated returned allocations/signatures, or retention as
+externref until genuine dynamic invocation. Do not use checker-only casts or
+throw merely on a property read. Later ToPrimitive invocation needs its own
+method-use relation, original receiver and selected source slot. Full712,
+mutable captures, prototype companions and exceptions remain required.
+
+
+### Transitive capture recovery validation on merged main (2026-09-27)
+
+Fresh validation at `f52f6ae020d6d5ddb07e69a3b18811a5b4f86c24` passed TS7
+and all 62 tests across four complete files: 23 transitive-capture controls,
+8 ordinary-getter source controls, 15 closure-signature controls, and 16
+void-result controls. Zero rows failed or were skipped; all 2,134 pinned
+inputs were unchanged. The first load-8 admission refusal started no child;
+the authorized load-10 retry admitted at 8.115 and completed normally.
+
+The source and all 23 recovered capture tests remained byte-identical to the
+reviewed reconstruction. This establishes capture analysis and prepared-source
+transport for the measured cases. Callable Get result carriers, general getter
+execution, and full IR behavioral parity remain outstanding. Legacy remains
+operational. Normal commit hooks and integration validation follow separately.
+
+Boolean BOX checkpoint `0e99694aaf5ea9299678bb65f5cec1d1a66be5f2` is
+signed and clean. Normal format/budget/oracle hooks passed; the default
+changed-root test hook automatically self-skipped at 258 files because it
+compared the broad branch. Its strict direct 31-case run is the test evidence.
+Capture integration now sets the existing CHANGED_ROOT_TESTS_BASE option to
+exact f52, so normal hooks execute the actual Boolean and capture changes.
+Retain both independent issue histories and all original failures.
