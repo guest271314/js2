@@ -26,16 +26,11 @@ export const NUMBER_BOUNDARY_POLICY_DISABLED: NumberBoundaryPolicy = Object.free
   unbox: "unsupported",
 });
 
-/**
- * (#3526 F1-S2) The exact, already-resolved BOOLEAN-boundary provider policy of
- * one preparation caller — a sibling of {@link NumberBoundaryPolicy}, not a
- * widening of it. The family is one-armed: the box arm resolves through the
- * host `env.__box_boolean` import, and there is no native boolean boxer to
- * select, so the union has no `"native"` member.
- */
+/** Resolved Boolean carrier policy. Native extraction requires a proven carrier, not ToBoolean. */
 export interface BooleanBoundaryPolicy {
-  /** `host` selects `env.__box_boolean`. There is no native box arm. */
-  readonly box: "host" | "unsupported";
+  readonly box: "host" | "native" | "unsupported";
+  /** Omitted means unsupported, preserving existing host-only and disabled policy records. */
+  readonly unbox?: "native" | "unsupported";
 }
 
 /** Adapters that expose no boolean boundary resolve the box arm to this. */

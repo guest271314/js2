@@ -106,8 +106,12 @@ export const NUMBER_BOUNDARY_RUNTIME_PROVIDER_IDS = Object.freeze([
 
 export type NumberBoundaryRuntimeProviderId = (typeof NUMBER_BOUNDARY_RUNTIME_PROVIDER_IDS)[number];
 
-/** (#3526 F1-S2) The one admitted boolean-boundary policy arm. */
-export const BOOLEAN_BOUNDARY_RUNTIME_PROVIDER_IDS = Object.freeze(["host.js.boolean.box"] as const);
+/** Explicit host boxing and native Boolean carrier providers. */
+export const BOOLEAN_BOUNDARY_RUNTIME_PROVIDER_IDS = Object.freeze([
+  "host.js.boolean.box",
+  "native.js.boolean.box",
+  "native.js.boolean.unbox",
+] as const);
 
 export type BooleanBoundaryRuntimeProviderId = (typeof BOOLEAN_BOUNDARY_RUNTIME_PROVIDER_IDS)[number];
 

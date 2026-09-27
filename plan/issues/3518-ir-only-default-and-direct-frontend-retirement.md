@@ -12932,3 +12932,41 @@ valid SSH signatures with key32dP45eS (no principal in the local allowed list);
 cb64's signature verifies against Thomas's local allowed signer. No source
 implementation, original donor fixture, or existing assertion changed.
 Evidence: `.tmp/closure-preservation/{terminal,tests,runtime-tests,pinned-harness}.json`.
+
+### 2026-09-27: Boolean carrier contracts for proven ordinary Get results
+
+Root owns the semantic Boolean unbox signature/vocabulary and explicit native
+box/unbox provider policy. The getter lane owns actual keyed descriptor/return
+proofs, frontend lowering and authenticated physical owner joins. A checker
+type or any reachable Boolean getter is insufficient authority: unknown,
+mixed, overwritten and forged results must refuse before allocation.
+
+Add js.boolean.unbox with branded Boolean i32 semantic result and externref→i32
+physical ABI. Native providers name the existing issued Boolean owner functions;
+no host truthiness/ToBoolean fallback or implicit admission. Preserve existing
+host/disabled policy serialization by making native unbox an explicit optional
+policy arm; omission is unsupported. Existing host behavior and legacy remain
+operational. Validate contract freeze, signatures, provider crosswires, absent
+policy, target/backend refusal, and original host-boundary regressions.
+
+Initial Boolean validation: TS7 passed and87/88 tests passed. The sole old
+host-lane import check expected five entries but received those exact five
+plus `__host_eq`. Untouched parent041fbe05 reproduced15/16 with the same
+sole import-set failure. Source attribution is committed strict-equality fix
+c111f2f03219b94fd7345a6425a60bd42fbd74a8: RUNNABLE's `a[0] === true`
+routes a reference/Boolean comparison through strict equality, preserving
+`1 !== true`. Update the exact expected list to include that independently
+required final import; retain source, ordering and runtime assertions. No
+production rollback or permissive import filtering. Both first-run failures
+are retained under `.tmp/boolean-contracts` and the exact-parent control
+`/private/tmp/js2-boolean-parent-041fbe05-20260927/.tmp/boolean-parent`.
+
+Final Boolean contract cohort passed88/88 across five complete files: new
+contracts16, existing Boolean16, number12, runtime manifest13, native BOX31.
+TS7 and all six structural gates passed (LOC, functions, oracle, coercion,
+boundary inventory and dead exports). The semantic verifier rejects loss of
+the Boolean result brand and native extraction provider crosswires. Native
+providers currently advertise only WasmGC; linear remains explicitly unsupported.
+This checkpoint supplies contracts only: keyed Get-result proofs and physical
+owner joins are still in the getter lane, so no full Get/Boolean coverage or
+retirement is claimed. No global/default policy change.
