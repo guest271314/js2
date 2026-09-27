@@ -10,6 +10,7 @@ import type {
 } from "../../../wasm/physical/module-reservations.js";
 import type { NativeInvocationRequirements } from "../../../ir/program/native-invocation-requirements.js";
 import { assertNativeInvocationRequirementsCurrent } from "../../../ir/program/native-invocation-requirements.js";
+import type { NativeObjectAccessRequirements } from "../../../ir/program/native-object-access-requirements.js";
 import type { NativeValueResourcePlan } from "../../../ir/program/native-value-resources.js";
 import type { NativeVectorResourcePlan } from "../../../ir/program/native-vector-resources.js";
 import { preparedIrDataMismatch } from "../../../ir/program/data.js";
@@ -42,6 +43,7 @@ import {
   reserveNativeErrorResources,
   fillNativeErrorResources,
   requireCompletedNativeErrors,
+  requireNativeErrorReservations,
   type NativeErrorReservations,
   type NativeErrorDependencies,
   type NativeErrorRequirements,
@@ -55,6 +57,12 @@ import {
 } from "../../../runtime/wasmgc/values/closure-method-body.js";
 import { buildNativeClosureVectorApplyDefinition } from "../../../runtime/wasmgc/values/closure-vector-apply-body.js";
 import type { ClosureInvocationLayout } from "../../../runtime/wasmgc/values/closure-invocation-types.js";
+import {
+  requireNativeBooleanBoxReservations,
+  requireCompletedNativeBooleanBoxes,
+  type NativeBooleanBoxReservations,
+} from "./native-booleans.js";
+import { objectResultIsBoolean } from "../../../ir/program/native-object-result-values.js";
 
 export interface NativeInvocationDependencies {
   readonly source: NativeSourceClosureTypes;
@@ -64,6 +72,7 @@ export interface NativeInvocationDependencies {
   readonly strings: NativeStringLiteralReservations;
   readonly vectors: NativeVectorTypeReservations;
   readonly vectorPlan: NativeVectorResourcePlan;
+  readonly booleanBoxes?: NativeBooleanBoxReservations;
 }
 export interface NativeInvocationReservations {
   readonly requirements: NativeInvocationRequirements;
@@ -106,6 +115,22 @@ function authenticate(
   requireNativeSourceClosureTypes(tx, dependencies.source, requirements.source);
   requireNativeValueReservations(tx, dependencies.values, dependencies.valuePlan, dependencies.valueDependencies);
   requireNativeVectorTypeReservations(tx, dependencies.vectors, dependencies.vectorPlan);
+  const needsBooleanBox = requirements.getterUses.some((use) =>
+    objectResultIsBoolean(
+      requirements.source.demands.owners.find((row) => row.unitId === use.liftedUnitId)?.projectedFunction
+        .closureSubtype?.signature.returnType,
+    ),
+  );
+  if (needsBooleanBox && !dependencies.booleanBoxes)
+    fail("selected Boolean getter needs its actual native Boolean BOX owner");
+  if (dependencies.booleanBoxes)
+    requireNativeBooleanBoxReservations(
+      tx,
+      dependencies.booleanBoxes,
+      dependencies.values,
+      dependencies.valuePlan,
+      dependencies.valueDependencies,
+    );
   requireNativeStringLiteral(tx, dependencies.strings, "TypeError");
   requireNativeStringLiteral(tx, dependencies.strings, "Value is not callable");
   if (
@@ -265,7 +290,36 @@ function requireOwner(tx: PhysicalModuleReservations, pack: NativeInvocationRese
   if (preparedIrDataMismatch(invocationLayout(owner.dependencies.source), owner.layout))
     fail("changed closure ancestry");
   nativeArgumentVectorReservationInventory(tx, pack.arguments, owner.argumentPlan);
+  requireNativeErrorReservations(tx, pack.errors, owner.errorRequirements, owner.errorDependencies);
   return owner;
+}
+
+/** Read-only cycle join. Reservation authentication never certifies callable body completion. */
+export function requireNativeInvocationReservations(
+  tx: PhysicalModuleReservations,
+  pack: NativeInvocationReservations,
+  expectedRequirements: NativeInvocationRequirements = pack.requirements,
+  expectedDependencies?: NativeInvocationDependencies,
+): NativeInvocationReservations {
+  if (pack.requirements !== expectedRequirements) fail("substituted expected invocation requirements");
+  const owner = requireOwner(tx, pack);
+  if (expectedDependencies !== undefined && owner.dependencies !== expectedDependencies)
+    fail("substituted expected invocation dependencies");
+  return pack;
+}
+
+/** The actual method-zero slot selected by this exact C1 getter demand owner. */
+export function nativeInvocationGetterDispatch(
+  tx: PhysicalModuleReservations,
+  pack: NativeInvocationReservations,
+  expectedAccess: NativeObjectAccessRequirements,
+): FunctionReservation {
+  requireNativeInvocationReservations(tx, pack);
+  if (pack.requirements.objectAccess !== expectedAccess) fail("foreign expected object-access requirements");
+  if (!pack.requirements.getterUses.length) fail("no issued semantic getter demand");
+  const selected = pack.methods.filter((row) => row.arity === 0);
+  if (selected.length !== 1) fail("semantic getter demand lacks its sole method-zero reservation");
+  return selected[0]!.function;
 }
 
 export function nativeInvocationFunctions(
@@ -283,9 +337,14 @@ function entries(
   const { values } = owner.dependencies;
   return callables.entries.map((row) => {
     const info = row.signature.info;
+    const booleanResult =
+      objectResultIsBoolean(row.source.closureSubtype?.signature.returnType) &&
+      info.returnType?.kind === "i32" &&
+      info.returnType.boolean === true &&
+      owner.dependencies.booleanBoxes !== undefined;
     if (
       info.paramTypes.some((type) => type.kind !== "externref" && type.kind !== "f64") ||
-      (info.returnType && info.returnType.kind !== "externref" && info.returnType.kind !== "f64")
+      (info.returnType && info.returnType.kind !== "externref" && info.returnType.kind !== "f64" && !booleanResult)
     )
       fail("selected callable lacks its actual native argument/result conversion");
     return {
@@ -296,7 +355,12 @@ function entries(
       params: info.paramTypes,
       arguments: { unboxNumber: values.functions.unboxNumber.handle, isUndefined: pack.isUndefined.handle },
       result: info.returnType
-        ? { kind: "value", returnType: info.returnType, boxNumber: values.functions.boxNumber.handle }
+        ? {
+            kind: "value",
+            returnType: info.returnType,
+            boxNumber: values.functions.boxNumber.handle,
+            ...(booleanResult ? { boxBoolean: owner.dependencies.booleanBoxes!.boxBoolean.handle } : {}),
+          }
         : {
             kind: "void",
             undefinedValue: [
@@ -318,10 +382,19 @@ export function fillNativeInvocationResources(
   const owner = requireOwner(tx, pack);
   if (owner.filled) fail("duplicate fill");
   requireNativeSourceClosureCallables(tx, callables, owner.dependencies.source);
+  if (callables.requirements !== pack.requirements) fail("selected callable requirements differ");
   const exceptionTag = tx.physicalIndex(exception);
   const rows = entries(owner, callables, pack);
   const { values, strings } = owner.dependencies;
   requireCompletedNativeValues(tx, values, owner.dependencies.valuePlan, owner.dependencies.valueDependencies);
+  if (owner.dependencies.booleanBoxes)
+    requireCompletedNativeBooleanBoxes(
+      tx,
+      owner.dependencies.booleanBoxes,
+      values,
+      owner.dependencies.valuePlan,
+      owner.dependencies.valueDependencies,
+    );
   requireCompletedNativeStringLiterals(tx, strings);
   const state: ClosureInvocationState = {
     currentThis: tx.physicalIndex(pack.globals.currentThis),

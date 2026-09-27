@@ -13482,3 +13482,298 @@ The combined 27-suite run executed all 1,527 rows: 1,515 passed and 12 historica
 Fetched `loopdive/js2` main directly at `bc73c88a67b017522c4e1d53a28a1d675bec3e5b` and merged after signed descriptor checkpoint `3a76cb4ef0e3b3bf9ccf746e192c02df32add1a5`. All eleven incoming non-policy files are byte-identical to main; the boundary policy retains every prior entry and adds the exact incoming array-reduce inventory entry. Combined typechecking passed, and all 355 rows in the two incoming callable regression suites plus the original boundary suite passed with clean exit, no reporting errors, and 2,170 unchanged pinned inputs. Inventory is valid; full architecture/retirement remains incomplete.
 
 The preceding descriptor commit hooks executed 935/935 assertions across twelve suites, but the 75-row descriptor suite also reported an `onTaskUpdate` timeout through the existing hook runner. Its separate integration run had already passed all 75 rows without reporting errors. Both raw records are preserved; hook assertion counts alone are not clean-process evidence. This sync is local delivery to the integration branch, not a verified main merge of the IR work.
+
+
+### Getter invocation draft resumed on integrated main (2026-09-27)
+
+Start this isolated port from signed
+`c344e6efcf36181358856d41a51231341891c9f2`, which composes the capture repair,
+native Boolean BOX prerequisite and prototype work. Port only the recovered
+eight-file getter-invocation draft. Its seven source/test files must match the
+frozen reconstruction exactly; retain all 42 drafted rows, including the two
+returned capturing-callable cases and the Boolean Get case. Preserve current
+issue history and the recovered historical notes below.
+
+Before changing Boolean/callable contracts, run fresh TS7, the entire 42-row
+getter suite, and the existing native invocation consumer, source-closure
+requirements and source-closure consumer suites. Use one 4 GB fork with Wasm
+exception references, process priority nice 10, and a recorded host load.
+Wait for the coordinated heavy slot; load is diagnostic, not an arbitrary
+admission threshold. No current-tree success is claimed before measurement.
+
+The last old-tree result was 36/42; the final effect-negative fixture correction
+was unmeasured. Native Boolean BOX alone does not establish the selected Get
+result or implement js.boolean.unbox. Later work must authenticate actual
+selected getter/data result provenance, retain a branded i32 unbox contract,
+and bind the real issued boxer in invocation result conversion. A checker type
+or a false-on-foreign unbox fallback is not authority. Callable Get, full 712
+and general IR behavioral parity remain open; keep the legacy path operational.
+
+The following material is recovered historical draft context, not current
+validation evidence.
+
+### C1 getter demand to C2 invocation ownership — implementation plan (2026-09-20)
+
+This isolated change starts from signed `65448565c7358581ca3e229fd3ce7537fae4b41f`
+and retains the original712 and general prototype requirements. It owns only
+`src/ir/program/native-invocation-requirements.ts`, the supporting new pure
+getter-demand module, `src/backend/wasmgc/resources/native-invocation.ts`,
+`native-source-closure-callables.ts`, and dedicated new tests. Root owns physical
+planning/consumer/support-string integration and default prototype companions;
+B owns C1 descriptor/Get resources and the object-access requirement issuer.
+
+1. Accept the exact issued C1 object-access requirement as a separate optional
+   input to invocation planning. Reconcile its actual Get, descriptor, closure
+   allocation, original captures, lifted signature, owner and projection with
+   the existing source-closure requirement. Retain a separate getter-use list;
+   do not manufacture source `.call` instructions or erase C1 capability gaps.
+2. Add method arity zero for actual getter demand and select the union of source
+   invocation/getter lifted units. Bind them to the consumer's original reserved
+   slots and existing capture/signature owner; do not reserve duplicate units or
+   derive authority from signatures alone. Preserve the source invocation ABI.
+3. Export a reservation-only currentness assertion and
+   `nativeInvocationGetterDispatch(tx, pack, expectedAccess)`. The accessor must
+   authenticate the exact C1 pack and same-ledger method-zero reservation before
+   returning its token. It must not imply function body completion. Keep actual
+   completion behind the existing post-fill check, including selected lifted
+   bodies and receiver/argc/extras restoration recipes.
+4. Add genuine prepared source and codec controls for getter-only selection,
+   captures, returned callable results, mixed source-call/getter selection and
+   distinct getter allocations. Pair them with copied/foreign/stale C1 packs,
+   changed allocation/capture/source identity, wrong ledger/slot/layout, absent
+   getter demand and incomplete-body negatives. Exercise the issued method-zero
+   through actual emitted Wasm using real produced closure bodies and original
+   slots; full public Get execution remains the composed C1/root validation.
+
+No fresh-local dominance/escape carve-out, default-prototype suppression, fake
+intrinsic use, legacy removal, allowance increase or completion claim is part of
+this change. Tests/typecheck/hooks will run only after the parent grants the
+single validation lane; all earlier failure records remain intact.
+
+Validation preparation retains two separate failures in this isolated tree:
+`first-terminal.json` records the incorrect default TypeScript project (the
+repository's TS7 project explicitly supplies Node types), with 1,552 unchanged
+input pins. `second-terminal.json` records corrected TS7 success but getter
+suite setup refusal for missing native string-constant policy; all 30 collected
+rows remained skipped and all 1,553 pins were unchanged. No getter result is
+claimed from either attempt. The fixture now selects the actual native string
+provider used by property-name constants.
+
+The C1 descriptor join also retains the original invocation dependency object:
+`requireNativeInvocationReservations` accepts an optional exact
+`expectedDependencies` identity, in addition to the expected requirement. Its
+reservation checks authenticate current resources without claiming body fills.
+C1 must compare its actual descriptor closure pack with that retained dependency's
+`source.closures`; copied or differently issued packs are not interchangeable.
+
+The corrected getter run measured 27/32 passing, 5 failing, no skips, TS7
+passing, and all 1,553 pins unchanged (`third-terminal.json` and
+`third-focused.json`). Two unchanged returned-closure rows fail because the
+getter does not forward the transitive outer capture; a Boolean getter read
+fails at the producer's numeric-only ordinary property-read contract. Root owns
+those producer repairs. These source fixtures remain mandatory integration
+controls and will not become permanent expected refusals. Two emitted controls
+reached native closure creation but a Vitest identity matcher inspected opaque
+Wasm objects before the actual calls. Compare primitive identity booleans in
+those controls. The exact seven-file candidate is archived in `third-snapshot`.
+
+The same run measured the existing mixed getter/source-call effect refusal.
+The next authorized source change is confined to
+`src/ir/source-closure-invocation-effects.ts`: derive actual local constant
+object/getter associations, admit only explicitly named own getter reads with
+non-escaping receivers, and visit every getter body through the existing closed
+syntax/effect proof. Primitive result authority must inspect actual return
+producers, never static type assertions. Unknown calls, coercions, mutation,
+computed names, alias/export escapes and unproved getters remain refusals.
+This is solely the primordial call/apply effect proof: it does not waive C1's
+implicit-prototype obligation. Original and decoded mixed programs must select
+the actual union of getter and source-call slots, with paired effect negatives.
+
+
+### Keyed ordinary Get results — current implementation plan (2026-09-27)
+
+The frozen resumed baseline measured TS7 success and 133/136 passing rows:
+39/42 getter controls, 61/61 invocation consumer, 5/5 source-closure consumer,
+and 28/28 source requirements. All 2,143 inputs were unchanged. The three
+mandatory original failures now all stop at ordinary `.value` lowering: both
+returned capturing-callable rows and the Boolean getter row. The earlier
+transitive capture failure is resolved. Preserve the complete first-run report
+in `.tmp/getter-resume-20260927/baseline-first`, including the initial priority
+refusal and scoped priority correction; no source was edited during that run.
+
+R now additionally owns `src/frontend/builtins/prepare-ordinary-object-access.ts`,
+the ordinary read hunk of `src/ir/from-ast.ts`, explicit projection construction
+in `src/ir/builder.ts` and its structural rule in `src/ir/verify.ts`, new pure
+keyed-result requirements/proof leaves, and the necessary narrow native
+invocation/physical consumer joins. Root owns Boolean intrinsic vocabulary,
+semantic branded result signature, provider policy/manifest and their contract
+tests. B retains the C1 descriptor/Get owner and original object-access issuer.
+All work remains isolated and the original 42 source rows remain available.
+
+1. Describe Boolean/callable read intent using the actual checker-owned getter
+   declaration, preserving `js.object.get` as `(externref,key,receiver)->externref`.
+   Use semantic `js.boolean.unbox` with a branded i32 result only after native
+   acceptance authenticates the selected result. A callable read uses a new
+   explicit builder entry into the existing representation-only
+   `coerce.to_externref` operation: the result is the same externref identity,
+   with an exact logical callable signature. Existing closure packing stays
+   unchanged; arbitrary raw externref is not a callable grant.
+2. Derive an issued keyed-result proof from the exact C1/source requirements.
+   Account for every Boolean unbox and raw-externref-to-callable projection,
+   including codec-constructed nodes. Reconcile actual Get key, receiver,
+   descriptor presence/order, current control coordinates, selected getter/data
+   producer, real lifted return bodies and returned closure allocation/capture
+   association. Checker annotations and membership in the broad reachable
+   getter list are insufficient. Unproved effects, ambiguous/mixed results,
+   overwritten descriptors, forged/stale populations and unsupported control
+   joins must refuse before any physical reservation. This proof does not waive
+   default-prototype resources or any existing C1 capability gap.
+3. Native Boolean getter results use the existing issued native Boolean BOX
+   owner on the same ledger and value/type pack. Preserve branded Boolean
+   distinction and never route Boolean through numeric boxing. Bind real
+   unbox/box functions through the selected provider contracts and sole physical
+   allocator; completion still requires the actual filled dependencies.
+4. Retain the original source/decoded callable-return fixtures and add actual
+   returned-closure invocation/identity, getter call-count, true/false result,
+   selected-key and forged/mixed/overwritten negative controls. Current C1
+   prototype/general Get and original 712 remain full integration obligations,
+   not erased by a local result proof. Full legacy operation and old APIs remain.
+
+No runtime tests, typechecks or hooks run until the coordinated lane is granted.
+The final Boolean control expectation will change only when its real result
+adapter exists; the original source and failing observation are retained above.
+
+
+The keyed-result draft is now ported by exact owned hunks onto signed Boolean
+contract checkpoint c2fb27fed2ae2cbe3559b26acd42d53d61da80d0, preserving current
+main and all upstream/source changes. The previous resumed tree is frozen at
+its 16-file archived draft; no dependency source was copied from a mutable tree.
+
+The first frozen result run is retained in
+`.tmp/getter-results-20260927/first`: TS7 passed; 45/61 cases passed, 16 failed,
+none skipped, and all 2,145 inputs stayed unchanged at actual nice 10. The
+original getter suite passed 42/42; the new result suite passed 3/19. The exact
+16-file source snapshot matches the run's input pins. Original getter tests
+establish their stated carrier/selection controls, not returned-value parity
+of the exported source function or complete public ordinary Get.
+
+The new Boolean proof had checked an i32 constant instead of the real `bool`
+constant emitted by source lowering and constant folding. Correct that producer
+case while preserving its Boolean result brand and the separate actual BOX
+requirement. Mutation controls must prove they changed a real instruction;
+an absent match is not negative evidence.
+
+### Inferred callable result preservation — scoped plan (2026-09-27)
+
+The unchanged unannotated callable-returning `run` currently receives a null
+result from the scalar propagation fallback. Return lowering discards its
+value, and dead-code elimination removes the pure Get-result projection. The
+new result controls exposed this before dispatch; adding an annotation to the
+fixture or counting only getter carriers would conceal the missing behavior.
+
+R additionally owns the private callable conversion and result-selection hunks
+of `src/ir/program-source.ts`. Extract the existing checker callable type
+converter without changing its cycle/generic/optional/rest/this restrictions
+or the explicit annotation's declared-versus-observed comparison. For a genuine
+unannotated regular function declaration, obtain its checker declaration return
+type and use the same exact callable contract when it is supported, before the
+scalar propagation fallback. This supplies only a logical signature: the actual
+body/result verifier and keyed Get descriptor/return producer proof remain
+required before physical allocation. No generic externref cast is admitted.
+
+Keep the original source unchanged and assert the exported `run` has a callable
+result, a real returned operand, and its actual Get-result projection in both
+original and decoded packets. Add ambiguous and recursive callable refusals.
+Full C1/prototype composition and the original 712 target remain pending.
+
+The corrected second run retained TS7 success and measured all 63 individual
+cases passing (42 original getter cases and 21 result cases), with zero failed
+or skipped rows and 2,146 unchanged inputs. The actual exported callable return
+operand/projection, both returned capturing closures, true/false native Boolean
+boxes, keyed/forged requirements and inferred signature refusals all passed.
+However, the Vitest child exited 1 despite its JSON reporter recording success.
+This is not a clean validation: the installed JSON reporter ignores unhandled
+errors when producing its success field. No particular error cause is inferred
+from the missing log. Preserve the second raw report, terminal receipt and exact
+17-file snapshot. The next required six-file regression proposal has 167 rows
+and must capture runner-level errors and process exit as well as individual
+test outcomes. No error suppression, exit-code reset or legacy retirement is
+authorized by the passing rows.
+
+### Getter result checkpoint policy and observed runner failure (2026-09-27)
+
+The frozen six-file broad run is terminal with exit 1. It executed 124 passing
+rows: invocation consumer 61, original getter requirements/dispatch 42, and
+new Boolean/callable results 21. The remaining source-callable contract,
+source-closure consumer and source-closure requirements files produced zero
+assertion rows, leaving 43 of the proposed 167 unmeasured. The default reporter,
+lifecycle error record and process-exit record all retain the actual unhandled
+`[vitest-worker]: Timeout calling "onTaskUpdate"` error. All 2,153 input pins
+were unchanged. The JSON reporter's success field and six file names do not
+establish execution of those missing rows; this run is not certified passing.
+
+Root authorized only the corresponding three new pure IR requirement leaves
+in the boundary inventory: getter invocation, object result requirements and
+object result values. The `ir-program` clean floor rises from 33 to 36. Their
+three additive boundary-test entries preserve all existing signed digests,
+activation history and allowed dependency edges. No budget allowance changes.
+
+After scoped static checks, the next frozen runtime retry includes all six
+original files and the complete semantic-provider boundary suite. A local
+runner setup yields via `setImmediate` after each test to drain reporting RPCs,
+following the independently measured descriptor-run correction. It changes
+no compiler source, assertion, timeout, or error suppression policy. Actual
+row populations, unhandled errors and final process exit remain mandatory.
+
+The first checkpoint runner accidentally requested measurement-only JSON modes
+for LOC/function checks and complete-architecture mode for the boundary check.
+Those outputs are retained as non-gating measurements, not successful gates or
+compiler failures. The corrected seven static checks all passed with 2,144
+unchanged inputs. LOC enforcement used the issue's existing, unchanged grants
+for builder (+26), from-ast (+5) and verifier (+35); no allowance was added or
+increased. The separately recorded required preservation check passed,
+including its actual core-node compiler child (12/12 witnesses). That child
+was already launched when the single-worker clarification arrived; it finished
+without termination during the recorded 14:49:14–14:49:51 UTC cohort interval
+while root reported its integration run live. Preserve that unintended overlap
+instead of describing the entire cohort as static-only.
+
+Production source and original tests remain byte-identical to the 124-row
+measurement. The final proposed retry is seven complete suites (516 proposed
+rows, including the full boundary suite), with only the local reporting drain
+added to runner setup. TS7's successful source pins still apply because the
+configuration includes `src/**/*.ts` and every source input remains unchanged.
+
+### Getter invocation/result checkpoint on current main — measured validation (2026-09-27)
+
+Port the frozen 19-file candidate onto signed base
+`77d0b0d7483e3da293b47185c231edfa8227b41c`, which includes the descriptor
+checkpoint and freshly merged upstream main `bc73c88a67b0`. All 16 source and
+new-test files remain byte-identical to the frozen candidate. The issue suffix,
+three clean IR inventory entries/floor and additive boundary assertions retain
+the final parent's complete existing content, history and dependency edges.
+The old tree, snapshots and failed-run receipts remain intact.
+
+Fresh TS7 and all seven complete selected suites passed with clean process
+exit 0: getter invocation 42/42, getter results 21/21, invocation consumer
+61/61, source callable contract 10/10, source closure consumer 5/5, source
+closure requirements 28/28, and semantic-provider boundaries 349/349. The
+actual total is 516/516, with zero skipped or pending rows and zero unhandled
+errors in both the lifecycle and process-exit observations. All 2,183 pinned
+inputs stayed unchanged. The one-fork, 4 GiB run used Wasm exception references
+and actual nice 10; load was recorded without an arbitrary admission threshold.
+
+This clean run measures all 43 regression cases that the earlier reporting
+failure left unexecuted. It does not retroactively certify that failed run.
+The only runner correction was the already approved reporting drain between
+tests; source, assertions and error policy were preserved. Runtime evidence is
+retained under `.tmp/getter-delivery-20260927/validation-first/` in the isolated
+`codex/3518-getter-delivery-20260927` worktree. This entry precedes the required
+final-base gates and normal signed commit; their receipts are retained there
+separately.
+
+The measured controls authenticate semantic getter selection, actual source
+closure bodies and slots, keyed Boolean/callable result proof, and native
+Boolean boxing. They do not complete public ordinary Get, inherited prototype
+composition, the original 712 target or full runtime-created callable/Promise
+coverage. Legacy remains operational; no retirement or default switch occurs.

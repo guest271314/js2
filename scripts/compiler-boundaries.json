@@ -200,9 +200,12 @@
         "src/ir/program/population.ts",
         "src/ir/program/native-ref-cell-requirements.ts",
         "src/ir/program/native-invocation-requirements.ts",
-        "src/ir/program/native-object-access-requirements.ts"
+        "src/ir/program/native-object-access-requirements.ts",
+        "src/ir/program/native-getter-invocation-requirements.ts",
+        "src/ir/program/native-object-result-requirements.ts",
+        "src/ir/program/native-object-result-values.ts"
       ],
-      "minModules": 33
+      "minModules": 36
     },
     {
       "id": "runtime-contracts",
@@ -13151,6 +13154,21 @@
     },
     {
       "path": "src/ir/program/native-object-access-requirements.ts",
+      "state": "clean",
+      "layer": "ir-program"
+    },
+    {
+      "path": "src/ir/program/native-getter-invocation-requirements.ts",
+      "state": "clean",
+      "layer": "ir-program"
+    },
+    {
+      "path": "src/ir/program/native-object-result-requirements.ts",
+      "state": "clean",
+      "layer": "ir-program"
+    },
+    {
+      "path": "src/ir/program/native-object-result-values.ts",
       "state": "clean",
       "layer": "ir-program"
     },

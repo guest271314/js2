@@ -5503,11 +5503,14 @@ function irPrivateFieldName(name: ts.Identifier | ts.PrivateIdentifier): string 
 function lowerPreparedOrdinaryPropertyRead(expr: ts.PropertyAccessExpression, cx: LowerCtx): IrValueId | null {
   const ordinary = cx.resolver?.preparedOrdinaryPropertyRead?.(expr);
   if (ordinary) {
-    if (!irTypeEquals(ordinary.resultType, IR_F64))
+    const result = ordinary.resultType;
+    const boolean =
+      result.kind === "val" && !result.typeRef && result.val.kind === "i32" && result.val.boolean === true;
+    if (!irTypeEquals(result, IR_F64) && !boolean && result.kind !== "callable")
       throw new IrInvariantError(
         "selection-preparation-mismatch",
         "build",
-        "ordinary property read lost its numeric result contract",
+        "ordinary property read lost its supported logical result contract",
       );
     const object = lowerExpr(expr.expression, cx, irVal({ kind: "externref" }));
     if (asVal(cx.builder.typeOf(object))?.kind !== "externref")
@@ -5523,6 +5526,8 @@ function lowerPreparedOrdinaryPropertyRead(expr: ts.PropertyAccessExpression, cx
       irVal({ kind: "externref" }),
     );
     if (value === null) throw new Error("ordinary Get contract returned no value");
+    if (result.kind === "callable") return cx.builder.emitOrdinaryGetCallableResult(value, result.signature);
+    if (boolean) return cx.builder.emitIntrinsic("js.boolean.unbox", [value]);
     return cx.builder.emitIntrinsic("js.number.unbox", [value]);
   }
   return null;

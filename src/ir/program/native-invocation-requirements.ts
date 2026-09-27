@@ -19,6 +19,19 @@ import {
   type NativePromiseSourceCensus,
 } from "./native-promise-inventory.js";
 import { freezePreparedIrValue, preparedIrDataMismatch } from "./data.js";
+import {
+  deriveNativeObjectAccessRequirements,
+  type NativeObjectAccessRequirements,
+} from "./native-object-access-requirements.js";
+import {
+  deriveNativeObjectResultRequirements,
+  assertNativeObjectResultRequirementsCurrent,
+  type NativeObjectResultRequirements,
+} from "./native-object-result-requirements.js";
+import {
+  reconcileNativeGetterInvocationRequirements,
+  type NativeGetterInvocationUse,
+} from "./native-getter-invocation-requirements.js";
 
 export interface NativeInvocationUse {
   readonly occurrence: number;
@@ -37,6 +50,10 @@ export interface NativeInvocationRequirements {
   readonly source: NativeSourceClosureRequirements;
   readonly runtimeCreated: NativePromiseSourceCensus;
   readonly uses: readonly NativeInvocationUse[];
+  /** Exact C1 issuer identity; its property/prototype gaps remain owned by C1. */
+  readonly objectAccess?: NativeObjectAccessRequirements;
+  readonly objectResults?: NativeObjectResultRequirements;
+  readonly getterUses: readonly NativeGetterInvocationUse[];
   readonly methodArities: readonly number[];
   readonly applyVector: boolean;
   readonly gaps: readonly { readonly unitId: IrUnitId; readonly detail: string }[];
@@ -133,10 +150,20 @@ function undefinedScalarArguments(
   });
 }
 
-function calculate(source: NativeSourceClosureRequirements) {
+function calculate(
+  source: NativeSourceClosureRequirements,
+  objectAccess?: NativeObjectAccessRequirements,
+  objectResults?: NativeObjectResultRequirements,
+) {
   assertNativeSourceClosureRequirementsCurrent(source);
   const uses: NativeInvocationUse[] = [],
     gaps: NativeInvocationRequirements["gaps"][number][] = [];
+  if (objectResults) {
+    assertNativeObjectResultRequirementsCurrent(objectResults);
+    if (objectResults.source !== source || objectResults.access !== objectAccess)
+      fail("detached keyed Get result proof");
+    gaps.push(...objectResults.gaps.map((row) => ({ unitId: row.unitId, detail: row.detail })));
+  }
   const { demands } = source;
   const typeMaps = new Map<IrUnitId, ReturnType<typeof nativeAsyncCallableValueTypes>>();
   const definitions = new Map<IrUnitId, Map<IrValueId, IrInstr>>();
@@ -242,11 +269,19 @@ function calculate(source: NativeSourceClosureRequirements) {
       callbacks,
     });
   }
+  const getters = objectAccess
+    ? reconcileNativeGetterInvocationRequirements(source, objectAccess)
+    : { getterUses: [], gaps: [] };
+  gaps.push(...getters.gaps);
   return {
     uses,
-    methodArities: [...new Set(uses.flatMap((use) => (use.arity === undefined ? [] : [use.arity])))].sort(
-      (a, b) => a - b,
-    ),
+    getterUses: getters.getterUses,
+    methodArities: [
+      ...new Set([
+        ...uses.flatMap((use) => (use.arity === undefined ? [] : [use.arity])),
+        ...(getters.getterUses.length ? [0] : []),
+      ]),
+    ].sort((a, b) => a - b),
     applyVector: uses.some((use) => use.kind === "apply-vector"),
     gaps,
   };
@@ -254,10 +289,16 @@ function calculate(source: NativeSourceClosureRequirements) {
 
 export function planNativeInvocationRequirements(
   source: NativeSourceClosureRequirements,
-  options: { readonly utf8Storage: boolean },
+  options: { readonly utf8Storage: boolean; readonly objectAccess?: NativeObjectAccessRequirements },
 ): NativeInvocationRequirements | undefined {
-  const data = calculate(source);
-  if (!data.uses.length) return undefined;
+  const objectAccess =
+    options.objectAccess ??
+    (needsObjectResultProof(source)
+      ? deriveNativeObjectAccessRequirements(source.demands.program, source.demands.projection)
+      : undefined);
+  const objectResults = objectAccess ? deriveNativeObjectResultRequirements(source, objectAccess) : undefined;
+  const data = calculate(source, objectAccess, objectResults);
+  if (!data.uses.length && !data.getterUses.length && !objectResults?.gaps.length) return undefined;
   const { program, projection } = source.demands;
   const runtimeCreated = collectNativePromiseSourceCensus(program, projection, {
     backend: projection.backend,
@@ -273,6 +314,8 @@ export function planNativeInvocationRequirements(
     key: `${source.key}:invocation`,
     source,
     runtimeCreated,
+    ...(objectAccess ? { objectAccess } : {}),
+    ...(objectResults ? { objectResults } : {}),
     ...(freezePreparedIrValue(data) as typeof data),
     completionScope: "selected-source-invocation" as const,
   });
@@ -280,11 +323,34 @@ export function planNativeInvocationRequirements(
   return pack;
 }
 
+function needsObjectResultProof(source: NativeSourceClosureRequirements): boolean {
+  for (const owner of source.demands.owners) {
+    const types = nativeAsyncCallableValueTypes(owner.projectedFunction);
+    for (const row of source.demands.occurrences) {
+      const buffer = source.demands.buffers[row.bufferIndex]!;
+      if (buffer.ownerUnitId !== owner.unitId || buffer.view !== "projection") continue;
+      const instruction = row.instruction;
+      if (
+        instruction.kind === "call" &&
+        instruction.target.binding.kind === "intrinsic" &&
+        instruction.target.binding.symbol === "js.object.get"
+      )
+        return true;
+      if (instruction.kind === "intrinsic" && instruction.id === "js.boolean.unbox") return true;
+      if (instruction.kind === "coerce.to_externref" && instruction.resultType?.kind === "callable") {
+        const input = types.get(instruction.value);
+        if (input?.kind !== "closure" && input?.kind !== "callable") return true;
+      }
+    }
+  }
+  return false;
+}
+
 export function assertNativeInvocationRequirementsCurrent(pack: NativeInvocationRequirements): void {
   const snapshot = owners.get(pack);
   if (!snapshot) fail("unissued or copied invocation requirements");
   assertNativePromiseSourceCensusCurrent(pack.runtimeCreated);
-  const data = calculate(pack.source);
+  const data = calculate(pack.source, pack.objectAccess, pack.objectResults);
   if (pack.runtimeCreated.required)
     data.gaps.push({
       unitId: pack.runtimeCreated.anchorUnitId,
@@ -298,6 +364,7 @@ export function assertNativeInvocationRequirementsCurrent(pack: NativeInvocation
     preparedIrDataMismatch(data, snapshot) !== undefined ||
     preparedIrDataMismatch(data, {
       uses: pack.uses,
+      getterUses: pack.getterUses,
       methodArities: pack.methodArities,
       applyVector: pack.applyVector,
       gaps: pack.gaps,

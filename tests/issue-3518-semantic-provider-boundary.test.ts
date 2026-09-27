@@ -671,6 +671,13 @@ const mergedObjectStorageAdditions: Readonly<Record<string, readonly string[]>> 
     "src/runtime/wasmgc/values/ordinary-object-storage-definitions.ts",
   ],
 };
+// Add only the current getter/result proof leaves; signed layer receipts and
+// the complete historical activation sequence remain unchanged below.
+const getterResultAdditions = [
+  "src/ir/program/native-getter-invocation-requirements.ts",
+  "src/ir/program/native-object-result-requirements.ts",
+  "src/ir/program/native-object-result-values.ts",
+];
 const mergedInvocationActivations = [
   {
     layer: "ir-program",
@@ -884,6 +891,7 @@ describe("semantic verification and provider ownership boundary", () => {
       if (id === "ir-runtime") additions.push(...semanticCallableAdditions);
       additions.push(...(mergedInvocationAdditions[id] ?? []));
       additions.push(...(mergedObjectStorageAdditions[id] ?? []));
+      if (id === "ir-program") additions.push(...getterResultAdditions);
       if (id === "native-runtime")
         additions.push(
           "src/runtime/wasmgc/values/prototype-companion-body.ts",

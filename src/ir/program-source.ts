@@ -165,10 +165,8 @@ function checkerScalar(checker: ts.TypeChecker, node: ts.Node): IrType | undefin
   return undefined;
 }
 
-/** Checker-certified callable annotations; no physical carrier or provider is inferred. */
-function checkerCallable(checker: ts.TypeChecker, node: ts.TypeNode, where: string): IrType | undefined {
-  const declared = checker.getTypeFromTypeNode(node);
-  if (!checker.getSignaturesOfType(declared, ts.SignatureKind.Call).length) return undefined;
+/** Shared logical callable conversion; this does not issue a physical carrier. */
+function checkerCallableType(checker: ts.TypeChecker, input: ts.Type, where: string): IrType | null {
   const active = new Set<ts.Type>();
   const convert = (type: ts.Type): IrType | null => {
     if ((type.flags & ts.TypeFlags.Void) !== 0) return null;
@@ -208,10 +206,41 @@ function checkerCallable(checker: ts.TypeChecker, node: ts.TypeNode, where: stri
       active.delete(type);
     }
   };
-  const result = convert(declared);
-  const observed = convert(checker.getTypeAtLocation(node));
+  return convert(input);
+}
+
+/** Checker-certified callable annotations; no physical carrier or provider is inferred. */
+function checkerCallable(checker: ts.TypeChecker, node: ts.TypeNode, where: string): IrType | undefined {
+  const declared = checker.getTypeFromTypeNode(node);
+  if (!checker.getSignaturesOfType(declared, ts.SignatureKind.Call).length) return undefined;
+  const result = checkerCallableType(checker, declared, where);
+  const observed = checkerCallableType(checker, checker.getTypeAtLocation(node), where);
   if (!result || preparedIrDataMismatch(result, observed) !== undefined)
     unsupported(`callable annotation in ${where} disagrees with its checker contract`);
+  return result;
+}
+
+/** Preserve a real inferred callable return instead of the scalar lattice's null fallback. */
+function checkerInferredCallableResult(
+  checker: ts.TypeChecker,
+  declaration: ts.FunctionDeclaration,
+  where: string,
+): IrType | undefined {
+  if (
+    declaration.type ||
+    !declaration.body ||
+    declaration.asteriskToken ||
+    declaration.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword)
+  )
+    return undefined;
+  const signature = checker.getSignatureFromDeclaration(declaration);
+  if (!signature) return undefined;
+  const type = checker.getReturnTypeOfSignature(signature);
+  const parts = type.isUnionOrIntersection() ? type.types : [type];
+  if (!parts.some((part) => checker.getSignaturesOfType(part, ts.SignatureKind.Call).length)) return undefined;
+  if (type.isUnionOrIntersection()) unsupported(`inferred callable result in ${where} has an ambiguous contract`);
+  const result = checkerCallableType(checker, type, where);
+  if (result?.kind !== "callable") unsupported(`inferred callable result in ${where} lost its checker contract`);
   return result;
 }
 
@@ -617,9 +646,8 @@ function prepareSourceFunctionSignatures(
               ? { kind: "val", val: { kind: "externref" } }
               : returnNode
                 ? (checkerCallable(checker, returnNode, unit.displayName) ?? typeNodeToIr(returnNode, unit.displayName))
-                : propagated
-                  ? lowerTypeToIrType(propagated.returnType)
-                  : null;
+                : (checkerInferredCallableResult(checker, declaration, unit.displayName) ??
+                  (propagated ? lowerTypeToIrType(propagated.returnType) : null));
     bodyResults.set(unit.id, result);
     const callableResults = preparedIrProgramCallableResults({
       funcKind: isAsync ? "async" : "regular",

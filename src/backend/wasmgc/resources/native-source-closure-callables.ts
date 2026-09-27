@@ -42,8 +42,11 @@ function resolveEntries(
   requireNativeSourceClosureTypes(tx, types, types.requirements);
   assertNativeInvocationRequirementsCurrent(requirements);
   if (requirements.source !== types.requirements) fail("selected invocation belongs to a different source owner");
-  const selected = new Set(requirements.uses.flatMap((use) => (use.liftedUnitId ? [use.liftedUnitId] : [])));
-  return types.requirements.units
+  const selected = new Set([
+    ...requirements.uses.flatMap((use) => (use.liftedUnitId ? [use.liftedUnitId] : [])),
+    ...requirements.getterUses.map((use) => use.liftedUnitId),
+  ]);
+  const entries = types.requirements.units
     .filter((unit) => selected.has(unit.unitId))
     .map((unit) => {
       const source = types.requirements.demands.projection.prepared.functions.find((fn) => fn.unitId === unit.unitId);
@@ -81,6 +84,8 @@ function resolveEntries(
         publicLength: parameters.publicLength,
       });
     });
+  if (entries.length !== selected.size) fail("selected invocation lacks an original lifted source unit");
+  return entries;
 }
 
 /** Associate the consumer's sole unit-slot population after reservation freeze. No allocation or fill. */

@@ -9,6 +9,74 @@ function fail(detail: string): never {
   throw new IrUnsupportedError("method-call-unsupported", "build", `native closure invocation: ${detail}`);
 }
 
+/** Actual own getter allocations used only for the source effect proof, not prototype capability. */
+function sourceGetterEffects(checker: ts.TypeChecker, sources: readonly ts.SourceFile[]) {
+  const objects = new Map<ts.VariableDeclaration, ReadonlyMap<string, ts.GetAccessorDeclaration>>();
+  const literals = new Set<ts.ObjectLiteralExpression>();
+  const getters = new Set<ts.GetAccessorDeclaration>();
+  const reads = new Map<ts.PropertyAccessExpression, ts.GetAccessorDeclaration>();
+  const collect = (node: ts.Node): void => {
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      ts.isVariableDeclarationList(node.parent) &&
+      node.parent.flags & ts.NodeFlags.Const &&
+      ts.isVariableStatement(node.parent.parent) &&
+      node.initializer &&
+      ts.isObjectLiteralExpression(node.initializer)
+    ) {
+      const members = new Map<string, ts.GetAccessorDeclaration>();
+      for (const property of node.initializer.properties) {
+        if (
+          !ts.isGetAccessorDeclaration(property) ||
+          !ts.isIdentifier(property.name) ||
+          !property.body ||
+          property.parameters.length ||
+          members.has(property.name.text)
+        )
+          return;
+        members.set(property.name.text, property);
+      }
+      if (members.size) {
+        objects.set(node, members);
+        literals.add(node.initializer);
+        for (const getter of members.values()) getters.add(getter);
+      }
+    }
+    ts.forEachChild(node, collect);
+  };
+  sources.forEach(collect);
+  const associate = (node: ts.Node): void => {
+    if (ts.isPropertyAccessExpression(node) && !node.questionDotToken && ts.isIdentifier(node.expression)) {
+      const declaration = checker.getSymbolAtLocation(node.expression)?.valueDeclaration;
+      const getter =
+        declaration && ts.isVariableDeclaration(declaration)
+          ? objects.get(declaration)?.get(node.name.text)
+          : undefined;
+      if (getter) reads.set(node, getter);
+    }
+    ts.forEachChild(node, associate);
+  };
+  sources.forEach(associate);
+  return { objects, literals, getters, reads };
+}
+
+function primitiveBodyReturn(body: ts.ConciseBody, primitive: (node: ts.Expression) => boolean): boolean {
+  if (!ts.isBlock(body)) return primitive(body);
+  const returns: ts.Expression[] = [];
+  let bare = false;
+  const collect = (part: ts.Node): void => {
+    if (part !== body && ts.isFunctionLike(part)) return;
+    if (ts.isReturnStatement(part)) {
+      if (part.expression) returns.push(part.expression);
+      else bare = true;
+    }
+    ts.forEachChild(part, collect);
+  };
+  collect(body);
+  return !bare && returns.length > 0 && returns.every(primitive);
+}
+
 /**
  * A fresh function literal has the primordial member in the isolated program's
  * initial realm. Only an exhaustive, closed source-effect proof preserves that
@@ -21,6 +89,7 @@ export function assertSourceClosureInvocationEffects(
   plans: ReadonlyMap<ts.CallExpression, SourceClosureInvocationPlan>,
 ): void {
   const callbacks = sourceClosureCallbackGraph(checker, sources, plans);
+  const getterEffects = sourceGetterEffects(checker, sources);
   const selected = callbacks.protectedFunctions;
   const members = new Set([...plans.keys()].map((call) => call.expression));
   const arrays = new Set(
@@ -69,6 +138,10 @@ export function assertSourceClosureInvocationEffects(
         return true;
       return primitive(node.left) && primitive(node.right);
     }
+    if (ts.isPropertyAccessExpression(node)) {
+      const getter = getterEffects.reads.get(node);
+      return !!getter?.body && primitiveBodyReturn(getter.body, primitive);
+    }
     if (ts.isCallExpression(node)) {
       const plan = plans.get(node);
       const targets = plan ? [plan.declaration] : callbacks.calls.get(node);
@@ -76,19 +149,7 @@ export function assertSourceClosureInvocationEffects(
       return targets.every((target) => {
         const fn = target.initializer;
         if (!fn || !(ts.isFunctionExpression(fn) || ts.isArrowFunction(fn))) return false;
-        if (!ts.isBlock(fn.body)) return primitive(fn.body);
-        const returns: ts.Expression[] = [];
-        let bare = false;
-        const collect = (part: ts.Node): void => {
-          if (part !== fn.body && ts.isFunctionLike(part)) return;
-          if (ts.isReturnStatement(part)) {
-            if (part.expression) returns.push(part.expression);
-            else bare = true;
-          }
-          ts.forEachChild(part, collect);
-        };
-        collect(fn.body);
-        return !bare && returns.length > 0 && returns.every(primitive);
+        return primitiveBodyReturn(fn.body, primitive);
       });
     }
     if (!ts.isIdentifier(node)) return false;
@@ -124,6 +185,15 @@ export function assertSourceClosureInvocationEffects(
     if (ts.isTypeNode(node) || ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)) return;
     if (ts.isIdentifier(node)) {
       if (ts.isPropertyAccessExpression(node.parent) && node.parent.name === node && members.has(node.parent)) return;
+      if (
+        (ts.isPropertyAccessExpression(node.parent) &&
+          node.parent.name === node &&
+          getterEffects.reads.has(node.parent)) ||
+        (ts.isGetAccessorDeclaration(node.parent) &&
+          node.parent.name === node &&
+          getterEffects.getters.has(node.parent))
+      )
+        return;
       const declaration = checker.getSymbolAtLocation(node)?.valueDeclaration;
       if (!declaration && !undefinedName(node)) {
         // Property/declaration names are syntax; other unknown reads can be
@@ -142,6 +212,16 @@ export function assertSourceClosureInvocationEffects(
           (!ts.isPropertyAccessExpression(access) || access.expression !== node || !members.has(access))
         )
           fail("selected closure escapes or is mutated outside its certified invocation sites");
+      }
+      if (
+        declaration &&
+        ts.isVariableDeclaration(declaration) &&
+        getterEffects.objects.has(declaration) &&
+        node !== declaration.name
+      ) {
+        const access = node.parent;
+        if (!ts.isPropertyAccessExpression(access) || access.expression !== node || !getterEffects.reads.has(access))
+          fail("getter receiver escapes or is mutated outside its actual own getter reads");
       }
       if (
         declaration &&
@@ -205,7 +285,9 @@ export function assertSourceClosureInvocationEffects(
     if (
       ts.isVariableStatement(node) &&
       node.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) &&
-      node.declarationList.declarations.some((declaration) => selected.has(declaration))
+      node.declarationList.declarations.some(
+        (declaration) => selected.has(declaration) || getterEffects.objects.has(declaration),
+      )
     )
       fail("selected closure export escapes the isolated source effect proof");
     if (ts.isVariableDeclaration(node) && !ts.isIdentifier(node.name))
@@ -235,7 +317,9 @@ export function assertSourceClosureInvocationEffects(
       ts.isEmptyStatement(node) ||
       ts.isExpressionStatement(node) ||
       ts.isCallExpression(node) ||
-      (ts.isPropertyAccessExpression(node) && members.has(node)) ||
+      (ts.isPropertyAccessExpression(node) && (members.has(node) || getterEffects.reads.has(node))) ||
+      (ts.isObjectLiteralExpression(node) && getterEffects.literals.has(node)) ||
+      (ts.isGetAccessorDeclaration(node) && getterEffects.getters.has(node)) ||
       (ts.isArrayLiteralExpression(node) && arrays.has(node)) ||
       ts.isConditionalExpression(node) ||
       ts.isParenthesizedExpression(node) ||
