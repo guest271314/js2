@@ -54,4 +54,39 @@ describe("#6684 — Object.prototype own-property predicates as values (standalo
     (instance.exports.__module_init as (() => void) | undefined)?.();
     expect((instance.exports.run as () => number)()).toBe(expected);
   });
+
+  // The DIRECT syntactic `.call` must keep the static-type fold, which answers
+  // a class CONSTRUCTOR from its static surface. Routed through the value
+  // closure it reached the runtime `__hasOwnProperty`, which has no
+  // class-object arm and answered `true` for an INSTANCE field — 124
+  // test262 class/elements rows in merge_group run 36285181870.
+  it("keeps the direct `.call` form answering a class constructor correctly", async () => {
+    const src = `
+class C { foo = "foobar"; static sf = 1; m() { return 1; } }
+export function run() {
+  var r = 0;
+  r = r * 10 + (Object.prototype.hasOwnProperty.call(C, "foo") ? 1 : 0);
+  r = r * 10 + (Object.prototype.hasOwnProperty.call(C, "sf") ? 1 : 0);
+  r = r * 10 + (Object.prototype.hasOwnProperty.call(C.prototype, "foo") ? 1 : 0);
+  r = r * 10 + (Object.prototype.hasOwnProperty.call(C.prototype, "m") ? 1 : 0);
+  r = r * 10 + (Object.prototype.hasOwnProperty.call(new C(), "foo") ? 1 : 0);
+  r = r * 10 + (Object.prototype.propertyIsEnumerable.call(C, "foo") ? 1 : 0);
+  return r;
+}
+`;
+    const expected = (
+      new Function(`${src.replace("export function run", "return function run")}`) as () => () => number
+    )()();
+    expect(expected).toBe(10_110);
+    const result = await compile(src, {
+      fileName: "test.js",
+      allowJs: true,
+      skipSemanticDiagnostics: true,
+      target: "standalone",
+    });
+    expect(result.success, result.errors.map((error) => error.message).join(" | ")).toBe(true);
+    const { instance } = await WebAssembly.instantiate(result.binary, {});
+    (instance.exports.__module_init as (() => void) | undefined)?.();
+    expect((instance.exports.run as () => number)()).toBe(expected);
+  });
 });

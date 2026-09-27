@@ -556,6 +556,7 @@ import { bindingMayReceiveHostCallable } from "../analysis/mixed-assignment-carr
 // Registry extracted to its own leaf module (#1793; LOC ratchet #3102) —
 // re-exported here so existing importers keep resolving via calls.js.
 import { BUILTIN_CLASS_NAMES } from "./builtin-class-names.js";
+import { objectOwnPredicateCallKeepsFold } from "../object-proto-has-own-property.js";
 import { maybeEmitLayoutHint } from "../fnctor-layout-emit.js"; // (#3927) per-type layouts
 import { matchClosureInfoBySignature, tsSignatureHasRest } from "./closure-sig-match.js"; // (#4394) exact-first closure pick
 export { BUILTIN_CLASS_NAMES };
@@ -1339,6 +1340,8 @@ function tryEmitNativeProtoReflectiveCall(
   // m.call(x)` arrives with an Identifier receiver, and the ES5 genericity idiom
   // `arr.getClass = Object.prototype.toString; arr.getClass()` never reaches a
   // `.call` at all. Neither gives the fold a receiver to read.
+  // (#6684) Same precedence for the own-property predicates — see the helper.
+  if (objectOwnPredicateCallKeepsFold(ifaceName, member, unwrapTransparent(receiver))) return undefined;
   if (ifaceName === "Object" && member === "toString" && ts.isPropertyAccessExpression(unwrapTransparent(receiver))) {
     // The lower direct-call path now owns BOTH statically-known tags and the
     // runtime any/externref classifier. Never divert this syntactic form through

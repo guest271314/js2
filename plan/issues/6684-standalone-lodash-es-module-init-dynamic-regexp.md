@@ -4,8 +4,8 @@ title: "standalone: lodash-es module-init hits a runtime-built RegExp outside th
 status: done
 sprint: Backlog
 created: 2026-09-26
-updated: 2026-09-26
-completed: 2026-09-26
+updated: 2026-09-27
+completed: 2026-09-27
 priority: high
 horizon: m
 feasibility: medium
@@ -28,7 +28,14 @@ loc-budget-allow:
   - src/codegen/expressions/call-identifier.ts
   - src/codegen/expressions/calls-closures.ts
   - src/codegen/expressions/identifiers.ts
+  # 2026-09-27 (#6684 merge_group follow-up): calls.ts gains a one-line
+  # decline (+ import) in the reflective `.call` interception so the DIRECT
+  # `Object.prototype.hasOwnProperty.call(X, k)` keeps its fold; the predicate
+  # lives in object-proto-has-own-property.ts.
+  - src/codegen/expressions/calls.ts
 func-budget-allow:
+  # 2026-09-27 (#6684 merge_group follow-up): the same one-line decline.
+  - src/codegen/expressions/calls.ts::tryEmitNativeProtoReflectiveCall
   # 2026-09-26 (#6684): the `Object.create` case + body arm in the builtin
   # value-closure switch, and the guarded-result fallback in the identifier
   # call dispatch ladder (both delegate to new modules).
@@ -170,3 +177,45 @@ the non-pass sets are equal row for row (0 losses, 0 gains).
 
 JS-host control (`identifiers.ts` is the one shared change):
 `tests/dogfood/lodash-upstream-suite.mjs` 59/62 before and after.
+
+### merge_group follow-up (2026-09-27)
+
+merge_group run 36285181870 parked the PR: `merge shard reports` failed the
+#1897 standalone regression guard (net −122: 3 improvements, 125 wasm-change
+regressions; 124 in `language/{statements,expressions}/class/elements`) and the
+#2097 high-water floor (41009 < 41132 − 50). All 126 pass→other rows still
+pass on main's newest standalone baseline, so this was the PR, not drift.
+
+6. **Mechanism.** Wiring a body for `hasOwnProperty` / `propertyIsEnumerable`
+   (step 2) also switched on the reflective `.call` interception in
+   `calls.ts::tryEmitNativeProtoReflectiveCall` for the DIRECT spelling
+   `Object.prototype.hasOwnProperty.call(X, k)`. That used to decline (the
+   refusal made `ensureStandaloneNativeMethodClosure` yield nothing), leaving
+   it to the #3021 introspection fold. The fold answers a class CONSTRUCTOR
+   from its static surface; the runtime `__hasOwnProperty` has no
+   class-object arm (#5195 R2-2), so
+   `Object.prototype.hasOwnProperty.call(C, "foo")` for an instance field
+   answered `true`. Fix: `objectOwnPredicateCallKeepsFold`
+   (object-proto-has-own-property.ts) declines the direct form, exactly like
+   the #4119 `Object.prototype.toString.call` decline. Value-erased spellings
+   (`var hop = objectProto.hasOwnProperty; hop.call(o, k)`, lodash-es) still
+   take the closure.
+
+- Test: `tests/issue-6684-object-proto-own-predicate-value.test.ts` new case
+  fails on the parent (`100111`), passes with the fix (`10110`, Node's answer).
+- The 126 regressed rows, `--standalone`: parent 126 fail; fix 125 pass, 1 fail
+  (`Temporal/PlainDateTime/prototype/since/roundingincrement-cleanly-divides.js`,
+  `Temporal` undefined locally; a CI `compile_timeout` in the park run).
+- Scoped standalone (264 rows: the 126 + `Object/prototype/{hasOwnProperty,
+  propertyIsEnumerable}` + a 1-in-20 sample of class/elements files using the
+  borrowed predicate + the park run's 3 improvements): parent
+  `{ pass: 109, fail: 144, compile_error: 11 }` → fix
+  `{ pass: 232, fail: 21, compile_error: 11 }`, 125 gains. Two rows go back to
+  fail: `language/expressions/super/prop-{dot,expr}-obj-ref-non-strict.js`.
+  They fail on main too; the parent passed them only through this same
+  unintended routing (the fold misses a `super.x =` expando). No loss against
+  main.
+- lodash-es `standalone-dynamic` lane unchanged: `runtime-error`
+  `RuntimeError: dereferencing a null pointer`, phase `checksum`, 0 imports
+  (next blocker #6704). The reflective route is `ctx.standalone`-only, so
+  JS-host is byte-identical.
