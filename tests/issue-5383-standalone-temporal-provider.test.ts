@@ -2116,7 +2116,7 @@ describe("#5383 S3 the pre-warm step and the CI job", () => {
   it("the pre-warm script builds per target and stamps each one", () => {
     const script = readRepoFile("scripts", "prewarm-temporal-provider.mjs");
     expect(script).toContain("--target");
-    expect(script).toContain("temporalProviderCompileOptions(target)");
+    expect(script).toContain("temporalProviderCompileOptions(target, semanticProviders)");
     // The key MUST be computed with the same options the build uses, or the
     // stamp certifies an artifact nobody will ask for.
     expect(script).toContain("temporalProviderCacheKey({ polyfillSource, compileOptions })");
