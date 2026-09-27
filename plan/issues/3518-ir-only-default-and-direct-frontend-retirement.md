@@ -12892,3 +12892,29 @@ Now integrate signed prototype checkpoint0d96ff4770, preserving its exact
 source/test blobs and main's Symbol brand changes; only the independent issue
 appends conflict. Legacy remains operational and all documented baseline
 failures remain open.
+
+### Sept 27: restore signed equality extraction in string-output preservation
+
+The unchanged 24-row output preservation cohort stops because its concat inverse
+still sees the later signed f75 equality adapter. Add a tests-only, purpose-named
+outer inverse authenticated against f75 and its parent Git blobs, complete file
+hashes, ordered unique spans, and actual pure builder source bytes. Replay must
+recover the exact input; existing donor fixtures and hashes remain unchanged.
+Apply this inverse only to native-strings-basics before the existing concat
+reconstruction. Preserve each original negative control. Any later native-strings
+mismatch remains a separate measured failure requiring independent attribution.
+No production changes or legacy retirement are part of this repair.
+
+First frozen repair run: 17/41 passed, including equality composition12/12
+and original equality donor5/5; original24 now stop at native-strings.ts.
+TS7 passed and 1,699 inputs stayed unchanged. Independently authenticated
+normalized c201 native-strings bytes as exact signed a216 (SHA88c85375…),
+whose AnyToString extraction donor is signed0ef8 (SHA234d0169…). Add a
+separate purpose-named inverse with full hashes and the existing strict
+actual-recipe inverse, preserving the first failure receipt. Original stdout
+and concat expectations remain unchanged.
+
+Second frozen validation passed 73/73: original output preservation24/24,
+equality composition12/12, AnyToString composition15/15, unchanged equality
+donor5/5 and unchanged AnyToString donor17/17. All 1,703 pinned inputs
+remained unchanged. The original17/41 failure record remains retained.
