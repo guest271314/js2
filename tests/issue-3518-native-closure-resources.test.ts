@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
-import { readBeforeResumeMain } from "./helpers/resume-main-composition.js";
+import { readBeforeClosureComposition } from "./helpers/closure-source-composition.js";
 
 import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
@@ -70,7 +70,7 @@ describe("atomic compatibility of the same-owner engine", () => {
 // embedded donor text/hashes remain unchanged; pin the formatted transport.
 const fixtureHash = "be6904328b9bb25981ca9ae109c3526d86931832eeb433bce66af41f99b96575";
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
-const read = readBeforeResumeMain;
+const read = readBeforeClosureComposition;
 interface Donor {
   path: string;
   text: string;

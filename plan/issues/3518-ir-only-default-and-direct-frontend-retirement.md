@@ -12892,3 +12892,43 @@ Now integrate signed prototype checkpoint0d96ff4770, preserving its exact
 source/test blobs and main's Symbol brand changes; only the independent issue
 appends conflict. Legacy remains operational and all documented baseline
 failures remain open.
+
+### 2026-09-27: preserve closure donors across the delivered method ABI fix
+
+The exact current `funcref-wrapper-types.ts` bytes equal signed main commit
+`bfe17bb4691881ebcb39e9848f52d7df1d4d620f` (parent
+`605df4a43008ebcdd5af731b9a3db387b2b7daf1`). Its independent cache-key
+helper and existing-wrapper lookup insertion shifts the original extraction
+receipt offsets. The earlier complete suite recorded52/100 failures; the
+header and metadata files still reconstruct their original receipts exactly.
+
+Implementation: authenticate two fixed Git-derived spans, whole input/output
+hashes, and reciprocal replay before the unchanged closure donor inverse.
+Only the preservation reader uses this view; production keeps the delivered
+method-trampoline repair. Keep all100 existing rows, original fixtures, and
+mutation checks unchanged. Add positive, missing/duplicate/reordered/altered
+span, outside-edit and fixture-tamper controls, then run the complete closure
+suite, new controls and actual method-trampoline regression tests. No pass
+claim until measured; source IR work and legacy execution remain active.
+
+Row-level attribution refines that count:28/52 failures stop at the wrapper
+span;23 stop at the independent linked-provider callback addition in calls.ts
+(commit ea46c33ddc); one header receipt stops at the27-line type-only
+IrClosureLowering move (cb64af7b03). Both full files after the existing
+resume-main inverse exactly match those signed commits. Extend the same
+new receipt to those two exact parent/commit pairs; preserve their runtime
+behavior and all original hashes. Do not infer52 fixes from the wrapper alone.
+
+Measured validation on aff6911664: TS7 passed; all100 original closure
+preservation tests and27 new composition controls passed. The first four-file
+run reported127 passed and7 pending because the two linked runtime suites
+could not initialize without this worktree's absent test262 harness. Preserve
+that exit1/report. Copied44 harness files only into the empty worktree
+submodule directory after verifying every file blob against pinned corpus
+b363f29d3c43c626dc852744ad64a0b48a003693; the root corpus is unchanged.
+Rerunning the complete two runtime suites then passed7/7 (6490=3,6492=4).
+All6,960 inputs in the first run were unchanged. The two main changes have
+valid SSH signatures with key32dP45eS (no principal in the local allowed list);
+cb64's signature verifies against Thomas's local allowed signer. No source
+implementation, original donor fixture, or existing assertion changed.
+Evidence: `.tmp/closure-preservation/{terminal,tests,runtime-tests,pinned-harness}.json`.
