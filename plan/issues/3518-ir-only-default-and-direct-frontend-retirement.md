@@ -13476,3 +13476,9 @@ needed after the first combined run; revalidate the complete affected suite.
 ### Descriptor integration validation, 2026-09-27
 
 The combined 27-suite run executed all 1,527 rows: 1,515 passed and 12 historical resume-main reader assertions failed because their reader skipped the authenticated descriptor relocation inverse. Only that test reader was corrected; its complete original 143-row suite then passed, with a clean process exit and all 2,167 pinned inputs unchanged. Production sources were unchanged after the first run. Typechecking passed. The preservation gate passed 6/6 witnesses, core execution 12/12 and core types 10/10; strict closure and retirement remain uncertified. Legacy remains operational. Raw first and corrected runs remain in `.tmp/descriptor-integration/`.
+
+### Fresh main integration, 2026-09-27
+
+Fetched `loopdive/js2` main directly at `bc73c88a67b017522c4e1d53a28a1d675bec3e5b` and merged after signed descriptor checkpoint `3a76cb4ef0e3b3bf9ccf746e192c02df32add1a5`. All eleven incoming non-policy files are byte-identical to main; the boundary policy retains every prior entry and adds the exact incoming array-reduce inventory entry. Combined typechecking passed, and all 355 rows in the two incoming callable regression suites plus the original boundary suite passed with clean exit, no reporting errors, and 2,170 unchanged pinned inputs. Inventory is valid; full architecture/retirement remains incomplete.
+
+The preceding descriptor commit hooks executed 935/935 assertions across twelve suites, but the 75-row descriptor suite also reported an `onTaskUpdate` timeout through the existing hook runner. Its separate integration run had already passed all 75 rows without reporting errors. Both raw records are preserved; hook assertion counts alone are not clean-process evidence. This sync is local delivery to the integration branch, not a verified main merge of the IR work.
