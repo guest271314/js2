@@ -125,6 +125,57 @@ describe("#4401 host import policy inventory", () => {
     );
   });
 
+  describe("#6707 linker-owned shared exception tag", () => {
+    const source = `export function boom(n: number): number { if (n > 0) throw new Error("x"); return n; }`;
+    const compileShared = async (regime: "1" | "0") => {
+      const previous = process.env.JS2WASM_NATIVE_REGIME_JS;
+      process.env.JS2WASM_NATIVE_REGIME_JS = regime;
+      try {
+        return await compile(source, {
+          fileName: `issue-6707-shared-exn-${regime}.ts`,
+          semanticProviders: "native-first",
+          sharedExceptionTag: true,
+        });
+      } finally {
+        if (previous === undefined) Reflect.deleteProperty(process.env, "JS2WASM_NATIVE_REGIME_JS");
+        else process.env.JS2WASM_NATIVE_REGIME_JS = previous;
+      }
+    };
+
+    it("keys on the non-func manifest kind, not on the name alone", () => {
+      const intent = { type: "builtin", name: "__exn" } as const;
+      expect(classifyHostImport({ ...descriptor("__exn", intent), kind: "global" })).toMatchObject({
+        classification: "instance-lifecycle",
+        family: "shared-exception-tag",
+        ownerIssue: 5226,
+        nativeFallback: true,
+      });
+      expect(classifyHostImport(descriptor("__exn", intent))).toMatchObject({ classification: "unknown" });
+    });
+
+    for (const regime of ["1", "0"] as const) {
+      it(`classifies env.__exn as instance-lifecycle and publishes (JS2WASM_NATIVE_REGIME_JS=${regime})`, async () => {
+        const result = await compileShared(regime);
+        expect(result.success, result.errors.map((error) => error.message).join("; ")).toBe(true);
+        expect(result.binary.length).toBeGreaterThan(0);
+        const tags = (result.hostImportInventory ?? []).filter((entry) => entry.name === "__exn");
+        expect(tags).toEqual([
+          expect.objectContaining({
+            module: "env",
+            kind: "tag",
+            classification: "instance-lifecycle",
+            family: "shared-exception-tag",
+            ownerIssue: 5226,
+            nativeFallback: true,
+          }),
+        ]);
+        expect(result.hostImportSummary).toMatchObject({
+          byClassification: { "legacy-semantic": 0, unknown: 0 },
+        });
+      });
+    }
+  });
+
   it("keeps a standalone generator on the native carrier whether or not native-first is spelled out", async () => {
     // Historical note: this test once pinned a transitional state in which the
     // standalone target still leaked `__create_generator` unless native-first

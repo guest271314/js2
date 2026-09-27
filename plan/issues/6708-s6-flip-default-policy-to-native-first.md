@@ -41,7 +41,11 @@ rule Date/Intl) available as opt-ins, and keep the Web-API/platform layer.
    an error state versus the `jsHost` lane on the same run (the dashboard
    JSON is CI-owned; read `benchmarks/results/npm-compat.json` after the next
    refresh, do not hand-run the whole generator).
-4. Performance: the unmeasured row of the program acceptance. Run
+4. Performance: the unmeasured row of the program acceptance. NOTE: the
+   sidebar runner passes `--experimental-wasm-custom-descriptors`, which
+   Node 22 rejects (`bad option`); it needs Node ≥ 24 (S1's implementer used
+   25.9). On a box with only Node 22 this item must run on CI or another
+   machine — do not skip it. Run
    `node scripts/generate-playground-benchmark-sidebar.mjs --kernels-only --output=.tmp/host.json`
    and the same with `--semantic-providers=native-first` (S1 already fixed
    the DOM row), plus the npm-compat perf lanes for acorn/cookie/redux/hono,
