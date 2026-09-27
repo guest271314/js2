@@ -1,6 +1,8 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { beforeBigIntCarrierPort } from "./bigint-carrier-port.js";
+import { beforeDescriptorAdapterRelocation } from "./descriptor-adapter-relocation.js";
 
 export const resumeMainPrior = "c2014e6da1fd49da71f5d3e57722f35bee73ecc0";
 export const resumeMainUpstream = "bb18c35e839bc35f8294b76123e231b253405127";
@@ -23,8 +25,12 @@ export const resumeMainPaths = [
   "src/runtime/wasmgc/values/to-primitive-bodies.ts",
 ] as const;
 export const resumeMainSha = (source: string) => createHash("sha256").update(source).digest("hex");
+/** Authenticate the later BigInt correction before the unchanged main-merge layer. */
 export const readMergedSource = (path: string): string =>
-  readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
+  beforeBigIntCarrierPort(
+    path,
+    beforeDescriptorAdapterRelocation(path, readFileSync(new URL(`../../${path}`, import.meta.url), "utf8")),
+  );
 export const resumeMainCompositionText = readMergedSource(resumeMainFixturePath);
 
 interface SourcePin {

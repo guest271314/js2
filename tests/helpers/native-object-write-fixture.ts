@@ -247,7 +247,8 @@ export function objectWriteRuntime(
       typeofBigIdx: control.isBigInt!.handle,
       unboxNumIdx: control.number!.handle,
       unboxBoolIdx: control.boolean!.handle,
-      toBigIdx: control.bigint!.handle,
+      // This controlled historical fixture preserves the original i64 donor branch.
+      bigint: { kind: "legacy-i64", toBigIdx: control.bigint!.handle },
       anyStrTypeIdx: strings.layout.anyStrTypeIdx,
       strFlattenIdx: f.flatten.flatten.handle,
       strEqualsIdx: f.equality.equals.handle,
@@ -323,7 +324,10 @@ export function objectWriteRuntime(
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
       { op: "local.set", index: 5 },
-      ...buildOrdinaryObjectDataDescriptorBody({ ...descriptor, errors: errors(6) }),
+      // This historical donor harness retains the original null-slot behavior.
+      ...buildOrdinaryObjectDataDescriptorBody({ ...descriptor, errors: errors(6) }, [
+        { op: "ref.null", typeIdx: descriptor.flags.noneHeap },
+      ]),
     ],
     dataLocals,
   );

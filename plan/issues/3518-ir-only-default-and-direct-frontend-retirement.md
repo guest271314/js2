@@ -12731,3 +12731,349 @@ callable-Get failure. It is untested and not part of this main merge. The
 signed prototype-read extraction35ab also remains a subsequent integration.
 Legacy retirement and IR-default activation remain prohibited until complete
 IR implementation, testing and behavioral equivalence.
+
+### 2026-09-20: connected descriptor and Get ownership implementation
+
+Start from signed `65448565c7358581ca3e229fd3ce7537fae4b41f` in the isolated
+`codex/3518-descriptor-get-owner-20260920` worktree. B owns new native descriptor,
+SameValue and Get resource owners, their explicit pure wrapper definitions and
+focused tests, plus the existing C1 requirements issuer. Root owns the general
+prototype companion and consumer/physical/string joins; R owns authentic C2
+getter-demand consumption and invocation reservations. The original 712 source
+and generic receiver/prototype obligations remain the integration target.
+
+The independently available implementation is:
+
+1. Reserve/fill a real SameValue dependency on the same ledger, using the issued
+   numeric/undefined values, Boolean owner, string flatten/equality and a real
+   signed-i64 BigInt carrier owner. No BigInt owner currently exists: the narrow
+   proposal reuses the canonical type/box/typeof bodies and reads the actual
+   payload only after SameValue's two BigInt-brand predicates. It does not stand
+   in for general ToBigInt or arbitrary-precision BigInt.
+2. Build descriptor installation definitions from the canonical ordinary data
+   and accessor bodies. Preserve descriptor presence bits independently of
+   values: absent getter/setter placeholders are ignored; explicit undefined,
+   actual null data and unspecified attributes retain distinct meaning. Bind
+   authentic TypeError construction, literal messages and an actual exception
+   tag; reserve every declaration before freeze and validate the complete key
+   batch before allocating. Keep full non-configurable transition checks,
+   growth and descriptor identity behavior.
+3. Issue a Get owner using only R's authenticated
+   `nativeInvocationGetterDispatch(tx, pack, expectedAccess)` and original C1
+   requirement identity/currentness. Bind the actual ordinary lookup/layouts
+   and canonical undefined global. No caller-supplied dispatch handle, arbitrary
+   callback or matching-signature substitute is accepted. The internal Get
+   retains all three statuses; public Get/Has must consume root's actual
+   implicit-prototype companion, never convert status2 to absence/undefined.
+4. Validate source demand against genuine prepared/decoded ordinary operations
+   and real closure allocation/capture associations. Do not invent source Get
+   rows for Number, source `.call` rows for getters, fresh-local dominance
+   authority or an escape restriction as a replacement for generic support.
+
+Planned owned paths are backend `native-object-same-value.ts`,
+`native-object-descriptors.ts`, `native-object-get.ts`, necessary narrow BigInt
+carrier/resource helpers, runtime ordinary descriptor/Get wrapper definitions,
+`src/ir/program/native-object-access-requirements.ts`, and new focused test files.
+Existing legacy adapters, donor fixtures and bodies stay intact. Record any
+canonical body defect separately rather than reseeding preservation receipts.
+
+Tests will pair genuine successful reservation/fill with copied/foreign/stale
+requirements, dependency/plan/token mutation, batch collision, external prefill
+and post-fill corruption negatives. Emitted Wasm controls must exercise
+descriptor merges, null versus undefined, same/different native accessor
+identity, reentrant single getter invocation/original receiver and status0/1/2.
+Controlled test imports are not production capability. Request the serialized
+heavy lane before TS7, tests or hooks; preserve original failures and exact input
+pins. Full IR equality is required before any legacy retirement.
+
+The first bounded run is preserved in `.tmp/descriptor-get-b-20260920/attempt1`:
+TS7 terminal10097 passed, and focused terminal58837 measured72/73 across the
+two new suites (BigInt21/21; descriptor51/52), with1695 inputs unchanged. The
+one failed row compares the exact committed accessor-to-data fixture against
+native Node: Node1, installed native resource1, retained compiler0. No assertion
+is marked expected-failure or weakened; this is an unresolved legacy discrepancy,
+not full IR/legacy equality. All source/decoded census and resource controls ran.
+
+The authorized narrow forward correction addresses the actual data-field default
+in `ordinary-object-descriptor-data.ts`: an accessor converted to a data property
+without `[[Value]]` currently stores raw null. That is JS null, not canonical
+undefined. Require an explicit undefined anyref operand in the pure builder;
+the retained `object-runtime-descriptors.ts` caller acquires the canonical
+undefined operand and the native owner uses its issued undefined global. Keep
+getter/setter empty-slot nulls distinct. Remove the new native wrapper's redundant
+lookup/flag workaround after both callers use the corrected shared body.
+
+Authenticate the exact two-file correction against signed65448565 before the
+existing historical write inverse. Preserve every original fixture/hash and the
+first failure. Historical acquisition/body controls use the reconstructed actual
+pre-correction source and its explicit old null operand; dedicated correction
+controls bind the new live bytes, exact forward replay and corruption refusals.
+Pair the unchanged original failure with native/retained/oracle controls for
+explicit null, explicit undefined, generic preservation and non-configurable
+accessor rejection. No broader descriptor change, production fallback or legacy
+retirement is authorized by this correction.
+
+### 2026-09-27: recovered descriptor draft and planned current BigInt port
+
+The nineteen-file descriptor draft has been reconstructed at its exact signed
+base `65448565c7358581ca3e229fd3ce7537fae4b41f` from reviewed successful patch
+data and recorded formatting. Failed patches at transcript lines 32506 and
+32512 remain inert evidence. Before this plan append, all nineteen recovered
+files were frozen under `.tmp/descriptor-recovery-b-20260927/frozen-draft/files`
+with the manifest `frozen-draft/pins.json` (SHA256
+`69e5470249b084dc8071950c23c57ef8d300597fcfa5edc87440a5b6cfb7ff6b`).
+The regenerated canonical-undefined correction receipt matches the recorded
+SHA256 `2a86a79619ace64857d59652e85f24dd132576d67a93e61dc583c00797794ce6`;
+both corrected whole-source hashes also match. No historical fixture changed.
+This is recovery evidence, not a fresh test result: the original 72/73 remains
+the measured run, and the subsequent correction and six added paired controls
+have not been revalidated after recovery. No Get owner was present among the
+recovered files; the earlier Get/prototype/invocation obligations still stand.
+
+The next implementation must port onto signed main integration
+`f52f6ae020d6d5ddb07e69a3b18811a5b4f86c24`, after root authorizes that isolated
+port. Its `registry/imports.ts` creates an open `$BigInt` base and immediately
+calls `registerWideBigIntTypes`. The recovered owner instead declares the old
+final i64-only carrier, and its SameValue recipe reads field zero and compares
+i64 values. Field zero of a wide carrier contains only its low 64 bits. Neither
+that layout nor that comparison is authority for current full carrier equality.
+
+Concrete implementation and ownership plan:
+
+1. Freeze exact signed-main source blobs and ordered donor spans for
+   `registerWideBigIntTypes` and `ensureBigIntCarrierEq` in
+   `src/codegen/bigint-wide.ts`, plus the open-base construction in
+   `src/codegen/registry/imports.ts`. Add pure layout builders in
+   `src/runtime/wasmgc/values/bigint-carrier-layouts.ts` and extend the recovered
+   `bigint-carrier-body.ts` with the exact equality body and local definitions.
+   Keep context acquisition, helper reuse and legacy registration order in
+   the existing adapters. Preserve the original main donor in a new fixed
+   fixture with unique ordered inverse and forward replay controls; do not
+   reseed the existing primitive or write receipts.
+2. Reserve the authentic type graph in its existing order: open `$BigInt`
+   with immutable i64 `value`; mutable-i32 `$BigIntLimbs` array; `$BigIntWide`
+   extending that exact base with immutable `value`, `sign` and non-null
+   magnitude-array fields. Use existing symbolic parent/type-key declarations
+   and the same physical ledger. Preflight every demanded type and function
+   key before any reservation, authenticate all issued layouts and tokens,
+   and keep original-owner fill completion separate from reservation access.
+   Retain the narrow box operation as narrow; do not present its i64 parameter
+   or field-zero read as a general BigInt conversion or value reader.
+3. Add an issued equality function with the donor ABI
+   `(anyref, anyref) -> i32`. Its actual body distinguishes narrow/narrow,
+   mixed narrow/wide, and wide/wide. The mixed case is unequal under the
+   donor's canonical-form invariant; wide/wide compares sign, limb length and
+   every magnitude limb; narrow/narrow compares the i64 payload. Bind the
+   recovered SameValue owner to this authentic same-ledger equality token,
+   after its existing two BigInt brand checks and extern-to-any conversions.
+   Never accept an arbitrary signature-compatible equality callback.
+4. Make the narrow corresponding legacy `__object_is` binding in
+   `object-runtime-enumeration.ts` consume the same canonical equality recipe.
+   Acquire its actual helper before capturing affected function coordinates.
+   Update only the BigInt arm of `object-same-value-body.ts`; keep number,
+   Boolean, string, null and reference-identity arms unchanged. Historical
+   i64 recipe/body expectations remain separately authenticated through an
+   explicit forward-correction layer. If a historical compatibility shape is
+   retained for donor controls, label it explicitly and never let it satisfy
+   the new native owner's equality dependency.
+5. Port the nineteen recovered files without overwriting root's current
+   Boolean BOX work. Preserve `readBeforeResumeMain` in the current
+   `native-object-write-donor.ts` reader, then compose only the declared new
+   correction inverses before the old full-source checks. The two current
+   descriptor correction sources still equal their signed654 originals, so
+   receipt `2a86a796...` remains frozen. Any new SameValue/layout changes need
+   their own authenticated outer receipt, including relocated recipe bytes;
+   no whole-file substitution or weakened mutation refusal.
+
+Planned controls pair actual emitted Wasm and native-JS values: narrow minimum,
+maximum and unequal values; equal wide values in distinct allocations; mixed
+wide/narrow with identical low bits (for example 2^64 and zero); opposite signs;
+different limb lengths; same-length values differing in a high or low limb;
+and nonzero type/function offsets. Retain copied/foreign/stale plan and pack,
+batch-collision, external-prefill, changed-layout and post-fill mutation
+negatives. Exercise descriptor SameValue by redefining a non-writable,
+non-configurable property with an equal distinct wide value (allowed) and with
+a different value sharing the low i64 bits (TypeError). The exact source oracle,
+retained compiler and native descriptor owner must agree; preserve any initial
+legacy discrepancy as a real failure before applying its forward correction.
+Keep the original undefined/null controls and every historical fixture intact.
+
+Validation follows the existing single heavy-lane grant: frozen pins, TS7,
+the complete relevant resource/donor/descriptor suites, the unchanged main
+wide-carrier suite and normal scoped quality gates. No tests, typecheck, hooks,
+commit or push were run for this recovery. This scope supplies canonical
+carrier layouts and exact equality; it does not add arbitrary-precision
+arithmetic, general ToBigInt, public Get/prototype completion, consumer
+integration or permission to retire the old compiler. The original 712 getter
+target and all general receiver/finalization obligations remain pending.
+
+
+### 2026-09-27: canonical BigInt descriptor port frozen for first validation
+
+The isolated `f52f6ae020d6d5ddb07e69a3b18811a5b4f86c24` port now
+reserves the actual open base, limbs array and wide subtype, followed by four
+owned functions: narrow box, brand, explicit low-64-bit read and full carrier
+equality. Native descriptor SameValue and retained compiler `__object_is` both
+bind the canonical equality helper. The historical i64 comparison remains an
+explicit donor-only recipe selection; it is not the native owner's dependency.
+The retained registration occurs at its original final position through a
+same-file `registerObjectSameValueHelper`, acquiring equality before reading
+function handles that acquisition may shift. This keeps the existing parent
+function within its unchanged size budget.
+
+The new outer receipt has SHA256
+`4b6214afe2ccf68e3c45e3cd8e2497d22cd71ce4fc32c5cf572acad150be7a43`:
+twelve unique ordered spans reconstruct four exact signed-f52 source blobs,
+with reciprocal forward replay and two actual relocated module hashes. The
+canonical-undefined correction receipt remains exactly
+`2a86a79619ace64857d59652e85f24dd132576d67a93e61dc583c00797794ce6`.
+All older receipts and hashes remain unchanged. Six truthful clean inventory
+rows add three runtime leaves and three backend owners, with floors 71 to 74
+and 32 to 35; no edge, allowance or historical policy change is included.
+
+The first planned measurement is TS7 followed by six complete focused suites:
+BigInt ownership, descriptor ownership, undefined correction, source-port
+preservation, source/native/retained wide descriptor agreement, and the existing
+storage suite. The proposed 223 rows have not yet been collected. This draft
+has only passed formatting, lint (two pre-existing registry warnings), diff
+checks and direct receipt authentication. Tests must establish actual behavior;
+source inversion alone is not runtime evidence. Validation will use root's
+explicit nice-10, single-fork 4-GB/EH grant and record current load and every
+input hash. This remains the f52 draft; integration must retain root's newer
+prototype reader and inventory union. Public Get, general prototype and the
+original 712 getter target remain incomplete.
+
+
+### 2026-09-27: first port result and emitted wide-carrier ABI correction
+
+Handle 85475 completed on exact f52: TS7 passed and the six selected suites
+collected exactly 223 rows, with 222 passed and one failed; none were skipped.
+All 1,797 source/test/config input hashes remained unchanged. The native owner
+41, descriptor 75, storage 51, correction 10 and preservation 35 rows passed;
+the source/native/retained wide suite passed 10 of 11. Its sole failure retained
+expected equality 1 for the actual compiler-returned 2^64 carrier against the
+native owner's 2^64 carrier. The native base-brand assertion passed first.
+The requested nice priority was refused by the sandbox; one explicit 4-GB/EH
+fork still ran. Raw rows, logs and all 32 owned file bytes remain frozen under
+`.tmp/descriptor-port-b-20260927/validation1`.
+
+Diagnostic handle 32304 compiled and instantiated the exact unchanged source
+(SHA256 `9252a3ab006878823e698a52fe29e624ef555a6d3b0fbb04e221210fa8dd2872`),
+but its observer setup collided with the already reserved `probe:wide` type
+key. This is a retained diagnostic failure, not a measured field observation;
+all 1,798 pins remained unchanged. Its saved WAT proves `wideCarrier` emits
+the full sign-1 magnitude `[0, 0, 1]`. It also exposes the actual type:
+`BigIntWide` is final and its magnitude field is nullable. The raw shared
+builder is deliberately the earlier declaration: an open child with non-null
+magnitude. Legacy `markLeafStructsFinal` followed by
+`widenNonDefaultableTypes` produces the emitted ABI. The base remains open
+because the concrete wide type is its actual child.
+
+The approved correction adds one pure `bigint-finalized-layouts.ts` leaf for
+that actual standalone emitted shape and binds only the native owner to it.
+The raw layout/equality donors and first receipt `4b6214af...` remain unchanged.
+Both numeric and symbolic finalized declarations retain the exact base/limbs
+coordinates, set wide finality, and change only magnitude nullability. The
+canonical constructors still allocate a real magnitude array before storing
+it; equality continues using the exact shared donor body. No global mutation
+pass is added to the native path. This is the standalone leaf ABI, not a claim
+that WASI's different finality policy or future wide subtypes are supported.
+
+New controls compare the finalized shape against the real legacy finalizer and
+widening pass, assert field order, parent and coordinate behavior, and keep the
+original cross-module equality-1 source row unchanged. Explicit final parent
+validation in the physical reservation ledger is proposed to reject a future
+extension before completion; that shared-file hunk needs root coordination.
+The diagnostic retry will use a distinct observer key, preserving all earlier
+failure evidence. No runtime rerun or success is claimed for this correction.
+
+
+Root approved the narrow shared-ledger hunk. `reserveType` now checks the
+candidate's actual parent finality before consuming its key or publishing type
+slots, and final resource validation checks the settled population again.
+Plain types are implicitly final; a struct with `superTypeIdx` is open unless
+its final flag is true; a `sub` wrapper carries its own final flag. Rec groups
+are flattened using the existing physical type indexer. Unresolved reservation
+coordinates still go through the existing final validation, rather than being
+interpreted as proof of an open parent. The paired tests retain valid open
+roots, wrapped children and recursive groups, and require failures to leave
+module slots unchanged. Native completion keeps authenticating the exact
+finalized leaf plan and all original type/function tokens. The one additional
+clean runtime row raises this branch's runtime floor from 74 to 75; no edge,
+history or size allowance changes are made.
+
+### 2026-09-27: finalized carrier result and ordering-fixture correction
+
+Handle 72455 completed the corrected f52 candidate: TS7 passed and all 11
+selected files collected 448 rows, with 447 passed, one failed and none skipped.
+All 1,803 inputs remained unchanged. The original six suites now pass 223/223,
+including the unchanged cross-module equality-1 case. The finalized-layout ten,
+atomic final-parent forty and corrected diagnostic one also pass. The actual
+compiler and native values both have sign 1, limbs `[0, 0, 1]`, equality 1 to
+the native wide value and equality 0 to narrow zero. The original failure and
+both diagnostic attempts remain preserved.
+
+The sole failure is an older deliberately invalid ordering fixture. Its
+`at-first/sub-super` member is a final subtype at flat index 1 with itself as
+parent index 1. The new final-parent guard rejects it during reservation before
+the fixture's existing freeze-time `must precede subtype` assertion. Root
+approved a test-only correction: make only this ordering fixture explicitly
+open, retain its original ordering assertion, and preserve its exact final
+self-parent graph as a new atomic reservation negative. Add a correctly ordered
+open parent and final child at the same flattened coordinates with real Wasm
+validation and instantiation. No production guard or historical donor is
+relaxed. The entire pre-correction ledger test is pinned under validation2.
+
+The test-only follow-up, handle 14445, passed exactly 191/191 rows: all 149
+ledger rows and 42 final-parent controls. All 1,801 inputs remained unchanged.
+Every production hash is identical to the preceding 447/448 run. This is a
+separate measured follow-up, not a claimed fresh combined 450-row run. The
+first failure, original final self-parent shape, full ordering assertions and
+original cross-module equality-1 fixture are retained. Normal checkpoint
+hooks and the quality gates have not yet run on this branch.
+
+Static-only handle 79257 completed six of eight gates, with all 2,149 inputs
+unchanged. Formatting, lint, coercion, oracle, inventory and preservation/core
+reachability passed. The measured failures are source size (enumeration
+1654 > 1643 and descriptors 2948 > 2940) and descriptor builder function size
+(2742 > 2739). No allowance will be increased. Move the new SameValue
+registration helper into `codegen/object-same-value.ts` without changing its
+body or call position; move only the canonical-undefined data-body adapter into
+`codegen/object-descriptor-data.ts`, keeping undefined acquisition at the same
+evaluation point. The latter restores the original driver's call width and
+import layout. An outer authenticated two-source relocation receipt will
+reconstruct the exact already-measured sources pinned by the unchanged BigInt
+port and descriptor correction receipts. It will also authenticate the actual
+new helper bytes, enforce reciprocal ordered-span reconstruction, and retain
+positive-before-corruption controls. Actual adapter acquisition and runtime
+checks remain required; source reconstruction alone does not prove execution.
+
+The helper relocations now reconstruct both measured pre-move sources through
+five unique ordered spans. The new receipt
+`69e5eb643443971ff96a4b827f282c3fadf32f290cea772d50f65b09443786cf`
+authenticates actual helper bytes and the original immutable receipts
+`4b6214afe2ccf68e3c45e3cd8e2497d22cd71ce4fc32c5cf572acad150be7a43`
+and `2a86a79619ace64857d59652e85f24dd132576d67a93e61dc583c00797794ce6`.
+Both new legacy adapters are explicitly mixed/unmigrated inventory rows. No
+budget, allowed-edge or activation-history change was made. Static handle
+76888 passed all eight gates with all 2,154 inputs unchanged; the preservation
+reachability contract passes while the production-rooted retirement graph
+remains incomplete.
+
+Handle 12381 passed TS7 with 1,807 unchanged inputs, but runtime validation was
+incomplete: only the descriptor suite's 75/75 cases executed before an
+unhandled Vitest `onTaskUpdate` RPC timeout. The other seven files' zero-row
+JSON statuses are not evidence. This complete failure record is retained.
+Root approved a runner-only `afterEach` event-loop yield in `.tmp`, keeping
+all test sources, assertions, test timeouts and unhandled-error reporting.
+
+Retry handle 79705 then executed every expected row: 266/267, none skipped,
+with all 1,808 inputs unchanged and no unhandled-error report. The original
+six B suites pass 223/223 and the new relocation suite passes 19/19. The
+unchanged main BigInt-wide suite passes 24/25; its sole `narrowedString`
+failure remains expected 1 versus actual 0, matching the previously measured
+untouched-main discrepancy. The unchanged cross-module wide equality-1,
+canonical undefined, descriptor behavior and actual relocated acquisition
+controls all pass. This is not full BigInt arithmetic/ToBigInt, public Get,
+general prototype or 712-program completion, and it does not authorize legacy
+retirement. A normal signed checkpoint with all hooks remains pending.

@@ -176,7 +176,10 @@ function buildOrdinaryObjectDataPreflight(d: OrdinaryDescriptorResources): Instr
 }
 
 /** Ordinary arm only. The caller has put the real object/bag in local 5. */
-export function buildOrdinaryObjectDataDescriptorBody(d: OrdinaryDescriptorResources): Instr[] {
+export function buildOrdinaryObjectDataDescriptorBody(
+  d: OrdinaryDescriptorResources,
+  undefinedAnyValue: readonly Instr[],
+): Instr[] {
   const { objectTypeIdx, propEntryTypeIdx, objFindIdx, objInsertIdx, objGrowIdx } = d;
   const {
     writable: FLAG_WRITABLE,
@@ -281,7 +284,7 @@ export function buildOrdinaryObjectDataDescriptorBody(d: OrdinaryDescriptorResou
             { op: "local.get", index: 8 },
             { op: "struct.set", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
             // [[Value]]: specified → overwrite; converting accessor→data →
-            // undefined (null slot); otherwise PRESERVE the current value.
+            // canonical undefined; otherwise PRESERVE the current value.
             ...descriptorFlagBit(9, HOST_HAS_VALUE),
             {
               op: "if",
@@ -301,7 +304,7 @@ export function buildOrdinaryObjectDataDescriptorBody(d: OrdinaryDescriptorResou
                   then: [
                     { op: "local.get", index: 11 },
                     { op: "ref.as_non_null" },
-                    { op: "ref.null", typeIdx: NONE_HEAP },
+                    ...structuredClone(undefinedAnyValue),
                     { op: "struct.set", typeIdx: propEntryTypeIdx, fieldIdx: 1 },
                   ],
                 },

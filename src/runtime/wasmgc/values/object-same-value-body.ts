@@ -8,7 +8,10 @@ export interface ObjectSameValueResources {
   readonly typeofBigIdx: FuncHandle;
   readonly unboxNumIdx: FuncHandle;
   readonly unboxBoolIdx: FuncHandle;
-  readonly toBigIdx: FuncHandle;
+  /** The legacy-i64 case exists only to preserve explicitly selected historical recipes. */
+  readonly bigint:
+    | { readonly kind: "carrier"; readonly equalIdx: FuncHandle }
+    | { readonly kind: "legacy-i64"; readonly toBigIdx: FuncHandle };
   readonly anyStrTypeIdx: TypeHandle;
   readonly strFlattenIdx: FuncHandle | undefined;
   readonly strEqualsIdx: FuncHandle | undefined;
@@ -22,7 +25,7 @@ export function buildObjectSameValueBody(resources: ObjectSameValueResources): I
     typeofBigIdx,
     unboxNumIdx,
     unboxBoolIdx,
-    toBigIdx,
+    bigint,
     anyStrTypeIdx,
     strFlattenIdx,
     strEqualsIdx,
@@ -100,13 +103,22 @@ export function buildObjectSameValueBody(resources: ObjectSameValueResources): I
     {
       op: "if",
       blockType: { kind: "val", type: { kind: "i32" } },
-      then: [
-        { op: "local.get", index: 0 },
-        { op: "call", funcIdx: toBigIdx },
-        { op: "local.get", index: 1 },
-        { op: "call", funcIdx: toBigIdx },
-        { op: "i64.eq" },
-      ],
+      then:
+        bigint.kind === "carrier"
+          ? [
+              { op: "local.get", index: 0 },
+              { op: "any.convert_extern" },
+              { op: "local.get", index: 1 },
+              { op: "any.convert_extern" },
+              { op: "call", funcIdx: bigint.equalIdx },
+            ]
+          : [
+              { op: "local.get", index: 0 },
+              { op: "call", funcIdx: bigint.toBigIdx },
+              { op: "local.get", index: 1 },
+              { op: "call", funcIdx: bigint.toBigIdx },
+              { op: "i64.eq" },
+            ],
       else: elseArm,
     },
   ];
