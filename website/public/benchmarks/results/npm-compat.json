@@ -1,8 +1,8 @@
 {
-  "generatedAt": "2026-09-27T00:39:11.330Z",
+  "generatedAt": "2026-09-27T01:11:29.580Z",
   "measuredRange": {
     "oldest": "2026-09-08T19:13:41.907Z",
-    "newest": "2026-09-26T23:36:11.133Z"
+    "newest": "2026-09-27T01:10:45.051Z"
   },
   "correctness": {
     "definition": {
@@ -149,13 +149,30 @@
   "refresh": {
     "status": "partial",
     "stalePackages": [
+      "acorn",
+      "axios",
+      "clsx",
+      "cookie",
+      "eslint",
+      "hono",
+      "jest",
       "jsdom",
-      "lit",
-      "react-dom",
+      "lodash",
+      "lodash-es",
+      "marked",
+      "moment",
+      "prettier",
+      "react",
+      "redux",
+      "styled-components",
+      "stylelint",
+      "tailwindcss",
+      "three",
       "typescript",
+      "uuid",
       "webpack"
     ],
-    "freshCount": 19,
+    "freshCount": 2,
     "totalCount": 24
   },
   "packages": [
@@ -945,7 +962,12 @@
         "scannedFiles": 20,
         "externalDependencies": []
       },
-      "weeklyDownloads": 275892096
+      "weeklyDownloads": 275892096,
+      "refresh": {
+        "status": "stale",
+        "reason": "measurement worker did not produce a partial report",
+        "lastMeasuredAt": "2026-09-26T23:25:52.814Z"
+      }
     },
     {
       "name": "typescript",
@@ -3253,7 +3275,12 @@
         "scannedFiles": 1,
         "externalDependencies": []
       },
-      "weeklyDownloads": 240886853
+      "weeklyDownloads": 240886853,
+      "refresh": {
+        "status": "stale",
+        "reason": "measurement worker did not produce a partial report",
+        "lastMeasuredAt": "2026-09-26T23:29:34.307Z"
+      }
     },
     {
       "name": "cookie",
@@ -3797,7 +3824,12 @@
         "scannedFiles": 1,
         "externalDependencies": []
       },
-      "weeklyDownloads": 173435452
+      "weeklyDownloads": 173435452,
+      "refresh": {
+        "status": "stale",
+        "reason": "measurement worker did not produce a partial report",
+        "lastMeasuredAt": "2026-09-26T23:26:20.571Z"
+      }
     },
     {
       "name": "lodash",
@@ -4349,7 +4381,12 @@
         "scannedFiles": 1,
         "externalDependencies": []
       },
-      "weeklyDownloads": 164859858
+      "weeklyDownloads": 164859858,
+      "refresh": {
+        "status": "stale",
+        "reason": "measurement worker did not produce a partial report",
+        "lastMeasuredAt": "2026-09-26T23:28:49.892Z"
+      }
     },
     {
       "name": "react",
@@ -5791,7 +5828,12 @@
         "scannedFiles": 3,
         "externalDependencies": []
       },
-      "weeklyDownloads": 162687688
+      "weeklyDownloads": 162687688,
+      "refresh": {
+        "status": "stale",
+        "reason": "measurement worker did not produce a partial report",
+        "lastMeasuredAt": "2026-09-26T23:28:37.284Z"
+      }
     },
     {
       "name": "eslint",
@@ -6359,7 +6401,12 @@
           "node:worker_threads"
         ]
       },
-      "weeklyDownloads": 152308132
+      "weeklyDownloads": 152308132,
+      "refresh": {
+        "status": "stale",
+        "reason": "measurement worker did not produce a partial report",
+        "lastMeasuredAt": "2026-09-26T23:30:24.326Z"
+      }
     },
     {
       "name": "react-dom",
@@ -6369,7 +6416,7 @@
       "shape": "cjs-project",
       "compile": {
         "success": false,
-        "durationMs": 1702810,
+        "durationMs": 1763039,
         "timedOut": false,
         "timeoutMs": 120000,
         "errorCount": 0,
@@ -6408,7 +6455,7 @@
           "implementationInvalidTests": 2,
           "compile": {
             "success": false,
-            "durationMs": 144347,
+            "durationMs": 148707,
             "binaryBytes": 4836373,
             "invalidBatches": 4
           },
@@ -6428,7 +6475,7 @@
           "implementationInvalidTests": 0,
           "compile": {
             "success": false,
-            "durationMs": 219686,
+            "durationMs": 229832,
             "binaryBytes": 3488715,
             "invalidBatches": 8
           },
@@ -6448,7 +6495,7 @@
           "implementationInvalidTests": 0,
           "compile": {
             "success": false,
-            "durationMs": 82699,
+            "durationMs": 87246,
             "binaryBytes": 1359108,
             "invalidBatches": 3
           },
@@ -6468,7 +6515,7 @@
           "implementationInvalidTests": 0,
           "compile": {
             "success": true,
-            "durationMs": 15025,
+            "durationMs": 15751,
             "binaryBytes": 223337,
             "invalidBatches": 0
           },
@@ -12626,9 +12673,9 @@
             "optimizationRequested": true,
             "optimizationVerified": true,
             "phase": "module-init",
-            "compileDurationMs": 13344.813760000001,
-            "moduleCompileDurationMs": 9.865531000003102,
-            "binaryBytes": 445321,
+            "compileDurationMs": 13662.880400000002,
+            "moduleCompileDurationMs": 12.839098000000376,
+            "binaryBytes": 446856,
             "moduleImportCount": 0,
             "functionImportCount": 0,
             "optimizationLevel": 4
@@ -12640,7 +12687,7 @@
             "diagnostic": "Native-first semantic-provider policy rejected implicit or unclassified host imports: env::__get_builtin (unknown, owner #4401), env::__get_process_env (unknown, owner #4401), env::__throw_reference_error (unknown, owner #4401), string_constants::__REACT_DEVTOOLS_GLOBAL_HOOK__ is not defined (legacy-semantic, owner #4397). Use the host-assisted compatibility profile for this source until its native provider is implemented.",
             "optimizationRequested": true,
             "optimizationVerified": false,
-            "compileDurationMs": 934.3658930000383,
+            "compileDurationMs": 937.5115410001017,
             "optimizationLevel": 4,
             "semanticProviders": "native-first",
             "environment": "javascript"
@@ -12653,9 +12700,9 @@
             "optimizationRequested": true,
             "optimizationVerified": true,
             "phase": "module-init",
-            "compileDurationMs": 13542.617968999999,
-            "moduleCompileDurationMs": 4.067588000001706,
-            "binaryBytes": 445269,
+            "compileDurationMs": 13601.731005999998,
+            "moduleCompileDurationMs": 4.090932999999495,
+            "binaryBytes": 446804,
             "moduleImportCount": 0,
             "functionImportCount": 0,
             "optimizationLevel": 4
@@ -12663,7 +12710,7 @@
         }
       },
       "knownBugs": [],
-      "measuredAt": "2026-09-26T23:33:29.011Z",
+      "measuredAt": "2026-09-27T01:10:45.051Z",
       "esEdition": {
         "required": 2015,
         "requiredLabel": "ES2015",
@@ -12823,12 +12870,7 @@
           "scheduler"
         ]
       },
-      "weeklyDownloads": 139740993,
-      "refresh": {
-        "status": "stale",
-        "reason": "measurement worker did not produce a partial report",
-        "lastMeasuredAt": "2026-09-26T23:33:29.011Z"
-      }
+      "weeklyDownloads": 139740993
     },
     {
       "name": "prettier",
@@ -13205,7 +13247,12 @@
         "scannedFiles": 1,
         "externalDependencies": []
       },
-      "weeklyDownloads": 117242232
+      "weeklyDownloads": 117242232,
+      "refresh": {
+        "status": "stale",
+        "reason": "measurement worker did not produce a partial report",
+        "lastMeasuredAt": "2026-09-26T23:29:59.878Z"
+      }
     },
     {
       "name": "tailwindcss",
@@ -13835,7 +13882,12 @@
         "scannedFiles": 4,
         "externalDependencies": []
       },
-      "weeklyDownloads": 117155768
+      "weeklyDownloads": 117155768,
+      "refresh": {
+        "status": "stale",
+        "reason": "measurement worker did not produce a partial report",
+        "lastMeasuredAt": "2026-09-26T23:27:02.795Z"
+      }
     },
     {
       "name": "axios",
@@ -15522,7 +15574,12 @@
           "zlib"
         ]
       },
-      "weeklyDownloads": 112353408
+      "weeklyDownloads": 112353408,
+      "refresh": {
+        "status": "stale",
+        "reason": "measurement worker did not produce a partial report",
+        "lastMeasuredAt": "2026-09-26T23:34:03.997Z"
+      }
     },
     {
       "name": "clsx",
@@ -15993,7 +16050,12 @@
         "scannedFiles": 1,
         "externalDependencies": []
       },
-      "weeklyDownloads": 104930549
+      "weeklyDownloads": 104930549,
+      "refresh": {
+        "status": "stale",
+        "reason": "measurement worker did not produce a partial report",
+        "lastMeasuredAt": "2026-09-26T23:25:58.068Z"
+      }
     },
     {
       "name": "jsdom",
@@ -17067,7 +17129,12 @@
         "scannedFiles": 1,
         "externalDependencies": []
       },
-      "weeklyDownloads": 60496071
+      "weeklyDownloads": 60496071,
+      "refresh": {
+        "status": "stale",
+        "reason": "measurement worker did not produce a partial report",
+        "lastMeasuredAt": "2026-09-26T23:27:40.128Z"
+      }
     },
     {
       "name": "webpack",
@@ -20544,7 +20611,12 @@
         "scannedFiles": 24,
         "externalDependencies": []
       },
-      "weeklyDownloads": 53123258
+      "weeklyDownloads": 53123258,
+      "refresh": {
+        "status": "stale",
+        "reason": "measurement worker did not produce a partial report",
+        "lastMeasuredAt": "2026-09-26T23:29:38.041Z"
+      }
     },
     {
       "name": "jest",
@@ -23495,7 +23567,12 @@
           "jest-config"
         ]
       },
-      "weeklyDownloads": 46631732
+      "weeklyDownloads": 46631732,
+      "refresh": {
+        "status": "stale",
+        "reason": "measurement worker did not produce a partial report",
+        "lastMeasuredAt": "2026-09-26T23:27:26.531Z"
+      }
     },
     {
       "name": "lodash-es",
@@ -23992,7 +24069,12 @@
         "externalDependencies": [],
         "graphTruncated": true
       },
-      "weeklyDownloads": 42294984
+      "weeklyDownloads": 42294984,
+      "refresh": {
+        "status": "stale",
+        "reason": "measurement worker did not produce a partial report",
+        "lastMeasuredAt": "2026-09-26T23:34:52.967Z"
+      }
     },
     {
       "name": "redux",
@@ -24865,7 +24947,12 @@
         "scannedFiles": 1,
         "externalDependencies": []
       },
-      "weeklyDownloads": 40344956
+      "weeklyDownloads": 40344956,
+      "refresh": {
+        "status": "stale",
+        "reason": "measurement worker did not produce a partial report",
+        "lastMeasuredAt": "2026-09-26T23:27:11.795Z"
+      }
     },
     {
       "name": "moment",
@@ -26142,7 +26229,12 @@
         "scannedFiles": 1,
         "externalDependencies": []
       },
-      "weeklyDownloads": 34294671
+      "weeklyDownloads": 34294671,
+      "refresh": {
+        "status": "stale",
+        "reason": "measurement worker did not produce a partial report",
+        "lastMeasuredAt": "2026-09-26T23:28:57.863Z"
+      }
     },
     {
       "name": "three",
@@ -27731,7 +27823,12 @@
         "scannedFiles": 2,
         "externalDependencies": []
       },
-      "weeklyDownloads": 12487515
+      "weeklyDownloads": 12487515,
+      "refresh": {
+        "status": "stale",
+        "reason": "measurement worker did not produce a partial report",
+        "lastMeasuredAt": "2026-09-26T23:36:11.133Z"
+      }
     },
     {
       "name": "styled-components",
@@ -28335,7 +28432,12 @@
           "stylis"
         ]
       },
-      "weeklyDownloads": 11029759
+      "weeklyDownloads": 11029759,
+      "refresh": {
+        "status": "stale",
+        "reason": "measurement worker did not produce a partial report",
+        "lastMeasuredAt": "2026-09-26T23:26:43.801Z"
+      }
     },
     {
       "name": "stylelint",
@@ -30676,7 +30778,12 @@
           "write-file-atomic"
         ]
       },
-      "weeklyDownloads": 10427988
+      "weeklyDownloads": 10427988,
+      "refresh": {
+        "status": "stale",
+        "reason": "measurement worker did not produce a partial report",
+        "lastMeasuredAt": "2026-09-26T23:32:46.278Z"
+      }
     },
     {
       "name": "lit",
@@ -30686,7 +30793,7 @@
       "shape": "esm-project",
       "compile": {
         "success": true,
-        "durationMs": 9971,
+        "durationMs": 9872,
         "timedOut": false,
         "timeoutMs": 120000,
         "errorCount": 0,
@@ -32940,51 +33047,51 @@
             "placement": "js-host",
             "inputMode": "runtime-dynamic",
             "sampleOp": "select one of two runtime-owned callbacks",
-            "wasmUs": 0.5564770945677326,
-            "nodeUs": 0.003899360401755883,
-            "wasmStdUs": 0.003954963273060777,
-            "nodeStdUs": 0.0001589399229762248,
-            "ratio": 0.0070262952305883185,
-            "ratioStd": 0.0002459316043265243,
+            "wasmUs": 0.6097442220224479,
+            "nodeUs": 0.003842482356048051,
+            "wasmStdUs": 0.0016193087985634407,
+            "nodeStdUs": 0.00007812734159839488,
+            "ratio": 0.006288149740062131,
+            "ratioStd": 0.0001290109952991966,
             "ratioSamples": [
-              0.0074411906469860805,
-              0.006759907679753117,
-              0.006975404054027091,
-              0.007156847987906401,
-              0.0070262952305883185,
-              0.007521318867087269,
-              0.006822971030421227,
-              0.006919079107384948,
-              0.007152933633909012
+              0.00626091355257705,
+              0.006299807013148236,
+              0.006201373648848166,
+              0.00659281835679481,
+              0.0063602075480914825,
+              0.006244345621970515,
+              0.006288149740062131,
+              0.006161040050730708,
+              0.006474179950560186
             ],
             "measurementOrder": "alternating-paired",
             "ratioEstimator": "median-of-paired-ratios",
-            "iters": 450439,
+            "iters": 410481,
             "warmupRounds": 2,
             "measuredRounds": 9,
             "wasmSamplesUs": [
-              0.5569206463028333,
-              0.5541517164366151,
-              0.557490556989934,
-              0.5550621904408762,
-              0.554966774635427,
-              0.5676276277142878,
-              0.5564770945677326,
-              0.5540166260026287,
-              0.5587561134804053
+              0.6063655467610068,
+              0.6099365183772236,
+              0.6097442220224479,
+              0.6100981921209497,
+              0.6087087758020587,
+              0.6111200932564493,
+              0.6115964660970956,
+              0.6090862646505003,
+              0.6071164950387281
             ],
             "nodeSamplesUs": [
-              0.004144152704382086,
-              0.003746014443688246,
-              0.0038887218913094064,
-              0.003972495720819705,
-              0.003899360401755883,
-              0.004269308385807461,
-              0.0037968270953286135,
-              0.0038332848621186887,
-              0.003996745397266272
+              0.003796402269531781,
+              0.003842482356048051,
+              0.003781251750987434,
+              0.004022266560462324,
+              0.00387151415044578,
+              0.0038160450788241223,
+              0.00384581015931137,
+              0.003752604870861696,
+              0.0039305814398341065
             ],
-            "compileDurationMs": 760.960052999988,
+            "compileDurationMs": 806.6055879999913,
             "binaryBytes": 1801,
             "moduleImportCount": 7,
             "functionImportCount": 7,
@@ -33020,53 +33127,53 @@
             "reason": "the pinned Lit callback probe currently covers the JS-host lane only"
           }
         },
-        "wasmUs": 0.5564770945677326,
-        "nodeUs": 0.003899360401755883,
-        "wasmStdUs": 0.003954963273060777,
-        "nodeStdUs": 0.0001589399229762248,
-        "ratio": 0.0070262952305883185,
-        "ratioStd": 0.0002459316043265243,
+        "wasmUs": 0.6097442220224479,
+        "nodeUs": 0.003842482356048051,
+        "wasmStdUs": 0.0016193087985634407,
+        "nodeStdUs": 0.00007812734159839488,
+        "ratio": 0.006288149740062131,
+        "ratioStd": 0.0001290109952991966,
         "ratioSamples": [
-          0.0074411906469860805,
-          0.006759907679753117,
-          0.006975404054027091,
-          0.007156847987906401,
-          0.0070262952305883185,
-          0.007521318867087269,
-          0.006822971030421227,
-          0.006919079107384948,
-          0.007152933633909012
+          0.00626091355257705,
+          0.006299807013148236,
+          0.006201373648848166,
+          0.00659281835679481,
+          0.0063602075480914825,
+          0.006244345621970515,
+          0.006288149740062131,
+          0.006161040050730708,
+          0.006474179950560186
         ],
         "measurementOrder": "alternating-paired",
         "ratioEstimator": "median-of-paired-ratios",
-        "iters": 450439,
+        "iters": 410481,
         "warmupRounds": 2,
         "measuredRounds": 9,
         "wasmSamplesUs": [
-          0.5569206463028333,
-          0.5541517164366151,
-          0.557490556989934,
-          0.5550621904408762,
-          0.554966774635427,
-          0.5676276277142878,
-          0.5564770945677326,
-          0.5540166260026287,
-          0.5587561134804053
+          0.6063655467610068,
+          0.6099365183772236,
+          0.6097442220224479,
+          0.6100981921209497,
+          0.6087087758020587,
+          0.6111200932564493,
+          0.6115964660970956,
+          0.6090862646505003,
+          0.6071164950387281
         ],
         "nodeSamplesUs": [
-          0.004144152704382086,
-          0.003746014443688246,
-          0.0038887218913094064,
-          0.003972495720819705,
-          0.003899360401755883,
-          0.004269308385807461,
-          0.0037968270953286135,
-          0.0038332848621186887,
-          0.003996745397266272
+          0.003796402269531781,
+          0.003842482356048051,
+          0.003781251750987434,
+          0.004022266560462324,
+          0.00387151415044578,
+          0.0038160450788241223,
+          0.00384581015931137,
+          0.003752604870861696,
+          0.0039305814398341065
         ]
       },
       "knownBugs": [],
-      "measuredAt": "2026-09-26T23:04:05.871Z",
+      "measuredAt": "2026-09-27T00:40:36.798Z",
       "esEdition": {
         "required": 2015,
         "requiredLabel": "ES2015",
@@ -33094,12 +33201,7 @@
           "lit-html/is-server.js"
         ]
       },
-      "weeklyDownloads": 6829692,
-      "refresh": {
-        "status": "stale",
-        "reason": "measurement worker did not produce a partial report",
-        "lastMeasuredAt": "2026-09-26T23:04:05.871Z"
-      }
+      "weeklyDownloads": 6829692
     }
   ]
 }
