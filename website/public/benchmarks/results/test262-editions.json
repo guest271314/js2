@@ -48,8 +48,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 10241,
-    "fail": 1445,
+    "pass": 10242,
+    "fail": 1444,
     "ce": 18,
     "skip": 0,
     "total": 11704,
@@ -66,8 +66,8 @@
       },
       {
         "name": "generators",
-        "pass": 2177,
-        "fail": 309,
+        "pass": 2178,
+        "fail": 308,
         "ce": 0,
         "skip": 0,
         "total": 2486,
