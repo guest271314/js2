@@ -125,7 +125,13 @@ describe("#4401 host import policy inventory", () => {
     );
   });
 
-  it("preserves target-derived standalone compatibility fallbacks until native-first is explicitly selected", async () => {
+  it("keeps a standalone generator on the native carrier whether or not native-first is spelled out", async () => {
+    // Historical note: this test once pinned a transitional state in which the
+    // standalone target still leaked `__create_generator` unless native-first
+    // was explicit, and the explicit selection was refused. The native
+    // generator carrier has since landed (#3178 lineage), so both selections
+    // now publish the same host-free module. Kept as a guard against either
+    // arm regressing to a host semantic import.
     const source = `
       export function run(): number {
         const make = function* () { return arguments.length; };
@@ -133,28 +139,18 @@ describe("#4401 host import policy inventory", () => {
       }
     `;
 
-    const compatibility = await compile(source, {
-      fileName: "issue-4401-standalone-generator-fallback.ts",
-      target: "standalone",
-      skipSemanticDiagnostics: true,
-    });
-    expect(compatibility.success, compatibility.errors.map((error) => error.message).join("; ")).toBe(true);
-    expect(compatibility.targetProfile?.semanticProviders).toBe("native-first");
-    expect(compatibility.hostImportInventory).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ name: "__create_generator", classification: "legacy-semantic" }),
-      ]),
-    );
-
-    const explicit = await compile(source, {
-      fileName: "issue-4401-explicit-native-generator-refusal.ts",
-      target: "standalone",
-      semanticProviders: "native-first",
-      skipSemanticDiagnostics: true,
-    });
-    expect(explicit.success).toBe(false);
-    expect(explicit.errors.map((error) => error.message).join("; ")).toContain(
-      "Native-first semantic-provider policy rejected",
-    );
+    for (const semanticProviders of [undefined, "native-first"] as const) {
+      const result = await compile(source, {
+        fileName: `issue-4401-standalone-generator-${semanticProviders ?? "auto"}.ts`,
+        target: "standalone",
+        ...(semanticProviders ? { semanticProviders } : {}),
+        skipSemanticDiagnostics: true,
+      });
+      expect(result.success, result.errors.map((error) => error.message).join("; ")).toBe(true);
+      expect(result.targetProfile?.semanticProviders).toBe("native-first");
+      expect(result.hostImportSummary?.total).toBe(0);
+      expect(result.hostImportSummary?.byClassification["legacy-semantic"]).toBe(0);
+      expect(result.hostImportSummary?.byClassification.unknown).toBe(0);
+    }
   });
 });
