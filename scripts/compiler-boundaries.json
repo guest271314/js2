@@ -340,9 +340,10 @@
         "src/runtime/wasmgc/values/ordinary-object-storage-definitions.ts",
         "src/runtime/wasmgc/values/prototype-companion-body.ts",
         "src/runtime/wasmgc/values/prototype-key-normalization-body.ts",
-        "src/runtime/wasmgc/values/prototype-read-bodies.ts"
+        "src/runtime/wasmgc/values/prototype-read-bodies.ts",
+        "src/runtime/wasmgc/values/prototype-receiver-bodies.ts"
       ],
-      "minModules": 73
+      "minModules": 74
     },
     {
       "id": "standalone-platform",
@@ -13773,6 +13774,11 @@
     },
     {
       "path": "src/runtime/wasmgc/values/prototype-read-bodies.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/prototype-receiver-bodies.ts",
       "state": "clean",
       "layer": "native-runtime"
     }

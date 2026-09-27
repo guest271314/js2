@@ -1,4 +1,5 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import { applyPrototypeReceiverExtraction } from "./prototype-receiver-extraction.js";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 const read = (path: string) => readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
@@ -39,5 +40,7 @@ export function applyPrototypeReadExtraction(source: string, inverse: boolean, r
 /** Only the preservation view strips this later extraction; runtime reads stay raw. */
 export function readBeforePrototypeRead(path: string): string {
   const source = read(path);
-  return path === "src/codegen/proto-index-store.ts" ? applyPrototypeReadExtraction(source, true) : source;
+  return path === "src/codegen/proto-index-store.ts"
+    ? applyPrototypeReadExtraction(applyPrototypeReceiverExtraction(source, true), true)
+    : source;
 }

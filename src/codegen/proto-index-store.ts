@@ -1,4 +1,8 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import {
+  buildPrototypeBrandOffsetDefinition,
+  buildPrototypeReceiverConsultBody,
+} from "../runtime/wasmgc/values/prototype-receiver-bodies.js";
 import { buildPrototypeKeyNormalizationBody } from "../runtime/wasmgc/values/prototype-key-normalization-body.js";
 import {
   buildPrototypeGetBody,
@@ -149,37 +153,6 @@ const PROTOIDX_OWN_RECV = "__protoidx_own_recv";
 /** Static brand OFFSETS (0-based slots in the brand band — native-proto.ts). */
 const OBJ_OFF = builtinBrandOffsetOf("Object")!;
 const ARR_OFF = builtinBrandOffsetOf("Array")!;
-const FUN_OFF = builtinBrandOffsetOf("Function")!;
-const REGEXP_OFF = builtinBrandOffsetOf("RegExp")!;
-const DATE_OFF = builtinBrandOffsetOf("Date")!;
-const ERROR_OFF = builtinBrandOffsetOf("Error")!;
-const PROMISE_OFF = builtinBrandOffsetOf("Promise")!;
-const STRING_OFF = builtinBrandOffsetOf("String")!;
-const NUMBER_OFF = builtinBrandOffsetOf("Number")!;
-const BOOLEAN_OFF = builtinBrandOffsetOf("Boolean")!;
-const SYMBOL_OFF = builtinBrandOffsetOf("Symbol")!;
-const SET_OFF = builtinBrandOffsetOf("Set")!;
-const MAP_OFF = builtinBrandOffsetOf("Map")!;
-const WEAKMAP_OFF = builtinBrandOffsetOf("WeakMap")!;
-const WEAKSET_OFF = builtinBrandOffsetOf("WeakSet")!;
-
-/** `$Map.kind` field / `COLLECTION_KIND` values (map-runtime.ts). Kept as
- * literals here to avoid an import cycle: map-runtime already consumes the
- * receiver-brand helper. */
-const MAP_KIND_FIELD = 4;
-const MAP_KIND = 0;
-const SET_KIND = 1;
-const WEAKMAP_KIND = 2;
-const WEAKSET_KIND = 3;
-
-/** (#5151) `$Map.kind` → the brand offset whose companion holds that
- *  collection's prototype overrides. All four share the `$Map` carrier. */
-const COLLECTION_KIND_OFFSETS: readonly (readonly [number, number])[] = [
-  [MAP_KIND, MAP_OFF],
-  [SET_KIND, SET_OFF],
-  [WEAKMAP_KIND, WEAKMAP_OFF],
-  [WEAKSET_KIND, WEAKSET_OFF],
-];
 
 /**
  * (#4176) The boxed-primitive wrapper internal-slot key — MUST equal
@@ -203,8 +176,6 @@ const FLAG_ACCESSOR = 0x08;
 const FLAG_WRITABLE = 0x01;
 /** `$Object.flags` frozen bit (object-runtime.ts `OBJ_FLAG_FROZEN`). */
 const OBJ_FLAG_FROZEN = 0x04;
-/** i31 abstract heap type (signed LEB -20) — small-int boxed numbers (#3673). */
-const I31_HEAP_TYPE = -20;
 
 /** Shared four-state internal [[Set]] decision ABI. */
 export const SET_DECISION_MISS = 0;
@@ -1087,208 +1058,48 @@ function fillGetFBody(ctx: CodegenContext, deps: ProtoIndexFillDeps): void {
 function fillBrandOffBody(ctx: CodegenContext): void {
   const fn = findFn(ctx, PROTOIDX_BRAND_OFF);
   if (!fn) return;
-  // params: 0=v ; locals: 1=any(anyref) 2=off(i32)
-  fn.locals = [
-    { name: "any", type: { kind: "anyref" } },
-    { name: "off", type: { kind: "i32" } },
-  ];
-  const ret = (off: number): Instr[] => [{ op: "i32.const", value: off }, { op: "return" }];
-  const testArm = (typeIdx: number | undefined, off: number): Instr[] =>
-    typeIdx === undefined
-      ? []
-      : [
-          { op: "local.get", index: 1 },
-          { op: "ref.test", typeIdx },
-          { op: "if", blockType: { kind: "empty" }, then: ret(off) },
-        ];
-
-  const body: Instr[] = [{ op: "local.get", index: 0 }, { op: "any.convert_extern" }, { op: "local.set", index: 1 }];
-
-  // $NativeProto receiver → its OWN brand offset (direct proto reads see
-  // their own companion first; out-of-band brands — user-class protos — fall
-  // back to Object).
-  const npTypeIdx = ctx.nativeProtoTypeIdx;
-  if (npTypeIdx !== undefined) {
-    body.push(
-      { op: "local.get", index: 1 },
-      { op: "ref.test", typeIdx: npTypeIdx },
-      {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [
-          { op: "local.get", index: 1 },
-          { op: "ref.cast", typeIdx: npTypeIdx },
-          { op: "struct.get", typeIdx: npTypeIdx, fieldIdx: 0 }, // $brand
-          { op: "i32.const", value: BUILTIN_BRAND_BASE },
-          { op: "i32.sub" },
-          { op: "local.tee", index: 2 },
-          { op: "i32.const", value: BUILTIN_BRAND_COUNT },
-          { op: "i32.lt_u" },
-          {
-            op: "if",
-            blockType: { kind: "empty" },
-            then: [{ op: "local.get", index: 2 }, { op: "return" }],
-          },
-          ...ret(OBJ_OFF),
-        ],
-      },
-    );
-  }
-  // Boxed-primitive WRAPPER (`new String()` / `new Number()` / `new
-  // Boolean()`) — a plain `$Object` carrying the [[PrimitiveValue]] internal
-  // slot (see WRAPPER_PRIMITIVE_KEY above). Classify by the slot value's box
-  // type so the wrapper's chain starts at its OWN prototype brand
-  // (`String.prototype.enumerable = true; Object.defineProperty(o, "p",
-  // new String())` — the 15.2.3.6-3-{35,141,220,250}-1 family). An ordinary
-  // `$Object` (no slot) falls through to the OBJ default. The key is built
-  // with `nativeStringLiteralInstrs` — finalize-safe (no import-global adds).
-  {
-    const types = ctx.objectRuntimeTypes;
-    const objFindIdx = ctx.funcMap.get("__obj_find");
-    const anyStr = ctx.anyStrTypeIdx;
-    if (types && objFindIdx !== undefined && anyStr >= 0) {
-      const entryRefNull: ValType = { kind: "ref_null", typeIdx: types.propEntryTypeIdx };
-      const eLocal = fn.locals.length + 1; // params: 1 → locals start at 1
-      fn.locals.push({ name: "we", type: entryRefNull });
-      const slotValue = (): Instr[] => [
-        { op: "local.get", index: eLocal },
-        { op: "ref.as_non_null" },
-        { op: "struct.get", typeIdx: types.propEntryTypeIdx, fieldIdx: ENTRY_VALUE },
-      ];
-      const boxNum = ctx.nativeBoxNumberTypeIdx;
-      const boxBool = ctx.nativeBoxBooleanTypeIdx;
-      body.push(
-        { op: "local.get", index: 1 },
-        { op: "ref.test", typeIdx: types.objectTypeIdx },
-        {
-          op: "if",
-          blockType: { kind: "empty" },
-          then: [
-            { op: "local.get", index: 1 },
-            { op: "ref.cast", typeIdx: types.objectTypeIdx },
-            ...nativeStringLiteralInstrs(ctx, WRAPPER_PRIMITIVE_KEY),
-            { op: "extern.convert_any" },
-            { op: "call", funcIdx: objFindIdx },
-            { op: "local.set", index: eLocal },
-            { op: "local.get", index: eLocal },
-            { op: "ref.is_null" },
-            { op: "i32.eqz" },
-            {
-              op: "if",
-              blockType: { kind: "empty" },
-              then: [
-                ...slotValue(),
-                { op: "ref.test", typeIdx: anyStr },
-                { op: "if", blockType: { kind: "empty" }, then: ret(STRING_OFF) },
-                ...(boxNum >= 0
-                  ? ([
-                      ...slotValue(),
-                      { op: "ref.test", typeIdx: boxNum },
-                      ...slotValue(),
-                      { op: "ref.test", typeIdx: I31_HEAP_TYPE },
-                      { op: "i32.or" },
-                      { op: "if", blockType: { kind: "empty" }, then: ret(NUMBER_OFF) },
-                    ] satisfies Instr[])
-                  : []),
-                ...(boxBool >= 0
-                  ? ([
-                      ...slotValue(),
-                      { op: "ref.test", typeIdx: boxBool },
-                      { op: "if", blockType: { kind: "empty" }, then: ret(BOOLEAN_OFF) },
-                    ] satisfies Instr[])
-                  : []),
-                // (#6651 H5) …and the SYMBOL wrapper (`Object(sym)`, built by #6651
-                // I4). A `[[PrimitiveValue]]` slot holding the `$Symbol` carrier
-                // (#2866) makes the wrapper a Symbol object, so §10.4.3's rule —
-                // the receiver's implicit chain starts at its OWN wrapper
-                // prototype — names Symbol.prototype. That is what lets
-                // `Object(Symbol.toPrimitive)[Symbol.toPrimitive]` reach the
-                // seeded `@@3` companion entry: this consult is key-AGNOSTIC
-                // (`__protoidx_get_k` hands the key straight to `__obj_find`), so
-                // a boxed-symbol key resolves here where the string-key
-                // inherited-method arm cannot look at all.
-                //
-                // Gated on the carrier ALREADY being registered. The fill never
-                // calls `ensureSymbolCarrier`, so a module with no symbols emits
-                // the exact previous body — the demand gate, not a flag.
-                ...(ctx.symbolTypeIdx >= 0
-                  ? ([
-                      ...slotValue(),
-                      { op: "ref.test", typeIdx: ctx.symbolTypeIdx },
-                      { op: "if", blockType: { kind: "empty" }, then: ret(SYMBOL_OFF) },
-                    ] satisfies Instr[])
-                  : []),
-              ],
+  const types = ctx.objectRuntimeTypes;
+  const findOwn = ctx.funcMap.get("__obj_find");
+  const recipe = buildPrototypeBrandOffsetDefinition({
+    nativeProtoTypeIdx: ctx.nativeProtoTypeIdx,
+    wrapper:
+      types && findOwn !== undefined && ctx.anyStrTypeIdx >= 0
+        ? {
+            types,
+            findOwn,
+            anyString: ctx.anyStrTypeIdx,
+            boxNumber: ctx.nativeBoxNumberTypeIdx,
+            boxBoolean: ctx.nativeBoxBooleanTypeIdx,
+          }
+        : undefined,
+  });
+  let step = recipe.next();
+  while (!step.done) {
+    step =
+      step.value.kind === "wrapper-key"
+        ? recipe.next({
+            kind: "wrapper-key",
+            materialization: nativeStringLiteralMaterialization(ctx, WRAPPER_PRIMITIVE_KEY),
+          })
+        : recipe.next({
+            kind: "remaining-carriers",
+            resources: {
+              symbolTypeIdx: ctx.symbolTypeIdx,
+              vecPropBaseTypeIdx: ctx.vecPropBaseTypeIdx,
+              mapTypeIdx: ctx.mapTypeIdx,
+              regExpTypeIdx: ctx.structMap.get("__StandaloneRegExp"),
+              dateTypeIdx: ctx.structMap.get("__Date"),
+              promiseTypeIdx: ctx.structMap.get("$Promise"),
+              boxBooleanTypeIdx: ctx.nativeBoxBooleanTypeIdx,
+              boxNumberTypeIdx: ctx.nativeBoxNumberTypeIdx,
+              anyStringTypeIdx: ctx.anyStrTypeIdx,
+              errorTypeIdx: ctx.errorStructTypeIdx,
+              isClosureCarrier: ctx.funcMap.get("__is_closure_prop_carrier"),
             },
-            ...ret(OBJ_OFF),
-          ],
-        },
-      );
-    }
+          });
   }
-  body.push(...testArm(ctx.vecPropBaseTypeIdx, ARR_OFF));
-  // The native keyed collections are the one non-`$Object` carrier family whose
-  // implicit prototype participates in the companion store. The collection
-  // runtime shares `$Map` for Map/Set/WeakMap/WeakSet, so discriminate by the
-  // immutable kind tag before the generic Object fallback. This lets a
-  // standalone constructor honor a user-installed `X.prototype.<adder>` without
-  // changing the native fast path when the companion has no override.
-  //
-  // (#5151) Only SET was classified until now, so `Map.prototype.set = null`
-  // (and the WeakMap/WeakSet twins) were invisible to every receiver-aware
-  // consult: the Map receiver answered `Object`, whose companion has no `set`.
-  // All four kinds map to their own brand offset here.
-  if (ctx.mapTypeIdx >= 0) {
-    body.push(
-      { op: "local.get", index: 1 },
-      { op: "ref.test", typeIdx: ctx.mapTypeIdx },
-      {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: COLLECTION_KIND_OFFSETS.flatMap(([kind, off]): Instr[] => [
-          { op: "local.get", index: 1 },
-          { op: "ref.cast", typeIdx: ctx.mapTypeIdx },
-          { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: MAP_KIND_FIELD },
-          { op: "i32.const", value: kind },
-          { op: "i32.eq" },
-          { op: "if", blockType: { kind: "empty" }, then: ret(off) },
-        ]),
-      },
-    );
-  }
-  body.push(...testArm(ctx.structMap.get("__StandaloneRegExp"), REGEXP_OFF));
-  body.push(...testArm(ctx.structMap.get("__Date"), DATE_OFF));
-  // `$Promise` participates in the generic carrier-bag predicate so promise
-  // expandos work, but its implicit prototype is Promise.prototype rather
-  // than Function.prototype. Classify it before the widened closure-carrier
-  // fallback or a dynamic `promise.then` read consults the wrong companion.
-  body.push(...testArm(ctx.structMap.get("$Promise"), PROMISE_OFF));
-  // (#4207) BARE primitive receiver — a native string / boxed number / boxed
-  // boolean that never went through `ToObject`. The wrapper arm above only
-  // classifies a `$Object` carrying [[PrimitiveValue]]; a primitive reaching a
-  // consult site directly (`Number.prototype.m = f; (5).m()`, which lowers to
-  // `__extern_method_call(__box_number(5), "m", …)`) fell through every test
-  // and answered `Object`, so `Number.prototype`'s companion was never
-  // consulted and the inherited method was invisible. §10.4.3 says the
-  // receiver's implicit chain starts at its OWN wrapper prototype, so this is
-  // the same rule the wrapper arm states, applied one representation earlier.
-  // Ordered boolean-before-number because the boxes are distinct struct types
-  // and i31 is claimed by Number (a boxed boolean is never an i31 here).
-  body.push(...testArm(ctx.nativeBoxBooleanTypeIdx >= 0 ? ctx.nativeBoxBooleanTypeIdx : undefined, BOOLEAN_OFF));
-  body.push(...testArm(ctx.nativeBoxNumberTypeIdx >= 0 ? ctx.nativeBoxNumberTypeIdx : undefined, NUMBER_OFF));
-  body.push(...testArm(I31_HEAP_TYPE, NUMBER_OFF));
-  body.push(...testArm(ctx.anyStrTypeIdx >= 0 ? ctx.anyStrTypeIdx : undefined, STRING_OFF));
-  body.push(...testArm(ctx.errorStructTypeIdx >= 0 ? ctx.errorStructTypeIdx : undefined, ERROR_OFF));
-  const isClosureCarrierIdx = ctx.funcMap.get("__is_closure_prop_carrier");
-  if (isClosureCarrierIdx !== undefined) {
-    body.push(
-      { op: "local.get", index: 0 },
-      { op: "call", funcIdx: isClosureCarrierIdx },
-      { op: "if", blockType: { kind: "empty" }, then: ret(FUN_OFF) },
-    );
-  }
-  body.push({ op: "i32.const", value: OBJ_OFF });
-  fn.body = body;
+  fn.locals = step.value.locals;
+  fn.body = step.value.body;
 }
 
 /** (#4176) `__protoidx_has_r` / `__protoidx_get_r` — receiver-aware consults. */
@@ -1298,26 +1109,9 @@ function fillRecvConsultBodies(ctx: CodegenContext): void {
   const getKIdx = ctx.funcMap.get(PROTOIDX_GET_K);
   if (brandOffIdx === undefined) return;
   const hasR = findFn(ctx, PROTOIDX_HAS_R);
-  if (hasR && hasKIdx !== undefined) {
-    // (recv, key) -> has_k(key, brand_off(recv))
-    hasR.body = [
-      { op: "local.get", index: 1 },
-      { op: "local.get", index: 0 },
-      { op: "call", funcIdx: brandOffIdx },
-      { op: "call", funcIdx: hasKIdx },
-    ];
-  }
+  if (hasR && hasKIdx !== undefined) hasR.body = buildPrototypeReceiverConsultBody("has", brandOffIdx, hasKIdx);
   const getR = findFn(ctx, PROTOIDX_GET_R);
-  if (getR && getKIdx !== undefined) {
-    // (recv, key) -> get_k(recv, key, brand_off(recv))
-    getR.body = [
-      { op: "local.get", index: 0 },
-      { op: "local.get", index: 1 },
-      { op: "local.get", index: 0 },
-      { op: "call", funcIdx: brandOffIdx },
-      { op: "call", funcIdx: getKIdx },
-    ];
-  }
+  if (getR && getKIdx !== undefined) getR.body = buildPrototypeReceiverConsultBody("get", brandOffIdx, getKIdx);
 }
 
 /**

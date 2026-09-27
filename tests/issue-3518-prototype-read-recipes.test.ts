@@ -1,9 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
-import {
-  applyResumeMainComposition,
-  readBeforeResumeMain,
-  readMergedSource,
-} from "./helpers/resume-main-composition.js";
+import { applyResumeMainComposition, readBeforeResumeMain } from "./helpers/resume-main-composition.js";
+import { readBeforePrototypeReceiver as readMergedSource } from "./helpers/prototype-receiver-extraction.js";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import ts from "typescript";

@@ -13002,3 +13002,46 @@ string checkpoint6a1fdfc4 into Boolean checkpointc2fb27fed2. Correct the
 Boolean cohort subcounts directly from JSON: number17 and manifest8; total
 88/88 unchanged. String's seven test/fixture/helper files stay byte-identical
 to its validated commit. No production changes in this merge.
+
+### 2026-09-27: canonical receiver classification for the prototype owner
+
+The native prototype owner still needs the actual receiver classifier and
+receiver-aware consult wrappers. Existing shared companion/key/Get/Has recipes
+do not supply this: classification remains in `fillBrandOffBody`, including
+Symbol wrappers, collection kinds, Promise-before-closure precedence and bare
+primitive rules. Extract that complete body plus both consult wrappers into
+a pure recipe before binding them to issued owners. Never replace the
+classifier with a constant Object brand or claim a missing companion is empty.
+
+Root owns the new prototype receiver recipe, legacy adapter, exact signed
+fc510 source receipt and negative/parity tests. Preserve late literal
+materialization: wrapper types are captured before requesting the real
+`[[PrimitiveValue]]` literal; Symbol and remaining carrier bindings are read
+after that request. Keep original branch order, locals and body bytes.
+Compose the new authenticated inverse before the existing prototype-read
+inverse; all earlier source receipts remain unchanged. Add the one pure
+module to the boundary inventory without widening permitted edges. B owns
+internal ordinary Get/descriptor resources; R owns result proofs and physical
+program joins. The full prototype resource owner/admission remains required
+after this dependency is extracted and tested.
+
+Receiver extraction first validation: TS7 passed; 67/67 executed rows across
+five suites passed (new classifier24, companion12, native prototype13,
+primitive receiver7, Symbol brand11). The historical read recipe suite failed
+collection because its direct raw source reader bypassed the new inverse.
+Preserve that failure. Route only that historical reader through the new
+complete-source authenticated inverse; keep every prior assertion/hash.
+Rerun all six files, with default and JSON reporters retaining non-test errors.
+The first reachability child also failed before compilation through the
+unaccepted Xcode git shim; rerun with the documented explicit Git PATH.
+Independent review verified exact fc510 donor reconstruction, timing,
+local slots, carrier ordering and receiver forwarding. Added missing helper
+cases from that review. Full native prototype admission remains unfinished.
+
+Receiver extraction corrected run is terminal0: **456/456** across seven
+complete suites (companion12, original read40, receiver24, boundary349,
+prototype13, primitive receiver7, Symbol brand11), zero failed/pending;
+2,150 inputs unchanged. First TS7 pass applies to identical production bytes.
+Boundary preservation appends exactly the new pure receiver module and its
+floor increment, retaining signed history/edge digests. Original read test
+changes only its source-reader import; all assertions and hashes are retained.
