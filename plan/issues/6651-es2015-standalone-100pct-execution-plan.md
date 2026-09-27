@@ -185,6 +185,30 @@ loc-budget-allow:
   # `undefWidenedPatternBindings` / `addSpill`), and the pack-site read has to sit
   # inside the `struct.new` operand sequence, where the value is pushed. The first
   # cut inlined both and cost +41.
+  # 2026-09-27 — lane SN1 (three unrelated one-row ES2015 standalone causes under
+  # one control run; receipt at the end of this file). Two god-files, +41 and
+  # +15, both paths already listed below and restated here per the
+  # stranded-grant rule.
+  #   - `src/codegen/expressions/call-namespace-static.ts` +41: ONE token in the
+  #     `Symbol.keyFor` gate (`|| isProvablyToObjectResult(...)`) plus the
+  #     module-level helper it names. 33 of the 41 lines are that helper, and
+  #     ~20 of those are its doc comment — because the whole content of this fix
+  #     is WHY acting on a `"mixed"` static type is sound here: §7.1.18 ToObject
+  #     always answers an Object, so `Object(v)` is provably not a Symbol for
+  #     every `v`. That is a fact about the CALLEE, and a reader who cannot see
+  #     it will read the arm as the operand-type guess the surrounding gate
+  #     explicitly refuses to make. The helper is deliberately module-level
+  #     rather than inline: inline it cost `compileNamespaceStaticCall` +34
+  #     against a +0 func-budget headroom, and the call site's own growth is
+  #     now net 0 lines.
+  #   - `src/codegen/expressions/calls.ts` +15: one `else if` arm in
+  #     `tryEmitNativeProtoReflectiveCall`'s brand resolver plus one import name.
+  #     The arm cannot move: the resolver is a flat one-member-at-a-time ladder
+  #     (`Number`/`Boolean` for #4582/#4619, `Promise` for #5197 Slice C) whose
+  #     ORDER is the semantics — each `else if` runs only when the preceding
+  #     `nativeProtoBrandForInterface` lookup declined — and the rationale for
+  #     admitting a member has to sit beside the members already admitted or the
+  #     next lane cannot tell an enumerated ladder from an open family.
   # 2026-09-26 — lane GEN1 (a rest binding inside a nested pattern was given TWO
   # local slots; see the receipt at the end of this file).
   # `src/codegen/destructuring-params.ts` +25 (path already listed below,
@@ -14668,3 +14692,244 @@ brief's instruction was to land the pair; the second half is not callability and
 not a prototype question, so it needs its own slice in the value-representation
 area. Held on this branch with the receipt above so the decision is the
 integrator's.
+
+---
+
+## Lane SN1 receipt — 2026-09-27 (three unrelated one-row causes, one control run)
+
+**+3 ES2015 standalone rows, 0 lost.** All three were ES2015-tagged (that is the
+whole batch — there is no non-ES2015 subset), and all three **already PASSED on
+the host lane**, measured on both trees: they were standalone-only gaps, so there
+is no host bonus to report. Five further causes were probed and **dropped**; four
+of those five collapsed from a plausible multi-row estimate to something smaller
+or harder, and that is recorded below because it is the more reusable half of
+this lane's output.
+
+Branch `issue-6651-sn1-singleton-batch`, base `2b0ea5b31a` (= `origin/main`,
+nothing to catch up).
+
+### Position, measured before choosing anything
+
+Scored the published standalone baseline
+(`test262-standalone-current.jsonl`, 48,735 rows, run 27.9.2026 00:01) with
+`classifyEdition`/`parseFrontmatter` from `scripts/generate-editions.ts`:
+**ES2015 10,993 / 11,704**, i.e. **711 not-pass rows in 320 distinct
+`error_signature` groups** — mean 2.2 rows per group, and the largest group
+(57 rows, "Expected a TypeError to be thrown but no exception was thrown at all")
+spans Proxy invariants, TypedArray brand checks, class name bindings and
+generator restricted properties with no shared cause. The plan's framing is
+confirmed by the data: what is left is singletons.
+
+Candidates were grouped by ERROR TEXT and then re-grouped by the fix each would
+need; every one was probe-RUN before being believed.
+
+### The three causes
+
+| # | Spec | Row | Host verdict | File |
+| - | ---- | --- | ------------ | ---- |
+| 1 | §20.4.3.2 / §20.4.3.3 | `built-ins/Symbol/prototype/toString/toString.js` | already **pass** | `src/codegen/expressions/calls.ts` |
+| 2 | Annex B §B.2.2.1.1 | `built-ins/Object/prototype/__proto__/get-ordinary-obj.js` | already **pass** | `src/codegen/object-proto-proto-accessor.ts` |
+| 3 | §20.4.2.6 step 1 | `built-ins/Symbol/keyFor/arg-non-symbol.js` | already **pass** | `src/codegen/expressions/call-namespace-static.ts` |
+
+**1. `Symbol.prototype.{valueOf,toString}` in their DIRECT reflective spelling.**
+Both members have had native standalone bodies for a while (`#4776`, `#5269 B-c`)
+and the brand check in them is correct. What was missing is one arm in
+`tryEmitNativeProtoReflectiveCall`'s resolver, which enumerates
+Number/Boolean (#4582/#4619) and Promise `then`/`catch` (#5197 Slice C) one
+member at a time and had no `Symbol` entry — so the direct spelling fell through
+to the #1888 Slice 3/4 borrowed-method tail, which has no `Symbol` arm either,
+refuse-louds, and answers `undefined`.
+
+The localisation is worth recording because it is what made a short fix out of a
+"the Symbol substrate is missing" reading. Probed on base, in one module:
+
+| spelling | base |
+| -------- | ---- |
+| `Symbol.prototype.toString.call(s)` | **`undefined`** |
+| `Symbol.prototype.valueOf.call(s)` | **not `s`** |
+| `Symbol.prototype.toString.apply(s)` | correct |
+| `var m = Symbol.prototype.toString; m.call(s)` | correct |
+| `s.toString()` / `Object(s).toString()` / `String(s)` | correct |
+
+Four of six spellings already worked, which rules out the body and points at the
+`.call`-specific dispatch. The arm was then found by tagging every `return` in
+the `.call`/`.apply` block of `calls.ts` and re-running the probe — the only one
+that fired was `return null` after the #1888 refuse-loud `reportError`.
+
+**2. The `Object.prototype.__proto__` getter on an ordinary object literal.**
+`__object_proto_get` already re-applies the two `$Object.$proto === null`
+encodings that `object-runtime-prototype.ts` documents, but its
+implicit-`%Object.prototype%` terminal `ref.test`s the receiver against the OPEN
+`$Object` carrier. A receiver the compiler builds as a CLOSED WasmGC struct fails
+that test and the raw `null` from the `[[GetPrototypeOf]]` walk is returned. So
+on base:
+
+| receiver | base | spec |
+| -------- | ---- | ---- |
+| `get.call({})` | **`null`** | `Object.prototype` |
+| `get.call(Object.create(proto))` | `proto` | `proto` |
+| `get.call(Object.create(null))` | `null` | `null` |
+| `get.call([])` | `Array.prototype` | `Array.prototype` |
+
+The shape that is most obviously an ordinary object was the only failing one. Fix
+= promote the literal RECEIVER ARGUMENT to the open carrier
+(`ctx.dynamicProtoLiteralNodes`), the same move the Error.prototype.toString
+reflective arm in `calls.ts` already makes, so the existing terminal logic sees
+it. Confined to this accessor's receiver and to a syntactic object literal.
+
+**3. `Symbol.keyFor` on a provably-`Object` argument.** #5269 A-6 throws only for
+a STATICALLY-proven non-symbol and deliberately lets `"mixed"` through.
+`ObjectConstructor` is declared `(value: any): any`, so `Object(Symbol())` — the
+Symbol WRAPPER, i.e. the one shape step 1 must reject while looking most
+symbol-like — reads as `"mixed"` and reached the i32 symbol-id lane, answering
+`undefined`. The refinement is a fact about the CALLEE, not a guess about the
+operand: §7.1.18 ToObject always answers an Object, so `Object(v)` is provably
+not a Symbol for every `v`. That is why it is sound to act on under a `mixed`
+operand type, and the rest of the `mixed` bucket is untouched.
+
+### Control run
+
+Authoritative lane only: `tests/test262-shared.ts::runTest262Chunk` driven from a
+gitignored `tests/probe-sn1-belt.test.ts`, `TEST262_PATH_FILTER_FILE`,
+`--isolate`, `TEST262_IT_TIMEOUT_MS=120000`, `COMPILER_POOL_SIZE=2` (a second
+lane was running alongside). `scripts/run-test262-paths.mts` was not used.
+
+Belt = the union of every path the three edits can reach: **all 346**
+`built-ins/Symbol/**` + `built-ins/Object/prototype/**` rows.
+
+| run | target | bundle hash | adapter key | rows | pass |
+| --- | ------ | ----------- | ----------- | ---- | ---- |
+| before | standalone | `18b8bb6b6ee8755f` | `c6db7c5233bcf86c` | 346 | **295** |
+| after | standalone | `16de438c6cf0216a` | `d14510702e20fa46` | 346 | **298** |
+| before | host (`gc`) | `18b8bb6b6ee8755f` | `c6db7c5233bcf86c` | 39 | **33** |
+| after | host (`gc`) | `16de438c6cf0216a` | `d14510702e20fa46` | 39 | **33** |
+| **final (committed tree)** | standalone | `66a2ef84bb191e87` | `e2db84be69c8adb3` | 346 | **298** |
+
+Shard-completion manifest on all five runs: `registeredTests == recordedRows ==
+canonicalVerdicts == callbacksSettled`, `allCallbacksSettled=true` (346/346 and
+39/39). Every adapter key is distinct, which is the evidence each run measured
+its own tree.
+
+The FINAL row exists because the `isProvablyToObjectResult` extraction (taken to
+keep `compileNamespaceStaticCall` inside its func budget) landed **after** the
+`after` run, which moved the bundle hash from `16de438c6cf0216a` to
+`66a2ef84bb191e87`. A pure extraction is a claim, not a measurement, so the belt
+was re-run on the committed tree: **`final` vs `after` is GAINED 0 / LOST 0 /
+CHANGED 0**, and `final` vs `before` is the same +3/−0 reported below. The
+committed tree re-derives to bundle `66a2ef84bb191e87`, adapter
+`e2db84be69c8adb3`.
+
+Per-row diff, standalone belt:
+
+```
+GAINED (3):
+  + test/built-ins/Symbol/keyFor/arg-non-symbol.js
+  + test/built-ins/Symbol/prototype/toString/toString.js
+  + test/built-ins/Object/prototype/__proto__/get-ordinary-obj.js
+LOST (0):
+CHANGED-but-still-not-pass (0):
+```
+
+Host belt (39 rows: `built-ins/Symbol/{keyFor,prototype/toString,prototype/valueOf}`
++ `built-ins/Object/prototype/__proto__`): **GAINED 0, LOST 0, CHANGED 0.** All
+three arms are `ctx.standalone`-gated, and this pair is the measurement of that
+rather than an appeal to the gate. The three fixed rows are `pass` on host on
+BOTH trees — so none of this was shared front-end work.
+
+Local runs leave `TEST262_ORACLE_MODE` unset, so the host numbers above are the
+honest whole-assembly lane, not CI's linked-harness lane.
+
+### Dropped, with what the probe actually said
+
+Each of these was a candidate chosen from the error-text grouping and then
+discarded. The estimate that collapsed is the finding.
+
+- **Primitive-wrapper prototype patch — estimated 4 rows, delivered 0, and it is
+  the known-hard #2175 substrate.** `built-ins/{Object,Array}/prototype/toLocaleString/primitive_this_value{,_getter}.js`
+  all hinge on `Boolean.prototype.toString = fn` being observed. Probed: not only
+  `true.toLocaleString()` but `true.toString()` itself ignores the patch, so this
+  is not a §19.1.3.5 `Invoke(O, "toString")` bug at all — the dispatch never gets
+  a chance. Dropped in one probe. Pinned in the test file.
+- **`isConstructor` family — looked like 8 rows, is really 4 + 3 + 1 and none of
+  them cheap.** Of the 8 ES2015 rows including `harness/isConstructor.js`: 4 are
+  `isConstructor(X) must return true` for `Function`/`GeneratorFunction`/`AsyncFunction`/`AsyncGeneratorFunction`,
+  which need `Reflect.construct(f, [], X)` to accept an arbitrary distinct
+  NewTarget — the already-diagnosed substrate behind the 6-row "standalone
+  Reflect.construct cannot preserve an arbitrary distinct NewTarget" refusal, and
+  `Function` also needs CreateDynamicFunction. The 3 `not-a-constructor` rows
+  (`Error.prototype.stack` get/set, `Function.prototype.toString`) already get
+  `isConstructor === false` right, and **a hand probe of their remaining assert
+  passes on base** (`new toString()`, `new get()` and `new hop()` all throw) — so
+  whatever those rows actually fail on is not the assert their filename names,
+  and they were left for a lane that will run them through the harness rather
+  than probe them. This is the brief's filename-grouping warning, observed.
+- **`ArrayBuffer.prototype.slice.call(...)` — 2 rows, not a brand-check gap.**
+  Both `context-is-not-object.js` and `context-is-not-arraybuffer-object.js` look
+  like a missing §25.1.5.3 step-2/3 throw. Probed: the VALID case is broken too —
+  `ArrayBuffer.prototype.slice.call(ab, 2)` neither returns a 6-byte buffer nor
+  throws, while `ab.slice(2)` is correct and `var m = ArrayBuffer.prototype.slice; m.call(ab, 2)`
+  throws. `nativeProtoBrandForInterface` already maps `ArrayBuffer`, so the
+  resolver is not the problem here (unlike cause 1) and the member's reflective
+  closure needs real work. Not a singleton.
+- **`String.prototype.indexOf` ToPrimitive — a genuine 3-row cause, deliberately
+  not taken here.** `position-tointeger-errors.js`,
+  `position-tointeger-toprimitive.js` and `searchstring-tostring-toprimitive.js`
+  all fail on the same two §7.1.1 OrdinaryToPrimitive facts: a NON-CALLABLE
+  `valueOf`/`toString` must be SKIPPED, and TypeError is required when neither is
+  callable (measured: `{valueOf: null, toString: fn}` does not fall through, and
+  `{valueOf: null, toString: null}` does not throw). This is the shared numeric
+  coercion path — the subject of the `check-coercion-sites` ratchet — not an
+  independent singleton, and mixing it into a three-cause batch would have made
+  the control run unreadable. **Recommend it as its own slice: one cause, 3 rows,
+  clear spec text.** Pinned in the test file.
+- **`Symbol.species` builtin getter `.name` — 1 row, and the diagnosis is the
+  opposite of "the name is missing".** `builtin-fn-meta.ts` already names the
+  canonical getter `"get [Symbol.species]"`, and read off a STATIC receiver it
+  answers exactly that. Through a function PARAMETER
+  (`getGetterName(Array, Symbol.species)`, which is how the row spells it) the
+  descriptor is synthesised at runtime with an anonymous getter installed under
+  the key `get`, so §17 NamedEvaluation names it `"get"`. The fix is in the
+  runtime gOPD handing back the real singleton, not in the metadata. Pinned.
+
+Also measured and reported without a fix: the **6-row**
+`language/{statements,expressions}/class/decorator/syntax/valid/decorator-*-identifier-reference-yield.js`
+family fails with `'yield' is a reserved word and may not be used as an
+identifier in strict mode`. These carry `flags: [noStrict]`, i.e. only the sloppy
+variant runs, but the compiler parses the module as strict and
+`skipSemanticDiagnostics` does not suppress a GRAMMAR error. That is a
+harness/parse-mode concern, not codegen, and it is worth 6 ES2015 rows to whoever
+owns the sloppy-variant lane. (They classify as ES2015 because `classifyEdition`
+takes the max MAPPED feature year and `decorators` is unmapped while `class` maps
+to 2015 — a classifier quirk, but it is the gate we are scored against.)
+
+### Tests
+
+`tests/issue-6651-sn1-reflective-singletons.test.ts` — 13 cases, all passing:
+one per fixed cause, four negative-control groups (the `.apply` and value-erased
+Symbol spellings; a Symbol.prototype member OUTSIDE the enumerated arm; the
+non-literal `__proto__` receivers; the `Symbol.for` registry answers), and four
+residual pins at today's **spec-wrong** answers so a later lane trips an
+assertion instead of moving the boundary silently.
+
+The setter half of the `__proto__` accessor gets its own control, probed on BOTH
+trees and byte-identical (`58` each way) — the promotion block runs for `get` and
+`set` alike, so it needed a measurement rather than an argument. It also records
+a pre-existing split worth knowing: after `d.set.call(target, proto)` the
+INHERITED READ works while `Object.getPrototypeOf(target)` still answers
+`%Object.prototype%`.
+
+### Gates — each run bare, exit code read directly
+
+`check-loc-budget` 0 · `check-func-budget` 0 · `check-coercion-sites` 0 ·
+`check:oracle-ratchet` 0 · `check:dead-exports` 0 · `check-host-import-policy` 0 ·
+`check-compiler-boundaries --mode inventory --base HEAD^1` 0 · `typecheck` 0.
+Re-run with `LOC_GATE_BASE=$(git rev-parse origin/main)`: both budget gates **0**
+(this branch's base IS `origin/main`, so there is no drift to strand). No new
+`src/` file, so no `compiler-boundaries.json` registration; no
+`scripts/*-baseline.json` touched; `src/runtime.ts` untouched, so neither its line
+ratchet nor the host-import-policy ceiling moves.
+
+Growth: `call-namespace-static.ts` +40 and `calls.ts` +15, granted dated in this
+file's frontmatter. `compileNamespaceStaticCall` is net **+0** — the soundness
+argument was moved into a module-level helper (`isProvablyToObjectResult`) rather
+than taking a func-budget grant, which is also where it reads better.
