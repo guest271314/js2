@@ -1,4 +1,5 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import { readBeforePrototypeRead } from "./prototype-read-extraction.js";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
@@ -136,7 +137,7 @@ export function applyResumeMainComposition(
 
 /** Preservation-only reader. Runtime imports and compiler executions never use this view. */
 export function readBeforeResumeMain(path: string): string {
-  const source = readMergedSource(path);
+  const source = readBeforePrototypeRead(path);
   return resumeMainPaths.some((candidate) => candidate === path)
     ? applyResumeMainComposition(path, source, true)
     : source;
