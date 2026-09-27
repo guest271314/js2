@@ -49,3 +49,33 @@ export function buildTypeofBooleanBody(boxBoolStructIdx: number): Instr[] {
     { op: "ref.test", typeIdx: boxBoolStructIdx },
   ];
 }
+
+export type BooleanBoxBodyBindings =
+  | { readonly mode: "allocating"; readonly typeIndex: number }
+  | { readonly mode: "interned"; readonly trueGlobalIndex: number; readonly falseGlobalIndex: number };
+
+/** Exact legacy primitive boxing recipe; allocation policy is explicit. */
+export function buildBoxBooleanBody(bindings: BooleanBoxBodyBindings): Instr[] {
+  if (bindings.mode === "allocating")
+    return [
+      { op: "local.get", index: 0 },
+      { op: "struct.new", typeIdx: bindings.typeIndex },
+      { op: "extern.convert_any" },
+    ];
+  return [
+    { op: "local.get", index: 0 },
+    {
+      op: "if",
+      blockType: { kind: "val", type: { kind: "externref" } },
+      then: [{ op: "global.get", index: bindings.trueGlobalIndex }, { op: "extern.convert_any" }],
+      else: [{ op: "global.get", index: bindings.falseGlobalIndex }, { op: "extern.convert_any" }],
+    },
+  ];
+}
+
+export function buildBooleanBoxInitializer(typeIndex: number, value: 0 | 1): Instr[] {
+  return [
+    { op: "i32.const", value },
+    { op: "struct.new", typeIdx: typeIndex },
+  ];
+}

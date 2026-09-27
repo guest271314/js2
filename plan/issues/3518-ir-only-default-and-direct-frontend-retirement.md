@@ -12731,3 +12731,41 @@ callable-Get failure. It is untested and not part of this main merge. The
 signed prototype-read extraction35ab also remains a subsequent integration.
 Legacy retirement and IR-default activation remain prohibited until complete
 IR implementation, testing and behavioral equivalence.
+
+### Native Boolean BOX implementation (2026-09-27, integration)
+
+Implement the missing Boolean BOX prerequisite for actual getter result
+carriers. Extract the exact retained interned-boolean recipe into the existing
+pure Boolean runtime module and keep the legacy adapter's environment toggle,
+true-before-false global acquisition, nonzero selection and allocating fallback.
+Add a separate issued native boxing owner alongside the existing read/classify
+owner: explicit interned/allocating mode, the same issued primitive Boolean
+type, one shared physical ledger, authenticated dependencies, immutable global
+reservations and completion checks. No ambient environment reads in native
+planning, no lookalike Boolean type or number-box substitute.
+
+Authenticate the complete signed donor and compare emitted body/global records
+for both modes and shifted import/global indices. Execute real emitted native
+Wasm for Boolean values, interned identity and allocating behavior; test cloned/
+foreign owners, incomplete dependencies, tampered bodies/globals and duplicate
+fill. This prerequisite does not claim general ToBoolean or source Get result
+projection support. Original getter/capture/712 requirements remain in scope.
+
+Boolean BOX validation: first full five-suite run measured 171/173 passing
+with 1841 frozen inputs unchanged and TS7 passing. Both failures were the
+negative identity matcher inspecting opaque Wasm GC objects; all preceding
+value/identity assertions passed. Replace only that matcher with the same
+identity predicate asserted as a Boolean. Add non-string-key refusal before
+reservation. Fresh TS7 and all 31 new cases pass, 1841 inputs unchanged. The
+other four suites had passed 143/143 in the first run; this is combined scoped
+evidence, not a claim of a fresh 174-row run. All six scoped structural gates
+pass against exact f52. Normal signed hooks remain the next step.
+
+The next Boolean getter joins are explicit: prepare-ordinary-object-access
+and from-ast currently only select numeric Get extraction; native-invocation
+refuses i32 returns and lacks the Boolean result BOX adapter. Add an issued
+Boolean extraction contract returning branded i32 and authenticate actual
+selected getter/data result occurrences. A checker type or the presence of a
+reachable Boolean getter is insufficient, because the native unbox returns
+false for foreign carriers. Preserve true/false invocation counts, mixed-key
+getters, descriptor overwrite/inheritance and foreign/forged controls.
