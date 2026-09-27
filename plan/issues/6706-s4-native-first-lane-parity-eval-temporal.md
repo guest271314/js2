@@ -168,3 +168,8 @@ then the nightly regime build step fails soft each run (~1 min).
   reports UNAVAILABLE, each fork announces `Temporal provider NOT linked (the
   host/native-first lane has no eligible provider)`; 48/66 rows `Temporal is
   not defined`, unchanged from before (the lane was unlinked before too).
+- `tests/issue-5383-standalone-temporal-provider.test.ts` is left at main's
+  content (the #3008 changed-file gate would otherwise root on it, and its
+  "S2i … DYNAMIC class-value receiver" test fails on main independently:
+  `expected NaN to be 8`). The #6706 source-shape assertions live in
+  `tests/issue-6706-native-first-lane-providers.test.ts`.

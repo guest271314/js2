@@ -108,6 +108,17 @@ describe("#6706 B — regime-compiled Temporal provider", () => {
     expect(test262TemporalLaneEnabled(undefined, dir, "native-first")).toBe(false);
   });
 
+  it("threads the lane's semantic-provider policy through prewarm and worker", () => {
+    const prewarm = readFileSync(join(process.cwd(), "scripts/prewarm-temporal-provider.mjs"), "utf8");
+    expect(prewarm).toContain("--semantic-providers");
+    expect(prewarm).toContain("temporalProviderCompileOptions(target, semanticProviders)");
+    expect(prewarm).toContain("temporalProviderCacheKey({ polyfillSource, compileOptions })");
+    const worker = readFileSync(join(process.cwd(), "scripts/test262-worker.mjs"), "utf8");
+    expect(worker).toContain("getWorkerTemporalProvider(target, semanticProviders)");
+    expect(worker).toContain("temporalProviderCompileOptions(target, semanticProviders)");
+    expect(worker).toContain("readTemporalPrewarmStamp(cacheDir, target, semanticProviders)");
+  });
+
   it("builds and ships the regime provider under its own artifact", () => {
     const provider = jobBlock("temporal-provider");
     expect(provider).toContain("--semantic-providers native-first");

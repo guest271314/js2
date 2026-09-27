@@ -140,7 +140,12 @@ async function main() {
   const polyfillSource = await loadTemporalPolyfillSource();
   for (const target of targets) {
     const label = semanticProviders === "native-first" ? "host/native-first" : (target ?? "host");
-    const compileOptions = temporalProviderCompileOptions(target, semanticProviders);
+    // The host/standalone lanes keep their pre-#6706 call verbatim; only the
+    // native-first lane (#6706) passes its semantic-provider policy.
+    const compileOptions =
+      semanticProviders === "auto"
+        ? temporalProviderCompileOptions(target)
+        : temporalProviderCompileOptions(target, semanticProviders);
     // The key MUST be computed with the same options the build uses, or the
     // stamp certifies an artifact nobody will ask for and the consuming lane
     // refuses with a key mismatch it cannot act on.
