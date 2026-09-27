@@ -26,7 +26,7 @@
  * the `ObjectDescriptorHelperState` bundle so the `registerNative` call ORDER
  * (and therefore the minted func-index sequence) is preserved exactly.
  */
-import { buildOrdinaryObjectDataDescriptorBody } from "../runtime/wasmgc/values/ordinary-object-descriptor-data.js";
+import { buildObjectDataDescriptorBody } from "./object-descriptor-data.js";
 import { buildOrdinaryObjectAccessorDescriptorBody } from "../runtime/wasmgc/values/ordinary-object-descriptor-accessor.js";
 import type { Instr, ValType } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
@@ -405,7 +405,7 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
           ...(dpValueClosureArm ?? [{ op: "local.get", index: 0 }, { op: "return" }]),
         ],
       },
-      ...buildOrdinaryObjectDataDescriptorBody(s4DescriptorResources),
+      ...buildObjectDataDescriptorBody(ctx, s4DescriptorResources),
     ];
     registerNative(
       "__defineProperty_value",

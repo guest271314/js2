@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /** Import/global registration and late index-space fixups. */
 import { registerWideBigIntTypes } from "../bigint-wide.js";
+import { buildOpenBigIntType } from "../../runtime/wasmgc/values/bigint-carrier-layouts.js";
 import type { Import, Instr, ValType, WasmFunction } from "../../ir/types.js";
 import { buildBoxNumberType, buildBoxBooleanType } from "../../runtime/wasmgc/values/primitive-layouts.js";
 import {
@@ -15,11 +16,7 @@ import {
   buildUnboxBooleanLocals,
   buildTypeofBooleanBody,
 } from "../../runtime/wasmgc/values/boolean-bodies.js";
-import {
-  buildBigIntPrimitiveType,
-  buildBoxBigIntBody,
-  buildTypeofBigIntBody,
-} from "../../runtime/wasmgc/values/bigint-primitive-bodies.js";
+import { buildBoxBigIntBody, buildTypeofBigIntBody } from "../../runtime/wasmgc/values/bigint-primitive-bodies.js";
 import type { CodegenContext, ExternClassInfo } from "../context/types.js";
 import { resolveWidenedVarKey } from "../widened-var-key.js";
 import { hasLoneSurrogate, hexCodeUnits, STRING_CONSTANTS16_NS } from "../../string-surrogate.js";
@@ -1372,7 +1369,7 @@ export function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
   ctx.mod.types.push(buildBoxBooleanType());
 
   const bigIntStructIdx = ctx.mod.types.length;
-  ctx.mod.types.push({ ...buildBigIntPrimitiveType(), superTypeIdx: -1 });
+  ctx.mod.types.push(buildOpenBigIntType());
   registerWideBigIntTypes(ctx, bigIntStructIdx);
   ctx.nativeBoxNumberTypeIdx = boxNumStructIdx;
   ctx.nativeBoxBooleanTypeIdx = boxBoolStructIdx;

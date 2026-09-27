@@ -891,6 +891,19 @@ describe("semantic verification and provider ownership boundary", () => {
           "src/runtime/wasmgc/values/prototype-read-bodies.ts",
           "src/runtime/wasmgc/values/prototype-receiver-bodies.ts",
         );
+      if (id === "backend-wasmgc")
+        additions.push(
+          "src/backend/wasmgc/resources/native-bigint.ts",
+          "src/backend/wasmgc/resources/native-object-same-value.ts",
+          "src/backend/wasmgc/resources/native-object-descriptors.ts",
+        );
+      if (id === "native-runtime")
+        additions.push(
+          "src/runtime/wasmgc/values/bigint-carrier-body.ts",
+          "src/runtime/wasmgc/values/bigint-carrier-layouts.ts",
+          "src/runtime/wasmgc/values/bigint-finalized-layouts.ts",
+          "src/runtime/wasmgc/values/ordinary-object-descriptor-definitions.ts",
+        );
       if (id === "runtime-contracts")
         additions.push("src/runtime/contracts/builtin-brands.ts", "src/runtime/contracts/collection-kind.ts");
       const signedEntries = additions.length ? layer.entries.slice(0, -additions.length) : layer.entries;

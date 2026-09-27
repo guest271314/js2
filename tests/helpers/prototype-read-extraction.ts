@@ -38,8 +38,8 @@ export function applyPrototypeReadExtraction(source: string, inverse: boolean, r
 }
 
 /** Only the preservation view strips this later extraction; runtime reads stay raw. */
-export function readBeforePrototypeRead(path: string): string {
-  const source = read(path);
+export function readBeforePrototypeRead(path: string, reader = read): string {
+  const source = reader(path);
   return path === "src/codegen/proto-index-store.ts"
     ? applyPrototypeReadExtraction(applyPrototypeReceiverExtraction(source, true), true)
     : source;

@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
-import { readBeforeResumeMain } from "./resume-main-composition.js";
 import { createHash } from "node:crypto";
+import { readBeforeResumeMain } from "./resume-main-composition.js";
 import ts from "typescript";
 import * as storage from "../../src/runtime/wasmgc/values/ordinary-object-storage-bodies.js";
 import * as keys from "../../src/runtime/wasmgc/values/object-key-bodies.js";
@@ -8,6 +8,7 @@ import { buildOrdinaryObjectDataDescriptorBody } from "../../src/runtime/wasmgc/
 import { buildOrdinaryObjectAccessorDescriptorBody } from "../../src/runtime/wasmgc/values/ordinary-object-descriptor-accessor.js";
 import { buildObjectSameValueBody } from "../../src/runtime/wasmgc/values/object-same-value-body.js";
 import type { Instr, LocalDef, ValType } from "../../src/wasm/model/instructions.js";
+import { beforeDescriptorUndefinedCorrection } from "./descriptor-undefined-correction.js";
 
 export const readWriteSource = readBeforeResumeMain;
 export const writeSourceHash = (source: string) => createHash("sha256").update(source).digest("hex");
@@ -65,8 +66,15 @@ export function authenticateWriteExtraction(text = writeExtractionText(), reader
     receipt.deltas.length !== 3
   )
     throw Error("write extraction provenance mismatch");
-  for (const [file, hash] of Object.entries(receipt.modules))
-    if (writeSourceHash(reader(file)) !== hash) throw Error("write relocated module mismatch: " + file);
+  for (const [file, hash] of Object.entries(receipt.modules)) {
+    let historical: string;
+    try {
+      historical = beforeDescriptorUndefinedCorrection(file, reader(file));
+    } catch (cause) {
+      throw Error("write relocated module mismatch: " + file, { cause });
+    }
+    if (writeSourceHash(historical) !== hash) throw Error("write relocated module mismatch: " + file);
+  }
   return receipt;
 }
 function transform(source: string, delta: Delta, direction: "forward" | "inverse"): string {
@@ -193,9 +201,18 @@ export function captureWriteDonor(
     ...keyResources,
     keyResources,
     ...storage,
-    buildOrdinaryObjectDataDescriptorBody,
+    // Historical reconstruction supplies the original null operand explicitly.
+    // Current caller captures may provide the corrected canonical operand.
+    buildOrdinaryObjectDataDescriptorBody: (
+      d: Parameters<typeof buildOrdinaryObjectDataDescriptorBody>[0],
+      undefinedAnyValue?: readonly Instr[],
+    ) => buildOrdinaryObjectDataDescriptorBody(d, undefinedAnyValue ?? [{ op: "ref.null", typeIdx: d.flags.noneHeap }]),
     buildOrdinaryObjectAccessorDescriptorBody,
-    buildObjectSameValueBody,
+    // Historical donors used only the original i64 comparison. The live native
+    // owner must provide its authenticated canonical carrier equality instead.
+    buildObjectSameValueBody: (
+      d: Omit<Parameters<typeof buildObjectSameValueBody>[0], "bigint"> & { toBigIdx: number },
+    ) => buildObjectSameValueBody({ ...d, bigint: { kind: "legacy-i64", toBigIdx: d.toBigIdx } }),
     objectTypeIdx: 10,
     propMapTypeIdx: 9,
     propEntryTypeIdx: 8,
@@ -233,6 +250,10 @@ export function captureWriteDonor(
     addUnionImportsViaRegistry: () => {
       trace.push(["union"]);
       if (options.changing) funcMap.set("__new_TypeError", ++next);
+    },
+    canonicalUndefinedExternInstrs: () => {
+      trace.push(["undefined"]);
+      return literal;
     },
     emitWasiErrorConstructor: (_ctx: unknown, name: string, arity: number) => {
       trace.push(["error", name, arity]);

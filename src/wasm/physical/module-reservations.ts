@@ -441,6 +441,8 @@ export class PhysicalModuleReservations {
 
   reserveType(key: PhysicalResourceKey, definition: TypeDef): TypeReservation {
     this.#require("reserving");
+    // Inspect the candidate before consuming a key or publishing any type slot.
+    this.#validateFinalParents([...this.#module.types, definition]);
     this.#key(key);
     if (this.#typeRecords.has(definition)) this.#fail("same type object reserved twice");
     const typeIndex = this.#flatTypes().length;
@@ -895,6 +897,36 @@ export class PhysicalModuleReservations {
     }
   }
 
+  /** Match emitted finality, including implicit final plain types and rec/sub wrappers. */
+  #validateFinalParents(types: readonly TypeDef[]): void {
+    let entries: ReturnType<typeof indexPhysicalTypes>["entries"];
+    try {
+      entries = indexPhysicalTypes(types).entries;
+    } catch (error) {
+      this.#fail(error instanceof Error ? error.message : String(error));
+    }
+    for (const { definition } of entries) {
+      const parentIndex =
+        definition.kind === "sub"
+          ? definition.superType
+          : definition.kind === "struct"
+            ? definition.superTypeIdx
+            : undefined;
+      if (parentIndex === undefined || parentIndex === null || parentIndex === -1) continue;
+      const parent = entries[parentIndex]?.definition;
+      // Forward coordinates may still be unresolved during reservation. The
+      // existing final resource validation rejects any unresolved coordinate.
+      if (!parent) continue;
+      const final =
+        parent.kind === "sub"
+          ? !!parent.final
+          : parent.kind === "struct"
+            ? parent.superTypeIdx === undefined || !!parent.final
+            : true;
+      if (final) this.#fail(`cannot extend final parent type ${parentIndex}`);
+    }
+  }
+
   #validateType(type: TypeDef): void {
     switch (type.kind) {
       case "func":
@@ -981,6 +1013,7 @@ export class PhysicalModuleReservations {
   #validateResources(): void {
     const m = this.#module;
     this.#validateCanonicalGroup();
+    this.#validateFinalParents(m.types);
     for (const type of m.types) this.#validateType(type);
     this.#planTypes();
     for (const imp of m.imports) {

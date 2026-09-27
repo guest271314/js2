@@ -5,6 +5,7 @@ import {
   applyResumeMainComposition,
   authenticateResumeMainComposition,
   readBeforeResumeMain,
+  readMergedSource,
   resumeMainCompositionText,
   resumeMainFixturePath,
   resumeMainPaths,
@@ -17,7 +18,7 @@ const receipt = authenticateResumeMainComposition();
 type Row = (typeof receipt.records)[number];
 function positive(row: Row) {
   // Inspect the authenticated main layer before the later prototype extraction.
-  const current = readBeforePrototypeRead(row.path);
+  const current = readBeforePrototypeRead(row.path, readMergedSource);
   expect(resumeMainSha(current)).toBe(row.mergedSha256);
   const prior = applyResumeMainComposition(row.path, current, true);
   expect(resumeMainSha(prior)).toBe(row.prior.sha256);

@@ -2,6 +2,8 @@
 import { readBeforePrototypeRead } from "./prototype-read-extraction.js";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { beforeBigIntCarrierPort } from "./bigint-carrier-port.js";
+import { beforeDescriptorAdapterRelocation } from "./descriptor-adapter-relocation.js";
 
 export const resumeMainPrior = "c2014e6da1fd49da71f5d3e57722f35bee73ecc0";
 export const resumeMainUpstream = "bb18c35e839bc35f8294b76123e231b253405127";
@@ -24,8 +26,12 @@ export const resumeMainPaths = [
   "src/runtime/wasmgc/values/to-primitive-bodies.ts",
 ] as const;
 export const resumeMainSha = (source: string) => createHash("sha256").update(source).digest("hex");
+/** Authenticate the later BigInt correction before the unchanged main-merge layer. */
 export const readMergedSource = (path: string): string =>
-  readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
+  beforeBigIntCarrierPort(
+    path,
+    beforeDescriptorAdapterRelocation(path, readFileSync(new URL(`../../${path}`, import.meta.url), "utf8")),
+  );
 export const resumeMainCompositionText = readMergedSource(resumeMainFixturePath);
 
 interface SourcePin {
@@ -137,7 +143,7 @@ export function applyResumeMainComposition(
 
 /** Preservation-only reader. Runtime imports and compiler executions never use this view. */
 export function readBeforeResumeMain(path: string): string {
-  const source = readBeforePrototypeRead(path);
+  const source = readBeforePrototypeRead(path, readMergedSource);
   return resumeMainPaths.some((candidate) => candidate === path)
     ? applyResumeMainComposition(path, source, true)
     : source;

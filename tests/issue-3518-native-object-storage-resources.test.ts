@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { applyClosureApplyExtraction } from "./helpers/object-runtime-apply-extraction.js";
 import { applyFnctorGuardForward } from "./helpers/object-runtime-fnctor-guard-forward.js";
+import { beforeDescriptorUndefinedCorrection } from "./helpers/descriptor-undefined-correction.js";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Instr } from "../src/wasm/model/instructions.js";
 import { createEmptyModule } from "../src/ir/types.js";
@@ -434,7 +435,7 @@ describe("executed issued storage with controlled descriptor dependencies", () =
 // Authenticate and remove only the signed later invocation/main layers.
 // The unchanged write receipt still checks its exact full source and offsets.
 function readWriteLayerSource(path: string): string {
-  const actual = readWriteSource(path);
+  const actual = beforeDescriptorUndefinedCorrection(path, readWriteSource(path));
   if (path !== "src/codegen/object-runtime.ts") return actual;
   const source = applyFnctorGuardForward(applyClosureApplyExtraction(actual, true), true);
   expect(applyClosureApplyExtraction(applyFnctorGuardForward(source, false), false)).toBe(actual);
@@ -462,7 +463,7 @@ describe("fixed donor and whole-source preservation", () => {
           : r.file.endsWith("object-runtime.ts"),
     )!;
     const before = writeRegisterScope(donor.source, name),
-      after = writeRegisterScope(readWriteSource(donor.file), name);
+      after = writeRegisterScope(beforeDescriptorUndefinedCorrection(donor.file, readWriteSource(donor.file)), name);
     for (const flag of [false, true])
       for (const changing of [false, true]) {
         const options = { symbol: flag, own: flag, carrier: flag, offset: flag ? 29 : 0, changing };

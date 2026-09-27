@@ -257,9 +257,12 @@
         "src/backend/wasmgc/resources/native-source-closure-callables.ts",
         "src/backend/wasmgc/resources/native-object-access-declarations.ts",
         "src/backend/wasmgc/resources/native-object-access.ts",
-        "src/backend/wasmgc/resources/native-object-storage.ts"
+        "src/backend/wasmgc/resources/native-object-storage.ts",
+        "src/backend/wasmgc/resources/native-bigint.ts",
+        "src/backend/wasmgc/resources/native-object-same-value.ts",
+        "src/backend/wasmgc/resources/native-object-descriptors.ts"
       ],
-      "minModules": 32
+      "minModules": 35
     },
     {
       "id": "native-runtime",
@@ -341,9 +344,13 @@
         "src/runtime/wasmgc/values/prototype-companion-body.ts",
         "src/runtime/wasmgc/values/prototype-key-normalization-body.ts",
         "src/runtime/wasmgc/values/prototype-read-bodies.ts",
-        "src/runtime/wasmgc/values/prototype-receiver-bodies.ts"
+        "src/runtime/wasmgc/values/prototype-receiver-bodies.ts",
+        "src/runtime/wasmgc/values/bigint-carrier-body.ts",
+        "src/runtime/wasmgc/values/bigint-carrier-layouts.ts",
+        "src/runtime/wasmgc/values/bigint-finalized-layouts.ts",
+        "src/runtime/wasmgc/values/ordinary-object-descriptor-definitions.ts"
       ],
-      "minModules": 74
+      "minModules": 78
     },
     {
       "id": "standalone-platform",
@@ -13779,6 +13786,57 @@
     },
     {
       "path": "src/runtime/wasmgc/values/prototype-receiver-bodies.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/backend/wasmgc/resources/native-bigint.ts",
+      "state": "clean",
+      "layer": "backend-wasmgc"
+    },
+    {
+      "path": "src/backend/wasmgc/resources/native-object-descriptors.ts",
+      "state": "clean",
+      "layer": "backend-wasmgc"
+    },
+    {
+      "path": "src/backend/wasmgc/resources/native-object-same-value.ts",
+      "state": "clean",
+      "layer": "backend-wasmgc"
+    },
+    {
+      "path": "src/codegen/object-descriptor-data.ts",
+      "state": "unmigrated",
+      "layer": "mixed-needs-split",
+      "destination": "backend-wasmgc",
+      "owner": "3518-coordinator",
+      "nextBoundary": "Replace context-bound canonical undefined acquisition with the actual issued native value dependency; preserve the legacy descriptor recipe call order."
+    },
+    {
+      "path": "src/codegen/object-same-value.ts",
+      "state": "unmigrated",
+      "layer": "mixed-needs-split",
+      "destination": "backend-wasmgc",
+      "owner": "3518-coordinator",
+      "nextBoundary": "Replace legacy context-bound SameValue helper registration with issued native value/string/BigInt dependency ownership; preserve original acquisition and registration order."
+    },
+    {
+      "path": "src/runtime/wasmgc/values/bigint-carrier-body.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/bigint-carrier-layouts.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/bigint-finalized-layouts.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/ordinary-object-descriptor-definitions.ts",
       "state": "clean",
       "layer": "native-runtime"
     }
