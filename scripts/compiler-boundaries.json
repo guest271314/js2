@@ -354,9 +354,10 @@
         "src/runtime/wasmgc/values/bigint-finalized-layouts.ts",
         "src/runtime/wasmgc/values/ordinary-object-descriptor-definitions.ts",
         "src/runtime/wasmgc/values/prototype-layouts.ts",
-        "src/runtime/wasmgc/values/prototype-singleton-bodies.ts"
+        "src/runtime/wasmgc/values/prototype-singleton-bodies.ts",
+        "src/runtime/wasmgc/values/own-property-bodies.ts"
       ],
-      "minModules": 80
+      "minModules": 81
     },
     {
       "id": "standalone-platform",
@@ -13881,6 +13882,11 @@
     },
     {
       "path": "src/runtime/wasmgc/values/prototype-singleton-bodies.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/own-property-bodies.ts",
       "state": "clean",
       "layer": "native-runtime"
     }

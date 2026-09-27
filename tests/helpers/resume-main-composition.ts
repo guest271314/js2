@@ -1,4 +1,5 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import { applyOwnPropertyExtraction } from "./own-property-extraction.js";
 import { readBeforePrototypeRead } from "./prototype-read-extraction.js";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -26,12 +27,12 @@ export const resumeMainPaths = [
   "src/runtime/wasmgc/values/to-primitive-bodies.ts",
 ] as const;
 export const resumeMainSha = (source: string) => createHash("sha256").update(source).digest("hex");
-/** Authenticate the later BigInt correction before the unchanged main-merge layer. */
-export const readMergedSource = (path: string): string =>
-  beforeBigIntCarrierPort(
-    path,
-    beforeDescriptorAdapterRelocation(path, readFileSync(new URL(`../../${path}`, import.meta.url), "utf8")),
-  );
+/** Peel the exact eager-body extraction before every pre-existing source receipt. */
+export const readMergedSource = (path: string): string => {
+  const raw = readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
+  const source = path === "src/codegen/object-runtime.ts" ? applyOwnPropertyExtraction(raw, true) : raw;
+  return beforeBigIntCarrierPort(path, beforeDescriptorAdapterRelocation(path, source));
+};
 export const resumeMainCompositionText = readMergedSource(resumeMainFixturePath);
 
 interface SourcePin {

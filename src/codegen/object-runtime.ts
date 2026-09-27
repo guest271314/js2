@@ -1,4 +1,5 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import { buildOwnPropertyBody, buildPropertyIsEnumerableBody } from "../runtime/wasmgc/values/own-property-bodies.js";
 import {
   buildOrdinaryObjectCreateBody,
   buildOrdinaryObjectInsertBody,
@@ -3624,37 +3625,12 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     const body: Instr[] = [
       ...hasOwnNpcArm,
       ...stringExoticHasOwnPrologue(strExoticHasOwnIdx),
-      // (#2896) Builtin-fn metadata arm: name/length are OWN properties of a
-      // builtin function value (until deleted). get_meta returns non-null
-      // exactly when the own property exists.
-      ...(bfnGetMetaIdx !== undefined
-        ? ([
-            { op: "local.get", index: 0 },
-            { op: "local.get", index: 1 },
-            { op: "call", funcIdx: bfnGetMetaIdx },
-            { op: "ref.is_null" },
-            { op: "i32.eqz" },
-            {
-              op: "if",
-              blockType: { kind: "empty" },
-              then: [{ op: "i32.const", value: 1 }, { op: "return" }],
-            },
-          ] satisfies Instr[])
-        : []),
-      // any = any.convert_extern(obj); if !ref.test $Object → carrier bag, else 0 (#4010 S3)
-      { op: "local.get", index: 0 },
-      { op: "any.convert_extern" },
-      { op: "local.tee", index: 2 },
-      { op: "ref.test", typeIdx: objectTypeIdx },
-      { op: "i32.eqz" },
-      bagHasIfAbsent(ctx),
-      // e = __obj_find(cast<$Object>(any), key) ; return e != null
-      { op: "local.get", index: 2 },
-      { op: "ref.cast", typeIdx: objectTypeIdx },
-      { op: "local.get", index: 1 },
-      { op: "call", funcIdx: objFindIdx },
-      { op: "ref.is_null" },
-      { op: "i32.eqz" },
+      ...buildOwnPropertyBody({
+        objectTypeIdx,
+        findOwnIdx: objFindIdx,
+        builtinMetadataIdx: bfnGetMetaIdx,
+        nonObjectArm: bagHasIfAbsent(ctx),
+      }),
     ];
     registerNative(
       name,
@@ -3680,40 +3656,12 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   // This replaces the standalone #1472-Phase-B refusal with a native lowering
   // over the same $Object/$PropEntry runtime; host mode keeps its JS import.
   {
-    const body: Instr[] = [
-      // any = any.convert_extern(obj); if !ref.test $Object → 0
-      { op: "local.get", index: 0 },
-      { op: "any.convert_extern" },
-      { op: "local.tee", index: 2 },
-      { op: "ref.test", typeIdx: objectTypeIdx },
-      { op: "i32.eqz" },
-      {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [{ op: "i32.const", value: 0 }, { op: "return" }],
-      },
-      // e = __obj_find(cast<$Object>(any), key)  (local 3)
-      { op: "local.get", index: 2 },
-      { op: "ref.cast", typeIdx: objectTypeIdx },
-      { op: "local.get", index: 1 },
-      { op: "call", funcIdx: objFindIdx },
-      { op: "local.tee", index: 3 },
-      // if e == null → 0 (no own property)
-      { op: "ref.is_null" },
-      {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [{ op: "i32.const", value: 0 }, { op: "return" }],
-      },
-      // return (e.flags & FLAG_ENUMERABLE) != 0
-      { op: "local.get", index: 3 },
-      { op: "ref.as_non_null" },
-      { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
-      { op: "i32.const", value: FLAG_ENUMERABLE },
-      { op: "i32.and" },
-      { op: "i32.const", value: 0 },
-      { op: "i32.ne" },
-    ];
+    const body = buildPropertyIsEnumerableBody({
+      objectTypeIdx,
+      propEntryTypeIdx,
+      findOwnIdx: objFindIdx,
+      enumerableFlag: FLAG_ENUMERABLE,
+    });
     registerNative(
       "__propertyIsEnumerable",
       [{ kind: "externref" }, { kind: "externref" }],
