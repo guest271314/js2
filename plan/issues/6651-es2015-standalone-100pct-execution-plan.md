@@ -837,6 +837,23 @@ loc-budget-allow:
   # calls `__extern_toString` directly) and
   # `dataview-native.ts` +17 (the callable disjunct of the §23.2.5.1 object-arm
   # guard; that guard exists only inside `emitTaDynCtorConstructFromLocals`).
+  # 2026-09-27 — lane VR1 (`instanceof` must not fold on the evolving-`any` start
+  # state of a binding assigned across a function boundary; see the receipt at the
+  # end of this file). ONE god-file, `expressions/identifiers.ts` +7. The whole
+  # mechanism — the predicate, the cached per-declaration scan, and the ~25 lines
+  # of rationale for why TypeScript's own narrowing is not a sound upper bound
+  # here — lives in the existing leaf `src/codegen/strict-eq-stale-type.ts`, which
+  # carries no budget and already owns the three sibling stale-carrier guards this
+  # is a fourth member of. What is left in the god-file is irreducible: 3 lines are
+  # the import statement biome re-wraps the moment it names a second symbol from
+  # that module (the one-symbol form is 78 chars, one under the 80 limit), 1 is the
+  # `const foldLeft` that stops the type being queried twice, 1 is the new
+  # conjunct, and 2 are the comment naming the predicate at the fold it narrows —
+  # which has to be readable there, because the #2998 / #4484 A / #6651 I2 comment
+  # block directly above it is a record of the PRECEDENCE decisions at this one
+  # `if`, and a fourth decline condition that is not listed with them is the next
+  # lane's trap. Inlined at the call site the same change was +34.
+  - src/codegen/expressions/identifiers.ts
 func-budget-allow:
   # 2026-09-26 — lane SC1: `buildNativeGeneratorPlan` +15 as the gate measures it
   # (path already listed below, restated per the stranded-grant rule), of which 9
@@ -14633,6 +14650,129 @@ Both sides built with all three artifacts in order
 (`build:compiler-bundle` → `build:runtime-bundle` →
 `scripts/build-quickjs-eval-provider.mjs`) on a file-copy A/B of
 `src/codegen/closure-prototype-edge.ts`, and both keys re-derived on the
+
+## Lane VR1 receipt — the value-representation half of the species-constructor cause (2026-09-27)
+
+**8 rows fixed, 5 of them ES2015-tagged. 1 row attempted and dropped (0
+ES2015).** SP1's prototype half was brought in (its code commit `108dda21bc`,
+cherry-picked without its plan-file receipt, which was already on `main`), and
+**the pair is what moves the rows**: measured on this box, same day, same
+filter file, SP1 alone is 0/8 and VR1 alone is 0/8, the pair is 7/8 on the
+species family. The 8th row is the bonus the sweep found outside it.
+
+### Rows fixed
+
+| row | cause | edition |
+| --- | --- | --- |
+| `built-ins/TypedArray/prototype/filter/speciesctor-get-species-custom-ctor-invocation.js` | §7.3.20 SpeciesConstructor `this` — §10.2.5 MakeConstructor (SP1) **+** §13.10.2 fold on a stale LHS type (VR1) | **2015** |
+| `built-ins/TypedArray/prototype/map/…` (same file name) | same | **2015** |
+| `built-ins/TypedArray/prototype/slice/…` | same | **2015** |
+| `built-ins/TypedArray/prototype/subarray/…` | same | **2015** |
+| `built-ins/TypedArray/prototype/map/BigInt/…` | same | 2020 (`BigInt`) |
+| `built-ins/TypedArray/prototype/slice/BigInt/…` | same | 2020 (`BigInt`) |
+| `built-ins/TypedArray/prototype/subarray/BigInt/…` | same | 2020 (`BigInt`) |
+| `built-ins/RegExp/prototype/Symbol.split/species-ctor.js` | §22.2.6.14 step 13 `Construct(C, …)` — same pair, found by the sweep | **2015** |
+
+Editions read from each row's own `features:` against
+`scripts/generate-editions.ts` (`Symbol.species` 2015, `Symbol.split` 2015,
+`TypedArray` 2015, `BigInt` 2020; `classifyEdition` takes the highest, so a
+BigInt twin is worth nothing toward ES2015).
+
+### Row dropped
+
+`built-ins/TypedArray/prototype/filter/BigInt/speciesctor-get-species-custom-ctor-invocation.js`
+— 2020-tagged, and it now fails EARLIER than the `this` assertion this lane
+fixed: `[0] is the new captured length Expected SameValue(«0», «2»)`, i.e.
+`%TypedArray%.prototype.filter` §23.2.3.9 step 9 passes the wrong `count` to
+TypedArraySpeciesCreate on the BigInt element path. Unrelated cause, not
+attempted.
+
+### Cause — §13.10.2's primitive-LHS fold answered on TypeScript's evolving-`any` START state
+
+**The recorded second half of this cause was callability; SP1 disproved that.
+SP1's replacement — "a captured `var` survives `===` but not a property store"
+— is REAL and reproduced here exactly, but its framing as a *carrier* defect is
+one step short. The value's carrier is fine. The STATIC TYPE the compiler reads
+for the binding is a lie, and the two sites that fold on that type are the two
+that answer wrongly.**
+
+`var ctorThis;` — no annotation, no initializer — is TypeScript's *evolving any*:
+its type at a reference is whatever control-flow analysis has seen assigned so
+far, starting at `undefined`. CFA does not cross a function boundary, so in the
+species row the only assignment (`ctorThis = this`, inside the @@species
+constructor) is invisible to it and `getTypeAtLocation(ctorThis)` answers
+**`undefined`** (`ts.TypeFlags.Undefined`, 32768) at `ctorThis instanceof S`.
+`isExclusivelyPrimitiveType` accepts that, and the #2998 fold — §7.3.20
+OrdinaryHasInstance step 3, "if Type(O) is not Object, return `false`" — pushes
+a CONSTANT `false` without ever reading the value.
+
+Instrumented, in the authoritative lane, on a copy of
+`…/slice/speciesctor-get-species-custom-ctor-invocation.js` placed in the corpus
+(`--target standalone`, SP1's half in):
+
+| expression | base (SP1 only) | with VR1 |
+| --- | --- | --- |
+| `typeof S === "function"` | ✓ | ✓ |
+| `typeof S.prototype === "object"` | ✓ | ✓ |
+| `obs.self instanceof S` (plain-object property) | ✓ | ✓ |
+| `ctorThis instanceof S` (auto binding) | **✗** | **✓** |
+| `ctorThis === obs.self` | ✓ | ✓ |
+| `(true ? ctorThis : ctorThis) instanceof S` | ✓ | ✓ |
+| `typeof ctorThis === "object"` | ✓ | ✓ |
+| `Object.getPrototypeOf(ctorThis) === S.prototype` | ✓ | ✓ |
+| `o2.v = ctorThis; o2.v === obs.self` | **✗** | **✗ — residual, below** |
+
+The compiler's own trace confirms the mechanism rather than inferring it: with a
+one-shot print at the fold, the three operands in that row report
+`obs.self type=any flags=1 prim=false` · `ctorThis type=undefined flags=32768
+prim=true` · `(true ? ctorThis : ctorThis) type=any flags=1 prim=false`. The
+ternary answers correctly because its join re-widens to `any`; that is the same
+reason SP1 saw it answer `true`.
+
+**Fix** — `src/codegen/strict-eq-stale-type.ts::autoBindingNarrowedAcrossFunctionBoundary`,
+consulted as a fourth decline condition on the #2998 fold in
+`expressions/identifiers.ts::emitDynamicInstanceOf`. It fires only when all three
+hold: the LHS is an identifier bound to an auto binding (VariableDeclaration, no
+type, no initializer); the checker type at the reference is the evolving START
+state (`Undefined | Null`); and that binding is assigned from inside a function
+nested in its own scope, decided by `ctx.oracle.valueDeclarationOf` **identity**
+(not by name, so a same-named `var` in the nested function is a different
+binding) and cached per declaration. Declining pushes the site onto
+`tryEmitNativeDynamicInstanceOf`, which reads the runtime value and is host-free
+— no `env::__instanceof_check` is reintroduced (asserted per case in the tests).
+
+**Why the guard is pinned to a narrowing of exactly `undefined`/`null`, and not
+to auto bindings generally.** That narrowing is the evolving type's start state:
+it asserts CFA saw *no* assignment reaching this reference, which is precisely
+the claim a cross-function assignment falsifies. A binding CFA narrowed to some
+*other* type (`var x; x = 1; … x instanceof F`) had an in-flow assignment it did
+see; that answer is also not a sound upper bound on a value a nested function may
+have overwritten, but it is a different question, it is not what these rows need,
+and widening the decline to cover it would trade a host-free constant for a
+dynamic operator call at every such site. Both halves of that line are pinned by
+negative controls in the test file.
+
+### Residual, measured and deliberately NOT fixed: the same lie at the property-store site
+
+`o2.v = ctorThis` stays wrong, and the same instrumented row says why in one
+word: **`typeof o2.v === "number"`**. The store consults the same `undefined`
+static type and takes the documented "undefined in f64 context" coercion, so an
+object goes in and a number comes out. Wrapping the read re-widens it —
+`o3.v = (true ? ctorThis : ctorThis)` stores an `object` and compares `===` to
+`obs.self` — which is the same `coerceType` join that rescues the ternary at the
+fold. So this is one root cause with two consumers, not two defects.
+
+It is left alone on purpose: it is a different site, in the value-representation
+store path, and none of the 8 rows needs it. Whoever takes it should expect the
+fix to be a *representation* decision (what carrier a `var`-read contributes to a
+property store), not another decline condition — and should re-verify the
+`typeof o2.v === "number"` reading first, since it is the whole diagnosis.
+
+### Control run — per-row set diff, both axes, all four keys
+
+Two-sided file-copy A/B on the three touched files, all three artifacts rebuilt
+in order (`build:compiler-bundle` → `build:runtime-bundle` →
+`scripts/build-quickjs-eval-provider.mjs`) on each side, keys re-derived on the
 committed tree afterwards:
 
 | side | bundle | adapter key |
@@ -14933,3 +15073,140 @@ Growth: `call-namespace-static.ts` +40 and `calls.ts` +15, granted dated in this
 file's frontmatter. `compileNamespaceStaticCall` is net **+0** — the soundness
 argument was moved into a module-level helper (`isProvablyToObjectResult`) rather
 than taking a func-budget grant, which is also where it reads better.
+| base (`origin/main`, both halves reverted) | `18b8bb6b6ee8755f` | `c6db7c5233bcf86c` |
+| after, **first** run (pre-commit source) | `d0f62cbadc2e9d04` | `1fa24e9a6b8edfb0` |
+| after, **re-run on the committed tree** | `47155f6276f980ee` | `e966668a2d72188f` |
+
+**There are two after-runs on the record because the key check caught a real
+drift, and the numbers below are the COMMITTED tree's.** The first after-run
+measured the source as written; the LOC gate then asked for the predicate's flag
+check to move into the helper, and `lint-staged`'s `prettier --write` re-wrapped
+the import at commit time. Re-deriving the adapter key on the committed tree
+answered `e966668a2d72188f`, not `1fa24e9a6b8edfb0` — i.e. the measured tree and
+the committed tree were not the same tree. The whole belt and the host subset
+were re-run on the committed tree rather than the refactor being argued
+equivalent by inspection. Both after-runs agree: `+8 gained, 0 LOST`.
+
+Belt, `--target standalone`, pool 2, `TEST262_IT_TIMEOUT_MS=120000`,
+`tests/test262-shared.ts::runTest262Chunk` under `TEST262_PATH_FILTER_FILE`,
+`VITEST_FORK_MAX_OLD_SPACE_SIZE=2048` (the 512 MB default OOMs the shard's own
+process past ~250 rows, which produces a partial run with NO completion
+manifest — worth knowing before drawing a belt this size), shard-completion
+manifest present for every part-run on every side:
+**703 rows** = every corpus row that contains `instanceof` AND an
+uninitialised `var` declaration (144 — the superset of shapes this guard can
+possibly reach), plus every `language/expressions/instanceof`, every
+`built-ins/Function`, every `built-ins/Object/getPrototypeOf` (SP1's 611-row
+belt, so its half is re-covered), plus the 8 species rows.
+
+| sweep | base | after (committed tree) | per-row diff |
+| --- | --- | --- | --- |
+| 703-row belt, standalone | 619 pass / 81 fail / 2 CE | 628 pass / 73 fail / 2 CE | **+8 gained, 0 LOST, 0 status-changed** |
+| 8 species rows, standalone | 0 pass / 8 fail | 7 pass / 1 fail | +7, 0 LOST |
+| 8 species rows, SP1 half only | 0 pass / 8 fail | — | the pair is required |
+| 8 species rows, VR1 half only | 0 pass / 8 fail | — | the pair is required |
+| 144-row trigger subset, **host (gc) axis** | 103 pass / 24 fail | 103 pass / 24 fail | **0 gained, 0 LOST** |
+
+The base side's raw files report 704 belt rows / 82 fail and 128 host rows /
+25 fail, one more than the tables above on each axis: the instrumented probe row
+placed in the corpus for the cause analysis itself matches the belt's own filter
+(it contains both `instanceof` and `var result, ctorThis;`), so it was collected
+and it always fails by construction — it throws its bitmask. It is excluded here
+and it is the sole `ONLY-IN-BASE` entry in both per-row diffs.
+
+The host axis was **RUN, not argued from the gate** — both halves are gated on
+`noJsHost(ctx)` / `ctx.standalone || ctx.wasi`, so the gc lane should be
+untouched by construction, and the measured row-for-row identity is the
+confirmation rather than the claim.
+
+Why the belt is drawn that way: the only new consumer of the guard is that one
+fold, so its blast radius is exactly the standalone `instanceof` sites whose LHS
+can be an auto binding. The harness is **not** in that radius, checked rather
+than assumed — every `instanceof` LHS in `assert.js`, `deepEqual.js`,
+`propertyHelper.js`, `sta.js` and `resizableArrayBufferUtils.js` is a parameter,
+a `catch` binding or `this`, none of which is a VariableDeclaration.
+
+### Regression test
+
+`tests/issue-6651-vr1-auto-binding-instanceof.test.ts`, 8 cases, and every case
+asserts BOTH the answer and `imports === []` (declining a fold must not
+reintroduce a host import). Two positives (property-held anonymous function; a
+named function declaration) and five negative controls, one per condition the
+guard could have been written without: a never-assigned auto binding (fold must
+survive), an in-flow-narrowed auto binding (fold must survive), a genuine
+`undefined` and a primitive assigned ACROSS the boundary (decline, but the
+dynamic operator must still answer `false`), and the same-name shadowing case.
+Stated honestly: the shadowing case answers `false` on both paths, so it pins
+compilability and host-freedom rather than a behavioural difference — it exists
+so a future rewrite that matches on the NAME still has to keep it green.
+`tests/issue-6651-sp1-closure-prototype-vivify.test.ts` (6 cases, brought in
+with SP1's half) and `tests/es5-standalone-instanceof.test.ts` (20 cases, the
+#2916/#2998 host-free `instanceof` contract this fold belongs to) both pass in
+full: **34 passed / 34**, re-run on the committed tree after the reformat.
+
+### Gates
+
+Run **bare**, all exit 0: `check-loc-budget`, `check-func-budget`,
+`check-coercion-sites`, `check:oracle-ratchet` (getTypeAtLocation +0, ctx.checker
++0 — the query was hoisted into a local, not duplicated), `check:dead-exports`,
+`check-host-import-policy`, `check-compiler-boundaries --mode inventory`
+(`inventoryValid: true`), `npm run -s typecheck`. CI-base simulation
+(`LOC_GATE_BASE=$(git rev-parse origin/main)`) on both budget gates: 0 — **no
+stranded grant appeared**, including the
+`object-runtime.ts::fillClosedStructExternGetArms` one SP1 had to restate, which
+main's post-merge baseline refresh has since absorbed; it is therefore NOT
+restated here. One allowance taken: `expressions/identifiers.ts` +7, granted in
+this file's `loc-budget-allow` with its rationale. No new file under `src/`, so
+`scripts/compiler-boundaries.json` is untouched; no `scripts/*-baseline.json`
+touched; `src/runtime.ts` untouched (no host-import line growth).
+
+## 2026-09-27 — the merge queue's `class/elements` cluster is PR #6175, not baseline drift
+
+A four-PR pile-up in the merge queue (#6175, #6177, #6178, #6179) all parked on
+the same required step — `merge shard reports` → Standalone regression guard
+(#1897), then the deferred #2097 high-water breach — with the **identical**
+regression bucket signature `35b87da5771c11f6`: 125 wasm-change regressions, 124
+of them `assertion_fail`, split 64 in `test/language/statements/class/elements`
+and 60 in `test/language/expressions/class/elements`, plus the same
+`illegal_cast 238 → 239` naming
+`built-ins/Proxy/apply/trap-is-missing-target-is-proxy.js`.
+
+**The diff report's own drift heuristic misleads here, and I followed it before
+checking.** It prints "Same signature on another PR ⇒ identical cluster ⇒ likely
+baseline drift". That inference assumes the PRs share only a *baseline*. When
+the queue speculates a **stack**, they also share *commits*, and the group
+branch names say so — `gh-readonly-queue/main/pr-<N>-<base sha>`:
+
+| group | base sha is |
+| --- | --- |
+| #6175 | main (`2a58b9fe9f`) |
+| #6177 | #6175's merge commit (`7ee2f19b99`) |
+| #6178 | #6175's merge commit (`7ee2f19b99`) |
+| #6179 | descends from `7ee2f19b99` |
+
+#6175 is in the merged state of all four, and **its own single-PR group against
+clean main already produces the whole cluster** (41,132 → 41,009). So read the
+group bases before reading the signature: two PRs sharing a cluster is drift
+evidence only if their groups do not share a commit.
+
+**Control run, which is what actually settled it.** All 1,951 `class/elements`
+rows the published standalone baseline marks `pass`, run on main + the #6179
+diff (i.e. **without** #6175), standalone target, `TEST262_IT_TIMEOUT_MS=120000`,
+pool 3: **1,951 / 1,951 pass**, 1995 s. So main passes them and the baseline's
+41,132 is correct — the two hypotheses worth naming (promote over-counts; main
+genuinely regressed) are both dead, and **re-promoting the baseline would have
+banked a regression**.
+
+**Plausible mechanism in #6175**, from its file list rather than its title: it
+adds `src/codegen/object-proto-has-own-property.ts` (+73, a new standalone
+`Object.prototype.hasOwnProperty` value body) and changes
+`src/codegen/closure-prototype-edge.ts` (+21/−1). `class/elements` rows assert
+field and accessor *placement* through `Object.prototype.hasOwnProperty.call(o,
+"x")` and own-vs-prototype checks, which is the shape that yields plain
+`assertion_fail`s rather than traps. Not bisected here — that is #6175's to do,
+and the row list in its run's `test262-merged-report` artifact confirms it in
+one pass.
+
+**Note for the next lane in this file:** #6175 also touches
+`src/codegen/closure-prototype-edge.ts`, which the VR1/SP1 pair extends by +157,
+so those two conflict there.
