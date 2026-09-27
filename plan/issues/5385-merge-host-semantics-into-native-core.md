@@ -589,6 +589,43 @@ provider question, because S1/S2 moved the environment/boundary ones).
   #2514's shared-runtime packaging.
 - Any change to the standalone/WASI targets' semantics.
 
+### 2026-09-26 evening checkpoint — S1, S1b, S2, S3-a landed; two spec corrections
+
+Merged to main today (all byte-identical for default `gc`/`standalone`/`wasi`;
+the regime stays behind `JS2WASM_NATIVE_REGIME_JS=1`):
+
+| PR    | slice | what it moved                                                                                                                                     |
+| ----- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| #6147 | S1    | `hostFreeEnvironment(ctx)`; console lowers to the `console_log_*` capability in a JS env; runner drains `__stdout_*` by feature, not target name |
+| #6156 | S1b   | Wasm-owned strings reach the host console (`hostStringBridgeUsable` keyed on environment; `src/runtime/console-host-marshal.ts`, injected converter); async-function sample 31 → 65 / 74 |
+| #6153 | S2    | `jsValueBoundary(ctx)`; string marshal at exports, admitted-object reads, JS callbacks/bind, closure-export unwrap; boundary suite 12 → 29 / 30; policy ratchet measures the regime by default |
+| #6152 | S3-a  | `__box_number` minted as a #1916 stable handle (the index went stale during async-resume compilation); ~600-row invalid-Wasm cluster validates |
+| #6159 | #6697 | `tests/issue-3520-…` moved its host-free compiles to a child process; the 512 MB pinned-test fork no longer OOMs when closure files are touched |
+
+**Spec corrections (keep these, they supersede the text above):**
+
+- `jsValueBoundary(ctx)` is `hostValueInterop === "required"`, not `!== "off"`.
+  The standalone test262 lane compiles with `hostBridge: "always"`, which is
+  `"enabled"` without a JS embedder; `!== "off"` would have made that lane
+  import `env::*` adapters.
+- The standalone leak scan (`src/codegen/index.ts` ≈ L7100) keys on
+  `targetProfile.target === "standalone"`, not `hostFreeEnvironment`, because
+  non-strict WASI builds would otherwise start warning.
+- S3-a's root cause was **not** a pre-shift read in `destructuring-params.ts`:
+  the index was fresh at emit and went stale while `__async_resume_fmethod`
+  compiled and three JS-env late imports landed with the method body out of
+  reach of every shifter root. Fix was the stable-handle regime, not a re-read.
+- The boundary suite has 30 tests, not 16; the one residual red
+  (`assignmentRest`, `illegal cast`) fails identically under plain
+  `--target standalone` — a native object-rest provider defect, not a
+  boundary arm.
+
+**Next:** S3-c (#6689, `__extern_set_decide` cast) is specced and claimed,
+dispatch waits on box load; the first nightly after these merges re-baselines
+the lane (expect the 2,121 async-marker rows and the ~600 `C_method` rows to
+move); then S5 (regime on by default for `native-first`) is evaluated against
+that number.
+
 ### Program acceptance
 
 - [ ] A native-first test262 lane and npm-compat lane exist, run in CI on
