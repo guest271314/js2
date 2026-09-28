@@ -9628,6 +9628,34 @@ either (`.tmp/a7/vsbl.mjs`).
   `ctx.errors`) from the triage spec is unchanged and still deserves its own
   issue.
 
+### 2026-09-28 — Cluster A, slice A11: generator value semantics (claim)
+
+**Claimed 2026-09-28** by session `session_01FEGi3DmyPRPD5dx4kWU8hs`, branch
+`claude/es6-6651-a11-gen-values` (WIP PR opened before code). Generator rows
+that compile but compute the wrong value in standalone, in this order:
+
+1. The method-receiver model — `this` of an extracted method (triage group 5c;
+   A8 claimed it and did not take it). Rows:
+   `language/expressions/object/method-definition/generator-invoke-fn-{strict,no-strict}.js`,
+   `language/{expressions,statements}/class/gen-method/yield-spread-arr-{single,multiple}.js`
+   (4, the A6 residuals). **This group also moves cluster C's non-generator
+   twins** `language/expressions/object/method-definition/name-invoke-fn-{strict,no-strict}.js`
+   (54tooh lane): the mechanism is one, so A11 takes them.
+2. The resumption value of a bare `yield` coerced to f64 (#680 continuation,
+   triage G3b): `language/expressions/yield/iter-value-{unspecified,specified}.js`.
+3. A static computed accessor keyed by `yield`:
+   `language/{statements,expressions}/class/accessor-name-static-computed-yield-expr.js`.
+4. Singles, root-caused and fixed if local, recorded otherwise:
+   `object/method-definition/{name-prop-name-yield-expr,generator-property-desc,generator-super-prop-param,params-dflt-gen-meth-ref-arguments}.js`,
+   `statements/generators/has-instance.js`,
+   `expressions/yield/formal-parameters-after-reassignment-non-strict.js`,
+   `expressions/generators/scope-name-var-open-non-strict.js`.
+
+Out of scope: `scope-param-elem-var-open` ×3 (eval in a parameter default),
+`built-ins/GeneratorFunction/**` (A9, #6274), host-import leaks / rest-param
+bails / compile crashes / module-code generator declarations (A10), `with` and
+`eval` rows. The A11 record lands here, under this claim.
+
 ### 2026-09-28 — Cluster D, slice D5
 
 Target: #5197 R3-7 — a native `$Promise` has no readable `then`. A dynamic `p.then` read (through
