@@ -8677,7 +8677,13 @@ Branch `issue-6651-c-class-expando` (worktree `agent-a5ea6382612747520`), based 
 @ `6b4cc2bbd6` + D4 (`2d6b4fe383`, merged in: `fcefaa1123` was not on main). Engine
 `JS2WASM_EVAL_ENGINE=quickjs`, `--standalone --isolate`, 24-row chunks, one runner at a time.
 Before-state is file-copy A/B from `.tmp/base/src` (a full `src` snapshot taken before the first
-edit) — measured on this base, not inherited from D4.
+edit) — measured on this base, not inherited from D4. Slice commit `c5f3778e29`; then
+`git merge origin/main` @ `42513771de` (B9, #5151, #6721 — no conflict in `src/`, the plan body
+took both sections). On the merged tree, against the merged tree minus this patch
+(`.tmp/mbase/src`): the byte differential moves the SAME 9 variants of the same 7 rows (gc 0),
+those 7 rows give the same verdicts and messages as pre-merge, playground/benchmarks 34/34,
+the pin suite 9/9, typecheck, every gate and the equivalence gate (22 / 1,720 / 22 known)
+re-ran green.
 
 | row set | before | after |
 | --- | --- | --- |
