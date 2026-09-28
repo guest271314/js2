@@ -469,6 +469,22 @@ export class PhysicalModuleReservations {
     key: PhysicalResourceKey,
     definition: SelfReferentialStructDefinition,
   ): TypeReservation {
+    return this.#reserveSelfReferentialStructType(key, definition, false);
+  }
+
+  /** Explicit extensible root; callers still cannot supply a parent or self coordinate. */
+  reserveExtensibleSelfReferentialStructType(
+    key: PhysicalResourceKey,
+    definition: SelfReferentialStructDefinition,
+  ): TypeReservation {
+    return this.#reserveSelfReferentialStructType(key, definition, true);
+  }
+
+  #reserveSelfReferentialStructType(
+    key: PhysicalResourceKey,
+    definition: SelfReferentialStructDefinition,
+    extensible: boolean,
+  ): TypeReservation {
     this.#require("reserving");
     if (typeof key !== "string" || !key || this.#keys.has(key)) this.#fail("empty or duplicate self-type key");
     const next = this.#flatTypes().length;
@@ -513,7 +529,12 @@ export class PhysicalModuleReservations {
         resolvedFields.push({ name: row.name, type: value, mutable: row.mutable });
       }
       if (selfFields === 0) this.#fail("missing self reference field");
-      resolved = { kind: "struct", name: input.name, fields: resolvedFields };
+      resolved = {
+        kind: "struct",
+        name: input.name,
+        fields: resolvedFields,
+        ...(extensible ? { superTypeIdx: -1, final: false } : {}),
+      };
     } finally {
       this.#checkingSelfDefinition = false;
     }
