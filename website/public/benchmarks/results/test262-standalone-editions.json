@@ -48,9 +48,9 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11024,
-    "fail": 591,
-    "ce": 89,
+    "pass": 11028,
+    "fail": 588,
+    "ce": 88,
     "skip": 0,
     "total": 11704,
     "pct": 94,
@@ -210,21 +210,21 @@
       },
       {
         "name": "Symbol.match",
-        "pass": 72,
-        "fail": 4,
+        "pass": 74,
+        "fail": 2,
         "ce": 0,
         "skip": 0,
         "total": 76,
-        "pct": 95
+        "pct": 97
       },
       {
         "name": "Symbol.replace",
-        "pass": 73,
+        "pass": 74,
         "fail": 1,
-        "ce": 1,
+        "ce": 0,
         "skip": 0,
         "total": 75,
-        "pct": 97
+        "pct": 99
       },
       {
         "name": "rest-parameters",
@@ -3263,8 +3263,8 @@
   },
   {
     "edition": "ES2025",
-    "pass": 567,
-    "fail": 319,
+    "pass": 568,
+    "fail": 318,
     "ce": 115,
     "skip": 0,
     "total": 1001,
@@ -3272,8 +3272,8 @@
     "features": [
       {
         "name": "iterator-helpers",
-        "pass": 101,
-        "fail": 283,
+        "pass": 102,
+        "fail": 282,
         "ce": 9,
         "skip": 0,
         "total": 393,
@@ -3353,12 +3353,12 @@
       },
       {
         "name": "Symbol",
-        "pass": 7,
-        "fail": 1,
+        "pass": 8,
+        "fail": 0,
         "ce": 6,
         "skip": 0,
         "total": 14,
-        "pct": 50
+        "pct": 57
       },
       {
         "name": "json-modules",
@@ -3506,12 +3506,12 @@
       },
       {
         "name": "cross-realm",
-        "pass": 0,
-        "fail": 2,
+        "pass": 1,
+        "fail": 1,
         "ce": 0,
         "skip": 0,
         "total": 2,
-        "pct": 0
+        "pct": 50
       },
       {
         "name": "Int8Array",
@@ -3551,12 +3551,12 @@
       },
       {
         "name": "Reflect",
-        "pass": 0,
-        "fail": 1,
+        "pass": 1,
+        "fail": 0,
         "ce": 0,
         "skip": 0,
         "total": 1,
-        "pct": 0
+        "pct": 100
       },
       {
         "name": "Set",
@@ -3571,18 +3571,18 @@
   },
   {
     "edition": "ES2026",
-    "pass": 4592,
+    "pass": 4593,
     "fail": 192,
-    "ce": 137,
+    "ce": 136,
     "skip": 0,
     "total": 4921,
     "pct": 93,
     "features": [
       {
         "name": "Temporal",
-        "pass": 4493,
+        "pass": 4494,
         "fail": 107,
-        "ce": 11,
+        "ce": 10,
         "skip": 0,
         "total": 4611,
         "pct": 97
@@ -3790,8 +3790,8 @@
   {
     "edition": "ES2027",
     "pass": 354,
-    "fail": 333,
-    "ce": 210,
+    "fail": 335,
+    "ce": 208,
     "skip": 0,
     "total": 897,
     "pct": 39,
@@ -3844,8 +3844,8 @@
       {
         "name": "IsHTMLDDA",
         "pass": 12,
-        "fail": 20,
-        "ce": 3,
+        "fail": 22,
+        "ce": 1,
         "skip": 0,
         "total": 35,
         "pct": 34
@@ -4159,8 +4159,8 @@
       {
         "name": "Symbol.replace",
         "pass": 0,
-        "fail": 0,
-        "ce": 2,
+        "fail": 2,
+        "ce": 0,
         "skip": 0,
         "total": 2,
         "pct": 0
@@ -4240,8 +4240,8 @@
       {
         "name": "String.prototype.replaceAll",
         "pass": 0,
-        "fail": 0,
-        "ce": 1,
+        "fail": 1,
+        "ce": 0,
         "skip": 0,
         "total": 1,
         "pct": 0
