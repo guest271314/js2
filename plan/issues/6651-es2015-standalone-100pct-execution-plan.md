@@ -18278,3 +18278,42 @@ attempt.
 No quality gates, hook, commit, or publication is claimed yet. The heavy lease
 has returned to the shared diagnostic lane; request it before the remaining
 normal validation steps.
+
+## Handoff — 2026-09-28, session wrap-up (D6, D7, H1 landed; I7 in this PR)
+
+Written at the user's "wrap up, handoff, open pr" (about 22:10 UTC). The goal
+loop was cleared by the user at the same time. No slice is running; no
+worktree holds unmerged work.
+
+| slice | PR | result (standalone, QuickJS eval) |
+| --- | --- | --- |
+| D6 — Promise-subclass static read before its write inherits `%Promise%` | #6259, merged `38f959a0b3` | see D6 entry |
+| D7 — `Promise.prototype.finally` invokes the receiver's `then` | #6272, merged `5f8b0b4529` | +8 in `Promise/prototype/finally/`, 0 lost |
+| H1 — spec ToPrimitive/ToString for object arguments to `String.prototype.*` | #6278, merged `b52efdc91d` | reach set 1,420 → 1,427, 0 lost |
+| I7 — `arguments` and rest parameters agree on the argument count | this PR | +2 (`rest-parameters/{arrow-function,with-new-target}`), 0 lost; 5 of the 7 dispatched rows were already fixed by lane A1 |
+| QuickJS adapter cache keyed on compiler inputs | #6252, merged | harness fix |
+
+I7 caveat: its final refactor was byte-checked on a 71-row subset, not the
+full 374-row reach list (the earlier version was checked on all 374).
+
+### Next levers (from the slice entries' residuals)
+
+- **H2** — the H1 ToPrimitive walk through `+`, template literals, unary `+`
+  and `String()`; non-literal object arguments; `{toString: null}` without an
+  own `valueOf`.
+- **D8** — the species step of `finally` (species/subclass-count rows,
+  `-PromiseResolve` rows); `rejected-observable-then-calls` (4 of 5 entries).
+- **I8** — rest arguments through `emitVirtualMethodDispatchByTag` (null rest
+  when the class has a subclass); same-named rest-method mis-dispatch (Wasm
+  validation failure); rest destructuring patterns on the closure path.
+- Language-misc table (lane I6): block-local closure TDZ (#5271 B2), loose
+  `==` with `@@toPrimitive` vs string, `instanceof` prototype getter,
+  primitive-base prototype reads/writes.
+- **E8** still waits on the user's unblock choice (see the 2026-09-24 wrap-up).
+
+Dispatch brief used for every slice this session: own worktree off
+`origin/main`, `src/` base copy before the first edit, QuickJS one runner at a
+time (the adapter cache key hashes `src/` — never add `src/` files mid-run),
+byte differential on both targets in separate processes, zero pass→non-pass,
+full gate chain incl. host-import-policy (`src/runtime.ts` is at its cap),
+eval-free pin suite red on base, commit with ✓ and trailers, no push.
