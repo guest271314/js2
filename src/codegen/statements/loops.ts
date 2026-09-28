@@ -93,6 +93,8 @@ import {
 import { collectPatternBindingNames } from "./tdz.js";
 import { tryCompileCountedStringAppend } from "./counted-string-append.js";
 import { emitHoleToUndefined } from "../array-holes.js"; // (#2001 S1)
+import { forOfSubjectMayYieldObjectIterator, reserveForOfIteratorStep } from "../forof-iterator-step.js"; // (#6651 G4)
+import { forOfArrayOverlayGetIdx, forOfArrayOverlayReadInstrs } from "../forof-array-overlay-read.js"; // (#6651 G4)
 import { emitF64HoleToUndef, f64HolesActive } from "../vec-f64-hole-presence.js"; // (#4491 T11)
 import { definedFuncAt, nativeStrHelperHandle } from "../func-space.js"; // (#1916 S2) positional-read chokepoint
 import { isOpenForInReceiver } from "../for-in-open-object.js";
@@ -2075,6 +2077,9 @@ function compileForOfArray(
     elemLocal = allocLocal(fctx, `__forof_elem_${fctx.locals.length}`, readElemType);
   }
 
+  // (#6651 G4) Overlay-routed `Get(array, i)` — resolved before the body swap.
+  const overlayGetIdx = forOfArrayOverlayGetIdx(ctx, fctx, vecDef.fields, elemType, iterableSource, !!preVec);
+
   // Build loop body
   const savedBody = pushBody(fctx);
 
@@ -2109,7 +2114,9 @@ function compileForOfArray(
   // else <default>`. `defaultValueInstrs` gives the same rep the within-backing
   // holes use — externref → `ref.null.extern` (≡ standalone `undefined`), f64 →
   // the sNaN hole sentinel, i32/packed → 0. No-op for dense arrays.
-  if (ctx.standalone) {
+  if (overlayGetIdx !== undefined) {
+    fctx.body.push(...forOfArrayOverlayReadInstrs(overlayGetIdx, vecLocal, iLocal));
+  } else if (ctx.standalone) {
     const dataIterLocal = allocLocal(fctx, `__forof_dataiter_${fctx.locals.length}`, {
       kind: "ref_null",
       typeIdx: arrTypeIdx,
@@ -3117,6 +3124,20 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
     kind: "externref",
   });
   fctx.body.push({ op: "local.set", index: iterLocal });
+  // (#6651 G4) Standalone: cache the OBJ iterator's `next` once (§7.4.1) and
+  // step through the for-of twin that type-checks the result (§7.4.4).
+  const forOfStep =
+    stmt.awaitModifier || !forOfSubjectMayYieldObjectIterator(ctx, stmt.expression)
+      ? undefined
+      : reserveForOfIteratorStep(ctx);
+  const nextMethodLocal = forOfStep
+    ? allocLocal(fctx, `__forof_next_${fctx.locals.length}`, { kind: "externref" })
+    : -1;
+  if (forOfStep) {
+    fctx.body.push({ op: "local.get", index: iterLocal });
+    fctx.body.push({ op: "call", funcIdx: forOfStep.primeIdx });
+    fctx.body.push({ op: "local.set", index: nextMethodLocal });
+  }
 
   // Allocate locals for the iterator-step result. __iterator_next now returns a
   // multi-value (i32 done, externref value); resultLocal holds the value, and
@@ -3268,7 +3289,8 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
   fctx.body.push({ op: "i32.const", value: 1 });
   fctx.body.push({ op: "local.set", index: inNextLocal });
   fctx.body.push({ op: "local.get", index: iterLocal });
-  fctx.body.push({ op: "call", funcIdx: nextIdx });
+  if (forOfStep) fctx.body.push({ op: "local.get", index: nextMethodLocal });
+  fctx.body.push({ op: "call", funcIdx: forOfStep ? forOfStep.stepIdx : nextIdx });
   fctx.body.push({ op: "local.set", index: resultLocal }); // externref value (top)
   fctx.body.push({ op: "local.set", index: nextDoneLocal }); // i32 done (below)
 
