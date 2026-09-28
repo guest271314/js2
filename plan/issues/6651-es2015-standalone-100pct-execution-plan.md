@@ -9669,6 +9669,15 @@ this order:
    - `yield … in obj` (2)
    - generator prototype relations (5)
 
+**A7 — claimed 2026-09-28**, branch `claude/es6-6651-a7-gen-self-binding`
+(WIP PR opened before code). Scope, from the 2026-09-28 generator triage spec:
+group 1 (a named generator expression that reassigns its own name: native gate +
+resume prelude, strict-mode TypeError on the immutable binding, shadow guard),
+group 4 (object-literal METHOD whose computed key folds statically), and 5a
+(`Object.getPrototypeOf(g)` for a never-rebound binding to a `function*`
+expression). Groups 2 and 3 wait for #6101 (A5); 5b–5d are not in this slice.
+The A7 record lands under `## Cluster status`.
+
 Each slice opens a WIP PR before any code is written. The claim excludes what
 lanes SG1 and SC1 already diagnosed as substrate work: the rest-parameter bail,
 dynamic `GeneratorFunction`, delete visibility, `-var-open` ordering, and #2170
