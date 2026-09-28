@@ -88,14 +88,13 @@ export function compileStandaloneDynamicImport(
     if (compileExpression(ctx, fctx, argument) !== null) fctx.body.push({ op: "drop" });
   }
   if ("sourceFile" in target) {
-    const namespaceLocal = allocLocal(fctx, `__dynimport_ns_${fctx.locals.length}`, { kind: "externref" });
-    const bodyLength = fctx.body.length;
+    // An `undefined` answer emits nothing, so the reject path needs no rollback.
     if (tryEmitModuleNamespaceObjectForSource(ctx, fctx, target.sourceFile) !== undefined) {
+      const namespaceLocal = allocLocal(fctx, `__dynimport_ns_${fctx.locals.length}`, { kind: "externref" });
       fctx.body.push({ op: "local.set", index: namespaceLocal });
       emitStandalonePromiseResolve(ctx, fctx, [{ op: "local.get", index: namespaceLocal }]);
       return { kind: "externref" };
     }
-    fctx.body.length = bodyLength;
     return emitRejectedImport(ctx, fctx, "the module namespace cannot be materialized in the standalone module graph");
   }
   return emitRejectedImport(ctx, fctx, target.reason);
