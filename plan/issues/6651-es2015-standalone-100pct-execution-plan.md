@@ -968,6 +968,16 @@ loc-budget-allow:
   # The last three paths are already listed below (restated per the
   # stranded-grant rule); `expressions.ts` is new to this list.
   - src/codegen/expressions.ts
+  # 2026-09-28 — call-rooted assignment targets at module scope.
+  # `declarations.ts` +2: one import line and one `||` term inside
+  # `shouldCollectTopLevelAssignment` — the keep has to sit where the statement
+  # would otherwise be dropped. The predicate (and its measured rationale) is
+  # the new leaf `declarations/expression-rooted-assignment-target.ts`.
+  # `src/runtime.ts` +1: the call that snapshots the test262 sandbox's realm
+  # intrinsics at `buildImports` — the only point that sees the sandbox before
+  # compiled code can rebind its globals. The mechanism lives in
+  # `runtime/wasm-struct-host-semantics.ts` beside `normalizeSandboxValue`.
+  # (`declarations.ts` is already listed below; `src/runtime.ts` just after.)
 func-budget-allow:
   # 2026-09-26 — lane SC1: `buildNativeGeneratorPlan` +15 as the gate measures it
   # (path already listed below, restated per the stranded-grant rule), of which 9
@@ -9397,6 +9407,114 @@ No new host import; `$Promise` unchanged; every piece is `--target standalone` (
   path's element, not in the read this slice fixes.
 - The static `Promise.prototype.then` read after a static `Promise.prototype.then = f` write still
   answers the builtin singleton (probe r1; pre-existing, the static fold ignores the companion).
+
+### 2026-09-28 — call-rooted assignment targets at module scope
+
+- **Branch** `issue-6651-callroot-assign` (local, not pushed), base `origin/main`
+  @ `3eb7ae5da3`. Engine for every verdict: QuickJS (artifact `073742801ba7`,
+  adapter `d4799bda84cfed0d` — rebuilt from the base tree and from the branch
+  tree, byte-identical), `--isolate`, one runner at a time, both targets.
+- **Defect** (the C-expando slice's side finding, `e3523c3a14`): a top-level
+  assignment whose target is a property/element access rooted in an
+  EXPRESSION — `f(o).p = v`, `f()[k] = v`, `g().a.b = v`, `new F().p = v`,
+  `` tag`x`.p = v ``, `({ set a(v){…} }).a = v`, `(a, b).p = v`, under `=`,
+  compound and logical operators — compiled to NOTHING on both targets.
+  `getAssignmentRootIdentifier` stops at the call and finds no root name, so no
+  keep arm in `collectDeclarations` matched, and neither backstop sees an
+  assignment (#3623 classifies every assignment "keep"; #4433 only acts on
+  `unhandled`). Probe (`.tmp/p/probe.mts`, both targets, same answer on base):
+  **15 of 18 call-rooted shapes wrong** (only `++f(o).n`, `f(o).n++`,
+  `o[f(k)] = v` right — other arms own them); object-literal, comma and
+  conditional roots wrong too. All of them right after, on both targets, except
+  the host `g()[1] = 7` on an `any[]` array, which is wrong INSIDE a function
+  body too (a host lowering gap, not this collection gap).
+- **Fix** `src/codegen/declarations/expression-rooted-assignment-target.ts`
+  (new leaf, classified in `compiler-boundaries.json`): keep the statement when
+  the access chain's root (parens/casts/`!` stripped) is not an identifier,
+  `this`, `super` or a meta-property; the TLA-recovery tagged template stays
+  out as in the bare-statement arm. `declarations.ts` +2 (import, one `||` in
+  `shouldCollectTopLevelAssignment`). Identifier-rooted targets keep their
+  existing decision, so a module without such a statement is byte-identical.
+- **Reach** (full TS parse of `test262/test` + `harness/`, `.tmp/p/scan.mts`):
+  26 files carry a top-level expression-rooted assignment (6 ES2015, 14 ES5 —
+  all `_FIXTURE` modules —, 2 unclassified, 2 `-3`, 1 ES2018, 1 ES2020);
+  **0 harness includes**. Measured rows = the 12 non-fixture files + the 23
+  importers of the 14 fixtures = **35 rows**.
+- **Verdicts on the 35 reach rows** (`.tmp/p/{base,after3,r2base,r2after}-*`):
+
+  | target | base pass | after pass | pass→non | non→pass |
+  | --- | ---: | ---: | ---: | ---: |
+  | standalone | 6 | **9** | **0** | 3 |
+  | host | 7 | **10** | **0** | 3 |
+
+  Gains on both targets: `statements/class/definition/setters-restricted-ids`,
+  `expressions/object/scope-setter-paramsbody-var-{open,close}`.
+- **The one host row the keep alone would have lost, and why it was a vacuous
+  pass**: `expressions/dynamic-import/returns-promise.js` does
+  `fnGlobalObject().Promise = function(){ throw … }` and then asserts
+  `p.constructor === originalPromise`. On base the write was dropped, so the
+  test never exercised anything. Once it runs, the runner-realm
+  `normalizeSandboxValue` (the `x.constructor` host-intrinsic → sandbox-realm
+  mapping) read the sandbox's LIVE `Promise` binding and answered the
+  replacement. The same write wrapped in a function body fails identically on
+  base (`.tmp/t262/rp-fn.js`). Fixed at the cause:
+  `runtime/wasm-struct-host-semantics.ts` snapshots the sandbox's
+  function-valued bindings (its realm intrinsics) once, at `buildImports`
+  (`src/runtime.ts` +1), and the `constructor` mapping answers from the
+  snapshot. Only affects runs with a `globalSandbox` (test262 lanes). Control:
+  every test262 row that rebinds/deletes/defines a capitalised global through
+  the global object or a bare `X =` (`.tmp/p/rt-control.txt`, 21 rows) — host
+  **21/21 pass before and after**.
+- **Byte differential** (compile-only, runner's original-harness assembly,
+  primary + strict variants, both targets, `.tmp/p/bytes.mts`): the 35 reach
+  rows — 17 of 72 variants move, all in the 8 rows carrying the statement;
+  **289 non-reach control rows** (C + I manifests) — **0 of 704 variants
+  move**. Playground examples + benchmarks: **34/34 identical**.
+- `node scripts/equivalence-gate.mjs`: 22 failing = the 22 known.
+  `pnpm run check:ir-fallbacks`: OK.
+- **Pin** `tests/issue-6651-callroot-assign-toplevel.test.ts` (25 cases: 11
+  shapes × 2 targets, an identifier-rooted control × 2, and the sandbox
+  intrinsic mapping) — **23/25 red on the base tree** (the 2 identifier-rooted
+  controls green by design), 25/25 green after. Neighbour suites (#3623, #4433,
+  #3615, #2992, #3592, #4176, #4199, #3366, #3956, C2 class-prototype,
+  #6492 r16–r20, #2623 P-7b, #6475, #2726): 238/239; the one failure
+  (`issue-2623-p7b` "Promise.try … carry Promise identity") fails identically
+  on the base tree.
+- Gates (bare): loc (grant in frontmatter), func, coercion-sites,
+  oracle-ratchet, dead-exports, `LOC_GATE_BASE=origin/main` loc/func,
+  typecheck, biome lint, compiler-boundaries inventory — all exit 0.
+
+#### Post-merge re-verification
+
+`origin/main` @ `cb50f21b90` (30 commits: D4, B10, `declarations.ts` +2 and
+~15 other `src` files) merged; only conflict was this section (both kept). The
+merged tree differs from an archive of `cb50f21b90` in exactly the four files
+of this slice. Re-run against that archive: QuickJS adapter rebuilt from both
+trees (identical, `0fe97d70133c`); the 35 reach rows **standalone 6 → 9, host
+7 → 10, 0 pass→non-pass**, the same three flips; the 21-row runtime control
+**21/21 host pass on both**; byte differential — reach 17/72 variants move
+(the identical set), control **0/704**, playground + benchmarks **34/34**;
+equivalence gate 22 = 22 known; `check:ir-fallbacks` OK; pin 23/25 red on the
+merged base, 25/25 after; neighbour suites 238/239 with the same pre-existing
+`issue-2623-p7b` failure on both. Gates re-run bare incl.
+`LOC_GATE_BASE=cb50f21b90` loc/func, typecheck, biome, boundaries inventory —
+all exit 0.
+
+#### Residuals the statement now exposes (lowering gaps, visible in a function body too)
+
+- `types/reference/put-value-prop-base-primitive.js` (both targets): a write
+  through a primitive base (`0..test262 = null`) does not reach a Proxy `set`
+  trap installed as the wrapper prototype; host throws "Cannot create property
+  'x' on number" instead.
+- A write through a nullish call result (`f(null).p = 1`) does not throw on
+  either target.
+- `module-code/{eval-rqstd-order,instn-same-global,eval-gtbndng-indirect-update(-as)}`
+  (both targets): the fixtures' `Function('return this;')()` returns the eval
+  provider's global object, not the module's — a runtime-eval realm question.
+- `RegExp/named-groups/groups-object-subclass-sans.js` (ES2018, fails both
+  before and after): host now fails earlier, at
+  `Object.getPrototypeOf(Array.prototype.groups)` — an `Array.prototype`
+  expando that does not read back on host.
 
 ## Handoff — 2026-09-21 (round 1 closed, round 2 ready to dispatch)
 
