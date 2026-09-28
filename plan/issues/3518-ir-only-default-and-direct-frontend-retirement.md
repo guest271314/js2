@@ -14667,3 +14667,20 @@ record. Main's intervening npm-report refresh changes no compiler inputs.
 Keep all prototype source, fixtures and tests unchanged; run normal commit
 and push gates before updating the existing PR, then verify queue admission
 for the new exact head. No main delivery is claimed for this increment yet.
+
+Prototype PR6237 second integration (2026-09-28): main6b69edbf delivered
+the parallel ES2015 Promise-subclass/RegExp changes. Preserve all of those
+source/test changes and every upstream inventory entry; add only the existing
+prototype runtime entry and its declared module floor. Seven prototype
+implementation/test files remain byte-identical to2da72f87. Revalidate the
+combined tree before updating the existing PR; do not rewrite the ES2015 fixes
+or use the former green head as evidence for this new integration.
+
+The second integrated tree passed TS7 and382/382 scoped tests (zero skipped),
+with2,273 unchanged inputs; all eight scoped quality gates passed. The current
+QuickJS provider rebuilt and passed its execution canaries against2,016 pinned
+source inputs. Six inherited B10 corpus rows were provisioned from repository
+pin b363f29d without overwriting existing corpus files. Full normal hooks and
+protected delivery remain required; this is not a full migration parity claim.
+Evidence: .tmp/prototype-second-validation, .tmp/prototype-second-quality,
+and .tmp/prototype-second-provider.

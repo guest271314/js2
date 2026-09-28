@@ -203,6 +203,7 @@ import {
 } from "./module-init-chunks.js";
 import { emitModuleVarUndefinedSeeds } from "./declarations/module-var-undefined-seed.js";
 import { inferStandaloneRegExpMatchGlobalType } from "./regexp-standalone.js";
+import { mintUntypedRegExpReceiverMembers } from "./regexp-untyped-receiver.js";
 import {
   prepareModuleTdzGlobals,
   registerModuleGlobal,
@@ -6107,6 +6108,7 @@ export function compileDeclarations(
     const initFctx: FunctionContext = targetFctx ?? createModuleInitFunctionContext();
     const previousFunc = ctx.currentFunc;
     ctx.currentFunc = initFctx;
+    mintUntypedRegExpReceiverMembers(ctx, initFctx, sourceFile); // (#6651 B10) untyped-RegExp proto reads
 
     // (#5271 step 8) §16.1.7 GlobalDeclarationInstantiation step 5.d — a
     // top-level lexical declaration whose name is a RESTRICTED GLOBAL
