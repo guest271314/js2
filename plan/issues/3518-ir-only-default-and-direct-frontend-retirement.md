@@ -14426,3 +14426,21 @@ Checks ran serially at observed nice 10 with one 4 GB fork. Evidence is in
 The upstream assignment was reread before staging and remains held by
 `ttraenkler/codex-ir-delivery-20260927`. Publication and protected queue
 validation still follow; no main delivery or retirement is claimed here.
+
+### Exact upstream refresh: RegExp and collection main, 2026-09-28
+
+PR6205 left the protected queue and became conflicting. Fresh upstream main
+was011e1278f531676b3e255558dc67c06396c21072, verified by GraphQL and fetch;
+merge it into exact published head25f4ec456c1c609629e046ab0f920dcbc8adee9a.
+The sole conflict was compiler-boundaries.json: retain all1,657 existing
+IR entries and add the two upstream unmigrated RegExp files, total1,659.
+All11 incoming source/test files outside policy match upstream byte-for-byte.
+
+TS7 passed. The initial four-suite run passed358/361 with three missing-corpus
+skips, not passes. Restore those exact three test262 files from pinned
+b363f29d3c43c626dc852744ad64a0b48a003693, authenticate their Git blobs, and
+rerun their complete suite:3/3 passed without skips. The original358 results
+retain unchanged source/test inputs. Eight quality gates passed with2,214
+unchanged inputs. Evidence: .tmp/ir6205-refresh/regexp-main-runtime,
+regexp-main-quality, and regexp-corpus. No legacy retirement or default
+change. Main delivery and merge-group conformance remain unverified.
