@@ -99,6 +99,7 @@ import {
   nodeContainsYield,
   spillSafeValType,
   bodyDeclaresBinding,
+  namedFunctionOwnNameShadow,
   loopBodyHasUnsupportedJump,
   thenBody,
   methodBodyUsesSuper,
@@ -2980,8 +2981,9 @@ export type GeneratorDecl = ts.FunctionDeclaration | ts.MethodDeclaration | ts.F
  *     state; the resume context reloads it before compiling the body;
  *   - no `this` (a bare function expression's `this` is call-site dependent; the
  *     state-struct model has no receiver slot for the non-method case);
- *   - a NAMED fn-expr must not reference its own name (the self-binding scope
- *     rides `__self` in the closure model, which the resume function lacks);
+ *   - a NAMED fn-expr MAY reference its own name (#6651 A7): the frame's
+ *     leading `__self` param IS that binding's value, and the resume prelude
+ *     maps the name onto it (`ensureNativeGeneratorResumeFunction`);
  *   - no outer-scope capture (checked by the caller via
  *     `generatorCapturesOuterScope`, same as methods).
  */
@@ -3024,7 +3026,6 @@ function isNativeGeneratorExpressionShape(ctx: CodegenContext, decl: ts.Function
     if (methodBodyUsesSuper(decl.body)) return false;
     if (!bodyReferencesOwnThis(decl.body)) return false;
   }
-  if (decl.name && bodyReferencesOwnName(decl.body, decl.name.text)) return false;
   // (#3302) Outer-scope captures are ADMITTED in the standalone/wasi lane:
   // the lifted closure already carries them as `__self` struct fields, and
   // the resume function re-materializes them via
@@ -6171,6 +6172,21 @@ function emitUnwindWalk(
   body.push({ op: "if", blockType: { kind: "empty" }, then: throwBody, else: returnBody });
 }
 
+/**
+ * (#6651 A7) A NAMED generator fn-expr's own name is an immutable binding to
+ * the function itself (§15.5.4 step 4) — the closure the frame already holds
+ * as its leading `__self` param. Map the name onto that resume-function local,
+ * read-only (`tryFunctionExpressionOwnNameWrite`), unless the function shadows it.
+ */
+function bindNamedExpressionOwnName(decl: ts.FunctionExpression, resumeFctx: FunctionContext): void {
+  const name = decl.name?.text;
+  const selfLocal = resumeFctx.localMap.get("__self");
+  if (name === undefined || selfLocal === undefined || !bodyReferencesOwnName(decl.body, name)) return;
+  if (namedFunctionOwnNameShadow(decl) !== undefined) return;
+  resumeFctx.localMap.set(name, selfLocal);
+  (resumeFctx.readOnlyBindings ??= new Set()).add(name);
+}
+
 export function ensureNativeGeneratorResumeFunction(ctx: CodegenContext, info: NativeGeneratorInfo): number {
   const fnName = `__gen_resume_${sanitizeTypeName(info.functionName)}`;
   // (#2941) SINGLE SOURCE OF TRUTH = `ctx.funcMap`, which every late-import
@@ -6360,6 +6376,8 @@ export function ensureNativeGeneratorResumeFunction(ctx: CodegenContext, info: N
       }
     }
   }
+
+  if (ts.isFunctionExpression(info.decl)) bindNamedExpressionOwnName(info.decl, resumeFctx); // (#6651 A7)
 
   // (#2864 C02) `arguments` is initialized by the factory at call time, but
   // this resume function owns the detached execution context. Rehydrate the
