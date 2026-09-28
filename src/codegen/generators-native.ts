@@ -117,7 +117,12 @@ import {
   type LinearizeHost,
   lowerLinearizedStatement,
 } from "./generator-yield-linearize.js";
-import { bodyHasComputedKeyYield, lowerNestedYieldStatement, type NestedYieldHost } from "./generator-yield-nested.js";
+import {
+  bodyHasComputedKeyYield,
+  bodyHasNestedYield,
+  lowerNestedYieldStatement,
+  type NestedYieldHost,
+} from "./generator-yield-nested.js";
 
 const MAX_NATIVE_GENERATOR_STATES = 256;
 
@@ -437,10 +442,10 @@ function noJsHostTarget(ctx: CodegenContext): boolean {
   return ctx.standalone || ctx.wasi;
 }
 
-function isNumericExpression(ctx: CodegenContext, expr: ts.Expression | undefined): boolean {
+function isNumericExpression(ctx: CodegenContext, expr: ts.Expression | undefined, allowBoolean = true): boolean {
   if (!expr) return true;
   const t = ctx.checker.getTypeAtLocation(expr);
-  return isNumberType(t) || isBooleanType(t);
+  return isNumberType(t) || (allowBoolean && isBooleanType(t));
 }
 
 // (#2171) Native-string yield support. A yield expression qualifies for the
@@ -478,10 +483,24 @@ function generatorElemValType(ctx: CodegenContext, decl: GeneratorDecl): ValType
   // identity — the boxed-any carrier's `sent` field. Only such generators, which
   // had no native plan before (see `bodyHasPatternYield`), move carrier.
   // (#6651 A5) Likewise a yield inside a computed property NAME: the resumed
-  // value becomes a KEY (`iter.next('first')` names an accessor).
-  if (decl.body && noJsHostTarget(ctx) && (bodyHasPatternYield(decl.body) || bodyHasComputedKeyYield(decl.body))) {
+  // value becomes a KEY (`iter.next('first')` names an accessor). (#6651 A6) And
+  // a yield inside a yield operand / a return value: the resumed value IS the
+  // next yielded or returned value (`yield yield 1` re-yields what `.next(v)`
+  // sent), whatever its type.
+  if (
+    decl.body &&
+    noJsHostTarget(ctx) &&
+    (bodyHasPatternYield(decl.body) || bodyHasComputedKeyYield(decl.body) || bodyHasNestedYield(decl.body))
+  ) {
     return { kind: "externref" };
   }
+  // (#6651 A6 G3a) Standalone/WASI: a BOOLEAN operand is not carrier-numeric.
+  // The f64 carrier turned `yield true` into the Number 1 (and a string sent back
+  // through it into NaN); booleans now take the boxed-any carrier. The JS-host
+  // lane keeps the historical rule — byte-identical, and its eager fallback owns
+  // the shapes the boxed-any plan refuses.
+  const numericOperand = (expr: ts.Expression | undefined): boolean =>
+    isNumericExpression(ctx, expr, !noJsHostTarget(ctx));
   let sawNumeric = false;
   let sawString = false;
   let sawOther = false;
@@ -500,7 +519,7 @@ function generatorElemValType(ctx: CodegenContext, decl: GeneratorDecl): ValType
           const fact = ctx.oracle.typeFactOf(node.expression);
           if (!(fact.kind === "array" && fact.element.kind === "number")) sawOther = true;
         }
-      } else if (isNumericExpression(ctx, node.expression)) sawNumeric = true;
+      } else if (numericOperand(node.expression)) sawNumeric = true;
       else if (isStringYieldExpression(ctx, node.expression)) sawString = true;
       else sawOther = true;
     }
@@ -511,7 +530,7 @@ function generatorElemValType(ctx: CodegenContext, decl: GeneratorDecl): ValType
     // then bailed on the string return — legacy host path on the gc lane and
     // a #680 refusal in standalone, for a shape the machine supports.
     if (ts.isReturnStatement(node) && node.expression) {
-      if (isNumericExpression(ctx, node.expression)) sawNumeric = true;
+      if (numericOperand(node.expression)) sawNumeric = true;
       else if (isStringYieldExpression(ctx, node.expression)) sawString = true;
       else sawOther = true;
     }
@@ -661,7 +680,9 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   const linearizeYields = elemIsAny && noJsHostTarget(ctx) && bodyHasPatternYield(decl.body);
   // (#6651 A5) Statements holding a yield nested in a computed key / call
   // argument / member target (`generator-yield-nested.ts`). Same gate shape as A4.
-  const nestedYields = elemIsAny && noJsHostTarget(ctx) && bodyHasComputedKeyYield(decl.body);
+  // (#6651 A6) Also a yield nested in a yield operand or a return value.
+  const nestedYields =
+    elemIsAny && noJsHostTarget(ctx) && (bodyHasComputedKeyYield(decl.body) || bodyHasNestedYield(decl.body));
   // (#6651 A5) Inner-generator bodies by delegation name, for the for-of chain's close-transparency gate.
   const delegationInnerBodies = new Map<string, ts.Block>();
 
@@ -765,16 +786,50 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
 
   /** (#6651 A5) The nested-yield planner's handle: A4's externref suspension + #680's capture / replacement map. */
   const nestedHost: NestedYieldHost<UnwindEntry> = {
-    suspend: (yieldExpr, unwind) => linearHost.suspend(yieldExpr, unwind),
+    suspend(yieldExpr, unwind, operand) {
+      // (#6651 A6) The suspending state's terminator compiles this yield's
+      // operand, which may read earlier yields / captures nested in it.
+      if (operand.length > 0 && !attachContinuationReplacements(curId, [...operand])) return null;
+      return linearHost.suspend(yieldExpr, unwind);
+    },
     canCapture: (expr) => isSafeContinuationOperand(expr) && continuationCaptureType(expr) !== null,
     capture: (expr) => captureContinuationOperand(expr)?.spillName ?? null,
     finish(stmt, replacements) {
       if (!attachContinuationReplacements(curId, [...replacements])) return false;
       collectSpillsIn(stmt);
+      if (ts.isReturnStatement(stmt)) {
+        // (#6651 A6) The completion terminator compiles the value against the
+        // replacement map; a prelude `return` would be a raw wasm return.
+        finishState(curId, { kind: "return", expr: stmt.expression });
+        curId = startState();
+        return true;
+      }
       curStatements.push(stmt);
       return true;
     },
   };
+
+  /**
+   * (#6651 A6) A statement whose yield sits inside another yield's operand, or a
+   * `return` holding a yield: lowered by the nested planner when it can prove
+   * the order, otherwise REFUSED. Never compiled as a plain terminator — that
+   * read the inner yield as `undefined` and never suspended (a silent miscompile:
+   * `function* g() { return yield 1; }` completed on the first `next()`).
+   */
+  function lowerNestedOrRefuse(
+    stmt: ts.Statement,
+    unwind: readonly UnwindEntry[],
+    allowExpressionContinuations: boolean,
+  ): boolean {
+    if (nestedYields && allowExpressionContinuations && unwind.length === 0 && stateFinallyDepth === 0) {
+      if (lowerNestedYieldStatement(ctx, decl, nestedHost, stmt, unwind) === "lowered") return true;
+    }
+    return fail();
+  }
+
+  /** (#6651 A6) A non-delegating yield whose operand holds a yield of this function. */
+  const yieldOperandHoldsYield = (yieldExpr: ts.YieldExpression): boolean =>
+    !yieldExpr.asteriskToken && yieldExpr.expression !== undefined && containsAnyYield(yieldExpr.expression);
 
   /**
    * Lower a list of statements into the state graph, threading the "current
@@ -821,6 +876,15 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
           curId = startState();
           return true;
         }
+        // (#6651 A6) `return <expr holding a yield>` (the direct `return yield* x`
+        // is the arm above): suspend first, complete in the successor.
+        if (
+          stmt.expression &&
+          containsAnyYield(stmt.expression) &&
+          !(ts.isYieldExpression(stmt.expression) && stmt.expression.asteriskToken)
+        ) {
+          return lowerNestedOrRefuse(stmt, unwind, allowExpressionContinuations);
+        }
         // (#2171) The return *value* must match the generator's yield element
         // type (numeric or string); a bare `return;` (no expr) is allowed.
         if (stmt.expression && !yieldValueOk(stmt.expression)) return fail();
@@ -850,6 +914,10 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
       // Statement that CONTAINS a yield somewhere — must be modeled.
       // 1) `yield expr;` as an expression statement.
       if (ts.isExpressionStatement(stmt) && ts.isYieldExpression(stmt.expression)) {
+        if (yieldOperandHoldsYield(stmt.expression)) {
+          if (!lowerNestedOrRefuse(stmt, unwind, allowExpressionContinuations)) return false;
+          continue;
+        }
         if (!emitYield(stmt.expression, undefined, unwind)) return false;
         continue;
       }
@@ -882,6 +950,10 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
       // 2) `let x = yield expr;`
       const yd = tryYieldDeclaration(stmt);
       if (yd) {
+        if (yieldOperandHoldsYield(yd.yieldExpr)) {
+          if (!lowerNestedOrRefuse(stmt, unwind, allowExpressionContinuations)) return false;
+          continue;
+        }
         if (!emitYield(yd.yieldExpr, yd.name, unwind)) return false;
         continue;
       }
@@ -1502,6 +1574,18 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     }
   }
 
+  /**
+   * (#6651 A6 G3b) The `sent` spill a #680 continuation suspends on. Under the
+   * boxed-any carrier (standalone/WASI only) it is an externref LINEAR spill,
+   * typed up front — the resumed value is an arbitrary JS value, and that typing
+   * is what exempts it from the any-carrier resume-binding bail in the spill
+   * pass. The f64 carrier keeps its historical spill (byte-identical).
+   */
+  const continuationAnyCarrier = elemIsAny && noJsHostTarget(ctx);
+  function continuationSentSpill(): string {
+    return continuationAnyCarrier ? linearHost.spill({ kind: "externref" }, "sent") : continuationSpillName("sent");
+  }
+
   function unwrapContinuationWrapper(expr: ts.Expression): ts.Expression {
     let current = expr;
     for (;;) {
@@ -1846,7 +1930,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
       if (!capture) return false;
       captures.push(capture);
     }
-    const sentSpill = continuationSpillName("sent");
+    const sentSpill = continuationSentSpill();
     if (!emitYield(yieldExpr, sentSpill, unwind)) return false;
     return finishExpressionContinuation(host, captures, [[yieldExpr, sentSpill]]);
   }
@@ -1910,7 +1994,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
       const yieldAtTerm = nextYield < yields.length && yields[nextYield]!.index === index;
       if (yieldAtTerm) {
         const yieldExpr = yields[nextYield]!.expression;
-        const sentSpill = continuationSpillName("sent");
+        const sentSpill = continuationSentSpill();
         if (!emitYield(yieldExpr, sentSpill, unwind)) return false;
         bindings.push([yieldExpr, sentSpill]);
         nextYield++;
@@ -1933,7 +2017,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     const elseYield = continuationYieldOf(conditional.whenFalse);
     if (!conditionYield || !thenYield || !elseYield) return false;
 
-    const conditionSent = continuationSpillName("sent");
+    const conditionSent = continuationSentSpill();
     if (!emitYield(conditionYield, conditionSent, unwind)) return false;
 
     const thenEntry = reserveState();
@@ -1955,7 +2039,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     });
 
     resetCursor(thenEntry);
-    const thenSent = continuationSpillName("sent");
+    const thenSent = continuationSentSpill();
     if (!emitYield(thenYield, thenSent, unwind)) return false;
     const thenReplacements = buildContinuationReplacements(
       host.root,
@@ -1971,7 +2055,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     finishState(curId, { kind: "jump", next: join });
 
     resetCursor(elseEntry);
-    const elseSent = continuationSpillName("sent");
+    const elseSent = continuationSentSpill();
     if (!emitYield(elseYield, elseSent, unwind)) return false;
     const elseReplacements = buildContinuationReplacements(
       host.root,
@@ -2097,8 +2181,10 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
 
     // Bare-yield sent values are f64 in this checkpoint. String/boxed-any
     // carriers and every try/unwind crossing retain the existing fail-closed
-    // native-plan boundary.
-    if (unwind.length !== 0 || elemValType.kind !== "f64") return "failed";
+    // native-plan boundary. (#6651 A6 G3b) Except the boxed-any carrier in
+    // standalone/WASI, whose sent value rides an externref linear spill
+    // (`continuationSentSpill`); every one of those plans was a refusal before.
+    if (unwind.length !== 0 || (elemValType.kind !== "f64" && !continuationAnyCarrier)) return "failed";
 
     if (singleYield) {
       return lowerSingleExpressionContinuation(host, singleYield, [], unwind) ? "lowered" : "failed";
