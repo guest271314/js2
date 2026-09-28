@@ -4,7 +4,7 @@ title: "UMBRELLA: ES6 (ES2015) standalone close-out → 100% (discovery scope au
 status: in-progress
 sprint: current
 created: 2026-08-15
-updated: 2026-09-20
+updated: 2026-09-28
 assignee: codex/es6-test262-closeout
 priority: high
 horizon: xl
@@ -17,6 +17,142 @@ related: [2860, 2864, 2865, 2867, 2906, 3032, 3178, 2161, 2175, 2158, 2159, 4445
 ---
 
 # #4444 — UMBRELLA: ES6 (ES2015) standalone edition close-out
+
+## 2026-09-28 implementation plan: exact-manifest discovery
+
+The implementation is routed to dedicated issue
+`plan/issues/6712-test262-exact-manifest-discovery.md`, claimed on upstream's
+assignment ledger by `ttraenkler/codex-es2015-manifest`, branch
+`codex/6712-exact-manifest-discovery-20260928`, based on
+`359c2d63b6753e0c540b8761d13647b00e24a9a4`. This owns runner discovery and
+its tests only, not #6651's compiler clusters or the other session's IR work.
+The umbrella's overlap gate returned STOP for active compiler subissues; no
+implementation proceeded under that result. The dedicated issue's gate
+returned CLEAR, and the earlier `4444:manifest-discovery` claim is superseded.
+
+The prior read-only audit reconstructed the frozen 11,778-path ES2015 index
+set with SHA256
+`f2fdd4e4544a44608f0b53d89d343526cfa9c9044ca263e860da949dc1a2f59f`
+(sorted paths without `test/`, newline terminated). The default runner
+discovers only 11,704 of them: all 74 omitted paths are under `intl402`.
+Default category discovery and a subsequent path filter cannot execute a
+path that discovery never selected. This is a coverage defect, not 74 measured
+runtime failures. Do not remove those paths, change their edition labels,
+or call 11,704/11,704 completion of the original goal.
+
+Implementation sequence:
+
+1. Reconfirm the pinned corpus/index identity on this base and preserve the
+   exact full-goal manifest as an auditable artifact. Fail on stale or missing
+   input rather than silently regenerating a smaller scope.
+2. Add a narrowly isolated explicit-manifest discovery mode to the maintained
+   runner. Resolve actual original corpus files from that exact set, including
+   otherwise undiscovered categories. Preserve default category discovery for
+   existing callers; do not add bare `intl402` (which would add 3,357 paths
+   across many editions). Choose one clearly documented manifest input and
+   reject ambiguous selection options.
+3. Validate canonical corpus-relative paths, duplicates, traversal/escape,
+   missing files, and fixture-only entries. Fail visibly before execution on
+   invalid input. Route the selected original files through the existing
+   filtering, sharding, execution, and result machinery without changing its
+   verdict rules or semantic lane.
+4. Connect the exact expected manifest to completeness validation. Verify set
+   identity and registered/verdict/started/settled counts; an omitted file,
+   duplicate, truncated run, or empty selection must not appear successful.
+5. Add focused discovery and completeness tests, including an Intl positive
+   control that default discovery misses, unchanged default behavior, and
+   negative controls for malformed/incomplete input. Prove selection of all
+   11,778 paths, including the exact 74 restored paths, independently of any
+   runtime pass claim. Under the shared execution slot, run a small maintained
+   whole-assembly control containing both ordinary and Intl original files.
+6. Run normal quality gates and open a separate upstream PR for this runner
+   fix. Record hashes, commands, outcomes, and any remaining blockers here.
+   Discovery success alone does not establish a 100% ES2015 pass rate; the full
+   manifest must subsequently complete with zero non-pass verdicts.
+
+Expected ownership: `tests/test262-shared.ts`, a small path-selection helper
+if needed, directly relevant runner scripts/docs, focused tests, and this
+issue. No compiler, IR, registry, runtime provider, edition-index, baseline
+counter, or workflow changes are authorized by this slice. Coordinate the
+test/build slot before execution; other sessions have live local tests.
+
+### 2026-09-28 measured discovery and next runtime census
+
+Issue 6712's exact-manifest helper resolved all **11,778 unique original
+paths**, including **74 Intl paths**, against corpus
+`b363f29d3c43c626dc852744ad64a0b48a003693`. Every selected path is tracked
+at that revision and no tracked corpus file is modified. Unrelated untracked
+probes and symlink directories remain preserved outside the selection; the
+corpus is not globally clean. The canonical `test/`-prefixed manifest SHA256 is
+`632db3bbecb0d6ea42b0915b13740912bf3fd8e32e2a15a8b28c1f63b6434360`.
+
+The maintained standalone dynamic chunk (index 0, total 1) completed a
+two-original control at source base `359c2d63b6` with the issue 6712 runner
+changes: **1 pass / 1 fail**, two registered/verdict/started/settled identities,
+and zero exclusions. Run ID: `20260928-005752`; JSONL and shard receipt are in
+the issue owner's `benchmarks/results/` directory. The ordinary addition
+control passed; `test/intl402/Intl/getCanonicalLocales/has-property.js` failed
+with `Expected a Test262Error but got a TypeError`. Wrapper exit 0 establishes
+dataset completeness, not conformance success. History publication was off.
+The original test and its failure remain included.
+
+Next measurement plan, after the runner quality/publication slot:
+
+1. Derive exactly the 74 `test/intl402/` identities from the frozen manifest;
+   save the newline-terminated input and its hash without recategorizing or
+   adding unrelated Intl files.
+2. Execute all 74 original files through the maintained standalone runner,
+   with a pinned source revision, provider identity, and independent expected
+   manifest. Coordinate the shared compiler slot; preserve every non-pass.
+3. Require complete identity and callback accounting before summarizing rows.
+   Reproduce concrete failures before assigning implementation issues; do not
+   extrapolate the single observed failure to all 74 paths.
+4. Keep the original 11,778-file completion bar. Neither discovery coverage nor
+   this restored-subset census replaces a complete zero-non-pass full-scope
+   run on the final candidate.
+
+### 2026-09-28 measured frozen Intl census
+
+The planned 74-path census is complete at source commit
+`db5fe17e84365f93f90c9134636f989f94a453dc`. Its exact frozen input and
+wrapper snapshot have SHA256
+`f1c370eed335e514cb60340e9d105545719599017fd20acfdfb0be2d9883d2a3`; both
+contain precisely the 74 `test/intl402/...` rows from the 11,778-path manifest.
+The maintained standalone dynamic chunk (0/1), with one worker, a 4096 MiB
+fork heap, history off, and the verified QuickJS linked pair completed all
+identity accounting: 74 registered, 74 verdicts, 74 started, 74 settled, and
+zero exclusions. The QuickJS artifact key was `2e2d7736713beeda`, its wasm
+SHA256 was `e9f8d30bc347dbc56f31b3389f7696eb6dedc9f05ea729781fc412f09a3e6b17`,
+and the current compiler-keyed adapter was `6dfa2dab8d8bfa0d`.
+
+The preserved result is **2 pass / 70 fail / 2 compile errors / 0 skip**. The
+passes are exactly the DisplayNames and Segmenter
+`ctor-custom-get-prototype-poison-throws.js` originals; they do not establish
+general user-Intl support. The two compile errors preserve the standalone host
+imports for NumberFormat constructor/format and constructor/formatToParts.
+Wrapper exit 0 means the expected dataset completed, not that the census
+passed. JSONL, completion, and report hashes are respectively
+`62150442b185548dd9a95c18a162984d0cd491aaf7ff746ac79bc64101ebac07`,
+`3deed2815b81bfe32bfd28d075cd4d879cb55ec6ac7ecf97e11fe02b662c16bf`, and
+`2c9c8ec92598fc66f5e18ac44d346f5e6745bf6d645aa756c5f3572fc2036411`.
+
+The report's existing 72-row error bucketing is useful triage data, not a
+single-cause diagnosis. The host-only Intl route noted in #5206 and the
+provider-local temporal DateTimeFormat shim in #6442 are adjacent but distinct:
+neither authorizes excluding paths or claiming a fix for all 72 non-passes.
+
+### Proposed follow-up boundary: standalone user-Intl namespace/API gap
+
+The proof-first [#6717 standalone user-Intl namespace/API
+plan](./6717-standalone-user-intl-namespace-api-gap.md) now owns this
+follow-up boundary. It remains explicitly distinct from #5206's completed
+host-only route and #6442's provider-local Temporal shim. It begins with
+original-file reproductions and positive controls: retain the two passing
+poison-prototype originals, select representative null/undefined namespace and
+host-import-leak cases, and verify each proposed surface through the maintained
+standalone runner. It preserves the 74-path and 11,778-path denominators,
+states that report buckets are not causal proof, and makes no compiler/runtime
+change until its scope and acceptance controls are reviewed.
 
 > **Dispatch plan lives in #6651** (`plan/issues/6651-es2015-standalone-100pct-execution-plan.md`,
 > 2026-09-20): fresh census 10,384 / 11,704, the 1,320-row gap partitioned into

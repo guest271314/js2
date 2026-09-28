@@ -14229,3 +14229,19 @@ Final combined typecheck and all eight quality gates pass with 2,195 unchanged
 inputs, including the actual change-scoped coercion check and moved-reference
 preservation audit. Claims were reread from upstream immediately before
 staging and still match the integration owner and isolated receipt owner.
+
+Signed merge 00f5a8216c004a8033ff86b965434748307cf078 completed the normal
+hook chain: 127/127 assertions, no observed reporting errors, verified Thomas
+author/Codex model trailers, exact parents and SSH signature. The branch then
+cleanly integrated upstream 2069d8df2ada23b5e7e20d083f078315badd97e7; all
+12 incoming files are byte-identical to upstream. These changes add exact
+Test262 selection and completion accounting, not compiler behavior. Combined
+typecheck and seven complete runner/corpus suites pass 51/51 with 2,205
+unchanged inputs. This selected validation is not an 11,778-case conformance
+claim. Legacy compilation remains retained and full IR parity is still open.
+
+The 2069d8df combined refresh also passes all eight quality gates with 2,199
+unchanged inputs. Fresh publication checks found the PR open and not in the
+merge queue, still at published 91d95479; upstream subsequently advanced to
+5bfc069422c7cece3e7f19f84e7ce3e51be2269c with callable-ABI repairs. Validate
+that increment before the single refreshed-head publication.
