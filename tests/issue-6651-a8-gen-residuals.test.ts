@@ -5,7 +5,10 @@
  * nothing under standalone: the module-init collector keeps `F.prototype = …`
  * only for a user constructor and excludes `prototype` from its
  * function-static keep, so `g.prototype` still read the original object and
- * `g()` inherited from it (`statements/generators/default-proto.js`).
+ * `g()` inherited from it (`statements/generators/default-proto.js`). On a
+ * generator EXPRESSION binding the write was kept, but the binder's expando
+ * declaration made `Object.getPrototypeOf(g)` lose its static answer
+ * (`expressions/generators/default-proto.js`).
  *
  * 5d. A generator METHOD read off a struct object literal had no own
  * `prototype` (`method-definition/generator-prototype-prop.js`): the
@@ -54,6 +57,15 @@ describe("#6651 A8 · top-level `g.prototype = v` on a generator declaration (5b
   it("`g.prototype = obj` lands, and g() inherits from obj", async () => {
     const prelude = "function* g() {}\nvar o: any = {};\n(g as any).prototype = o;";
     expect(await run(`return Object.getPrototypeOf(g()) === o ? 1 : 0;`, prelude)).toBe(1);
+  });
+
+  it("on a generator EXPRESSION binding, the write does not un-fold `Object.getPrototypeOf(g)`", async () => {
+    // The top-level write adds `g` to the binder's declarations (a JS expando),
+    // which read as a second binding and dropped the static %GeneratorFunction.prototype% answer.
+    const prelude = `var g: any = function* () {};
+var GP: any = Object.getPrototypeOf(g).prototype;
+g.prototype = null;`;
+    expect(await run(`return GP !== undefined && Object.getPrototypeOf(g()) === GP ? 1 : 0;`, prelude)).toBe(1);
   });
 });
 
