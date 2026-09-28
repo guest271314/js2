@@ -15318,6 +15318,35 @@ Get main refresh validation correction (2026-09-28): normal hooks passed 66/66 G
 
 Get CI timeout follow-up (2026-09-28, claim `3518:get-ci-memory-delivery-20260928`): run 36424443886 / job 108935185687 exhausted its 20-minute whole-job limit on published head 5332a8218. Pinned cohort passed 277 tests with one existing skip; boundary349 passed in 248.837s, leaving 829.7s before cancellation without a Get terminal report. The separate required quality job 108934839508 subsequently completed its changed-root step successfully. This is not evidence of an assertion failure or OOM. Plan: retain every selected file, 4GB worker limit, callback timeouts, fatal/advisory policy, and required checks; use a fresh serial fork per changed file and a bounded 40-minute aggregate job budget. Verify workflow syntax/selection and normal hooks, then publish to the existing PR and require exact-head terminal CI before queue admission. No legacy retirement or coverage reduction.
 
+
+### Runtime root-finality fingerprint delivery (2026-09-28)
+
+Claim: `3518:root-finality-fingerprint-20260928`, owner
+`ttraenkler/codex-root-finality-fingerprint-20260928`. Delivery branch:
+`codex/3518-root-finality-fingerprint-20260928`.
+
+Implementation: include emitted extensibility in canonical root-type tokens;
+normalize plain, inline, and generic subtype encodings with equal Wasm meaning.
+An unused `final` field on a plain struct does not change its emitted finality.
+Fingerprint ABI version 3 refuses version-2 fingerprints, which could conflate
+final and extensible roots. Providers must be regenerated for the new ABI.
+
+Evidence: the preserved regression initially passed 53/120 and failed 67/120,
+with no skipped cases. After the fix all 120 passed. It compares independent
+emitted Wasm modules using engine `ref.test`, compares structural fingerprints,
+and verifies emitted recursive-group bytes across seven encodings and shifted
+type indices. The existing canonical runtime-linking and provider-manifest suites
+also passed: 135/135 combined, with a clean typecheck. Those results were measured
+in the Number integration worktree; validation on this isolated fresh-main branch
+is recorded separately before publication. The change neither retires legacy
+code nor grants wrapper allocation, intrinsic prototype, or ToObject completion.
+
+Acceptance for this checkpoint: current-root tests and normal hooks, a signed
+commit with accurate attribution, fork publication, protected queue validation,
+and verified upstream main ancestry/content. Queue entry or a PR is not delivery.
+
+Current isolated-base validation:139/139 tests passed on upstream2148f208f066e5abd9a64ef31a332cafb7477583 (124finality controls plus15existing canonical/runtime-provider cases),0skipped; TS7 reported no errors. Added raw-byte positive/negative controls for generic array/function root encodings because they share subtype normalization. Normal commit/push hooks and protected queue are still required.
+
 ### ToObject algorithm body (claimed 2026-09-28)
 
 Upstream `issue-assignments` claim `3518:to-object-body-20260928` belongs to

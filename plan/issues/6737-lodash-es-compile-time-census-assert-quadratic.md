@@ -14,6 +14,10 @@ area: compiler
 goal: standalone
 requested_by: ttraenkler/sendev-standalone
 related: [6720, 6704, 3525]
+loc-budget-allow:
+  # 2026-09-28 (#6737): +16 — the user-program name sets of
+  # collectDeclaredGlobals move into a memoized helper in the same file.
+  - src/codegen/extern-declarations.ts
 ---
 
 # #6737 — lodash-es compile time: the per-module census assert is quadratic
@@ -98,3 +102,38 @@ needs a narrower profile of that pass.
 - lodash-es `standalone-dynamic` compiles inside the lane's 120 s child
   budget on CI, or the remaining cost is itemized with the next hotspot.
 - The emitted binary is byte-identical before and after each change.
+
+## Progress — trivially quadratic slice (2026-09-28)
+
+Landed the output-neutral half of fixes 1 and 2:
+
+- census assert: `inventory.sources.find` per source → one id index per call;
+  `terminalUnits.filter` per source → one group-by per call;
+  `captureLegacyObservation`'s per-source `staticEntries` / `moduleStatements`
+  filters → one group-by per call (same order, same arrays' contents);
+- lib scan: the user-program name sets are memoized per `allUserFiles` array.
+
+Measured on the lane driver, `optimize: 0`, main `a08ed30b5c`, same box
+(load 25-60):
+
+| | before | after |
+|---|---|---|
+| standalone compile | 237.5 s / 280.6 s | 74.0 s / 76.8 s / 92.2 s |
+| JS-host (`gc`) compile | 325.0 s | 140.7 s |
+| standalone binary sha256 | `dc30b6c8…` | `dc30b6c8…` (identical) |
+| JS-host binary sha256 | `31548146…` | `31548146…` (identical) |
+
+## Remaining (next hotspots, after the slice)
+
+1. **`wasm-opt -O4`** — the lane's own optimize step. Lane driver at `optimize:
+   4`: 352 s total, of which codegen phases 88.7 s, so Binaryen ≈ 263 s
+   (75 %). The lane budget cannot be met while the lane runs O4 on a 3.6 MB
+   module; options are a lower level for this lane or a pass subset.
+2. **Census syntax walk** — still 43 % of codegen (35 s of 81.5 s sampled):
+   `currentSourceSyntax` + `nodeSyntaxScalarFields` re-walk every source's AST
+   on each of the ~1,280 per-module calls. The structural fix (re-check only the
+   entered source, or a mutation counter) is the owner's call (#3525).
+3. **First module-init pass** (`_freeGlobal.js`) — unchanged, profile it alone.
+
+Lane after this slice: `measured`, checksum 54 = 54, `compileDurationMs`
+435,879 (O4 included) — still over the 120 s child budget.
