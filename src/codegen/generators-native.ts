@@ -34,6 +34,7 @@ import {
 import { ts } from "../ts-api.js";
 import { resolveComputedKeyExpression } from "./literals.js";
 import { hasStaticModifier } from "./ast-modifiers.js";
+import { delegationSlotToInner } from "./generator-delegation-slot.js"; // (#6651 A10)
 import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3b) stable-regime minting
 import {
   isBooleanType,
@@ -4002,6 +4003,16 @@ function isAnonymousDefaultExportDeclaration(decl: GeneratorDecl): boolean {
  * `undefined` when the name does not fold. Mirrors `resolveClassMemberName` /
  * `resolveAccessorPropName` (the two emit sites' key derivations).
  */
+function foldedMethodKey(ctx: CodegenContext, name: ts.PropertyName): string | undefined {
+  if (ts.isIdentifier(name)) return name.text;
+  if (ts.isPrivateIdentifier(name)) return "__priv_" + name.text.slice(1);
+  if (ts.isStringLiteral(name)) return name.text;
+  if (ts.isNumericLiteral(name)) return String(Number(name.text));
+  if (ts.isComputedPropertyName(name)) return resolveComputedKeyExpression(ctx, name.expression);
+  return undefined;
+}
+
+/** (#6651 A10) A standalone class generator method keyed by an unfoldable computed name. */
 function isStandaloneDynamicClassMethod(ctx: CodegenContext, decl: GeneratorDecl): boolean {
   return (
     ctx.standalone &&
@@ -4010,15 +4021,6 @@ function isStandaloneDynamicClassMethod(ctx: CodegenContext, decl: GeneratorDecl
     ts.isComputedPropertyName(decl.name) &&
     foldedMethodKey(ctx, decl.name) === undefined
   );
-}
-
-function foldedMethodKey(ctx: CodegenContext, name: ts.PropertyName): string | undefined {
-  if (ts.isIdentifier(name)) return name.text;
-  if (ts.isPrivateIdentifier(name)) return "__priv_" + name.text.slice(1);
-  if (ts.isStringLiteral(name)) return name.text;
-  if (ts.isNumericLiteral(name)) return String(Number(name.text));
-  if (ts.isComputedPropertyName(name)) return resolveComputedKeyExpression(ctx, name.expression);
-  return undefined;
 }
 
 /**
@@ -4643,27 +4645,6 @@ function ensureRegisteredNativeGenerator(ctx: CodegenContext, name: string): Nat
   const existing = ctx.nativeGenerators.get(name);
   if (existing) return existing;
   return null;
-}
-
-/**
- * (#6651 A10, #2170) The instruction that turns a non-null `yield*` delegation
- * slot into the inner's `(ref $GenState)`. A slot is typed `ref null $Inner`
- * only when the inner was registered before the outer; an inner declared LATER
- * in the source (`function* g() { yield* g2(); } function* g2() {}`) leaves the
- * slot `eqref`, and `ref.as_non_null` then yields a `(ref eq)` the inner's
- * locals reject — the module failed validation. Cast in that case only, so
- * every typed slot keeps its bytes.
- */
-function delegationSlotToInner(
-  ctx: CodegenContext,
-  info: NativeGeneratorInfo,
-  slotFieldIdx: number,
-  inner: NativeGeneratorInfo,
-): Instr {
-  const stateFields = ctx.structFields.get(ctx.typeIdxToStructName.get(info.stateTypeIdx) ?? "");
-  return stateFields?.[slotFieldIdx]?.type.kind === "eqref"
-    ? { op: "ref.cast", typeIdx: inner.stateTypeIdx }
-    : { op: "ref.as_non_null" };
 }
 
 // (#2171/#2979) The default `value` for a done/empty result. The old comment

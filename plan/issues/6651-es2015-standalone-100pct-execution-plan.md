@@ -169,6 +169,25 @@ assignee: "ttraenkler/fable-es2015-plan"
 #     `$__ta_ctor`, which the Int8Array `$Object` carrier is not). The first cut
 #     inlined the arm here and cost +68 / +65; extracting it left these 8.
 loc-budget-allow:
+  # 2026-09-28 — cluster A, slice A10 (record under the A10 claim). Four
+  # god-files, every path already listed below and restated per the
+  # stranded-grant rule; about half of each is the comment recording why a bail
+  # was lifted. The delegation-slot cast lives in the NEW leaf
+  # `generator-delegation-slot.ts`, the new predicates in
+  # `generators-native-ast-scan.ts` / `generator-yield-nested.ts`.
+  #   - `src/codegen/generators-native.ts` +44: the candidate gate's four A10
+  #     admissions (standalone literal-method `super`, runtime-keyed class
+  #     members, static-vs-instance uniqueness, rest params without a JS host)
+  #     and the returning-`finally` routing — each is a clause inside a gate
+  #     that already exists here, so it cannot move.
+  #   - `src/codegen/expressions/new-super.ts` +12: `objectLiteralSuperReceiver`
+  #     and its three call sites — the §12.3.5.3 receiver inside a generator
+  #     resume function is the frame's `this`, not `__current_this`.
+  #   - `src/codegen/closures.ts` +4: `computeClosureWrapperSig` no longer asks
+  #     the checker for a yield-keyed generator method's signature (TypeScript
+  #     recursed without bound).
+  #   - `src/codegen/declarations.ts` +2: the top-level generator branches
+  #     register the rest vec (`registerResolvedRestParam`) in no-host lanes.
   # 2026-09-28 — cluster H, slice H1 (receipt under `## Cluster status`). Both
   # paths already listed below; restated per the stranded-grant rule. The
   # mechanism lives in the NEW leaves `spec-arg-coercion.ts` (the object-literal
@@ -1064,6 +1083,12 @@ loc-budget-allow:
   # `promise-subclass-cell-read.ts`; the hand-off cannot move, because it is the
   # arm that would otherwise emit the bare `global.get` of the cell.
 func-budget-allow:
+  # 2026-09-28 — cluster A, slice A10 (paths already listed below, restated per
+  # the stranded-grant rule). `buildNativeGeneratorPlan` +5: the one clause that
+  # routes a `finally` holding a `return` to `lowerTryRegion` (its comment is 4
+  # of the 5 lines). `registerNativeGenerator` +1: `capturesDynamicThis` also
+  # snapshots the receiver for a `super`-using literal method.
+  # `collectDeclarations` +1: the rest-vec registration in the generator branch.
   # 2026-09-28 — cluster H, slice H1. `emitToPrimitiveMethodExports` +2 and its
   # nested `emitDispatchForMethod` +2 (the same two lines, counted once per
   # enclosing function): `boxResult`'s branded-i32 arm, which boxes a
