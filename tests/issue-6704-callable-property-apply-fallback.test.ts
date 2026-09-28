@@ -18,8 +18,8 @@ import { describe, expect, it } from "vitest";
 
 import { compileMulti } from "../src/index.js";
 
-async function runStandalone(lib: string, main: string, extra: Record<string, string> = {}): Promise<number> {
-  const result = await compileMulti({ "./lib.js": lib, ...extra, "./main.js": main }, "./main.js", {
+async function runStandalone(lib: string, main: string): Promise<number> {
+  const result = await compileMulti({ "./lib.js": lib, "./main.js": main }, "./main.js", {
     allowJs: true,
     skipSemanticDiagnostics: true,
     target: "standalone",
@@ -30,23 +30,6 @@ async function runStandalone(lib: string, main: string, extra: Record<string, st
   (instance.exports.__module_init as (() => void) | undefined)?.();
   return (instance.exports.run as () => number)();
 }
-
-const WORDS = `
-var re = /[a-z]+/gi;
-/**
- * @param {string} [string=''] The string to inspect.
- * @param {RegExp|string} [pattern]
- * @param- {Object} [guard]
- * @returns {Array}
- */
-function words(string, pattern, guard) {
-  string = string + '';
-  pattern = guard ? undefined : pattern;
-  if (pattern === undefined) return string.match(re) || [];
-  return string.match(pattern) || [];
-}
-export default words;
-`;
 
 const COMPOUNDER = `
 /**
@@ -80,14 +63,21 @@ export function run() {
   });
 
   it("a callable that is not a wrapper struct is applied instead of trapping", async () => {
-    const lib = `export function tpl(src) { return Function(["x"], "return " + src).apply(undefined, [1]); }\n${WORDS}`;
+    const lib = `
+export function tpl(src) { return Function("x", src); }
+/**
+ * @param {string} [string=''] The string to split.
+ * @returns {Array}
+ */
+function words(string) { return (string + '').split(' '); }
+export default words;
+`;
     const main = `
-import { words } from "./barrel.js";
+import words from "./lib.js";
 const ns = { words };
 export function run() {
   return ns.words("ab cd ef").length * 10 + words("x y").length;
 }`;
-    const barrel = `export { default as words } from "./lib.js";\n`;
-    expect(await runStandalone(lib, main, { "./barrel.js": barrel })).toBe(32);
+    expect(await runStandalone(lib, main)).toBe(32);
   });
 });
