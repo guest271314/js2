@@ -15,9 +15,10 @@
  *     number (the #680 continuation under the boxed-any carrier, G3b).
  *
  * Every case compiles with `target: "standalone"` and asserts `imports: []`. The
- * last case is a CONTROL for the "refuse, never miscompile" rule: a
+ * CONTROL case in the return group pins the "refuse, never miscompile" rule: a
  * return-with-yield the planner cannot order (inside a loop body) must refuse
- * with the #680 diagnostic.
+ * with the #680 diagnostic. The last group pins the order against #680's
+ * comma / short-circuit statement desugar, which landed beside this slice.
  */
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
@@ -190,5 +191,36 @@ export function test(): number {
   return r1.value.tag * 1000 + before * 100 + (received === sent ? 10 : 0) + (complete && r2.done ? 1 : 0);
 }`;
     expect(await run(src)).toBe(1111);
+  });
+});
+
+describe("#6651 A6 — beside #680's statement desugarings", () => {
+  // The nested planner runs before #680's comma / `&&` / `||` / `?:` desugar. It
+  // answers not-applicable for a yield in a short-circuit operand, so the
+  // desugar still owns that statement in a generator a nested yield gates.
+  it("a short-circuit yield before `yield yield 2`", async () => {
+    const src = `function* g(): any { const o = (x: any) => x > 0; o(1) && (yield 7); yield yield 2; }
+export function test(): number {
+  const it: any = g();
+  const a: any = it.next();
+  const b: any = it.next();
+  const c: any = it.next(5);
+  const d: any = it.next();
+  return a.value * 1000 + b.value * 100 + c.value * 10 + (d.done ? 1 : 0);
+}`;
+    expect(await run(src)).toBe(7251);
+  });
+
+  it("prettier's `yield n, u.push(n)` before `return yield 9`", async () => {
+    const src = `function* g(u: any): any { let n = 3; yield n, u.push(n); return yield 9; }
+export function test(): number {
+  const u: any = [];
+  const it: any = g(u);
+  const a: any = it.next();
+  const b: any = it.next();
+  const c: any = it.next(6);
+  return a.value * 1000 + b.value * 100 + c.value * 10 + u.length;
+}`;
+    expect(await run(src)).toBe(3961);
   });
 });
