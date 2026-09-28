@@ -3138,7 +3138,12 @@ function isNativeGeneratorExpressionShape(ctx: CodegenContext, decl: ts.Function
     ) {
       return false;
     }
-    if (param.questionToken || param.dotDotDotToken || (param.initializer && !noJsHostTarget(ctx))) return false;
+    if (
+      param.questionToken ||
+      (param.dotDotDotToken && !noJsHostTarget(ctx)) ||
+      (param.initializer && !noJsHostTarget(ctx))
+    )
+      return false;
   }
   // (#6651 A1) A `this` in the body no longer bails in the no-JS-host lane.
   // The receiver is snapshotted into the frame's `dynamic_this` field by the
@@ -3843,7 +3848,7 @@ export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorD
     // spill fields; the plan builder decides pattern legality (rest elements /
     // unstorable binding types bail there). Identifier params stay
     // byte-identical.
-    if (param.dotDotDotToken) return false;
+    if (param.dotDotDotToken && !noJsHostTarget(ctx)) return false;
     if (
       !ts.isIdentifier(param.name) &&
       !ts.isArrayBindingPattern(param.name) &&
