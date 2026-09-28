@@ -10017,6 +10017,24 @@ unconditional lowering (pinned). Species is NOT performed: `C` is `%Promise%` (b
 - D5's dynamic-call residual (`id(p).then(f)` under a replaced `Promise.prototype.then`) is still
   open; it reaches no candidate row outside `finally/`.
 
+### A10 claimed — 2026-09-28 (generator rows that fail to compile or leak host imports, standalone)
+
+Cluster A (claimed above under `## Cluster status`), same session. Branch
+`claude/es6-6651-a10-gen-host-leaks`, cut from `origin/main` @ `d7e1d646c8`; WIP
+PR opened before code. The fix admits these shapes to the native lowering; it
+adds no host import. Rows (all non-pass standalone on `fd02938f8d`):
+
+| group | rows |
+| --- | --- |
+| (a) module-code generator declaration leaks `env::<fn name>` (#2961) | `language/module-code/{eval-export-dflt-expr-gen-named,eval-export-dflt-expr-gen-anon,instn-named-bndng-dflt-gen-named,instn-named-bndng-dflt-gen-anon,instn-named-bndng-gen,instn-iee-bndng-gen}.js` |
+| (b) object/class generator method falls back to the host generator runtime | `expressions/object/concise-generator.js`, `statements/class/definition/fn-name-gen-method.js`, `expressions/object/method-definition/generator-super-prop-body.js` |
+| (c) rest-parameter generator bails (#680 "sequential numeric yields") or leaks | `scope-param-rest-elem-var-{open,close}.js` under `statements/generators/`, `expressions/generators/`, and `expressions/object/scope-gen-meth-param-rest-elem-var-{open,close}.js` |
+| (d) crash / invalid Wasm / residual bail | `expressions/object/method-definition/generator-prop-name-yield-expr.js` (stack overflow), `statements/generators/yield-star-before-newline.js` (invalid Wasm, #2170), `built-ins/GeneratorPrototype/return/try-finally-set-property-within-try.js` (A5 target 3) |
+
+Out of scope: `module-code/namespace/internals/` and `yield/from-with.js`
+(project-thread lane), `built-ins/GeneratorFunction/**` (A9, PR #6274), and the
+value-semantics rows left for A11. The A10 record lands under this heading.
+
 ## Handoff — 2026-09-21 (round 1 closed, round 2 ready to dispatch)
 
 ### 2026-09-28 — Cluster H, slice H1
