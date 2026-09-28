@@ -5931,3 +5931,325 @@ Root inspected the receipt. The sidecar cannot explain this failure; next
 trace must establish why the callback was not stored or whether it was reset.
 No production source patch is justified yet. Earlier missing-flags and
 text-reassembly failures are preserved as setup-only, not semantic results.
+
+Follow-up export-only property observation completed: original and clone
+again retain the exact1F. Clone SHA256
+`c687178e5ffc641ae9d4402c53bc468da3a3ba988714f2837b1cee55ce19c15a`;
+receipt `.tmp/5197-exact-binary-exportprobe1/receipt-properties.json` in
+the Promise worktree. Root inspected it: thenable.then and NotPromise are
+callable, but the raw global-object NotPromise.resolve is classified as
+internal undefined and noncallable. **This is not cause proof:** subsequent
+exact-WAT inspection shows assignment target local75 and constructor local81
+both fall back to runtime-eval AOT carrier global43, not that raw object, when
+the sidecar is absent. Carrier writes intentionally use its closure-own-property
+bag. The next observation must read global43.resolve and compare actual
+operand identity. No special-case Promise workaround or generic property
+patch is justified from the raw-global observation alone.
+
+### 2026-09-28 frozen census index 64 — complete
+
+Session48532 terminated exit1 after161.70s: **85 pass,7 fail,0 compile errors,
+0 skips /92**. Maintained completeness92/92,zero exclusions; pinned inputs
+unchanged. Run `es2015-fullscope-128-f924650-chunk064-a01`.
+
+- JSONL SHA256: `7ad8c63f22a39e4e3f29d4d2e496726346a65c686ef06edbba2236c6bc8de0ba`.
+- Completion SHA256: `d1341232e6918ca251abd54898746ab98ee261da29b350d8d5783bf9a1bded2f`.
+- All65 receipt pairs and5,981 unique exact-scope identities verified:
+  **5,602 pass,334 fail,45 compile errors;5,797 unmeasured**. Next index65.
+  Frozen baseline only, not integrated current-source conformance.
+
+Failures relative to `test/`: object method
+`language/expressions/object/method-definition/name-invoke-fn-no-strict.js`
+(null versus object); `language/expressions/super/prop-expr-obj-val-from-eval.js`
+(null versus a); `built-ins/RegExp/prototype/Symbol.split/splitter-proto-from-ctor-realm.js`
+(nullish access); `language/computed-property-names/object/method/number.js`
+(illegal cast); `built-ins/Function/internals/Construct/base-ctor-revoked-proxy.js`
+(missing TypeError); `built-ins/Reflect/set/set-value-on-data-descriptor.js`
+(false versus true); `intl402/DisplayNames/options-languagedisplay-toString-abrupt-throws.js`
+(missing abrupt completion). Signatures are not causal attribution.
+
+### 2026-09-28 frozen census index 65 — complete
+
+Session4016 (tool handle, unrelated to issue4016) terminated exit1 after187.70s:
+**87 pass,4 fail,1 compile error,0 skips /92**. Maintained completeness92/92,
+zero exclusions. Run `es2015-fullscope-128-f924650-chunk065-a01`, pinned inputs
+unchanged and no retry.
+
+- JSONL SHA256: `0d8cfef41b474da01c152122a373e528f259a9402aec4f3b9712ed2edc5e5fcc`.
+- Completion SHA256: `1313c0392dc412fd7ceb877f8223f821cd98afb2f2999f18392048c0f9c59b1d`.
+- All66 receipt pairs and6,073 unique exact-scope identities verified:
+  **5,689 pass,338 fail,46 compile errors;5,705 unmeasured**. Next index66.
+  Frozen baseline only, not integrated current-source conformance.
+
+Nonpassing paths relative to `test/`: `built-ins/Array/from/source-object-constructor.js`
+(constructor identity); `language/statements/class/decorator/syntax/valid/decorator-parenthesized-expr-identifier-reference-yield.js`
+(strict reserved identifier compile error);
+`built-ins/Map/iterator-item-second-entry-returns-abrupt.js`
+(TypeError instead of Test262Error); `built-ins/Proxy/get-fn-realm.js`
+(newTarget not constructor); `intl402/DisplayNames/ctor-custom-prototype.js`
+(null versus expected prototype). Observations do not establish common causes.
+
+### 2026-09-28 Promise post-failure replay boundaries
+
+The exact carrier observation confirmed global43.resolve is present/callable;
+the missing property on the raw global function is intentional carrier/raw
+separation, not the bug. Two fresh diagnostic replays preserve the original
+null-versus-Function.prototype failure before making additional calls:
+
+- `receipt-resolver-replay.json`: exact emitted-equivalent receiver/resolver/
+  thenable tuple returns the same thenable with callable then; callback binding
+  remains undefined before and after that replay.
+- `receipt-then-replay-attempt2.json`: existing method2 helper passes a known
+  callable sentinel to thenable.then and moduleglobal32 becomes identity-equal
+  to it. Its attempt1 was a script TDZ setup error, not semantic evidence.
+
+Both receipts live under the Promise worktree's
+`.tmp/5197-exact-binary-exportprobe1/`. These prove post-failure resolver and
+callback delivery work, not that original custom-all reaches either. Next
+diagnosis must establish original capability/iterator progression and any
+caught abrupt completion. Do not patch a bridge based on the original symptom
+or substitute these replays for maintained-runner conformance.
+
+### 2026-09-28 frozen census index 66 accepted
+
+Session 41777 terminated with exit 1 after 148.93s: 85 pass, 4 fail,
+3 compile errors of 92, no skips. Maintained completeness confirms all 92
+registered verdicts with zero exclusions. JSONL SHA256:
+`bb85a6b236436d302d75798feb14eb384eef560ebf57916cad9ffa5e101b3005`;
+completion SHA256:
+`cbdddbebcb74a2b6374d415db88e204c1b04f47e96c4d18fcdf5070e1acd1a6e`.
+The frozen execution ledger now includes 67 shards, 6,165 unique scope members:
+5,774 pass, 342 fail, 49 compile errors; 5,613 remain unmeasured. All accepted
+receipt hashes and unique manifest membership were revalidated. Next index is
+67. These are frozen-source observations, not integrated-current conformance.
+
+### Promise resolve admission guard audit
+
+The exact worker binary's pre-custom-all guard uses `ref.test $1`, not the
+generic callable helper. This is not sufficient evidence of a defect: its
+assigned resolver is `$52 <: $51 <: $2 <: $1`, stored in the `$63` AOT
+carrier's closure property bag. The bag read precedes raw-target fallback and
+therefore preserves that resolver. Do not widen the guard speculatively.
+The next diagnostic observes original execution milestones in a binary clone;
+post-failure bridge replays cannot establish which original branch executed.
+
+### Frozen index 66 super receiver failure — existing ownership
+
+`language/expressions/super/prop-dot-cls-ref-this.js` fails its first assertion:
+`Parent.getThis()` returns null when invoked via `super.getThis()` inside
+`C.prototype.method()`, where the expected receiver is `C.prototype`. The later
+`super.This` assertion has not been reached. At the audited source, the legacy
+`compileSuperMethodCallCore` static funcMap branch passes the typed instance
+`this`; the property-read companion can fall back from null typed `this` to
+`__current_this`, but that fallback does not cover this direct CallExpression.
+
+This is already an explicit residual in #5350, also covered by #5153's receiver
+plan; #3522 owns active IR super-call lowering. Do not create a duplicate issue
+or edit IR. Any coordinated legacy repair needs runtime receiver ABI evidence
+and controls for prototype receivers, ordinary instances, parent-method lookup
+despite overrides, argument order, and the existing property-read case.
+This is a static diagnosis against an observed frozen failure, not a current
+maintained-runner reproduction or a measured fix.
+
+### Promise original-progress diagnostic overturns static expectation
+
+The first progress clone completed with trace **3**: NotPromise entry (1) and
+capability executor tail after both slot stores (2), but no custom-all entry
+(4), resolver entry (8), or then entry (16). Original and clone reproduce the
+same Test262Error. Clone SHA256:
+`f1dd1d1f1ccb668ae70f470d2f955dcd9da89e9adef031d7d2d9e87420efdbc9`.
+Receipt: Promise worktree `.tmp/5197-exact-binary-progress1/receipt.json`.
+The patch changes only global/export/code sections and the five pinned bodies;
+all unrelated sections/bodies remain byte-identical. This is diagnostic only.
+
+Despite the static subtype expectation above and successful post-failure
+replays, original execution does not enter custom-all. Next observe the exact
+resolver value and chosen validation branch at the original call site;
+post-failure property state must not substitute for that observation. No
+production guard change is justified yet.
+
+### 2026-09-28 frozen census index 67 accepted
+
+Session 26365 terminated with exit 1 after 224.36s: **82 pass, 9 fail,
+1 compile error of 92**, no skips. Maintained completeness confirms 92
+registered verdicts and zero exclusions. JSONL SHA256:
+`064a14200f0e8b09cd9805799e1bfac1a5ee360019ceff8d80283fddb1919cd7`;
+completion SHA256:
+`b4000eaf69edf11de995536a2cb634cf2e3d4437d63109353b385a582faedf2a`.
+All 68 accepted receipt pairs and manifest identities revalidate: **6,257
+unique = 5,856 pass + 351 fail + 50 compile errors**, 5,521 unmeasured.
+Next index is 68. This remains frozen-source evidence, not current integrated
+conformance. Failures include computed object properties, delegated-yield
+boolean representation, RegExp subclasses, nested Proxy get, constructor
+realm/prototype behavior, symbol own-key omission, and Intl PluralRules.
+These observations are not a claim of shared causes or newly attributed bugs.
+
+### Promise exact guard operand: callable rejected by wrapper-only check
+
+The second binary diagnostic directly captured the original `local97` operand
+and `ref.test $1` result. Predicate **0** (not the unreached sentinel -1)
+rejects that operand, although the existing generic `__is_callable` returns
+**1** and `__extern_is_undefined` returns **0**. Its identity differs from a
+post-failure `global43.resolve` property read, so the previous static producer
+and replay reasoning did not establish the original value's representation.
+Original and clone retain the identical final assertion failure. Clone SHA256:
+`6e19e499f3729bda9483e5c8f896cbfaf7a901ade378d16c917af0d391d4b05b`.
+Receipt: Promise worktree `.tmp/5197-exact-binary-guard1/receipt.json`.
+
+Next implementation is a narrowly scoped use of the existing generic callable
+predicate for resolve admission, after checking its reservation lifecycle and
+the apply bridge's callable coverage. Revalidate the original/control pair and
+focused callable/rejection regressions. This is now runtime attribution, but
+no fixed conformance result is claimed before that rerun.
+
+### Intl PluralRules standalone capability gap (index 66/67)
+
+Read-only audit against local main `e4c3e3` found no PluralRules implementation
+under `src`. Both observed originals dereference `Intl.PluralRules.prototype`
+before reading the tag; this is not evidence for a descriptor-only repair.
+Standalone global materialization has no Intl entry and the unimplemented
+global path emits null. Existing extern/runtime constructor registration lists
+ListFormat and NumberFormat, not PluralRules. #5206, #5355, and #5381 describe
+host-bridge work and explicitly do not establish standalone capability.
+
+Implementation planning must begin with a separately claimed standalone Intl
+namespace/PluralRules provider and locale-data design, not a special-cased tag.
+Acceptance must include namespace/constructor/prototype identity, exact
+Symbol.toStringTag descriptor, Object.prototype.toString on prototype and
+instances, tag deletion/redefinition, construction, select, resolvedOptions,
+and locale/category behavior. The original two rows remain in the 11,778-path
+goal; do not remove them or claim host execution as standalone conformance.
+No production change or new maintained measurement resulted from this audit.
+
+### Delegated relational-expression yield: existing A6 carrier work
+
+Index 67 `language/expressions/yield/star-in-rltn-expr.js` installs a Boolean
+iterator generator yielding `this.valueOf()`, then delegates to the results of
+`'hit' in obj` and `'miss' in obj`. Its first yielded value is numeric 1 rather
+than true. The source audit finds the inner native generator classifies boolean
+as numeric and converts its i32 result to f64; the outer generic delegation
+already transports externref and preserves that wrong value. Binary `in`
+boxing is not the proposed repair site.
+
+Existing #6651 A6 branch `upstream/claude/es6-6651-a6-nested-yield`
+(`3d2e08c`, parent `4fcff8`) owns the boolean-yield carrier change. This is WIP,
+not merged or measured here. Coordinate its exact original-row test plus custom
+Boolean iterator true/false and mixed numeric/boolean identity controls rather
+than duplicate the source edit. Keep #5257's boolean-return ABI controls
+separate and preserve #5199's broader generator ownership. No IR edit or
+conformance gain is claimed by this static audit.
+
+### 2026-09-28 frozen census index 68 accepted
+
+Session 67699 terminated with exit 1 after 217.50s: **83 pass, 9 fail of
+92**, no compile errors/skips. Maintained completeness confirms all 92
+registered verdicts with zero exclusions. JSONL SHA256:
+`003156affd308d260b6cde373198bf294145a601dff99f08241c3f9d4c204c31`;
+completion SHA256:
+`3b30af0ba1683f0b880f8263c9dae3ff21f6c50faba783720801cef6eb63bf3e`.
+All 69 accepted receipt pairs and manifest identities revalidate: **6,349
+unique = 5,939 pass + 360 fail + 50 compile errors**, 5,429 unmeasured.
+Next index is 69. These are frozen-source results, not current integrated
+conformance. The PluralRules supportedLocalesOf row also fails at null access;
+the standalone capability gap above remains in scope.
+
+### Promise resolve admission candidate: original pair 1P/1F to 2P
+
+The narrowly scoped `__is_callable` admission candidate completed the maintained
+exact pair in run `20260928-180741`, session 12945 terminal: **2/2 pass**,
+zero exclusions. Root independently read both JSONL rows and ran the maintained
+completeness verifier. `Promise/all/resolve-element-function-prototype.js`
+flipped fail to pass; `Promise/resolve-function-prototype.js` stayed passing
+against the prior exact baseline run `20260928-141520` (1P/1F).
+
+Candidate source remains local dirty work on base `38f959a0b3ee0b50edc96662d3aef933f0c795fb`;
+`promise-custom-combinator.ts` SHA256 is
+`c9db91f0a34db77ad5dfa810a8fe6a7276aedddbd40763aa1073c75e9ef14644`.
+JSONL SHA256: `1f06a31eedc0901d4df1ccbe5e5efc871d129c7892fd2fc6c01e32c046ad3c37`;
+completion SHA256: `04525ff45fdb391f3452dc996291d1f256bb6fda2681f8dfe18d29de967896e7`.
+Fresh bundle token `7edb4aeea5187a8f`, adapter `5cb9ea13d632e7a6`.
+This is a measured one-row repair, not full-suite completion or merge readiness.
+Next validate custom-C noncallable/Get-once/all/race controls and cached-index
+lifecycle; publication remains subject to the existing permission boundary.
+
+### Promise pre-publication review follow-up
+
+The helper lifecycle audit found that private `__promiseCustomCapability`
+caches `executorFuncIdx`, but the async side-channel import-shift pass does
+not update that cache. The measured standalone pair does not add a host import;
+it remains valid for the recorded source hash. A host-facing late registration
+could nevertheless stale that cached index. Register/flush dependencies before
+capturing emission indices, and account for a capability cache created by an
+earlier emitter, not just one created in this function. Keep this local to the
+owned admission emitter rather than changing shared migration machinery.
+Revalidate after any reordering; previous receipts do not validate new bytes.
+
+The focused function-wrapped source is a reduced control, not an exact original
+reproduction. Its baseline host failures must remain documented, with no
+weakened assertions or skipped tests presented as passes. The unmodified
+maintained original/control pair remains the direct conformance evidence.
+
+### 2026-09-28 frozen census index 69 accepted
+
+Session 95986 terminated with exit 1 after 187.96s: **86 pass, 6 fail of
+92**, no compile errors/skips. Maintained completeness confirms all 92
+registered verdicts with zero exclusions. JSONL SHA256:
+`ffd0dbf8a0d9b809736ac8fe05b9c065afa70ade267291c289dc16a8e2c8b020`;
+completion SHA256:
+`c58afd28d6a8f854775d7ebbdc92bc03f1151b89ad7284c6d003a019c9e4544c`.
+All 70 accepted receipt pairs and manifest identities revalidate: **6,441
+unique = 6,025 pass + 366 fail + 50 compile errors**, 5,337 unmeasured.
+Next index is 70. Frozen failures include typed-array tag getter, primitive
+locale-string dispatch, ArrayBuffer slice species prototype, generator
+restricted properties/return-yield, and PluralRules resolvedOptions. This is
+not a current-source attribution or integrated conformance result.
+
+### Promise revised helper lifecycle: maintained pair revalidated
+
+After dependency reordering and a local canonical executor-index snapshot,
+source SHA256 is `7187330a4e1bbd663ccf8652a7e321cd1f032b142e5da0b92456f863b707a5ba`.
+Run `20260928-181704` (session 62509 terminal) remains **2/2 pass** on the
+unchanged original/control manifest, zero exclusions. Root independently read
+both verdict rows and reran completeness. JSONL SHA256:
+`161555693ef8ac3807db4156008fa3daf9d26dd581e3b3dfd49651f978830681`;
+completion SHA256:
+`4818d1e1f85a332ce3de3ae770a6e9449dee2cfcdde7a3934d98310b0c129032`.
+Fresh bundle token `6c38279709e304b0`, adapter `a69c7af62d66e143`.
+The four newly added custom-C controls passed the Node oracle before execution;
+the eight-check standalone focused suite remains pending at this checkpoint.
+No host-mode conformance, full-suite result, or publication is claimed.
+
+### Promise focused controls passed on revised candidate
+
+Owner-reported terminal session 51170: **8/8 standalone focused checks pass**,
+40.27s total (10.24s tests), source hash unchanged from the revised pair above.
+The checks cover reduced callback prototype/surface, settle and ordinary-object
+controls, custom-C all/race thenables, captured TypeError for non-callable
+resolve without element invocation, and one resolver Get before then. These
+are focused compiler checks, separate from the two original Test262 rows.
+Normal repository gates and the local checkpoint are next; this does not claim
+full-suite conformance or permission to publish.
+
+### Promise final formatted focused receipt and gates
+
+Root independently inspected `/private/tmp/5197-focused-final.aWqcOI/vitest-report.json`:
+success true, **8 total/8 passed/0 failed/0 pending**, with all eight named
+assertions passed. Receipt SHA256:
+`5aa53e1d3d79212517d20aec7c9beec5e098dfcc331665ad678b2dd53bcbe9f6`.
+Final focused fixture SHA256:
+`bfb0de117310de635fce93961af29ff56fd4b3a7b78e5b5f53a69297d422228e`.
+Session 97141 is terminal. Owner reported normal full formatting (54100),
+lint (86750), and typecheck (87696) all terminal/pass; the initial formatting
+failure was corrected in the owned test file and rerun, not bypassed.
+Exact-scope staging and normal commit hooks are pending at this checkpoint.
+
+### Promise checkpoint complete locally
+
+Commit `65764586be438725f83c2e6e7ae15b11551e3001` contains only the owned source,
+standalone focused test, exact two-row manifest, and #5197 issue handoff. Root
+verified the clean worktree, Thomas author, Codex coauthor/model/validation
+trailers, and unchanged measured source/test hashes. Normal hook session 82221
+passed staged formatting/lint, LOC/function budgets, changed-root 8/8 tests,
+and oracle ratchet. No push or PR is claimed. Renewed authorization for this
+branch's source/test/handoff upload and upstream PR was requested explicitly;
+do not infer it from automatic goal continuation.
