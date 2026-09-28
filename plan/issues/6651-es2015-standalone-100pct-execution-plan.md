@@ -4,7 +4,7 @@ title: "ES2015 standalone → 100%: cluster execution plan from the 2026-09-20 c
 status: in-progress
 sprint: current
 created: 2026-09-20
-updated: 2026-09-24
+updated: 2026-09-27
 priority: high
 horizon: xl
 feasibility: hard
@@ -169,6 +169,18 @@ assignee: "ttraenkler/fable-es2015-plan"
 #     `$__ta_ctor`, which the Int8Array `$Object` carrier is not). The first cut
 #     inlined the arm here and cost +68 / +65; extracting it left these 8.
 loc-budget-allow:
+  # 2026-09-27 — cluster B, slice B8 (receipt under `## Cluster status`). Two
+  # god-files, both paths already listed below and restated per the
+  # stranded-grant rule. Both mechanisms live in NEW leaves
+  # (`regexp-symbol-any-receiver.ts`, `regexp-compile-binding.ts`).
+  #   - `src/codegen/regexp-standalone.ts` +7: two imports, the one-line
+  #     `compiledRegExpBinding` decline at the top of `staticRegExpFlags`, and the
+  #     hand-off in `tryCompileStandaloneRegExpSymbolCall`'s untyped-receiver
+  #     branch (it passes the two regexp-standalone helpers the leaf needs as
+  #     callbacks, so the leaf does not import its own importer).
+  #   - `src/codegen/index.ts` +3: `resolveWasmTypeForClosureReturn` loops over
+  #     union members instead of reading the whole type's symbol — the check it
+  #     already made, applied to `null | { get 0() {…} }`.
   # 2026-09-26 — lane SC1 (a generator body could not see a `var` a
   # PARAMETER-LIST direct eval introduced; receipt at the end of this file).
   # `src/codegen/generators-native.ts` +20 (path already listed below, restated
@@ -2500,6 +2512,10 @@ as a complete no-op, and was deleted before a type-classification probe
 reported through the key list) showed the receiver was never a view. Cost:
 about an hour. The rule that falls out: **probe through
 `testWithTypedArrayConstructors`, never through a locally-bound constructor.**
+
+The 4: `@@match/g-match-empty-{coerce,set}-lastindex-err` (items 1, 2),
+`annexB/…/compile/flags-to-string` (item 3), `String.prototype.replace/cstm-replace-get-err`
+(item 4, CE → pass).
 
 #### Controls
 
@@ -8014,6 +8030,144 @@ Half-done: target 2 (dropped, see above). A static-only module (static views, no
 still gets no arms; test262's TypedArray modules always have both, and
 registering the dyn carrier just for the arms would change every static-view
 module's bytes.
+
+### 2026-09-27 — Cluster B, slice B8: the dynamic grammar was already done; a null-dropped accessor return, an `any` receiver that compiled to nothing, `compile`'s stale flags, a one-argument `replace`
+
+- **Branch** `issue-6651-b8-regexp-dynamic` (local, not pushed), base
+  `origin/main` @ `c2601efa89`. Engine for every verdict: QuickJS (artifact
+  `073742801ba7`, adapter `d4799bda84cfed0d`), `--standalone --isolate`,
+  24-row chunks, one runner at a time; source sha checked unchanged first→last
+  on every measured tree.
+
+#### Target 1 (dynamic pattern grammar) — measured, nothing left to do
+
+The round-3 handoff's "biggest lever" (`a+b`, `\d`, classes at run time; 9 rows
++ `species-ctor-ctor-non-obj`) **landed on main before this slice** as #6677
+(`regex-runtime/compiler.ts`, the full-grammar runtime compiler spliced into
+`__regex_compile_dynamic_simple`'s out-of-subset branch). Measured on this
+base: every one of those rows passes — `compile/pattern-string-invalid{,-u}`,
+`compile/pattern-string-u`, `RegExp-invalid-control-escape-character-class`,
+`unicode_restricted_identity_escape{,_alpha,_c}`, `{match,search}/cstm-*-is-null`,
+`@@split/species-ctor-ctor-non-obj`. The manifest base is therefore
+**127 pass / 19 fail / 1 CE**, not B7's 116. B8 took the tail instead.
+
+#### What landed (the tail)
+
+1. **`resolveWasmTypeForClosureReturn` looks through a union** (`index.ts`,
+   +3). An `exec` override `function () { if (…) return null; return { get 0()
+   {…} }; }` has return type `null | {readonly 0: string}`; #3051 S3's
+   accessor-literal → externref rule read the WHOLE type's symbol, which a
+   union does not have, so the closure's wasm return was the literal's STRUCT
+   and the host accessor object null-dropped on the return-path `ref.test`
+   (WAT: `ref.test (ref 49)` → `ref.null 49`). `@@match` saw `null` = no match,
+   exec ran once, the getter never. Now each union member is checked.
+2. **`r[Symbol.match|search|replace|split](…)` on an `any` receiver** (new leaf
+   `regexp-symbol-any-receiver.ts`). `var r; r = /./g;` types `r` as `any`
+   inside a nested function; `tryCompileStandaloneRegExpSymbolCall` returned
+   `undefined` for an unproven receiver, the caller reported the #682/#1474
+   refusal, and `compileExpression`'s #1919 transaction ROLLED THE ERROR BACK —
+   the call compiled to `global.get $__undefined; drop` with no diagnostic.
+   Now: §13.3.6.1 at run time — a `$NativeRegExp` receiver calls the reified
+   `RegExp.prototype[@@id]` singleton (a runtime-keyed `[[Get]]` on the carrier
+   does not reach `%RegExp.prototype%` yet: `r.test` on an `any` receiver
+   answers `undefined`, probe `.tmp/b8/p/w20.js`); anything else does
+   `__extern_get(V, @@id)`, arguments after the Get, `IsCallable` → TypeError,
+   `__apply_closure`.
+3. **Annex B `compile` invalidates the literal's static flags** (new leaf
+   `regexp-compile-binding.ts`, one call at the top of `staticRegExpFlags`).
+   `var subject = /a/g; subject.compile('a','i')` — the `.test` lane kept
+   honouring `g`. A binding that receives `.compile(` now answers "flags
+   unknown" (runtime flags). Applying the same decline to
+   `isTrustedBackendCreatedRegExpBinding` was tried first and LOST six
+   `compile/*` rows (`toString()` read `undefined`), so it is not there.
+4. **One-argument `replace`/`replaceAll`** (`string-replace-dynamic.ts`, +4):
+   `''.replace(poisonedReplace)` was the #1474 compile refusal; the runtime
+   dispatcher takes arity 1 with `replaceValue = undefined`.
+
+#### Measurements
+
+| set | rows | before | after | Δ |
+| --- | ---: | ---: | ---: | --- |
+| manifest `B-regexp-protocol.txt`, standalone | 147 | 127 pass / 19 fail / 1 CE (`.tmp/b8/bm-chunk-0*.log`; chunk 04 re-run on the frozen base after a 20 s mid-run edit window, identical) | **131** / 16 / 0 (`.tmp/b8/am-chunk-0*.log`, frozen source `c28cd7a8…` first→last) | **+4, 0 pass→non-pass** (every after non-pass row was non-pass before, same status) |
+
+#### Controls
+
+- **Reach, measured by instrumentation rather than grep.** Every mechanism was
+  given a detection hook in a scratch copy of the after tree and every row that
+  could reach one was compiled (primary + strict rerun, BOTH targets): the
+  union of every file with an accessor (3,680), every file naming
+  `Symbol.{match,search,replace,split}` (340), every `.compile(` file (23),
+  every `.replace(`/`.replaceAll(` file (102), and the manifest — 4,023 rows
+  (`.tmp/b8/detect-all.txt`). Two detection processes were OOM-killed; the
+  1,581 rows they had not reached were narrowed by a TypeScript parse to the
+  502 with an accessor declared in an OBJECT LITERAL (a class accessor cannot
+  fire the union rule; none of the 1,581 names a `@@` symbol, `.compile(` or
+  `.replace(`) and those 502 were compiled. Mechanisms fired on **17 rows**
+  (`.tmp/b8/det/fired-all.tsv`). Harness-level accessor literals
+  (`temporalHelpers.js`, `testIntl.js`) return a literal directly, never a
+  union, so cannot fire.
+- **Byte differential** (base = `git archive` of `c2601efa89`) on the 17 fired
+  rows + a 40-row sample of non-fired candidates, both targets: the 40 sampled
+  rows are byte-identical on both targets (validates the detection); changed:
+  15 standalone, 4 host.
+- **Verdicts on every changed row** (`.tmp/b8/v{b,a}-{sa,h}.log`, `--isolate`):
+
+  | lane | changed rows | base | after |
+  | --- | ---: | --- | --- |
+  | standalone | 15 | 9 pass / 3 fail / 3 CE | **13 pass** / 2 fail |
+  | host | 4 | 2 pass / 2 fail | **4 pass** |
+
+  Standalone +4 are the four manifest rows; the 2 remaining are
+  `annexB/String/prototype/{replace,replaceAll}/custom-replacer-emulates-undefined`
+  (IsHTMLDDA): CE → fail, both non-pass. Host +2 are
+  `g-match-empty-{coerce,set}-lastindex-err` (the union rule is target-agnostic).
+  The other 8 standalone changed rows (`compile/*`, `g-match-no-*`) pass on both.
+- **Zero pass→non-pass.**
+- **Byte identity** `website/playground/examples/**` + 3 benchmarks, both
+  targets: **32/32 identical** (`.tmp/b8/bytes-{base,after}.txt`).
+- `node scripts/equivalence-gate.mjs`: 22 failing = the 22 known.
+  `pnpm run check:ir-fallbacks`: OK.
+- **Pins**: `tests/issue-6651-b8-regexp-protocol-tail.test.ts` (4 test262 rows)
+  and `…-inline.test.ts` (4 programs) — **8/8 red on the base tree**
+  (`.tmp/b8/pin-b8-ONBASE.log`), green after. B-family and neighbour pins, one
+  worker, `VITEST_FORK_MAX_OLD_SPACE_SIZE=2048` (`.tmp/b8/pins-all.log`): B3,
+  B4, B5 ×4, B6 ×2, B7 ×2, exec protocol, `string-symbol-protocol`,
+  `issue-3794`, `issue-6662`, `issue-6665`, `issue-6677` all green (178/185);
+  the 7 failures are all `issue-3051.test.ts` host-lane cases that fail
+  identically on the base tree (`.tmp/b8/pin-3051-ONBASE.log`, same 7 names).
+- Gates (bare): loc (grant above), func, coercion-sites, oracle-ratchet,
+  dead-exports, typecheck, biome lint, compiler-boundaries inventory — all
+  exit 0; `LOC_GATE_BASE=aca46e64cd` (origin/main at hand-back) loc/func
+  re-runs exit 0. `origin/main` advanced `c2601efa89 → aca46e64cd` during the
+  slice (#6690 + artifact refreshes; the only overlapping file is
+  `scripts/compiler-boundaries.json`, additive); NOT merged, so every
+  measurement above is against `c2601efa89`.
+
+#### Residuals in the manifest
+
+| rows | first failure | what it needs |
+| ---: | --- | --- |
+| 8 | `*/cross-realm` (6), `proto-from-ctor-realm`, `@@split/splitter-proto-from-ctor-realm` | `$262.createRealm` — wont-fix per definition of done |
+| 3 | `String.prototype.match/invoke-builtin-match`, `search/invoke-builtin-search{,-searcher-undef}` | a WRITE to `RegExp.prototype[Symbol.match]` is not observable at all (probe `.tmp/b8/p/m1.js`: reading it back returns the builtin) — the RegExp brand's symbol members need the seeded mutable own-property table other brands have (`__protoidx_get_r`, `native-proto-instance-method-read.ts`), then RegExpCreate's `Invoke(rx, @@match)` has to read it |
+| 2 | `exec/{failure,success}-lastindex-access` | not one cause: after `exec`, `r.lastIndex === counter` is true but `assert.sameValue(r.lastIndex, counter)` is false, and `var li = r.lastIndex` / `typeof r.lastIndex` see a NUMBER (lib.d.ts `number` drives the local's f64 type and a static `typeof` fold) — value-rep, not RegExp |
+| 2 | `String.prototype.indexOf/searchstring-tostring-{errors,toprimitive}` | the argument goes through the lenient `__extern_toString` (WAT of `.tmp/b8/p/i1.js`): `Object(Symbol())` and `{toString: null, valueOf: null}` do not throw. Spec ToString (`__extern_to_string_spec`) at the `String.prototype.*` argument site — cross-cutting (every string method with an object argument), cluster H |
+| 1 | `@@split/coerce-flags-err` | unchanged from B7 (cluster C `__module_init` null-deref) |
+
+#### Found while probing (not in the manifest)
+
+- **`compileExpression`'s #1919 rollback turns a refusal into a silent
+  `undefined`** whenever the caller of a refusing arm is itself speculative:
+  item 2 above was exactly that — success, no diagnostic, the call gone. Any
+  other `reportError(…); return null` arm reached the same way has the same
+  failure mode; worth a lint.
+- `log.push(f())` where evaluating `f()` itself pushes onto `log` (a getter
+  here): the outer push overwrites the inner one (`.tmp/b8/p/g5.js`: log reads
+  `"a,b,c"`, spec `"m2,a,m3,b,m4,c"`) — `push` appears to read the length
+  before evaluating its argument. Untriaged, not RegExp.
+- `Object.getPrototypeOf(r) === RegExp.prototype` is false for an `any`-typed
+  RegExp, and a runtime-keyed method read (`var t = r.test`) is `undefined`
+  (probes `w15`/`w20`); the typed spelling works. The `$NativeRegExp` carrier
+  has no `__extern_get` proto-walk arm (Map has none either; Date does).
 
 ## Handoff — 2026-09-21 (round 1 closed, round 2 ready to dispatch)
 
