@@ -145,6 +145,7 @@ import {
   isNativeGeneratorCandidate,
   registerNativeGenerator,
 } from "./generators-native.js";
+import { namedFunctionOwnNameShadow } from "./generators-native-ast-scan.js"; // (#6651 A7)
 import type { NativeGeneratorInfo } from "./context/types.js";
 // (#3270) Extracted closure subsystems. Re-exported below so external importers
 // that reference these symbols via `./closures.js` are unaffected.
@@ -2993,7 +2994,11 @@ export function compileLiftedClosureBody(
   // closure struct).  Also register in closureMap so the call-site
   // compiler emits call_ref instead of a direct call.
   let funcExprName: string | undefined;
-  if (ts.isFunctionExpression(arrow) && arrow.name) {
+  // (#6651 A7) A parameter of the same name shadows the self binding in the
+  // parameters AND the body, so it is never registered; a body declaration
+  // shadows it only after the parameter prologue (see the var hoist below).
+  const ownNameShadow = ts.isFunctionExpression(arrow) ? namedFunctionOwnNameShadow(arrow) : undefined;
+  if (ts.isFunctionExpression(arrow) && arrow.name && ownNameShadow !== "params") {
     funcExprName = arrow.name.text;
     // Map the name to the __self param (index 0) inside the lifted body
     liftedFctx.localMap.set(funcExprName, 0);
@@ -3105,6 +3110,13 @@ export function compileLiftedClosureBody(
     if (presize.size > 0) liftedFctx.stringBuilderPresize = presize; // #1761
   }
 
+  // (#6651 A7) The parameter prologue above saw the fn-expr's self binding; a
+  // body var/function/lexical declaration of that name wins from here on.
+  if (funcExprName !== undefined && ownNameShadow === "body") {
+    liftedFctx.localMap.delete(funcExprName);
+    liftedFctx.readOnlyBindings?.delete(funcExprName);
+    ctx.closureMap.delete(funcExprName);
+  }
   // Pre-hoist function-scoped `var` declarations into the closure's localMap
   // (#1745). Regular functions run this in function-body.ts; closures/arrows
   // previously skipped it, so a `var x` inside a closure body that collided

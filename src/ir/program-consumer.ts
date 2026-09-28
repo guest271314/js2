@@ -358,14 +358,24 @@ export function acceptPreparedIrProgram(
     }
   }
 
+  const sourceClosures =
+    options.backend === "wasmgc" && options.target === "standalone"
+      ? prepareNativeSourceClosureInput(program, runtime)
+      : undefined;
+  const nativeInvocation =
+    sourceClosures && planNativeInvocationRequirements(sourceClosures, { utf8Storage: options.utf8Storage === true });
   let nativeStrings: NativeStringValueReservationInput | undefined;
   if (options.backend === "wasmgc" && options.target === "standalone") {
     const demands = collectNativeStringValueDemands(program, runtime);
-    const native = planNativeStringValuePhysical(demands, {
-      representation: "native-string",
-      utf8Storage: options.utf8Storage === true,
-      stringConcatEmptyIdentity: options.stringConcatEmptyIdentity ?? true,
-    });
+    const native = planNativeStringValuePhysical(
+      demands,
+      {
+        representation: "native-string",
+        utf8Storage: options.utf8Storage === true,
+        stringConcatEmptyIdentity: options.stringConcatEmptyIdentity ?? true,
+      },
+      nativeInvocation,
+    );
     if (native.kind !== "none" && native.kind !== "planned") return native;
     if (native.kind === "planned") {
       const outputRequirements = native.plan.output
@@ -373,6 +383,7 @@ export function acceptPreparedIrProgram(
         : undefined;
       if (outputRequirements && "kind" in outputRequirements) return outputRequirements;
       nativeStrings = Object.freeze({
+        ...(nativeInvocation ? { invocationRequirements: nativeInvocation } : {}),
         ...(outputRequirements ? { outputRequirements } : {}),
         demands,
         plan: native.plan,
@@ -383,12 +394,6 @@ export function acceptPreparedIrProgram(
     }
   }
   const nativeNumberFormat = prepareNativeNumberFormat(program, options, runtime);
-  const sourceClosures =
-    options.backend === "wasmgc" && options.target === "standalone"
-      ? prepareNativeSourceClosureInput(program, runtime)
-      : undefined;
-  const nativeInvocation =
-    sourceClosures && planNativeInvocationRequirements(sourceClosures, { utf8Storage: options.utf8Storage === true });
   const physical = planPhysicalSetup(program, options, runtime, nativeStrings, nativeNumberFormat);
   if (physical.kind !== "planned") return physical;
 
@@ -516,6 +521,7 @@ function prepareNativeEmission(accepted: AcceptedPreparedIrProgram, plan: Physic
     assertNativeInvocationRequirementsCurrent(record.nativeInvocation);
     if (
       record.nativeInvocation.source !== record.sourceClosures ||
+      record.nativeStrings?.invocationRequirements !== record.nativeInvocation ||
       record.nativeInvocation.key !== plan.nativeInvocation?.key
     )
       emissionFailed("native invocation input differs from its selected source owner");
@@ -1285,6 +1291,7 @@ function materializePhysicalProgram(
           values: nativePack.number.values,
           valuePlan: record.nativeStrings.valueRequirements,
           valueDependencies: nativePack.number.dependencies,
+          ...(nativePack.number.booleanBoxes ? { booleanBoxes: nativePack.number.booleanBoxes } : {}),
           strings: nativePack.strings,
           vectors: vectorTypes,
           vectorPlan: plan.vectors,
