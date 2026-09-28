@@ -169,6 +169,22 @@ assignee: "ttraenkler/fable-es2015-plan"
 #     `$__ta_ctor`, which the Int8Array `$Object` carrier is not). The first cut
 #     inlined the arm here and cost +68 / +65; extracting it left these 8.
 loc-budget-allow:
+  # 2026-09-28 — cluster D slice D4 (`class X extends Promise` in standalone,
+  # #5197 G9; receipt under `## Cluster status`). The mechanisms live in two NEW
+  # leaves: `promise-subclass-proto-link.ts` (the `$bag.$proto` link, the
+  # `instanceof` walk, the inherited-`resolve` fallback) and
+  # `promise-class-receiver-settle.ts` (`Promise.{resolve,reject}.call(C)` for a
+  # class `C`). What cannot move is where each decision is taken:
+  #   - `class-bodies.ts` +18: one import, one link call after the explicit
+  #     `super(executor)` Promise arm, and the implicit-constructor Promise arm
+  #     (a `} else if` between the linked-provider arm and the builtin ladder it
+  #     precedes — the ladder would otherwise commit to the identity-only object);
+  #   - `call-namespace-static.ts` +4: one import and the class-receiver settle
+  #     dispatch (plus its comment) at the end of the `Promise.{resolve,reject}
+  #     .call` arm, after D1's function-constructor arm it complements;
+  #   - `identifiers.ts` +3: one import and the two-line standalone `instanceof`
+  #     arm, ahead of the host-only Promise-subclass arm it is the twin of.
+  # All three paths are already listed below (restated per the stranded-grant rule).
   # 2026-09-27 — cluster B, slice B8 (receipt under `## Cluster status`). Two
   # god-files, both paths already listed below and restated per the
   # stranded-grant rule. Both mechanisms live in NEW leaves
@@ -899,6 +915,14 @@ loc-budget-allow:
   # lane's trap. Inlined at the call site the same change was +34.
   - src/codegen/expressions/identifiers.ts
 func-budget-allow:
+  # 2026-09-28 — cluster D slice D4: `compileHostInstanceOf` +2 (the standalone
+  # Promise-subclass `instanceof` arm — its body is `tryEmitPromiseSubclassInstanceOf`
+  # in the new leaf), `compileSuperCall` +1 (the bag-link call after the explicit
+  # `super(executor)` Promise arm), `compileClassBodiesInner` +16 (the implicit
+  # Promise-constructor arm, see the LOC grant) and `compileNamespaceStaticCall`
+  # +3 (the settle dispatch). The last two keys are already listed below.
+  - src/codegen/expressions/identifiers.ts::compileHostInstanceOf
+  - src/codegen/class-bodies.ts::compileSuperCall
   # 2026-09-26 — lane SC1: `buildNativeGeneratorPlan` +15 as the gate measures it
   # (path already listed below, restated per the stranded-grant rule), of which 9
   # are the comment
@@ -8316,6 +8340,67 @@ drive already takes any constructible `C`.
 - The remaining 23 fails are unchanged and belong to D2b's residual table (`prototype/then`
   species reads, realm, `Object.prototype.toString` tag, executor/resolve-element
   `[[Prototype]]`, `exception-after-resolve-*`, `regular-subclassing`, `iter-arg-is-string`).
+
+### 2026-09-28 — Cluster D, slice D4
+
+Target: the 6 manifest rows where a class extends `Promise` (#5197 G9) —
+`{all,race,resolve,reject}/ctx-ctor` and `{all,race}/invoke-resolve-on-promises-every-iteration-of-custom`.
+
+#### Design
+
+**Measured first, because D3's three sites were partly stale.** On this branch's base
+(D3 merged): the class OBJECT already exists standalone (`class-bodies.ts` stopped skipping
+`__class_<Name>` in #5191 — D3's site 1 note is stale on that half), and explicit
+`super(executor)` to `Promise` already builds a real `$Promise` through the executor bridge
+(`emitStandalonePromiseFromExecutorValue`, the Deno `SafePromise` arm) and then installs
+`constructor` as an own property of the carrier's `$bag` (#5383 S2m) — so D3's site 2 holds
+only for the IMPLICIT constructor (`class Custom extends Promise {}`), and
+`instance.constructor === C` already answers through a dynamic receiver. What was really
+missing (probes `.tmp/d4/js/c1..c7`):
+
+1. the value read (`identifiers.ts` ×2) emitted `env::__promise_subclass_ctor` with no
+   host-free gate — every row failed to compile on that alone;
+2. the native construct dispatcher (`standalone-class-construct.ts`) excludes every
+   builtin-parent class, so `Construct(C, «executor»)` threw "not a constructor";
+3. nothing on a `$Promise` says which class built it, so a dynamic `v instanceof C` was false;
+4. `Promise.{resolve,reject}.call(C)` has no arm for a CLASS `C` (only D1's function arm);
+5. D3's receiver admission excluded Promise-rooted classes.
+
+**Representation — no struct change.** A Promise-subclass instance IS the native `$Promise`
+carrier (so settle / `then` / the combinator drives take it unchanged); its [[Prototype]] is
+recorded the way #2917 records it for the `extends Array` vec carrier: the carrier's intrinsic
+`$bag` (#4241) is an `$Object` whose `$proto` field no bag consumer reads (every bag read is
+own-only, #4563), so construction stores `C.prototype` there. `$Promise` itself — and therefore
+every promise allocation in every module — is untouched. Rejected alternatives: a proto field on
+`$Promise` (moves every module that allocates a promise); a `$Promise` subtype struct (every
+`ref.test $Promise` consumer would still accept it, but `struct.new` sites, the final-type
+marking and the settle bodies' casts would all need auditing for a 6-row slice).
+
+**`super(executor)`** (§27.2.3.1 via §10.1.13 OrdinaryCreateFromConstructor): the existing
+explicit arm already does steps 3-11 (allocate pending, CreateResolvingFunctions, call the
+executor, reject on abrupt completion); D4 adds the same arm for the implicit constructor
+(`class X extends Promise {}` → `constructor(...args) { super(...args) }`, direct heritage
+`Promise` only) and, on both, the bag link after S2m's `constructor` install.
+
+**`instanceof` / `.constructor`.** `.constructor` is S2m's own `constructor` (unchanged).
+`v instanceof C` for a Promise-subclass identifier `C`, standalone, becomes
+`__promise_proto_instanceof(v, C.prototype)`: OrdinaryHasInstance steps 4-6 over the bag link
+(or an `$Object`'s own `$proto`), `ref.eq` until null — so `Y extends X extends Promise` needs
+no per-class list.
+
+**[[Construct]].** A standalone value read of a Promise subclass marks the module; the class
+construct dispatcher then admits Promise-rooted classes (their `<C>_new` returns the carrier).
+Every module that performs such a read failed to compile before D4, so no previously-compiling
+module's dispatcher moves.
+
+**`Promise.{resolve,reject}.call(C, x)`** for a compiled class `C`: NewPromiseCapability(C)
+through D3's construct call, then `Call(capability.[[Resolve]] / [[Reject]], undefined, «x»)`,
+return `capability.[[Promise]]` (§27.2.4.6 / .7; PromiseResolve's step 1 fast path — `x` a
+promise whose `constructor` is `C` — first).
+
+**Gate.** Everything above is `--target standalone` and keyed on a class whose builtin root is
+`Promise`; the gc lane and every module with no such class are byte-identical by construction
+(checked, not assumed — controls below).
 
 ## Handoff — 2026-09-21 (round 1 closed, round 2 ready to dispatch)
 

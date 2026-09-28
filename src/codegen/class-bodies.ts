@@ -22,6 +22,7 @@ import { irPreparedNestedOrdinaryClass, type IrNestedClassFieldCallAdmission, ty
 import { isHostConstructibleBuiltin, isNativeCollectionBuiltin } from "./builtin-tags.js";
 import { isStandalonePromiseActive } from "./async-scheduler.js"; // (#2637 B2) host-only Promise-subclass ctor gate
 import { emitStandalonePromiseFromExecutorValue } from "./promise-executor.js"; // native standalone Promise-subclass super(executor)
+import { emitPromiseSubclassProtoLink, isStandalonePromiseSuperForwarder } from "./promise-subclass-proto-link.js"; // (#6651 D4)
 // (#3132 S2a) Bounded async-generator METHOD drive: no-`this`/`super`/
 // `arguments` methods route through the same native producer as fn
 // declarations/expressions (the drive gate self-limits to standalone/wasi).
@@ -2830,6 +2831,22 @@ function compileClassBodiesInner(
       );
       if (!built) fctx.body.push({ op: "ref.null.extern" });
       fctx.body.push({ op: "local.set", index: selfLocal });
+    } else if (
+      !ctor &&
+      isExternrefBacked &&
+      isStandalonePromiseSuperForwarder(ctx, className, implicitForwarderArity)
+    ) {
+      // (#6651 D4) The implicit `constructor(...args) { super(...args) }` of a
+      // `class X extends Promise {}` builds the real `$Promise` from `args[0]`,
+      // exactly as the explicit `super(executor)` branch does — not the
+      // identity-only plain object, which ignores the executor.
+      const built = emitStandalonePromiseFromExecutorValue(ctx, fctx, () =>
+        fctx.body.push({ op: "local.get", index: 0 }),
+      );
+      if (!built) fctx.body.push({ op: "ref.null.extern" });
+      fctx.body.push({ op: "local.set", index: selfLocal });
+      emitSetSubclassProto(ctx, fctx, selfLocal, className, "Promise");
+      emitPromiseSubclassProtoLink(ctx, fctx, selfLocal, className);
     } else if (!ctor && isExternrefBacked) {
       const parentName = ctx.classBuiltinParentMap.get(className);
       if (parentName) {
@@ -4308,6 +4325,7 @@ export function compileSuperCall(
       fctx.body.push({ op: "local.set", index: selfLocal });
       emitSetSubclassProto(ctx, fctx, selfLocal, childClassName, builtinParent);
       emitSetSubclassUserBrand(ctx, fctx, selfLocal, childClassName);
+      emitPromiseSubclassProtoLink(ctx, fctx, selfLocal, childClassName); // (#6651 D4)
       return;
     }
     const hasSpread = args.some((a) => ts.isSpreadElement(a));

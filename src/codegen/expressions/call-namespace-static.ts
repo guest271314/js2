@@ -86,6 +86,7 @@ import {
 } from "../promise-combinators.js";
 import { isCustomCombinatorMethod, tryEmitCustomCombinatorCall } from "../promise-custom-combinator.js";
 import { tryEmitClassReceiverCombinatorCall } from "../promise-class-receiver-drive.js"; // (#6651 D3)
+import { tryEmitClassReceiverSettleCall } from "../promise-class-receiver-settle.js"; // (#6651 D4)
 import { emitStandalonePromiseCombinatorDrive } from "../promise-combinator-drive.js";
 import type { InnerResult } from "../shared.js";
 import { brandExternMethodResult, coerceType, compileExpression, VOID_RESULT } from "../shared.js";
@@ -3311,6 +3312,9 @@ export function compileNamespaceStaticCall(
       }
       rollbackSpeculative(ctx, fctx, snap);
     }
+    // (#6651 D4) A compiled-CLASS `C` (including `extends Promise`): Construct(C, «executor»).
+    const classSettled = tryEmitClassReceiverSettleCall(ctx, fctx, expr, settleKind);
+    if (classSettled !== undefined) return classSettled;
   }
   if (
     propAccess.name.text === "call" &&
