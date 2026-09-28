@@ -19445,6 +19445,42 @@
           "standalone": {}
         }
       }
+    },
+    {
+      "generatedAt": "2026-09-28T09:26:11.456Z",
+      "sourceRevision": "355632194772f32e5411e8b0c611c616a5321789",
+      "optimizationLevels": {
+        "js-host": 4,
+        "js-host-native": 4,
+        "standalone": 4
+      },
+      "packages": {
+        "lit": {
+          "jsHostNative": {},
+          "jsHost": {
+            "dynamic": 0.009090443811580851
+          },
+          "standalone": {}
+        }
+      }
+    },
+    {
+      "generatedAt": "2026-09-28T09:59:02.791Z",
+      "sourceRevision": "dd6c16e73e63c7a499e338884c1e0d19c594113a",
+      "optimizationLevels": {
+        "js-host": 4,
+        "js-host-native": 4,
+        "standalone": 4
+      },
+      "packages": {
+        "lit": {
+          "jsHostNative": {},
+          "jsHost": {
+            "dynamic": 0.008812173289468737
+          },
+          "standalone": {}
+        }
+      }
     }
   ]
 }

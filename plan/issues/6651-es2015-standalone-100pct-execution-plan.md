@@ -176,6 +176,17 @@ loc-budget-allow:
   # `cell ?? Get(%Promise%, p)` read) lives in the NEW leaf
   # `promise-subclass-cell-read.ts`; the hand-off cannot move, because it is the
   # arm that would otherwise emit the bare `global.get` of the cell.
+  # 2026-09-28 — cluster A, slice A5 (receipt under the A5 record).
+  # `src/codegen/generators-native.ts` +85 against `origin/main` (path already
+  # listed below, restated per the stranded-grant rule). The target-1 planner
+  # (~690 LOC) lives in the NEW leaf `generator-yield-nested.ts` and the
+  # close-transparency predicate in `generators-native-ast-scan.ts`; what stays
+  # in the god-file is what reads/writes `buildNativeGeneratorPlan`'s own cursor
+  # locals (the `nestedHost` adapter, the arm-2a call, the for-of chain
+  # admission in `emitYield`, the inner-body map) plus two emit seams that have
+  # to sit where the abrupt body / throw route is built. The D2 delegate-close
+  # forwarding moved OUT of `compileState` into `emitDelegateCloseForward`
+  # (net-neutral lines, now called from both abrupt branches).
   # 2026-09-27 — cluster B, slice B8 (receipt under `## Cluster status`). Two
   # god-files, both paths already listed below and restated per the
   # stranded-grant rule. Both mechanisms live in NEW leaves
@@ -986,6 +997,17 @@ loc-budget-allow:
   # `runtime/wasm-struct-host-semantics.ts` beside `normalizeSandboxValue`.
   # (`declarations.ts` is already listed below; `src/runtime.ts` just after.)
 func-budget-allow:
+  # 2026-09-28 — cluster A, slice A5: `buildNativeGeneratorPlan` +40 as the gate
+  # measures it (path already listed below, restated per the stranded-grant
+  # rule). Four pieces, each writing this function's own closure state and so
+  # unable to move behind a seam: the `nestedHost` adapter (it wraps
+  # `linearHost.suspend`, `captureContinuationOperand` and pushes onto
+  # `curStatements`), the arm-2a call in `lowerStatements`, the for-of chain
+  # admission in `emitYield` (it sets `curAbrupt` / `curUnwind`), and the
+  # inner-body map `nativeGeneratorDelegationName` fills for the gate. The
+  # planner itself lives in `generator-yield-nested.ts`, the gate predicate in
+  # `generators-native-ast-scan.ts`. `compileState` SHRINKS (the D2 block moved
+  # into `emitDelegateCloseForward`).
   # 2026-09-26 — lane SC1: `buildNativeGeneratorPlan` +15 as the gate measures it
   # (path already listed below, restated per the stranded-grant rule), of which 9
   # are the comment
@@ -10932,6 +10954,293 @@ yet.**
   computed-key / for-of-`yield*` rows, each needing a verdict. Then (2)-(5).
   Then `git merge origin/main`, re-run the func gate, and hand the SHA over.
 
+#### Resumed — 2026-09-25, rebuilt from this record (different session)
+
+The WIP commit `a80f49d064` above was **never pushed**, and the container that
+held worktree `agent-ab4ec40c80235671d` is gone — `git fetch origin
+a80f49d064` fails and no branch carries it. Nothing touched
+`src/codegen/generators-native.ts` on `main` in the ~28 h after the wrap-up.
+So this slice is being **re-implemented from the record above** by session
+`session_01FEGi3DmyPRPD5dx4kWU8hs`, on branch
+`claude/es6-test262-standalone-g10c7u`, based on `origin/main` @ `f4bb7dfe12`.
+
+Re-verified on that base before starting: all 13 target rows are still
+`compile_error` in the 2026-09-24 standalone baseline (the 9 computed-key rows
+and the 4 `for-of/yield-star*` rows listed in the target table).
+
+**If you are the lane that suspended A5 and your worktree still exists, stop
+and reconcile before resuming it** — push your SHA and say so on this PR rather
+than finishing a twin. The concurrency lesson at the top of this file is why
+this note exists before any code does.
+
+#### Suspended again — 2026-09-25
+
+Stopped at the coordinator's session wrap-up. **Not mergeable: target 2 is
+half-done and no control has run.** Everything below is what was actually done;
+nothing here is a measurement unless it says so.
+
+What is implemented (WIP commit on `claude/es6-test262-standalone-g10c7u`):
+
+- **Target 1, complete as designed.** New leaf
+  `src/codegen/generator-yield-nested.ts`: `bodyHasComputedKeyYield` (the
+  generator gate) and `lowerNestedYieldStatement` (the per-statement walk into
+  spec-ordered events `yield` / `value` / `fn` / `callee` / `op`; every event
+  before the last yield must be a yield, REPLAYABLE, or CAPTURED via
+  `captureContinuationOperand`; an `op` before the last yield refuses; a
+  yield-keyed class FIELD refuses). Wired in `generators-native.ts`:
+  `generatorElemValType` moves gated generators to the boxed-any carrier;
+  `buildNativeGeneratorPlan` gets `nestedYields` + a `nestedHost`
+  (suspend = A4's `linearHost.suspend`, capture = `captureContinuationOperand`,
+  finish = `attachContinuationReplacements` + push); `lowerStatements` arm
+  `2a` runs it before the f64-only #680 continuation arms, direct body only,
+  empty unwind.
+- **Target 2, HALF-DONE.** Done: `lowerForOf` no longer refuses `yield*` in
+  the body (the now-unused `nodeContainsDelegatedYield` is deleted); the
+  native-gen arm of `emitYield` admits a chain of `replay` / `catch` /
+  `iter-close` entries that contains an `iter-close`, and gives the delegation
+  state `curUnwind` (innermost-first) instead of the replay-only `curAbrupt`.
+  **NOT done:** the D2 delegate-close forwarding in `compileState` still lives
+  only in the legacy `else if (state.abruptResume …)` branch. It must be
+  extracted verbatim into `emitDelegateCloseForward(ctx, fctx, info, state,
+  selfLocal, getCaughtExnIdx): Instr[]` and called from BOTH branches (in the
+  `state.unwind` branch: after `fctx.body = abruptBody`, before
+  `emitUnwindWalk`). Until then a `.return()` / `.throw()` at a delegated yield
+  inside a for-of closes the loop iterator but NOT the inner generator. Also
+  planned, not written: in the `throwRoute` `routeInstrs`, clear a native-gen
+  delegation slot the way the protocol-iterable one is cleared (byte-inert —
+  no native-gen yield-star state had a throw route before this change —
+  and needed so a runtime throw caught by a `catch` in the loop body does not
+  leave a stale inner for the next iteration).
+
+What was measured: **nothing through the runner.** The base A-manifest run was
+killed before it printed its counts (wrap-up), so there is no before/after on
+this base yet. Only single-file standalone probes (compile + instantiate with no
+imports + run), on the branch:
+
+- object literal `get [yield]` / `set [yield]` keyed by `.next('first')` /
+  `.next('second')`: both accessors land and dispatch (`imports []`);
+- a class expression with 4 yield-keyed accessors, a class declaration with 2
+  yield-keyed methods, and `check(c[yield 9], 9)`, `check(c[yield 9] = 9, 9)`,
+  `check(c[String(yield 9)](), 9)` and friends: 17 suspensions, 0 check
+  failures, `imports []`.
+
+Controls NOT run (all of them): the 197-row manifest before/after; the
+compile-only byte differential on both targets; playground/benchmark byte
+identity; `node scripts/equivalence-gate.mjs`; `pnpm run check:ir-fallbacks`;
+the A-family pin suites on both trees; the new pin suite (not written yet);
+typecheck / lint / the loc, func, coercion, oracle-ratchet and dead-exports
+gates (only the commit hook's fast checks ran).
+
+Resume steps (`.tmp/` is not pushed — these are the commands, not file refs):
+
+1. `git worktree add <wt> -b a5 origin/claude/es6-test262-standalone-g10c7u`;
+   symlink `node_modules`, `.test262-cache` and `test262` from the main
+   checkout. Make the source-clean base with `git archive <this WIP's parent,
+   b5e1168594> | tar -x -C <wt>/.tmp/basetree` (symlink the same three into it).
+2. Finish target 2 (the extraction above), then `npm run -s typecheck`.
+3. Base and branch manifest runs, one at a time, under the shared lock
+   (`flock /tmp/claude-0/t262.lock …`), in the tree being measured:
+   `JS2WASM_EVAL_ENGINE=quickjs COMPILER_POOL_SIZE=2 npx tsx
+   scripts/run-test262-paths.mts <chunk> --standalone --isolate > out.log 2>&1`
+   with the manifest `plan/agent-context/6651/A-generators-standalone.txt`
+   split `head -100` / `tail -n +101`. The script prints only non-pass rows
+   after `=== counts ===`; a row absent from that list passed.
+4. Then every control the brief lists (byte differential on both targets over
+   A4's reach set ∩ sources with `yield*` or a `[`…`yield` computed key, with
+   verdicts on each changed standalone row; 32-program byte identity; the
+   equivalence gate; `check:ir-fallbacks`; the A-family pin suites on both
+   trees; the new pin suite `tests/issue-6651-a5-computed-key-yield.test.ts`,
+   red on base, `result.imports` asserted `[]`).
+
+#### Resumed and finished — 2026-09-28
+
+Resumed by session `session_01FEGi3DmyPRPD5dx4kWU8hs` in worktree
+`/home/user/js2/.claude/worktrees/agent-af2f609008ac6fb35` (local branch
+`a5-resume`, every commit pushed to `claude/es6-test262-standalone-g10c7u`,
+PR #6101). Every number below was measured in this session unless it names
+another artifact.
+
+**Commits.**
+
+| sha | what |
+| --- | --- |
+| `9a0f2694fa` | merge `origin/main` @ `732d9f75e6`. One conflict, the native-gen `yield*` arm of `emitYield`: kept main's `\|\| hostLane` (#1691 keeps a nested generator's `yield*` eager on host) AND A5's for-of chain admission (which replaces the replay-only refusal). Plan file: both sides kept. |
+| `99ca4b6002` | target 2 finished + `quality` fix (details below) |
+| `4401a4126d` | pin suite |
+| `3ee2e051c5` | retire the #680 `fails closed for computed object key` pin (it pinned the refusal target 1 removes); positive twin of the exact shape added to the A5 suite — A4's treatment of its destructuring case |
+| `a245bfe94e` | fix: the harness callee `assert.sameValue` was refused (below) |
+| `5787999b14` | `issue-6651-generator-default-lane`'s NEGATIVE computed-accessor-name case pinned the #680 refusal A5 removes; it now asserts the suspension the A2 carve-out protects (first `next()` stops AT the key, value 1). Red on base, green here |
+| `921912f2e7` | merge `origin/main` @ `3556321947` (102 commits, none in the generator files or these tests). One conflict: `scripts/compiler-boundaries.json`, where main moved the neighbouring generator entries into its later module list; the A5 entry follows them |
+
+**#1691 does not overlap target 2.** It routes a GENERIC-iterable `yield*`
+through the protocol delegation state on the JS host, and bails a native-gen
+delegate back to the eager host path (`|| hostLane`) before any A5 code runs.
+There was no second delegate-close to reuse: the D2 forwarding
+(`emitDelegateCloseForward`) is main's own #2864 block, extracted verbatim.
+
+**Target 2, as finished.**
+
+- (a) The D2 delegate-close block moved verbatim out of `compileState`'s legacy
+  `abruptResume` branch into `emitDelegateCloseForward`, and is called from BOTH
+  branches — in the `unwind` branch after `fctx.body = abruptBody`, before
+  `emitUnwindWalk`. A close that throws upgrades `mode` to throw, which the walk
+  then reads. The legacy branch is byte-identical (control below).
+- (b) `throwRoute` clears the native-gen delegation slot, as it already cleared
+  the protocol-iterable one. Without it a runtime throw from the inner, caught
+  by a `catch` in the loop body, left the completed inner in the slot and the
+  next iteration's `yield* inner()` resumed it (pin: `NaN`, i.e. no second
+  inner, without the clear).
+- (c) **Not in the suspended plan — added because (a) alone traded a loud
+  refusal for a silently wrong answer.** D2 drives the inner ONCE and discards
+  its result. §27.5.3.7 7.b/7.c instead re-yield a not-done inner result, and
+  let a done `.throw()` result complete the `yield*` normally. So the for-of
+  chain admission now also requires `isCloseTransparentGenerator(inner body)`
+  (`generators-native-ast-scan.ts`): no `catch` whose try block holds a
+  yield, no `finally` around a yield that itself yields or returns, no nested
+  `yield*`. Measured: an inner `try { yield 1 } catch { yield 99 }` delegated
+  from a for-of body answered the outer's rethrow where the spec yields 99;
+  with the gate it refuses with #680, as on base. **The same approximation is
+  live on `main` for a plain `yield* inner()` outside any loop** (probe:
+  `.throw()` rethrows on BOTH trees, spec yields 99). That is the legacy
+  replay-only chain; it is untouched here and left as a residual.
+- (d) `scripts/compiler-boundaries.json` classifies
+  `src/codegen/generator-yield-nested.ts` (`mixed-needs-split`,
+  `backend-wasmgc`, like its siblings). It is not a main-written baseline — PRs
+  add their own entries (e.g. `66315eb368`).
+  `check-compiler-boundaries.mjs --mode inventory --base origin/main`:
+  `errors: []`.
+
+**Target 1 fix (`a245bfe94e`).** The first after-run left 4 of the 9
+target-1 rows at #680 CE. In a JS source the harness's module-scope expandos
+(`assert.sameValue = function …`) list the BASE identifier `assert` as a
+declaration of the function's symbol (7 `Identifier@PropertyAccessExpression`
+entries next to the `FunctionDeclaration`), so `moduleScopeOrAmbient` refused
+`assert.sameValue` as a callee before a later yield. Those declarations add a
+property; they do not rebind the name — filtered out. Pinned red → green.
+
+**Trees.** base = `git archive 732d9f75e6` (`.tmp/basetree`); after = HEAD
+`a245bfe94e` (`.tmp/aftertree`). Both verified blob-for-blob over `src/`,
+`tests/`, `scripts/` against their revision (6,937 / 6,939 files, 0
+mismatches). Engine QuickJS, artifact key `2e2d7736713beeda`, adapter
+`d4799bda84cfed0d` (cache hits on both trees).
+
+**A manifest, per path** — 4 chunks (50/50/50/47),
+`JS2WASM_EVAL_ENGINE=quickjs COMPILER_POOL_SIZE=2 … --standalone --isolate`,
+each under the shared lock.
+
+| A manifest, 197 rows | pass | fail | compile_error |
+| --- | ---: | ---: | ---: |
+| base `732d9f75e6` (`.tmp/a5/A-base.tsv`) | 152 | 2 | 43 |
+| after `a245bfe94e` (`.tmp/a5/A-after.tsv`) | **165** | 4 | 28 |
+
+Join: 152 pass → pass, **13 CE → pass**, 2 CE → fail, 28 CE → CE, 2 fail →
+fail. **0 pass → non-pass.** Same totals as the lost 2026-09-24 record, on a
+base 5 days newer.
+
+| target row | base | after |
+| --- | --- | --- |
+| `expressions/object/cpn-obj-lit-computed-property-name-from-yield-expression.js` | CE (#680) | pass |
+| `expressions/object/accessor-name-computed-yield-expr.js` | CE (#680) | pass |
+| `expressions/object/method-definition/computed-property-name-yield-expression.js` | CE (#680) | pass |
+| `expressions/class/accessor-name-inst-computed-yield-expr.js` | CE (#680) | pass |
+| `statements/class/accessor-name-inst-computed-yield-expr.js` | CE (#680) | pass |
+| `expressions/class/cpn-class-expr-computed-property-name-from-yield-expression.js` | CE (#680) | pass |
+| `expressions/class/cpn-class-expr-accessors-computed-property-name-from-yield-expression.js` | CE (#680) | pass |
+| `statements/class/cpn-class-decl-computed-property-name-from-yield-expression.js` | CE (#680) | pass |
+| `statements/class/cpn-class-decl-accessors-computed-property-name-from-yield-expression.js` | CE (#680) | pass |
+| `statements/for-of/yield-star.js` | CE (host imports) | pass |
+| `statements/for-of/yield-star-from-try.js` | CE (host imports) | pass |
+| `statements/for-of/yield-star-from-catch.js` | CE (host imports) | pass |
+| `statements/for-of/yield-star-from-finally.js` | CE (host imports) | pass |
+
+The 2 CE → fail are `{expressions,statements}/class/accessor-name-static-computed-yield-expr.js`
+(`yieldSet` undefined): the generator half is right; a runtime-keyed STATIC
+setter on a class value is not dispatched. Reproduced with NO generator on
+BOTH trees (`class { static get [k1]() {…} static set [k2](v) {…} }` from a
+factory: getter answers, setter never runs — probe 70 where the spec gives 75).
+Class lowering, cluster C.
+
+**Compile-only byte differential, both targets.** Set: every test262 row whose
+source holds a `yield*` or a yield inside a computed property name **of a sync
+generator** (TypeScript AST scan; an async generator is never a native
+candidate — `isNativeGeneratorCandidate` returns false on `async`; no harness
+file matches), 162 rows, ∪ the A manifest = **342 rows**, 473 variants
+(primary + strict rerun, the runner's assembly and compile options, canonical
+`fileName` so both trees compile identical input). This replaces the lost
+record's 747-row textual set with an AST-exact one; every A5 edit is reachable
+only through one of the two shapes.
+
+| lane | variants | changed |
+| --- | ---: | ---: |
+| host | 473 | **0** |
+| standalone | 473 | 17 rows (all primary) |
+
+Standalone verdicts, all 17: the 13 target rows (gained, above); the 2
+static-accessor rows (CE → fail, above); and two rows outside the manifest,
+both run through the runner on both trees:
+
+- `expressions/object/method-definition/name-prop-name-yield-expr.js`: CE (host
+  imports) → **fail**. The failing assertion is `Object.prototype.hasOwnProperty.call(obj, …)`
+  with `obj` a script `var` initialised to `null` and written inside a function.
+  That reads `null` with **no generator at all, on both trees** (`var obj = null;
+  function f() { obj = { k: 1 }; } f(); hasOwnProperty.call(obj, 'k')` →
+  "called on null or undefined"). The A5 half is verified separately: four
+  variants of the same generator (statement before / after, declaration form,
+  via a local) pass on the after tree when the write is observed with
+  `obj !== null` instead. Pre-existing, generator-independent; not A5's.
+- `expressions/object/method-definition/generator-prop-name-yield-expr.js`: CE →
+  CE, "Maximum call stack size exceeded" on both trees (the hash moves only
+  with the IR-fallback note's shifted type indices).
+
+Every other `yield*` row (139 of 143) is byte-identical on standalone, which is
+the control for the verbatim D2 extraction.
+
+**Other controls.**
+
+- `website/playground/examples/` (13) + `benchmarks/suites/*.ts` (4) +
+  `benchmarks/*.bench.ts` (2) = 19 programs × host/standalone: **38/38
+  byte-identical** (after = `a245bfe94e`).
+- Pin suite `tests/issue-6651-a5-computed-key-yield.test.ts`, 15 cases: on the
+  base tree **12 red** (all the #680 refusal), 3 CONTROLS green on both (a
+  yield-keyed class field; a call-argument yield in a generator with no computed
+  key; an inner that catches the forwarded throw). Green on the after tree.
+- A-family + generator pin suites (`issue-6651-a*`, `*generator*`, `*yield*`,
+  `issue-680*`; one vitest process per file, 2 GB fork heap — a single 51-file
+  run OOMs the default 512 MB fork): base 52 files / 468 tests, after 53 / 482.
+  The 11 failing on base fail identically on the after tree (`issue-2173-yieldstar-generic-iterable`
+  ×9, `issue-2864-standalone-generator-carrier` ×2 — the set A4's record
+  already names). The one after-only failure was
+  `issue-6651-generator-default-lane`'s NEGATIVE pin of the refusal A5
+  removes, converted in `5787999b14` (11/11 green after, the converted case
+  red on base).
+- `pnpm run check:ir-fallbacks` (after tree): **OK** — no unintended,
+  post-claim or module-level increase.
+- `node scripts/equivalence-gate.mjs` (after tree `a245bfe94e`, under the
+  lock): **22 failing / 1,720 passing, all 22 in the baseline — no new
+  regressions** (exit 0).
+- **After the second merge (`921912f2e7`), re-run:** `typecheck`; every source
+  gate, including `LOC_GATE_BASE=3556321947` (exit 0); `check-compiler-boundaries
+  --mode inventory --base origin/main` (`errors: []`, `inventoryValid: true`);
+  the A5 + A4 + default-lane suites (37/37); the 13 target rows through the
+  runner (13/13 pass). The manifest, byte differential and pin-family runs
+  above were NOT repeated on the merged tree — they measure `732d9f75e6` vs
+  `a245bfe94e`.
+- Gates, bare, before every commit: `typecheck`, biome lint (error level),
+  prettier, `check-loc-budget` / `check-func-budget` (also with
+  `LOC_GATE_BASE=732d9f75e6`; grants restated in this file's frontmatter,
+  dated), `check-coercion-sites`, `check:oracle-ratchet`, `check:dead-exports`
+  — all exit 0.
+
+**Residuals.**
+
+| rows | shape | what it needs |
+| ---: | --- | --- |
+| 2 | `accessor-name-static-computed-yield-expr` ×2 (now fail) | runtime-keyed static setter dispatch (class lowering, cluster C) |
+| 1 | `name-prop-name-yield-expr` (outside the manifest, now fail) | a null-initialised script `var` written in a function reads `null` through `hasOwnProperty.call` — generator-independent |
+| 1 | `generator-prop-name-yield-expr` | stack overflow compiling `*[yield]() {}` |
+| 1 | `obj.foo = yield` in `try {} finally { return 1 }` | target 3, unchanged from the record above |
+| — | D2 on the legacy chain | an inner that catches a forwarded `.throw()` / yields or returns in a finally is answered as if it rethrew / completed (pre-existing on `main`); the for-of chain gates it out |
+
 ### 2026-09-24 — Cluster E, slice E8
 
 **Status: WIP, suspended at the session wrap-up — NOT mergeable yet** (the
@@ -17077,3 +17386,114 @@ frontmatter; `tryLengthAndNameReads` itself is net **+0**.
   both are priced in place so the next lane does not re-derive them.
 - The branch carries the VR1 predecessor commit (`772ddd4421`) as a merge, because
   target A was defined against it. Nothing else was taken from it.
+
+## 2026-09-28 — Dynamic TypedArray `subarray` detached-ordering lane
+
+### Scope and ownership
+
+This isolated lane owns only the identifier-receiver dynamic-view species arm in
+`src/codegen/array-methods.ts`, a dedicated focused regression, and this record.
+It does **not** change closed-symbol literal lookup, the dynamic MOP, providers,
+the IR migration, or the held #5145 `copyWithin` work.
+
+### Current evidence and diagnosis
+
+The fresh current-head four-row receipt `20260928-114844` on source
+`86dbc35c4ed772f2f100ec95dbe86ce86e9eee84` records two passing custom-species
+controls and these two independent non-passes:
+
+| rows | current first failure | classification |
+| --- | --- | --- |
+| `subarray/detached-buffer.js` | observable `ToInteger(begin)` / `Float64Array` construction | dynamic-view ordering gap |
+| `subarray/byteoffset-with-detached-buffer.js` | detached-buffer `TypeError` | source-supported closed `@@species` literal-lookup hypothesis; separate remaining mechanism pending runtime A/B |
+
+`emitDynViewSpeciesMethodTwoArm` currently runs
+`emitTaDynViewValidate` and materializes a vector before dispatching its
+`subarray` branch. That is wrong for `%TypedArray%.prototype.subarray`: unlike
+ordinary TypedArray methods, subarray does not use the ValidateTypedArray
+throwing prelude. It must snapshot the source length as zero for an already
+out-of-bounds/detached source, then perform `ToIntegerOrInfinity(begin)`, form
+the byte offset, perform `ToIntegerOrInfinity(end)`, and only then run the
+existing species construction/returned-view validation. The ordering matters
+because both conversions can be observable and can detach the source.
+
+`pushTaDynViewInBoundsLen` is the existing correct source-length primitive:
+it reports zero for an out-of-bounds fixed view and the live length for a
+length-tracking view. `pushTaDynViewEffectiveLen` is deliberately unsuitable,
+because its fixed-view behavior retains the stored length after shrink.
+
+### Planned narrow implementation
+
+1. Import only `pushTaDynViewInBoundsLen` into `array-methods.ts`.
+2. Keep `slice`, `map`, and `filter` on their existing validation/materialize
+   path. In the `subarray` arm alone, avoid both calls; obtain element size and
+   snapshot the in-bounds source length before compiling `begin`.
+3. Preserve the current conversion, clamping, and
+   `emitTaDynSpeciesCreate` result-validation sequence, but **move**
+   `beginByteOffset` between `begin` and `end` as required by the algorithm.
+   Do not reuse a post-conversion live length or revalidate the source.
+4. Add focused standalone controls independently measuring: pre-detached and
+   mid-`begin` detachment/coercion behavior, begin-offset-end observation
+   order where it is observable, the existing custom-species result path, and
+   an ordinary attached subarray control. Argument-expression evaluation and
+   later `ToIntegerOrInfinity` coercion are distinct; the controls must not
+   overclaim one from the other. The closed-literal `@@species` byteoffset row
+   remains a separately documented non-pass, not a claimed gain.
+
+### Overlap audit before implementation
+
+Current source is byte-identical to `upstream/main` at `86dbc35` (the local
+`c713478` parent tip is documentation-only). Open #6651 PRs #6248 and #6245
+modify the shared plan but not `array-methods.ts` or `dataview-native.ts`;
+#4449 is already landed. Remote IR/TypeScript PR #5753 touches neither target
+file. The only open source PR touching `array-methods.ts`, #5748, changes only
+boolean-result metadata near lines 3994 and 8779--8894, disjoint from this
+lane's import and dynamic-subarray area. A later rebase may need an
+append-only plan-record reconciliation, but no source-level conflict is known.
+
+### Validation status
+
+The candidate was measured on compiler base
+`86dbc35c4ed772f2f100ec95dbe86ce86e9eee84`, with
+`src/codegen/array-methods.ts` SHA-256
+`cf21327214c0cc30f5863331424d71bf969e48f3dce8f9a6f9af9605cec8d54e` and its
+scoped diff SHA-256
+`19088d5d2dd84b2f8ec89220050d216d4bf773077e4e2bf51991f00b6319f2dc`.
+
+The maintained standalone runner used Node 24, one fork, a 4 GiB heap, auto
+semantic providers, the immutable QuickJS artifact
+`quickjs-artifact-2e2d7736713beeda` (`libquickjs.wasm` SHA-256
+`e9f8d30bc347dbc56f31b3389f7696eb6dedc9f05ea729781fc412f09a3e6b17`), and a
+fresh compiler-keyed QuickJS adapter. The adapter was a cache miss and was
+built plus canary-verified as key `244c81abc2a5004e` for bundle
+`a9540b315d6d2891`.
+
+The matched four-original manifest completed as run `20260928-122422`: **3
+pass / 1 fail**, with four verdicts and four registrations. Its JSONL SHA-256
+is `d3bee17997ffda8cf96efbc77ff96488257a8c110202c1f4712266884399997d` and its
+one-of-one completion manifest SHA-256 is
+`e2e44303f5ba1e530f8a178f33fb43d8d0c2f6789c0ea7be6fac01f2d7c2022f`.
+`subarray/detached-buffer.js` now passes; both custom-species controls still
+pass. `subarray/byteoffset-with-detached-buffer.js` remains **included** in
+the matched goal/cohort and is the counted failure (a source-supported
+closed-literal `@@species` lookup hypothesis, pending runtime A/B), not an
+excluded row or a claimed gain.
+
+The focused direct Node 24 Vitest receipt then passed **5 / 5** in 52.44 s:
+pre-detached begin/end coercion before the constructor throw, source-length
+snapshot across begin detachment, byte-offset formation before end detachment,
+ordinary attached-view aliasing, and map/filter/slice preservation. An adapted
+Node oracle had separately confirmed all five expected result values before
+compiler measurement; the focused compiler receipt is the evidence above.
+
+Two prelaunch attempts are retained as infrastructure observations, not
+conformance evidence: `pnpm run` attempted its managed dependency status
+install and stopped with an EPERM before the runner; the direct runner under
+the initial sandbox validated the manifest but could not write its timestamped
+snapshot. The approved direct-wrapper invocation produced the receipt above;
+the symlinked dependency target was verified intact after the aborted pnpm
+attempt.
+
+No quality gates, hook, commit, or publication is claimed yet. The heavy lease
+has returned to the shared diagnostic lane; request it before the remaining
+normal validation steps.
