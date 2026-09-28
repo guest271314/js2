@@ -361,9 +361,10 @@
         "src/runtime/wasmgc/values/prototype-singleton-bodies.ts",
         "src/runtime/wasmgc/values/own-property-bodies.ts",
         "src/runtime/wasmgc/values/prototype-seeder-bodies.ts",
-        "src/runtime/wasmgc/values/prototype-chain-bodies.ts"
+        "src/runtime/wasmgc/values/prototype-chain-bodies.ts",
+        "src/runtime/wasmgc/values/to-object-body.ts"
       ],
-      "minModules": 83
+      "minModules": 84
     },
     {
       "id": "standalone-platform",
@@ -14205,6 +14206,11 @@
       "path": "src/backend/wasmgc/resources/native-object-get.ts",
       "state": "clean",
       "layer": "backend-wasmgc"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/to-object-body.ts",
+      "state": "clean",
+      "layer": "native-runtime"
     }
   ]
 }

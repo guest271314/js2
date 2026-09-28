@@ -15317,3 +15317,34 @@ Get main refresh validation correction (2026-09-28): normal hooks passed 66/66 G
 
 
 Get CI timeout follow-up (2026-09-28, claim `3518:get-ci-memory-delivery-20260928`): run 36424443886 / job 108935185687 exhausted its 20-minute whole-job limit on published head 5332a8218. Pinned cohort passed 277 tests with one existing skip; boundary349 passed in 248.837s, leaving 829.7s before cancellation without a Get terminal report. The separate required quality job 108934839508 subsequently completed its changed-root step successfully. This is not evidence of an assertion failure or OOM. Plan: retain every selected file, 4GB worker limit, callback timeouts, fatal/advisory policy, and required checks; use a fresh serial fork per changed file and a bounded 40-minute aggregate job budget. Verify workflow syntax/selection and normal hooks, then publish to the existing PR and require exact-head terminal CI before queue admission. No legacy retirement or coverage reduction.
+
+### ToObject algorithm body (claimed 2026-09-28)
+
+Upstream `issue-assignments` claim `3518:to-object-body-20260928` belongs to
+`ttraenkler/codex-to-object-body-20260928`. Independent delivery branch:
+`codex/3518-to-object-body-20260928`, based on verified upstream main
+`17fd40474db1b61caec1b4920fb056cc690e4a32`. The pending Number integration
+work and its original failing parity fixture are preserved separately.
+
+Implementation follows the full ToObject control flow from
+https://tc39.es/ecma262/multipage/abstract-operations.html#sec-toobject:
+throw TypeError for undefined/null; wrap Boolean, Number, String, Symbol and
+BigInt using brand-specific factories; preserve every existing object by
+identity. Factories receive unchanged primitives, and the body performs no
+property access or public-constructor lookup. Error operands and coordinates
+are captured; abrupt completions propagate without later work.
+
+The body consumes explicit semantic bindings. Native realm prototypes and
+complete native String exotic factories are required from physical owners;
+ordinary wrapper storage alone does not satisfy that contract. Tests execute
+actual Wasm with imported semantic controls, covering primitive payloads,
+fresh identity, UTF-16 descriptors, nullish tagged errors, revoked proxies,
+foreign objects, shifted coordinates, abrupt propagation and metadata refusal.
+This addition registers one native runtime module (floor 83 to 84) without
+rewriting the historical boundary receipts.
+
+Initial integration-tree evidence: 96/96 focused tests, TS7, two selected
+boundary checks and six gates passed. The isolated main-based branch also passes 96/96 focused tests, TS7 and all
+six gates; logs are in `.tmp/to-object/`. Normal commit hooks and queue delivery
+remain pending. These results do not certify native provider
+completion, public Number equality, full IR coverage or legacy retirement.
