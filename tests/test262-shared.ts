@@ -834,11 +834,10 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
             // single-source test retain their existing path.
             const isModuleNamespaceTest = relPath.startsWith("test/language/module-code/namespace/");
             const selfModuleImport = isModuleNamespaceTest && hasSelfModuleImport(testRelativePath, source);
-            // #3509 — Dynamic fixture metadata alone does not mean this test
-            // executes import(). Compiler capability validation rejects eager
-            // #3494 cases while allowing an uncalled ordinary closure to reach
-            // the test with a host-free runtime trap in its body. Do not turn
-            // dynamic fixtures into eager compileMulti inputs.
+            // #3509/#3494 — Dynamic fixture metadata alone does not mean this
+            // test executes import(). Standalone import() of a module outside
+            // the compiled graph settles as a rejected Promise at runtime. Do
+            // not turn dynamic fixtures into eager compileMulti inputs.
             if (Object.keys(fixtureGraph.fixtureFiles).length > 0 || selfModuleImport) {
               // Fixture tests are rare — compile in-process
               try {

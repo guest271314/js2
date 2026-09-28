@@ -2010,12 +2010,12 @@ process.on("message", async (msg) => {
   const fixtureGraph = staticFixtureGraph || selfNamespaceGraph;
   const compileStart = performance.now();
 
-  // #3492/#3509 — Dynamic fixture discovery is transport metadata, not proof
-  // that a loader is needed during this test. Let the compiler distinguish an
-  // eager import (fatal #3494) from an ordinary deferred closure (host-free
-  // runtime trap, #3509). A blanket graph guard false-failed syntax-valid tests
-  // whose arrow was never invoked. No dynamic fixture is promoted to a static
-  // compileMulti edge here.
+  // #3492/#3509/#3494 — Dynamic fixture discovery is transport metadata, not
+  // proof that a loader is needed during this test. A standalone import() of a
+  // module outside the compiled graph settles as a rejected Promise at runtime
+  // (#3494). A blanket graph guard false-failed syntax-valid tests whose arrow
+  // was never invoked. No dynamic fixture is promoted to a static compileMulti
+  // edge here.
 
   // (#5353) The parent computes the PATH-or-`features:` gate (it is the side
   // that knows both) and this worker double-checks the two conditions it owns:
