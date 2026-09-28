@@ -442,6 +442,27 @@ function pushMathReflectNamespaceTagSeed(
   fctx.body.push({ op: "drop" });
 }
 
+/**
+ * (#6713) Reserve — without materializing — the slot holding the namespace
+ * carrier for `builtinName` (the Error family's bare-value carriers, #2907).
+ * The namespace twin of `reserveBuiltinConstructorIdentityGlobal`: a site that
+ * compares a value against the carrier cannot depend on a read having been
+ * compiled first, and a later read reuses this slot.
+ */
+export function reserveBuiltinNamespaceObjectGlobal(ctx: CodegenContext, builtinName: string): number {
+  const existing = ctx.builtinObjectGlobals.get(builtinName);
+  if (existing !== undefined) return existing;
+  const globalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+  ctx.mod.globals.push({
+    name: `__builtin_${builtinName}`,
+    type: { kind: "externref" },
+    mutable: true,
+    init: [{ op: "ref.null.extern" }],
+  });
+  ctx.builtinObjectGlobals.set(builtinName, globalIdx);
+  return globalIdx;
+}
+
 export function emitBuiltinNamespaceObject(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -465,17 +486,7 @@ export function emitBuiltinNamespaceObject(
   const newObjectIdx = ctx.funcMap.get("__new_plain_object")!;
   const defineValueIdx = ctx.funcMap.get("__defineProperty_value")!;
 
-  let globalIdx = ctx.builtinObjectGlobals.get(builtinName);
-  if (globalIdx === undefined) {
-    globalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
-    ctx.mod.globals.push({
-      name: `__builtin_${builtinName}`,
-      type: { kind: "externref" },
-      mutable: true,
-      init: [{ op: "ref.null.extern" }],
-    });
-    ctx.builtinObjectGlobals.set(builtinName, globalIdx);
-  }
+  const globalIdx = reserveBuiltinNamespaceObjectGlobal(ctx, builtinName);
 
   const objLocal = allocLocal(fctx, `__builtin_${builtinName}_obj_${fctx.locals.length}`, { kind: "externref" });
   const initBody: Instr[] = [
