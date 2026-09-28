@@ -100,6 +100,7 @@ import {
   tryBorrowedPrototypeNullishThisThrow,
 } from "../builtin-prototype-brand.js"; // (#4076, #5143)
 import { tryCompilePromiseCallWithoutNew } from "../promise-newtarget.js"; // (#5143)
+import { isReflectivePromiseMember } from "../promise-finally-invoke.js"; // (#6651 D7)
 import {
   appendDynamicCandidateArgcSetup,
   appendExternResultArgcReset,
@@ -1375,9 +1376,9 @@ function tryEmitNativeProtoReflectiveCall(
   // invocation. (The value-erased spelling `var m = Promise.prototype.catch`
   // already routed here, which is why a hand-probe of the same shape passed.)
   // Enumerated rather than opening the family: `then` and `catch` now decide
-  // the receiver at runtime, but `finally` still `ref.cast`s it, so routing
-  // `finally` here would turn today's wrong-but-non-throwing answer into a trap.
-  else if (brand === undefined && ifaceName === "Promise" && (member === "then" || member === "catch")) {
+  // the receiver at runtime; `finally` too since #6651 D7 (it Invokes `then`
+  // off any receiver) — except under wasi, whose native body still `ref.cast`s.
+  else if (brand === undefined && ifaceName === "Promise" && isReflectivePromiseMember(ctx, member)) {
     brand = ensurePromiseNativeProtoGlue(ctx);
   }
   // (#6651 SN1) …and the same one-member-at-a-time discipline for `Symbol`.

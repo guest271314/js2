@@ -4754,7 +4754,7 @@ export function compileReceiverMethodCall(
           [{ kind: "externref" }],
         );
         // For built-in class identifiers, import __get_builtin to resolve real JS object
-        const receiverIsBuiltin = isHostResolvedBuiltinReceiver(ctx, propAccess.expression); // (#1472)
+        const receiverIsBuiltin = isHostResolvedBuiltinReceiver(ctx, propAccess.expression, methodName); // (#1472)
         const getBuiltinIdx = receiverIsBuiltin
           ? ensureLateImport(ctx, "__get_builtin", [{ kind: "externref" }], [{ kind: "externref" }])
           : undefined;

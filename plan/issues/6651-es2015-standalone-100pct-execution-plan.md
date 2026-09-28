@@ -169,6 +169,41 @@ assignee: "ttraenkler/fable-es2015-plan"
 #     `$__ta_ctor`, which the Int8Array `$Object` carrier is not). The first cut
 #     inlined the arm here and cost +68 / +65; extracting it left these 8.
 loc-budget-allow:
+  # 2026-09-28 — cluster A, slice A8. `src/codegen/declarations.ts` +1 (path
+  # already listed below, restated per the stranded-grant rule): the import of
+  # `isGeneratorDeclarationPrototypeWrite`. The keep itself rides the existing
+  # #2660 S2 `F.prototype = …` keep line (one `||`); the predicate lives in
+  # `generators-factory-prototype.ts`, beside the initializer whose own
+  # `prototype` the kept write reaches.
+  # 2026-09-28 — cluster A, slice A6 (receipt under the A6 claim).
+  # `src/codegen/generators-native.ts` +86 against `origin/main` @ `8273bc388e` (A5 + A7)
+  # (path already listed below, restated per the stranded-grant rule). The walker
+  # (yield-in-yield-operand, owner tracking, the return case) lives in the leaf
+  # `generator-yield-nested.ts`. What has to stay in the god-file writes
+  # `buildNativeGeneratorPlan`'s own closure state: the refuse-or-lower router the
+  # return arm and arms 1/2 call (it needs `nestedYields`, `fail`, `nestedHost`),
+  # the host's operand-replacement attach + return terminator (`curId`,
+  # `finishState`), the G3b sent-spill helper (`linearHost`,
+  # `continuationSpillName`), and the G3a carrier rule inside
+  # `generatorElemValType`. About half of the growth is the comment recording
+  # why each arm refuses instead of compiling a plain terminator.
+  # 2026-09-28 — cluster D, slice D7 (receipt under `## Cluster status`).
+  #   - `src/codegen/async-scheduler.ts` +5 (NEW entry): the import, the two
+  #     comment lines and the one-line hand-off at the top of
+  #     `emitStandalonePromiseFinally` (it re-enters itself for the native arm,
+  #     so no function split), and the `intrinsic` parameter of
+  #     `emitStandalonePromiseThen` that keeps %Promise.prototype.then% itself
+  #     from re-dispatching to an own `then` (it recursed without bound on
+  #     `p.then = function () { return Promise.prototype.then.apply(this, arguments) }`).
+  #     The `Get(promise, "then")` + generic Invoke, thenFinally / catchFinally
+  #     and the value thunks live in the NEW leaf `promise-finally-invoke.ts`.
+  #   - `src/codegen/array-object-proto.ts` +1 (path already listed below,
+  #     restated per the stranded-grant rule): the comment naming the
+  #     `intrinsic` argument at the reflective `then` member body.
+  #   - `src/codegen/expressions/calls.ts` +1 (path already listed below): the
+  #     import of `isReflectivePromiseMember`, which admits the DIRECT spelling
+  #     `Promise.prototype.finally.call(x, …)` to the member closure.
+  - src/codegen/async-scheduler.ts
   # 2026-09-28 — cluster A, slice A7 (receipt under `## Cluster status`). Both
   # paths already listed below; restated per the stranded-grant rule. The write
   # semantics live in `expressions/identifier-assignment.ts`
@@ -1013,6 +1048,17 @@ loc-budget-allow:
   # `promise-subclass-cell-read.ts`; the hand-off cannot move, because it is the
   # arm that would otherwise emit the bare `global.get` of the cell.
 func-budget-allow:
+  # 2026-09-28 — cluster A, slice A6: `buildNativeGeneratorPlan` +67 as the gate
+  # measures it against `origin/main` @ `8273bc388e` (path already listed below,
+  # restated per the stranded-grant rule). Every piece reads or writes this
+  # function's closure state, so none can move behind a seam: `lowerNestedOrRefuse`
+  # and `yieldOperandHoldsYield` (called from the return arm and arms 1/2; they
+  # use `nestedYields`, `fail`, `nestedHost`, `stateFinallyDepth`), the widened
+  # `nestedHost` (`attachContinuationReplacements(curId, …)`, a `return`
+  # terminator via `finishState` / `startState`), the three arm hooks, and
+  # `continuationSentSpill` (`linearHost.spill` / `continuationSpillName`) with
+  # the relaxed carrier check it serves. The walker changes are in
+  # `generator-yield-nested.ts`.
   # 2026-09-28 — cluster A, slice A7. `ensureNativeGeneratorResumeFunction` +2:
   # one call line (`bindNamedExpressionOwnName`) and its spacing, placed after
   # the param copy / capture rehydration (so the `__self` local exists) and
@@ -9850,6 +9896,105 @@ side removes it (0 spurious moves).
   expando-inference question, not this lowering; no test262 row found hitting it.
 - The remaining 22 manifest fails are unchanged and belong to D2b/D3/D4/D5's residual tables.
 
+### 2026-09-28 — Cluster D, slice D7
+
+Target: D5 residual 2 — `Promise.prototype.finally` (§27.2.5.3, ES2018; its rows sit in the D
+candidate set, not the ES2015 manifest) never performed step 7, `Invoke(promise, "then",
+«thenFinally, catchFinally»)`.
+
+#### Measured first — three defects, not one
+
+Probes on base (`.tmp/d7/p/f1…f9`, `r1`): (1) `emitStandalonePromiseFinally` subscribed to the
+`$Promise` reaction list directly and never read `then` — an own `p.then`, a replaced
+`Promise.prototype.then`, a poisoned or non-callable `then` were all unobservable; (2) the DIRECT
+reflective spelling `Promise.prototype.finally.call(x, …)` — the one almost every row uses — was
+not routed anywhere (`tryEmitNativeProtoReflectiveCall` enumerated only `then`/`catch`, because
+the finally body `ref.cast` its receiver), so the call did nothing: no `then` call, no TypeError,
+`undefined` back; (3) `{resolved,rejected}-observable-then-calls` died with `Maximum call stack
+size exceeded` before reaching `finally` at all: the test262 idiom `p.then = function () { return
+Promise.prototype.then.apply(this, arguments) }` recursed because the INTRINSIC `then` body
+(`emitPromiseProtoMemberBody`) went through `emitStandalonePromiseThen`'s own-`then` override
+branch, which re-dispatched to `p.then`. D5's other residual (a dynamic `id(p).then(f)` under a
+replaced `Promise.prototype.then`) reaches no row of the candidate set outside `finally/` — the
+five rows that replace `Promise.prototype.then` are all `finally` rows — so it was not taken.
+
+#### What landed
+
+NEW leaf `src/codegen/promise-finally-invoke.ts`:
+
+| piece | what |
+| --- | --- |
+| `tryEmitObservablePromiseFinally` (hand-off at the top of `emitStandalonePromiseFinally`) | evaluates receiver and handler once, performs `Get(promise, "then")` through `__extern_get` (D5's arm answers an own bag entry, a D4 subclass chain, or `%Promise.prototype%.then`), then: receiver is a `$Promise` AND the read is the intrinsic `then` singleton (`ref.eq`) → the pre-D7 native lowering, by re-entering `emitStandalonePromiseFinally` (a per-`fctx` re-entry guard makes the nested call emit the old body); otherwise the generic arm |
+| `__promise_finally_invoke(promise, then, onFinally)` | IsCallable(`then`) or TypeError; callable `onFinally` → two fresh builtin function objects thenFinally / catchFinally (`length` 1, `name` "", no [[Construct]] — the builtin-fn-meta carrier the combinators' resolve-element functions use); `Call(then, promise, «tF, cF»)`, whose result `finally` returns |
+| `__promise_finally_handler` / `__promise_finally_thunk` | §27.2.5.3.1/.2: `Call(onFinally)`, `PromiseResolve(%Promise%, result)`, `Invoke(promise, "then", «valueThunk»)`; the thunk (`length` 0, `name` "") returns the value or throws the reason |
+| `isReflectivePromiseMember` (`calls.ts`, +1 import) | admits `finally` to the direct reflective route in exactly the modules where the hand-off applies (standalone, non-wasi, native promise carrier) |
+| `emitStandalonePromiseThen(…, intrinsic)` (`async-scheduler.ts`) | the reflective `then` member body passes `true` and skips the own-`then` override branch: %Promise.prototype.then% itself never re-dispatches |
+
+No new host import, `src/runtime.ts` untouched, `$Promise` unchanged; wasi keeps its zero-import
+unconditional lowering (pinned). Species is NOT performed: `C` is `%Promise%` (below).
+
+#### Receipt
+
+- **Branch** `issue-6651-d7-promise-finally-then` (worktree `agent-a104a5ba50691407f`), based on
+  `origin/main` @ `8fe10eab6b` + D6 (`c8ababaf70`, merged in — not on main at the start; main has
+  since absorbed it as `38f959a0b3`, tree-identical to this base). Engine
+  `JS2WASM_EVAL_ENGINE=quickjs` (artifact `073742801ba7`, adapter `968ec1c076d74cea` from the base
+  tree; the branch tree's adapter `fef1c153c66bdd0f` is byte-identical), `--standalone --isolate`,
+  24-row chunks, one runner at a time. Before-state measured on the unedited tree (`.tmp/base/src`
+  copied before the first edit). One harness lesson: the adapter key hashes `src/`, so ADDING a
+  file under `src/` while a base run is in flight makes every eval-dependent row of the remaining
+  chunks fail "quickjs provider is not built" — the first base pass was contaminated that way from
+  chunk 5 on and was re-run.
+- **Rows** — D manifest (101) ⊂ candidate set = D6's 357 ∪ all 29 `built-ins/Promise/prototype/finally/`
+  rows (368, `.tmp/d7/all.txt`):
+
+  | | pass | fail | compile_error |
+  | --- | ---: | ---: | ---: |
+  | manifest before (`.tmp/d7/base-c-*.log`) | 79 | 22 | 0 |
+  | manifest after (`.tmp/d7/new-c-*.log`) | 79 | 22 | 0 |
+  | candidate set before | 98 | 159 | 111 |
+  | candidate set after | **106** | 151 | 111 |
+
+  **+8, 0 pass→non-pass**, all under `finally/`: `invokes-then-with-{function,non-function}`,
+  `this-value-{proxy,then-not-callable,then-poisoned,then-throws,thenable}`,
+  `resolved-observable-then-calls`. Four non-pass rows change message only (residuals below).
+  The ES2015 manifest does not move.
+
+#### Controls
+
+| control | result |
+| --- | --- |
+| reach — every test262 row (built-ins, language, annexB) whose runner-assembled source names `Promise` or `finally` (`.tmp/d7/reach-all.txt`, 3,461 rows), compiled standalone on the branch (`.tmp/d7/bytes.mts`, runner's original-harness assembly and options) and flagged when the binary carries `__promise_finally_invoke` or a `__proto_method_<Promise>_then` body — the only two places this slice emits anything | **609 rows reachable** (the intrinsic `then` body exists in every module that mints it — mostly `asyncHelpers.js` includers — and the finally runtime rides with it where `Promise.prototype` is seeded); 2,852 not |
+| byte differential, base vs branch, ONE process per side | fired rows (93-row subset, both targets, both variants, same order per side): **gc 132/132 identical**, standalone 132/132 moved; the 943 rows that compile to a CE: **943/943 identical CE**; a 127-row sample of unfired rows: 119 identical, 8 moved — re-compiled in fresh same-order processes, **8/8 identical** (the D6 harness note: well-known-symbol member names depend on how much the process compiled before, so different row ORDERS alone move bytes) |
+| verdicts on every reachable row outside the candidate set (440 rows, branch; `.tmp/d7/vnew-v-*.log`) | 124 pass / 69 fail / 247 CE. The 69 fails re-run on base (`.tmp/d7/fbase-f-*.log`): **69/69 fail on base too**, 2 message-only changes (a function index in a Wasm validation message). The 247 CEs are all `standalone target emitted host imports` naming features this slice does not touch (`AsyncDisposableStack_*`, `SharedArrayBuffer_new`, `__array_from_async`, `__timer_set_timeout`, async-generator buffers, `__js_array_*`); the slice adds no import. **0 pass→non-pass** |
+| 17 playground + benchmark programs × {gc, standalone} (`.tmp/d7/pgbytes1.mts`, one process per side) | **34/34 identical** |
+| pin suite `tests/issue-6651-d7-promise-finally-invoke.test.ts` (9) | 9/9 green; on base (the suite compiled against `.tmp/base/src`) **7 red** — the two controls (ordinary pass-through / override; wasi keeps no generic arm) are green on both by design |
+| D-family and `finally` pins, one vitest process per file (27 files: the D7 suite, `issue-2903-finally`, `issue-2903`, `issue-2623-p7-finally-bridge`, `issue-2861`, `issue-2867-s2-value-escape-inference`, `issue-855`, and D6's 20) | all green except `promise-combinators` (2), `issue-2671-promise-capability` (1) and `issue-855`'s one unhandled `__call_fn_2` rejection (13/13 tests pass) — each identical on base (`.tmp/d7/pin-base-*.log`) |
+| gates | `check-loc-budget`, `check-func-budget` (both also with `LOC_GATE_BASE` = origin/main `38f959a0b3`), `check-coercion-sites`, `check:oracle-ratchet`, `check:dead-exports`, `typecheck`, `biome lint --diagnostic-level=error`, `check:host-import-policy`, `check-compiler-boundaries --mode inventory --base origin/main` (`inventoryValid: true`, the new leaf classified), `check:ir-fallbacks` (OK), `scripts/equivalence-gate.mjs` (22 failing / 1,720 passing / 22 known — no new). Grant: dated D7 note at the head of `loc-budget-allow` (`async-scheduler.ts` +5, new entry; `array-object-proto.ts` +1 and `expressions/calls.ts` +1 restated) |
+
+#### Residuals (measured, not taken)
+
+- `SpeciesConstructor(promise, %Promise%)` is not performed; `C` is always `%Promise%`. That
+  leaves `species-constructor`, `subclass-{resolve,reject}-count` (unchanged: they keep the native
+  arm, their `then` is intrinsic) and `{resolved,rejected}-observable-then-calls-PromiseResolve`
+  (now 2 of the 5 expected `then` calls instead of 0; not diagnosed further — the missing species
+  is the obvious candidate, since `PromiseResolve(MyPromise, mp2)` must return `mp2`). The generic arm is the place to add it: Get `constructor`, then
+  `@@species`, and a `Construct(C, executor)` capability for a non-`%Promise%` `C`.
+- `species-constructor-throws` (`finally.call({constructor: 0})`) now throws from the generic arm
+  (the literal has no callable `then`), but `assert.throws` reads `thrown.constructor` and reports
+  "got a undefined" — the harness's `thrown.constructor` read resolves against the `{constructor:
+  0}` literal's shape; a plain-JS probe of the same throw (`.tmp/d7/p/s2.js`, `s3.js`) sees a
+  TypeError. Not a `finally` question.
+- `rejected-observable-then-calls` now runs (no recursion) and fails with 4 of 5 expected
+  entries. Not diagnosed; the unverified lead is that the NATIVE arm's thenFinally (taken whenever
+  `then` is intrinsic) settles through `__finally_after`'s thenable job rather than performing
+  `Invoke(promise, "then", «thrower»)` on `onFinally`'s result, which changes when and how often a
+  user `then` on that result is called.
+- D5's dynamic-call residual (`id(p).then(f)` under a replaced `Promise.prototype.then`) is still
+  open; it reaches no candidate row outside `finally/`.
+
+## Handoff — 2026-09-21 (round 1 closed, round 2 ready to dispatch)
+
 ## Handoff — 2026-09-21 (round 1 closed, round 2 ready to dispatch)
 
 ### What landed
@@ -10929,6 +11074,199 @@ owners above.
 Both lanes `git merge origin/main` before opening a slice and record slices
 under `## Cluster status`. This lane has not opened F, H or I since round 1;
 the partition stands as proposed.
+
+**A8 — claimed 2026-09-28**, branch `claude/es6-6651-a8-gen-residuals` (WIP PR
+opened before code). The remaining small generator residuals: 5b
+(`g.prototype = v` on a generator function), 5d (own `prototype` on generator
+METHODS), 5c (receiver of an extracted object-literal method; also moves the
+non-generator `name-invoke-fn-*` twins of cluster C — refused and recorded if it
+is not local), generator-function restricted properties (`caller`/`arguments`
+via `%ThrowTypeError%`), strict compound/update/destructuring writes to a named
+fn-expr's own name (the A7 leftover), and optionally A5's target 3. Stays out of
+A6's regions (#6248): `generator-yield-nested.ts`, `generatorElemValType`, the
+#680 continuation arms and `lowerStatements`' return arm.
+
+#### A6 claimed — 2026-09-28 (nested yield operands)
+
+Claimed by the same session, before any code. Branch
+`claude/es6-6651-a6-nested-yield`, cut from A5's branch at `f8519713cb` on
+purpose: A6 extends `generator-yield-nested.ts`. A5's branch is re-merged if it
+changes; `origin/main` is merged as usual. Every before-measurement uses a
+source-clean `git archive f8519713cb`.
+
+| group | shape | ES2015 rows |
+| --- | --- | ---: |
+| yield-spread | `yield [...yield yield]` — `yield-spread-arr-{single,multiple}` under `{expressions,statements}/class/gen-method{,-static}`, `expressions/generators/{,named-}`, `statements/generators`, `object/method-definition/gen-` | 16 |
+| yield operand | `yield yield 1` — `yield-as-yield-operand` ×4 (incl. `class/definition/methods-gen-`), `yield/rhs-yield`, `GeneratorPrototype/next/return-yield-expr` | 6 |
+| group 2 | `return <expr holding a yield>` (silently miscompiled today) — `yield-identifier-non-strict` ×4 | 4 |
+| group 3 | carrier: G3a `isNumberType` for yield/return operands, G3b #680 continuation under the boxed-any carrier (standalone only, externref linear `sent` spills) — `yield/{in,star-in}-rltn-expr` (+ `yield/rhs-regexp`) | 2 (+1) |
+
+Diagnosis source: the 2026-09-28 triage spec, groups 2 and 3. Out of scope: its
+groups 1, 4 and 5, and the error-swallowing hazard in
+`statements/nested-declarations.ts` (the hoist rollback that discards a
+generator's codegen errors) — a separate issue. G3a is measured on the `dstr/`
+and class generator-method families before it is trusted (the spec's owed
+measurement).
+
+#### A6 receipt — 2026-09-28
+
+PR #6248. Every number below was measured in this session; the artifact each
+came from is named. Two measurement rounds: round 1 before A7 landed (base =
+A5's head `f8519713cb`, after = `3d2e08c00a`), round 2 on top of A5 + A7 as
+asked (base = `origin/main` @ `8273bc388e`, after = the merged A6 head
+`d58abb85b1`). Both base trees are source-clean `git archive` extracts, verified
+blob-for-blob over `src/`, `tests/`, `scripts/` (0 mismatches). Engine QuickJS,
+adapter `d4799bda84cfed0d`.
+
+**What changed, and why.**
+
+- **A yield inside a yield operand** (`yield yield 1`, `yield [...yield]`).
+  §15.5.5 evaluates the operand, then suspends, so the inner yield suspends
+  first and the rest of the operand runs between the two suspensions. The A5
+  walker (`generator-yield-nested.ts`) now walks such an operand first and tags
+  every event with the yields whose operand contains it (`owners`). An event
+  inside the operand of the NEXT yield to suspend is evaluated by that yield's
+  terminator, which is its spec position; the suspending state gets the
+  replacement map its operand reads (earlier yields, captures).
+  `collectYields` is post-order to match.
+- **`return <expr holding a yield>`** (triage group 2). The return arm used to
+  emit a plain `return` terminator: the inner yield compiled as `undefined`, no
+  suspension (`function* g() { return yield 1; }` finished on the first
+  `next()`). It now goes to the walker's new `ReturnStatement` case, whose
+  `finish` terminates the last state with the completion. An IIFE callee
+  (`(function (arg) { … })(yield)`) is replayable: creating a closure is
+  unobservable.
+- **Refuse, never miscompile.** Arms 1 (`yield <op holding a yield>;`), 2
+  (`let x = yield <…>`) and the return arm route to the planner when it can
+  prove the order (direct body, no enclosing try, boxed-any carrier,
+  standalone) and `fail()` otherwise. On the JS host a return-with-yield now
+  falls back to the eager path instead of the native miscompile. Generators
+  with these shapes take the boxed-any carrier (`bodyHasNestedYield`), since
+  the resumed value is the next yielded or returned value.
+- **G3a.** Standalone/WASI: a boolean operand no longer counts as
+  carrier-numeric (`true` came out as the Number 1). Host keeps the old rule, so
+  it stays byte-identical.
+- **G3b.** A #680 continuation now runs under the boxed-any carrier in
+  standalone/WASI. Its `sent` spill is an externref linear spill, typed up
+  front, so the any-carrier resume-binding bail does not apply. Every such plan
+  was a refusal before.
+
+**Per path, targets ∪ A manifest** (224 unique rows; standalone,
+`--isolate`, 4 manifest chunks + the 29-row target list, under the shared lock):
+
+| round | base | after | pass → non-pass |
+| --- | --- | --- | ---: |
+| 1: A5 head `f8519713cb` → `3d2e08c00a` (`.tmp/a6/A-{base,after}.tsv`) | 171 pass / 31 fail / 22 CE | **196** / 7 / 21 | **0** |
+| 2: main `8273bc388e` → `d58abb85b1` (`.tmp/a6/R2-{base,after}.tsv`) | 178 / 33 / 13 | **203** / 9 / 12 | **0** |
+
+Both rounds: 24 fail → pass, 1 CE → pass (`yield/rhs-regexp`, G3b), nothing
+else moves. The A manifest alone (197 rows) is 171 → 173 (round 1) and
+178 → 180 (round 2); 27 of the 29 targets are outside it.
+
+| target group | rows | after |
+| --- | ---: | --- |
+| `yield-spread-arr-{single,multiple}` | 16 | **12 pass**; 4 fail — `{expressions,statements}/class/gen-method/` (below) |
+| `yield-as-yield-operand` ×4, `yield/rhs-yield`, `GeneratorPrototype/next/return-yield-expr` | 6 | 6 pass |
+| `yield-identifier-non-strict` ×4 | 4 | 4 pass |
+| `yield/{in,star-in}-rltn-expr` + `yield/rhs-regexp` | 3 | 3 pass |
+
+**The 4 non-static `class/gen-method/yield-spread-arr-*` rows are not A6's.**
+They call the method UNBOUND (`var gen = C.prototype.gen; gen()`). A probe
+with no nested yield at all (`*gen() { yield [1, 2]; }` called the same way)
+fails identically on BOTH trees (`Cannot access property on null or
+undefined`); the same A6 generator called as `new C().gen()` passes. That is
+the method-receiver model (triage group 5c, here for classes).
+
+**Reach of the byte differential.** A typed scan (`.tmp/a6/reach6.mts`)
+covered every test262 row with a sync generator: 2,817 rows, including the
+`dstr/` and class/object generator-method families. It assembled the harness
+the way the runner does and classified each generator with the checker:
+
+| tag | meaning | rows |
+| --- | --- | ---: |
+| N | nested yield operand / return-with-yield | 58 |
+| C | computed-key yield (A5 walker, changed here) | 19 |
+| G | **G3a changes the carrier** | **4** |
+| E | yield inside a larger expression under a boxed-any carrier (G3b) | 119 |
+
+128 rows in all. **G3a moves exactly 4 carriers, none in `dstr/` or a
+generator-method family**: `in/{,private-field-}rhs-yield-present`,
+`yield/{in,star-in}-rltn-expr`. As an empirical cross-check (the spec's owed
+measurement), a seeded 150-row sample of the `dstr/` sync-generator and
+class/object generator-method rows (`.tmp/a6/g3a-sample.txt`, population
+1,991) went through the byte differential. The only sample row whose bytes
+moved is an N row (`class/gen-method/yield-spread-obj`).
+
+**Compile-only byte differential, round 1** (A5 head → `3d2e08c00a`). The set
+is the 128 reach rows ∪ targets ∪ A manifest ∪ the 150-row sample: 409 rows,
+527 variants per lane (primary + strict rerun, the runner's assembly and
+compile options).
+
+- **Host: 5 rows changed**, every one a host-native generator DECLARATION
+  with a `return <expr holding a yield>`, which now falls back to the eager
+  path instead of the native miscompile. Runner verdicts, host, both trees: all
+  5 non-pass before and after (`return-yield-expr`, `in/rhs-yield-present`,
+  `generators/yield-identifier-non-strict` fail → fail; the two
+  `dynamic-import/assignment-expression/yield-*` rows are an isolate
+  environment error on both trees). 0 pass lost.
+- **Standalone: 55 rows changed.** 29 are in the per-path set above. The other
+  26 went through the runner on both trees: **9 fail → pass** (the
+  `class/elements/gen-private-method{,-static}/yield-spread-arr-*` ×8, ES2022,
+  and `in/rhs-yield-present`), **17 fail → CE**, 0 pass lost. The 17 are
+  `yield-spread-obj` ×10 (ES2018), `yield-identifier-spread-non-strict` ×4,
+  `in/private-field-rhs-yield-present`, and the two `statements/generators`
+  twins. Each was silently wrong before; now it is a loud refusal. Example: in
+  `{ ...yield, y: 1, ...yield yield }` the first sent value's
+  CopyDataProperties must run BEFORE the later yield suspends, and an `op`
+  before a later yield that is not part of that yield's operand is refused.
+
+**Compile-only byte differential, round 2** (main `8273bc388e` →
+`d58abb85b1`, the same 409-row set): NOT YET RUN at the time of this entry —
+queued behind the shared lock. Round 1 above is the byte evidence until it
+lands.
+
+**Other controls.**
+
+- Pin suite `tests/issue-6651-a6-nested-yield-operands.test.ts`, 11 cases,
+  standalone, `imports: []`: **11/11 red on both bases** (A5 head, and main
+  `8273bc388e` via the pin-family run), green after. Ten compile and answer
+  wrong or refuse; the CONTROL (a return-with-yield in a loop body) compiles
+  on base (the miscompile) and refuses with #680 after.
+- Two older pins asserted a refusal A6 removes, and now assert the answer:
+  `issue-2864-yield-in-expression-position`'s nested-yield-operand BOUNDARY
+  case (`[yield ((yield 1) as number)]` → 7; red on the A5 base).
+- Pin families (`issue-6651-a*`, `*generator*`, `*yield*`, `issue-680*`; one
+  vitest per file, 2 GB fork heap), round 2: base 56 files, 23 failing = the
+  11 A6 cases + 12 pre-existing (`issue-2173-yieldstar-generic-iterable` ×9,
+  `issue-2864-standalone-generator-carrier` ×2,
+  `issue-3526-generator-number-box` ×1); after 12 failing, the identical
+  pre-existing set. Round 1 (A5 base) found one more after-only failure, the
+  #2864 BOUNDARY case, converted as above.
+- `website/playground/examples/` + `benchmarks/suites/*.ts` +
+  `benchmarks/*.bench.ts` (19 programs × host/standalone): **38/38
+  byte-identical** in round 1.
+- `pnpm run check:ir-fallbacks`: **OK** (both rounds).
+- Guard suite (`node scripts/run-guard-suite.mjs`: one fork, 512 MB heap).
+  Round 1: 20/20 files on both trees, every file ending at ~500 MB heap used
+  on BOTH. Round 2: it OOMs locally on main `8273bc388e` itself (18 files, then
+  the heap limit) and identically on the A6 head; all 20 files pass one at a
+  time. That is main's heap ceiling, fixed in PR #6261. CI's `quality` on
+  `d58abb85b1` is green.
+- CI on `d58abb85b1`: every required check green (`quality`,
+  `equivalence-gate` with 8/8 shards, `cheap gate`, `merge shard reports`,
+  `check for test262 regressions`, `cla-check`).
+- Gates, bare, before every commit: `typecheck`; biome lint (error level);
+  prettier; loc/func budgets, also with `LOC_GATE_BASE` = each main tip
+  (grants dated in this file's frontmatter: +86 / +67 vs `8273bc388e`);
+  `check-coercion-sites`; `check:oracle-ratchet`; `check:dead-exports`.
+
+**Residuals.**
+
+| rows | shape | what it needs |
+| ---: | --- | --- |
+| 4 | `class/gen-method/yield-spread-arr-*` (unbound instance method call) | the class method receiver model (triage group 5c) |
+| 17 | `yield-spread-obj` ×10 (ES2018), `yield-identifier-spread-non-strict` ×4, `in/private-field-rhs-yield-present`, 2 twins — now CE | an observable op (object spread, private `in`) between two yields that is not part of the later yield's operand; needs capturing the partially built value |
+| — | `yield*` whose operand holds a yield, a yield inside a destructuring default under A4 | not routed through the nested planner; still the old lowering |
 
 ### 2026-09-24 — Cluster I, slice I5: the void-`super` rollback (arrow-lexical family)
 
