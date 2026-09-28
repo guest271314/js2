@@ -101,6 +101,10 @@ import { armConstructIsConstructorGuard } from "../construct-is-constructor-guar
 import { linkCompatibleDeclaredStructAncestor } from "../struct-hierarchy-layout.js";
 import { emitBoundConstructOnNull } from "../construct-bound.js"; // (#4196) §10.4.1.2
 import { emitRuntimeEvalConstructOnNull } from "../runtime-eval-construct.js"; // (#4438) §10.2.2
+import {
+  emitBuiltinCollectionConstructOnNull,
+  reserveBuiltinCollectionDynConstruct,
+} from "../builtin-collection-dyn-construct.js"; // (#6720)
 import { resolveDefaultExpressionImportGlobal } from "../default-expression-import-global.js";
 import { emitNativeNumberFormat } from "../number-format-native.js";
 import { compileStandaloneRegExpConstructor, isGlobalRegExpConstructorExpression } from "../regexp-standalone.js";
@@ -4008,7 +4012,8 @@ function tryCompileNativeConstructFromValue(
     !proxyCtorValue &&
     !dynamicMemberCtorValue &&
     !resolvesToConstructableFunctionValue(ctx, calleeExpr) &&
-    !resolvesToLateAssignedConstructSignatureValue(ctx, calleeExpr)
+    !resolvesToLateAssignedConstructSignatureValue(ctx, calleeExpr) &&
+    !(noJsHost(ctx) && isDefaultExpressionImport(ctx, calleeExpr)) // (#6720) the snapshot cell's VALUE
   )
     return undefined;
 
@@ -4100,6 +4105,7 @@ function tryCompileNativeConstructFromValue(
   // bytes.
   if (moduleHasF64TypedConstructFormal(ctx)) armExternF64ArgTypeGuard(ctx, fctx);
   const driverIdx = reserveNativeConstructDriver(ctx, args.length, stringConstantExternrefInstrs(ctx, "prototype"));
+  reserveBuiltinCollectionDynConstruct(ctx); // (#6720) the driver's collection-carrier arm
 
   // Evaluate the callee, then each argument, exactly once and in source order.
   const calleeTy = compileExpression(ctx, fctx, calleeExpr, { kind: "externref" });
@@ -5121,6 +5127,7 @@ function emitDynamicNewFallback(
     fctx.body = base;
     emitBuiltinFnNotAConstructorGuard(ctx, fctx, descLocal);
     emitTaDynCtorConstructFromLocals(ctx, fctx, descLocal, argLocals);
+    emitBuiltinCollectionConstructOnNull(ctx, fctx, descLocal, argLocals); // (#6720)
     fctx.body = savedBase;
     noMatchBase = base;
   } else if (noJsHost(ctx) && useRuntimeArgv) {
@@ -6670,6 +6677,9 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
   // explicitly until their dynamic construct carrier accepts this exact cell.
   if (isDefaultExpressionImport(ctx, unwrappedLiteralCtor)) {
     if (noJsHost(ctx)) {
+      // (#6720) lodash-es `import Set from './_Set.js'`: construct the snapshot's runtime VALUE.
+      const fromValue = tryCompileNativeConstructFromValue(ctx, fctx, unwrappedLiteralCtor, expr.arguments ?? []);
+      if (fromValue) return fromValue;
       reportError(ctx, expr, "Constructing an imported default-expression snapshot is not available without a host");
       return null;
     }
@@ -8038,6 +8048,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
           // [[Construct]]. Each retry declines for the other's carrier shape,
           // so the chain has no ordering hazard.
           emitRuntimeEvalConstructOnNull(ctx, fctx, expr, taDescLocal, taArgLocals);
+          emitBuiltinCollectionConstructOnNull(ctx, fctx, taDescLocal, taArgLocals); // (#6720) Map/Set carrier value
           return { kind: "externref" };
         }
       }
