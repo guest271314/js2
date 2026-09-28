@@ -10585,7 +10585,9 @@ the control for the verbatim D2 extraction.
   red on base).
 - `pnpm run check:ir-fallbacks` (after tree): **OK** — no unintended,
   post-claim or module-level increase.
-- `node scripts/equivalence-gate.mjs` (after tree): PENDING
+- `node scripts/equivalence-gate.mjs` (after tree `a245bfe94e`, under the
+  lock): **22 failing / 1,720 passing, all 22 in the baseline — no new
+  regressions** (exit 0).
 - **After the second merge (`921912f2e7`), re-run:** `typecheck`; every source
   gate, including `LOC_GATE_BASE=3556321947` (exit 0); `check-compiler-boundaries
   --mode inventory --base origin/main` (`errors: []`, `inventoryValid: true`);
