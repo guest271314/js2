@@ -15346,3 +15346,32 @@ commit with accurate attribution, fork publication, protected queue validation,
 and verified upstream main ancestry/content. Queue entry or a PR is not delivery.
 
 Current isolated-base validation:139/139 tests passed on upstream2148f208f066e5abd9a64ef31a332cafb7477583 (124finality controls plus15existing canonical/runtime-provider cases),0skipped; TS7 reported no errors. Added raw-byte positive/negative controls for generic array/function root encodings because they share subtype normalization. Normal commit/push hooks and protected queue are still required.
+
+
+### 2026-09-28: primitive wrapper delivery integration
+
+Claim: `3518:primitive-wrapper-delivery-20260928`, owned by
+`ttraenkler/codex-primitive-wrapper-delivery-20260928` on upstream
+`issue-assignments`. The existing extensible-root, wrapper-layout, wrapper-body,
+and wrapper-storage implementation claims remain intact.
+
+Implementation plan: deliver the existing symbolic extensible self-root reservation,
+five private-slot primitive wrapper layouts, pure allocation/read bodies, and
+authenticated backend storage owner together. Build from upstream main
+`f083fd4a9ad676cf08d69b7693954b1ca93c78e9`, which includes the separately delivered
+root-finality fingerprint fix. Keep the default ordinary Object layout final;
+require an explicit native-only extensible-root opt-in. Preserve the existing
+signed boundary composition and append only these four new modules.
+
+Validation plan: run all four wrapper/root suites and existing ordinary-layout
+and Get owner regressions, TypeScript checking, boundary composition and
+preservation gates, then the normal commit/push hooks and protected merge queue.
+Fresh isolated delivery validation passed TypeScript checking and 633/633 tests
+across six suites, with zero failures, skips, or reported unhandled errors. The full
+boundary suite passed 349/349, and all six inventory/preservation/budget/oracle/
+coercion gates passed. Strict closure remains open; hooks and delivery are pending.
+
+This provides wrapper storage, not completed canonical realm prototypes, native
+String exotic behavior, ToObject factory population, or public Number parity.
+No legacy retirement is authorized by this slice. Completion requires verified
+upstream main ancestry and reviewed file content; a local test pass is not delivery.

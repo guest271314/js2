@@ -169,6 +169,12 @@ assignee: "ttraenkler/fable-es2015-plan"
 #     `$__ta_ctor`, which the Int8Array `$Object` carrier is not). The first cut
 #     inlined the arm here and cost +68 / +65; extracting it left these 8.
 loc-budget-allow:
+  # 2026-09-28 — cluster A, slice A8. `src/codegen/declarations.ts` +1 (path
+  # already listed below, restated per the stranded-grant rule): the import of
+  # `isGeneratorDeclarationPrototypeWrite`. The keep itself rides the existing
+  # #2660 S2 `F.prototype = …` keep line (one `||`); the predicate lives in
+  # `generators-factory-prototype.ts`, beside the initializer whose own
+  # `prototype` the kept write reaches.
   # 2026-09-28 — cluster A, slice A6 (receipt under the A6 claim).
   # `src/codegen/generators-native.ts` +86 against `origin/main` @ `8273bc388e` (A5 + A7)
   # (path already listed below, restated per the stranded-grant rule). The walker
@@ -11102,6 +11108,17 @@ owners above.
 Both lanes `git merge origin/main` before opening a slice and record slices
 under `## Cluster status`. This lane has not opened F, H or I since round 1;
 the partition stands as proposed.
+
+**A8 — claimed 2026-09-28**, branch `claude/es6-6651-a8-gen-residuals` (WIP PR
+opened before code). The remaining small generator residuals: 5b
+(`g.prototype = v` on a generator function), 5d (own `prototype` on generator
+METHODS), 5c (receiver of an extracted object-literal method; also moves the
+non-generator `name-invoke-fn-*` twins of cluster C — refused and recorded if it
+is not local), generator-function restricted properties (`caller`/`arguments`
+via `%ThrowTypeError%`), strict compound/update/destructuring writes to a named
+fn-expr's own name (the A7 leftover), and optionally A5's target 3. Stays out of
+A6's regions (#6248): `generator-yield-nested.ts`, `generatorElemValType`, the
+#680 continuation arms and `lowerStatements`' return arm.
 
 #### A6 claimed — 2026-09-28 (nested yield operands)
 
