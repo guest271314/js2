@@ -89,7 +89,7 @@ import { emitStandalonePromiseCombinatorDrive } from "../promise-combinator-driv
 import type { InnerResult } from "../shared.js";
 import { brandExternMethodResult, coerceType, compileExpression, VOID_RESULT } from "../shared.js";
 import { compileSpreadCallArgs } from "./extern.js";
-import { emitKnownRestMethodArguments, knownMethodRestInfo } from "./object-method-rest-abi.js";
+import { emitKnownRestMethodArguments, knownStaticMethodRestInfo } from "./object-method-rest-abi.js";
 import { compileSpreadCallArgsWithArguments } from "./spread-arguments-call.js";
 import { emitSetExtrasArgv, maybeSetArgcForKnownCall } from "../statements/nested-declarations.js";
 import {
@@ -4343,7 +4343,7 @@ export function compileNamespaceStaticCall(
         // shape (object-literal method, plain function, instance method) was
         // already correct; only the static-through-a-class-object arm was
         // missing both halves of the known-callee argument ABI.
-        const restInfoStatic = knownMethodRestInfo(ctx, expr, fullName, paramTypes, 0);
+        const restInfoStatic = knownStaticMethodRestInfo(ctx, expr, fullName, paramTypes); // (#6699)
         const handledRestStatic =
           restInfoStatic !== undefined && emitKnownRestMethodArguments(ctx, fctx, expr, paramTypes, restInfoStatic, 0);
         const hasSpreadStatic = expr.arguments.some((argument) => ts.isSpreadElement(argument));
