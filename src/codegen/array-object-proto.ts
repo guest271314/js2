@@ -38,6 +38,11 @@ import { ensureStandaloneSpeciesGetterClosure, pushBuiltinFnSingletonValueInstrs
 import { withSpeculativeCompile } from "./context/speculative.js";
 import { buildThrowJsErrorInstrs, emitThrowTypeError } from "./expressions/helpers.js";
 import { ensureNativeArrayHof, NATIVE_HOF_METHODS, NATIVE_HOF_REDUCE } from "./hof-native.js"; // (#4394)
+import {
+  emitArrayProtoHofReceiverGuard,
+  emitArrayReduceProtoMemberBody,
+  isArrayReduceVariadicMember,
+} from "./array-reduce-proto-value.js"; // (#6709)
 import { emitArrayBufferProtoMemberBody, emitDataViewProtoMemberBody, emitTaCtorValue } from "./dataview-native.js";
 import { emitDateProtoMemberBody } from "./expressions/builtins.js"; // (#3219) reflective Date getter bodies
 import { emitDateReflectiveSetterBody } from "./date-reflective-setters.js"; // (#3174) reflective Date setter/toISOString bodies
@@ -75,6 +80,10 @@ import { emitReceiverBrandCheck } from "./receiver-brand.js"; // (#3171) shared 
 import { pushMarkBuiltinCarrierCallable } from "./builtin-callable-brand.js"; // %TypedArray% carrier is a function
 import { emitTransferredCharAtProtoMemberBody, unboxProtoArgToI32 as unboxArgToI32 } from "./char-at-transfer.js";
 import { compileArrayConcatNativeSpecFromReceiverAndArgsVec } from "./array-concat-spec.js";
+import { emitArrayFlatProtoMemberBody } from "./array-flat-native.js"; // (#2717)
+import { emitSliceProtoArrayLikeFallback, emitSliceProtoEndDefault } from "./array-slice-native.js"; // (#6701)
+import { emitArraySpliceProtoMemberBody, isArraySpliceVariadicMember } from "./array-splice-native.js"; // (#6701)
+import { emitArrayProtoIteratorMemberBody } from "./array-proto-iterator-value.js"; // (#6651 RS1)
 import { emitArrayLikeNativeMemberBody } from "./array-like-native.js";
 // (#4119) The shared member-body tail: `Object.prototype.toString`'s real
 // §20.1.3.6 runtime classifier, and the graceful catchable-TypeError refusal for
@@ -84,6 +93,7 @@ import { emitArrayLikeNativeMemberBody } from "./array-like-native.js";
 // brands (a reflective member closure must degrade to a catchable TypeError, not
 // a hard compile error — #2193 PR-C).
 import { emitObjectProtoOrRefusal as emitProtoMemberBodyRefusal } from "./object-proto-tostring.js";
+import { emitObjectProtoOwnPredicateBody } from "./object-proto-has-own-property.js";
 // (#4491) `Object.prototype.isPrototypeOf` — the §20.1.3.3 chain walk, routed
 // to the same `__isPrototypeOf` native the typed call path uses.
 import { emitObjectProtoIsPrototypeOfBody } from "./object-proto-is-prototype-of.js";
@@ -910,12 +920,15 @@ function emitArrayProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, me
   if (member === "concat") {
     return compileArrayConcatNativeSpecFromReceiverAndArgsVec(ctx, fctx, 1, 2) ?? null;
   }
+  if (member === "flat" || member === "flatMap") return emitArrayFlatProtoMemberBody(ctx, fctx, member) ?? null; // (#2717)
 
   // ES2015 §23.1.3.23/.25/.30 — these three methods are intentionally
   // generic.  Their first-class values are transferred onto ordinary objects
   // by the historical Test262 rows, so their reflective closures must operate
   // through the dynamic array-like substrate rather than the typed `$Vec`
   // cores used by direct `array.push`/`reverse`/`unshift` calls.
+  const spliceBody = emitArraySpliceProtoMemberBody(ctx, fctx, member); // (#6701)
+  if (spliceBody !== undefined) return spliceBody;
   const arrayLikeMutator = emitArrayLikeNativeMemberBody(ctx, fctx, member);
   if (arrayLikeMutator !== undefined) return arrayLikeMutator;
 
@@ -929,8 +942,10 @@ function emitArrayProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, me
   // on nine standalone harness tests.
   //
   // The reduce family takes `(recv, cb, init, hasInit)` rather than
-  // `(recv, cb, thisArg)`, so it stays on the refusal until its own arg
-  // marshalling is written.
+  // `(recv, cb, thisArg)`; its variadic-ABI marshal lives in
+  // array-reduce-proto-value.ts (#6709), which declines off the native regime.
+  const reduceBody = emitArrayReduceProtoMemberBody(ctx, fctx, member);
+  if (reduceBody !== undefined) return reduceBody;
   if (member !== "slice" && NATIVE_HOF_METHODS.has(member) && !NATIVE_HOF_REDUCE.has(member)) {
     const hofIdx = ensureNativeArrayHof(ctx, member);
     if (hofIdx !== undefined) {
@@ -939,17 +954,7 @@ function emitArrayProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, me
       // receiver, so `Array.prototype.map.call(undefined)` passed by accident;
       // routing to the loop without this guard silently returns an empty
       // result instead (measured: 3 regressions in the map/filter suites).
-      // Mirrors the `String.prototype.<member>` receiver guard below: under the
-      // undefined-singleton regime `undefined` is a NON-null sentinel externref,
-      // so `ref.is_null` alone misses `.call(undefined)`.
-      const thisThrow: Instr[] = [];
-      emitBrandCheckTypeError(ctx, thisThrow, `Array.prototype.${member} called on null or undefined`);
-      fctx.body.push({ op: "local.get", index: 1 }, { op: "ref.is_null" });
-      const isUndefinedIdx = undefinedSingletonActive(ctx) ? ctx.funcMap.get("__extern_is_undefined") : undefined;
-      if (isUndefinedIdx !== undefined) {
-        fctx.body.push({ op: "local.get", index: 1 }, { op: "call", funcIdx: isUndefinedIdx }, { op: "i32.or" });
-      }
-      fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: thisThrow });
+      emitArrayProtoHofReceiverGuard(ctx, fctx, member);
       // The closure ABI declares only as many params as the member's own
       // `.length`, so `thisArg` (param 3) exists for `map`/`forEach`/… but not
       // for the 1-arity members. Substitute a null externref when absent
@@ -962,6 +967,10 @@ function emitArrayProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, me
       return { kind: "externref" };
     }
   }
+  // (#6651 RS1) `values`/`keys`/`entries` over an arbitrary array-LIKE; declines
+  // (undefined) outside standalone or on a missing dep, keeping the refusal below.
+  const rs1IterBody = emitArrayProtoIteratorMemberBody(ctx, fctx, member);
+  if (rs1IterBody !== undefined) return rs1IterBody;
   if (member !== "slice") {
     // Other Array.prototype members: their *FromVecLocal cores land in PR-C; until
     // then, a reflective call degrades to a catchable TypeError, not a compile error.
@@ -972,6 +981,7 @@ function emitArrayProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, me
   // slice: args begin@2, end@3 (closure ABI pads with externref). Unbox to i32.
   const startLocal = unboxArgToI32(ctx, fctx, 2);
   const endLocal = unboxArgToI32(ctx, fctx, 3);
+  emitSliceProtoEndDefault(ctx, fctx, endLocal); // (#6701) omitted end => len
   const resultType: ValType = { kind: "externref" };
 
   // Recover the array instance from the externref `this` (param 1) over the
@@ -997,8 +1007,8 @@ function emitArrayProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, me
       if (sliced.kind !== "externref") fctx.body.push({ op: "extern.convert_any" }); // vec → externref
     },
     () => {
-      // Non-array (genuine host) `this`: no compiled backing → return undefined.
-      fctx.body.push({ op: "ref.null.extern" });
+      // Non-array `this`: the array-like slice (#6701), else undefined.
+      if (!emitSliceProtoArrayLikeFallback(ctx, fctx)) fctx.body.push({ op: "ref.null.extern" });
     },
   );
   return resultType;
@@ -2605,7 +2615,16 @@ function makeGlue(
       return STRING_PROTO_METHOD_PARAM_SLOTS[member] ?? 0;
     },
     memberIsVariadic: (member) =>
-      name === "Array" && (member === "join" || member === "push" || member === "unshift" || member === "concat")
+      // (#6709) reduce/reduceRight need the argument COUNT (initialValue presence).
+      (name === "Array" && isArrayReduceVariadicMember(ctx, member)) ||
+      (name === "Array" && isArraySpliceVariadicMember(ctx, member)) || // (#6701)
+      (name === "Array" &&
+      (member === "join" ||
+        member === "push" ||
+        member === "unshift" ||
+        member === "concat" ||
+        member === "flat" ||
+        member === "flatMap")
         ? true
         : name === "String" && member === "concat"
           ? true
@@ -2613,7 +2632,7 @@ function makeGlue(
             // `(thisArg, ...rest)` — the packed vec ABI the invoker bodies below
             // unpack themselves. `apply` stays fixed at its 2-slot spec arity
             // (thisArg, argArray).
-            name === "Function" && (member === "call" || member === "bind"),
+            name === "Function" && (member === "call" || member === "bind")),
     // (#4485) §B.2.4.3 — `Date.prototype.toGMTString` IS `Date.prototype.
     // toUTCString` (one function object, asserted by test262 annexB
     // .../toGMTString/value.js). The Annex B String aliases have the same
@@ -2717,6 +2736,9 @@ function makeGlue(
                   // OrdinaryToPrimitive walk reaches; refusing it made ToPrimitive
                   // throw where the spec just falls through to `toString`.
                   (name === "Object" ? emitObjectProtoValueOfBody(c, fctx, member) : null) ??
+                  // (#6684) `hasOwnProperty` / `propertyIsEnumerable` as VALUES
+                  // (lodash-es: `var hasOwnProperty = objectProto.hasOwnProperty`).
+                  (name === "Object" ? emitObjectProtoOwnPredicateBody(c, fctx, member) : null) ??
                   emitProtoMemberBodyRefusal(c, fctx, name, member))),
   };
 }

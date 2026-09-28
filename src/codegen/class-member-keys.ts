@@ -69,6 +69,25 @@ export function classMemberFuncKey(ctx: CodegenContext, fullName: string, kind?:
 }
 
 /**
+ * (#6699) `ctx.funcRestParams` key for a class member's rest-parameter ABI.
+ *
+ * The metadata maps keep the legacy `fullName` (see the module note) — which is
+ * NOT collision-free when a class declares both `static m(...)` and instance
+ * `m(...)`: both registered `funcRestParams[A_m]`, last-wins, so one member's
+ * call sites packed arguments against the OTHER member's `restIndex`. axios's
+ * `AxiosHeaders` has exactly this pair (`concat(...targets)` /
+ * `static concat(first, ...targets)`); `new H(x).concat(y)` then pushed a
+ * receiver plus a padded "first" plus the rest vec into the two-param instance
+ * method — invalid Wasm. The colliding STATIC member takes its funcMap key
+ * (also the function's display name, which its own body prologue reads); the
+ * instance member and every non-colliding member keep `fullName`, so all other
+ * programs are unchanged.
+ */
+export function classMemberRestParamKey(ctx: CodegenContext, fullName: string, kind: ClassMemberKind): string {
+  return kind === "static" && ctx.classMethodSet.has(fullName) ? classMemberFuncKey(ctx, fullName, "static") : fullName;
+}
+
+/**
  * (#1394 / #2963) Walk the class-parent chain to the TOPMOST class that owns
  * the same method funcIdx. When `class D extends C { }` inherits `m` from C,
  * the codegen registers `D_m` with the SAME funcIdx as `C_m`

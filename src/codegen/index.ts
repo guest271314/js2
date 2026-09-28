@@ -299,6 +299,7 @@ import { fillVecProtoLinkArms } from "./vec-proto-link.js"; // (#2917)
 import { mintStandaloneClassProtoBuilders } from "./standalone-class-dyn-member.js"; // (#5383 S2h)
 import { mintStandaloneClassStaticBuilders } from "./standalone-class-dyn-static.js"; // (#5383 S2i)
 import { scanForArrayHoles, ensureHoleType } from "./array-holes.js"; // (#2001 S1)
+import { noteRegexPropertySource } from "./regex-runtime/unicode.js"; // (#6677)
 import {
   hoistedVarRetypesToConcreteRef,
   inferArrayVecType,
@@ -391,7 +392,8 @@ import {
   unshiftExternGetStringExoticArm,
   unshiftExternGetWrapperCtorArm,
 } from "./object-runtime.js";
-import { fillObjectProtoSingleton } from "./object-runtime-prototype.js"; // (#5270 step 2)
+import { fillArrayProtoSingleton, fillObjectProtoSingleton } from "./object-runtime-prototype.js"; // (#5270 step 2; #6651 R1)
+import { prependNativeGeneratorResultPrototypeArm } from "./generators-native-protocol.js"; // (#6651 SG1)
 import { fillVecLengthDynamicArms } from "./vec-length-set.js";
 import { fillTaCtorGetMetaArm } from "./ta-ctor-meta.js"; // `$__ta_ctor` name/length meta arm
 import { fillProxyRevokerFnMeta } from "./proxy-revoker-meta.js"; // (#5196) revoker name/length meta arm
@@ -410,6 +412,7 @@ import { unshiftExternGetProtoMethodArm } from "./native-proto-instance-method-r
 import { unshiftExternGetIterRecArm } from "./iterator-proto-next.js"; // (#6484 S2) record property reads
 import { unshiftRegExpAccessorGetArm } from "./regexp-accessor-get-arm.js"; // (#6651 B4) §22.2.6 accessor reads
 import { installRegExpLastIndexCarrierArms } from "./regexp-lastindex-carrier.js"; // (#6651 B6) lastIndex MOP
+import { unshiftDateCarrierMemberArms } from "./date-carrier-dynamic-member.js"; // (#6678) untyped Date members
 import { unshiftExternMethodCallProtoArm } from "./native-proto-method-call.js"; // (#4619) proto-receiver method CALL
 import {
   noteNumberPrimitiveMethodDemand,
@@ -441,6 +444,7 @@ import {
   fillReflectIsConstructor,
 } from "./reflect-construct-native.js";
 import { fillArrayToPrimitive } from "./array-to-primitive.js";
+import { fillNumberToLocaleString, fillTaToLocaleString } from "./to-locale-string-element.js"; // (#6651 TA1)
 import { fillVecOwnToPrimitive } from "./vec-own-to-primitive.js"; // (#6651 E3)
 import { fillClassToPrimitive } from "./class-to-primitive.js";
 import {
@@ -5730,6 +5734,7 @@ export function generateModule(
     // vec reads / joins emit the `$Hole → undefined` read-boundary guard.
     // Off by default — programs without holes are byte-identical.
     scanForArrayHoles(ctx, ast.sourceFile);
+    noteRegexPropertySource(ctx, ast.sourceFile); // (#6677) link the \p{…} table only if spellable
 
     if (
       options?.experimentalIR &&
@@ -6245,6 +6250,7 @@ export function generateModule(
     fillAnyIterNext(ctx);
     // (#6484 S3 review) `%ArrayIteratorPrototype%` for a kind-VEC `$__IterRec`.
     prependIterRecPrototypeArm(ctx);
+    prependNativeGeneratorResultPrototypeArm(ctx); // (#6651 SG1) %Object.prototype%
 
     // (#2922) Rebuild `__combinator_to_vec`'s user-iterable arm with the same
     // closed-struct dispatchers (identical five-dispatcher condition, so the
@@ -6581,6 +6587,7 @@ export function generateModule(
     // (#6484 S2) A `$__IterRec` has no own properties — resolve every read off
     // one through `__iter_rec_proto`. No-op unless the module demanded it.
     unshiftExternGetIterRecArm(ctx);
+    unshiftDateCarrierMemberArms(ctx); // (#6678) untyped Date members
     // (#4619) The CALL twin, which delegates to `__extern_get` — so it must
     // run after the read arm above. See native-proto-method-call.ts.
     unshiftExternMethodCallProtoArm(ctx);
@@ -6845,6 +6852,12 @@ export function generateModule(
     // (#6651 E3) …and the own-method prefix in front of it, which needs the
     // same late helpers plus `__hasOwnProperty` / the #3537 vec bag.
     fillVecOwnToPrimitive(ctx);
+    // (#6651 TA1) …and the numeric ELEMENT of a `toLocaleString` join. Filled
+    // here, not at the join call site, because a `Number.prototype` companion
+    // hit is only known to be a USER value once the native-proto seeder registry
+    // is final — see num-to-locale-string.ts.
+    fillNumberToLocaleString(ctx);
+    fillTaToLocaleString(ctx);
 
     // #1504: emit __is_closure(externref) -> i32 so the JS-side wrapExports
     // can discriminate a closure struct return from a vec/struct return
@@ -6904,6 +6917,7 @@ export function generateModule(
     // object, and the brand's lazy `$NativeProto` global only exists once the
     // native-proto glue has been registered.
     fillObjectProtoSingleton(ctx);
+    fillArrayProtoSingleton(ctx); // (#6651 R1) its `%Array.prototype%` twin
 
     // (#2638) Fill the reserved `__class_to_primitive` driver now that the
     // per-struct `__call_valueOf`/`__call_toString` dispatchers exist (emitted
@@ -7110,7 +7124,8 @@ export function generateModule(
 function assertNoLeakedHostImports(ctx: CodegenContext, mod: WasmModule): void {
   const severity: "error" | "warning" | null = ctx.strictNoHostImports
     ? "error"
-    : ctx.standalone && process.env.JS2WASM_STANDALONE_LEAK_SCAN !== "0"
+    : // (#6686) audits the standalone deliverable, not the regime in a JS env
+      ctx.targetProfile.target === "standalone" && process.env.JS2WASM_STANDALONE_LEAK_SCAN !== "0"
       ? "warning"
       : null;
   if (severity === null) return;
@@ -10920,6 +10935,7 @@ export function generateMultiModule(multiAst: MultiTypedAST, options?: CodegenOp
     profilePhase("array-hole-scan", () => {
       for (const sf of multiAst.sourceFiles) {
         scanForArrayHoles(ctx, sf);
+        noteRegexPropertySource(ctx, sf); // (#6677)
       }
     });
 
@@ -11337,6 +11353,7 @@ export function generateMultiModule(multiAst: MultiTypedAST, options?: CodegenOp
     // helper. MUST stay ahead of the cache arm below, which has to remain the
     // body's PREFIX for the #4157 inline extractor.
     profilePhase("unshift-extern-get-iter-rec", () => unshiftExternGetIterRecArm(ctx));
+    profilePhase("unshift-date-carrier-member", () => unshiftDateCarrierMemberArms(ctx)); // (#6678)
     // (#4619) The CALL twin, which delegates to `__extern_get` — so it must
     // run after the read arm above. See native-proto-method-call.ts.
     profilePhase("unshift-extern-method-call-proto", () => unshiftExternMethodCallProtoArm(ctx));
@@ -11532,6 +11549,7 @@ export function generateMultiModule(multiAst: MultiTypedAST, options?: CodegenOp
     profilePhase("fill-iter-result-object", () => fillIterResultObject(ctx));
     profilePhase("fill-any-iter-next", () => fillAnyIterNext(ctx));
     profilePhase("prepend-iter-rec-prototype-arm", () => prependIterRecPrototypeArm(ctx));
+    profilePhase("prepend-gen-result-proto-arm", () => prependNativeGeneratorResultPrototypeArm(ctx));
     profilePhase("fill-combinator-to-vec", () => fillCombinatorToVec(ctx));
 
     // Emit __call_fn_0 export for calling zero-arg closures from JS (#851, #1308).
@@ -11644,6 +11662,7 @@ export function generateMultiModule(multiAst: MultiTypedAST, options?: CodegenOp
     // (#5270 step 2) Multi-source parity for the `%Object.prototype%` carrier;
     // see the single-source placement above.
     profilePhase("fill-object-proto-singleton", () => fillObjectProtoSingleton(ctx));
+    profilePhase("fill-array-proto-singleton", () => fillArrayProtoSingleton(ctx)); // (#6651 R1)
 
     // (#2358 #10 / #2638) Fill the reserved `__array_to_primitive_string` /
     // `__class_to_primitive` driver bodies now that `__extern_length` /
@@ -11663,6 +11682,9 @@ export function generateMultiModule(multiAst: MultiTypedAST, options?: CodegenOp
     profilePhase("fill-array-to-primitive", () => fillArrayToPrimitive(ctx));
     profilePhase("fill-vec-own-to-primitive", () => fillVecOwnToPrimitive(ctx));
     profilePhase("fill-class-to-primitive", () => fillClassToPrimitive(ctx));
+    // (#6651 TA1) Same reserve/fill reason as the three above.
+    profilePhase("fill-num-to-locale-string", () => fillNumberToLocaleString(ctx));
+    profilePhase("fill-ta-to-locale-string", () => fillTaToLocaleString(ctx));
 
     // (#3981) Same class of multi-file gap as the two fills immediately above.
     // This path emits only `__call_fn_0`/`__call_fn_1`, never the
@@ -13171,9 +13193,12 @@ function typeHasObjLitAccessorProperty(tsType: ts.Type): boolean {
  * #2724 object-REST steering (see the note in `resolveWasmType`).
  */
 export function resolveWasmTypeForClosureReturn(ctx: CodegenContext, retType: ts.Type): ValType {
-  const symName = retType.getSymbol()?.name;
-  if ((symName === "__type" || symName === "__object") && typeHasObjLitAccessorProperty(retType)) {
-    return { kind: "externref" };
+  // (#6651 B8) Each union member too: `exec` overrides return `null | { get 0() {…} }`.
+  for (const member of retType.isUnion() ? retType.types : [retType]) {
+    const symName = member.getSymbol()?.name;
+    if ((symName === "__type" || symName === "__object") && typeHasObjLitAccessorProperty(member)) {
+      return { kind: "externref" };
+    }
   }
   return resolveWasmType(ctx, retType);
 }

@@ -23,6 +23,7 @@ import {
 import type { Instr, ValType } from "../../ir/types.js";
 import { compileHostFreeCryptoCall, isHostFreeCryptoCall } from "./standalone-crypto.js";
 import { tryStandaloneQueueMicrotaskCall } from "./standalone-queue-microtask.js";
+import { tryStandaloneHostFreeCall } from "./standalone-dynamic-code.js"; // (#6675/#6676) timers, Function(src)
 import { compileArrayMethodCall, compileArrayPrototypeCall, resolveArrayInfo } from "../array-methods.js";
 import { emitGlobalThisGopdFold } from "../dyn-read.js"; // (#2984)
 import { tryEmitNullishReceiverCall } from "../nullish-receiver-coercible.js"; // (#4484 B) §7.3.2 on a syntactic null/undefined receiver
@@ -46,6 +47,7 @@ import { NATIVE_HOF_METHODS } from "../hof-native.js";
 import { ensureTaMapFilterHelper } from "../ta-hof-map-filter.js";
 import { LAZY_ITER_METHODS } from "../iter-lazy-native.js"; // (#2903 R3b) flatMap closure-path exemption
 import {
+  ensureBoundaryCallableKind,
   ensureObjVecBuilders,
   ensureObjectGroupBy,
   ensureObjectRuntime,
@@ -222,6 +224,7 @@ function emitDynamicCallDispatch(
   return isBareCall ? emitBareCallReceiverReset(ctx, fctx, dispatch, { kind: "externref" }) : dispatch;
 }
 import type { ClosureInfo, CodegenContext, FunctionContext } from "../context/types.js";
+import { jsValueBoundary } from "../context/types.js";
 import {
   addFuncType,
   addImport,
@@ -313,6 +316,7 @@ import {
   ensureObjectNativeProtoGlue,
   ensurePromiseNativeProtoGlue,
   ensureStringNativeProtoGlue,
+  ensureSymbolNativeProtoGlue,
   ensureGeneratorPrototypeNativeProtoGlue,
   emitTypedArrayIntrinsicCtorObject,
   emitArrayIteratorPrototypeSingleton,
@@ -470,7 +474,12 @@ import {
 import { reshapeSloppyPrimitiveThisArg } from "./sloppy-this-toobject.js"; // (#4246)
 import { planInlinedReceiver, releaseInlinedReceiver } from "./inlined-call-receiver.js"; // (#4246)
 import { seedBoundFunctionMetaOnStack } from "../bound-fn-meta.js"; // (#4562/#4563) §20.2.3.2 steps 5-11
-import { buildHostCallFallbackArm, ensureHostCallFallbackImports, planHostCallFallback } from "./host-call-fallback.js";
+import {
+  buildHostCallFallbackArm,
+  composeHostCallFallback,
+  ensureHostCallFallbackImports,
+  planHostCallFallback,
+} from "./host-call-fallback.js";
 import { analyzeTdzAccessByPos, emitLocalTdzCheck, emitStaticTdzThrow } from "./identifiers.js";
 import {
   emitUndefined,
@@ -548,6 +557,7 @@ import { bindingMayReceiveHostCallable } from "../analysis/mixed-assignment-carr
 // Registry extracted to its own leaf module (#1793; LOC ratchet #3102) —
 // re-exported here so existing importers keep resolving via calls.js.
 import { BUILTIN_CLASS_NAMES } from "./builtin-class-names.js";
+import { objectOwnPredicateCallKeepsFold } from "../object-proto-has-own-property.js";
 import { maybeEmitLayoutHint } from "../fnctor-layout-emit.js"; // (#3927) per-type layouts
 import { matchClosureInfoBySignature, tsSignatureHasRest } from "./closure-sig-match.js"; // (#4394) exact-first closure pick
 export { BUILTIN_CLASS_NAMES };
@@ -1331,6 +1341,8 @@ function tryEmitNativeProtoReflectiveCall(
   // m.call(x)` arrives with an Identifier receiver, and the ES5 genericity idiom
   // `arr.getClass = Object.prototype.toString; arr.getClass()` never reaches a
   // `.call` at all. Neither gives the fold a receiver to read.
+  // (#6684) Same precedence for the own-property predicates — see the helper.
+  if (objectOwnPredicateCallKeepsFold(ifaceName, member, unwrapTransparent(receiver))) return undefined;
   if (ifaceName === "Object" && member === "toString" && ts.isPropertyAccessExpression(unwrapTransparent(receiver))) {
     // The lower direct-call path now owns BOTH statically-known tags and the
     // runtime any/externref classifier. Never divert this syntactic form through
@@ -1366,6 +1378,20 @@ function tryEmitNativeProtoReflectiveCall(
   // `finally` here would turn today's wrong-but-non-throwing answer into a trap.
   else if (brand === undefined && ifaceName === "Promise" && (member === "then" || member === "catch")) {
     brand = ensurePromiseNativeProtoGlue(ctx);
+  }
+  // (#6651 SN1) …and the same one-member-at-a-time discipline for `Symbol`.
+  // §20.4.3.2 `valueOf` / §20.4.3.3 `toString` both have native standalone
+  // bodies (`symbol-proto-valueof.ts` #4776, `symbol-proto-tostring.ts` #5269
+  // B-c) whose `thisSymbolValue` prologue performs the brand check, but only the
+  // VALUE-ERASED spelling (`var m = Symbol.prototype.toString; m.call(s)`)
+  // reached them. The DIRECT spelling fell past this resolver to the #1888
+  // Slice 3/4 borrowed-method tail, which has no `Symbol` arm and so
+  // refuse-louds and answers `undefined` — measured on base:
+  // `Symbol.prototype.toString.call(Symbol('66'))` === undefined,
+  // `Symbol.prototype.valueOf.call(s)` !== s, while the `.apply` twin and the
+  // value-erased twin both already answered correctly.
+  else if (brand === undefined && ifaceName === "Symbol" && wrapperWiredMember) {
+    brand = ensureSymbolNativeProtoGlue(ctx);
   }
   if (brand === undefined) return undefined;
 
@@ -1517,6 +1543,10 @@ export function emitReflectiveNativeProtoClosureCall(
   // every other reflective ABI retains its existing null/undefined policy.
   const nativeStringNormalize =
     (ctx.standalone || ctx.wasi) && getNativeProtoBuiltinGlue(ctx, brand)?.name === "String" && member === "normalize";
+  // (#6701) `Array.prototype.slice.call(o, k)`: an omitted `end` is
+  // `undefined` (⇒ len), not `null` (⇒ 0), so pad it with the canonical
+  // undefined — `[].slice.call(arguments, 1)` answered an empty array.
+  const arraySliceEnd = ctx.standalone && member === "slice" && getNativeProtoBuiltinGlue(ctx, brand)?.name === "Array";
   for (let i = 0; i < paramTypes.length; i++) {
     const pType = paramTypes[i]!;
     if (nativeProtoVariadic && i === 1) {
@@ -1548,7 +1578,9 @@ export function emitReflectiveNativeProtoClosureCall(
       // optional *form* slot (index 1) represents an omitted argument as the
       // canonical undefined singleton; explicit null is still a real value.
       const missingPad =
-        nativeStringNormalize && i === 1 ? canonicalUndefinedExternInstrs(ctx) : arrayBufferUndefinedPad;
+        (nativeStringNormalize && i === 1) || arraySliceEnd
+          ? canonicalUndefinedExternInstrs(ctx)
+          : arrayBufferUndefinedPad;
       fctx.body.push(...(missingPad ?? [{ op: "ref.null.extern" }]));
     } else {
       pushDefaultValue(fctx, pType, ctx);
@@ -4724,6 +4756,7 @@ export function tryEmitInlineDynamicCall(
   // evaluated, matching EvaluateCall's observable order.
   const wantIsCallableGuard = noJsHost(ctx);
   if (wantIsCallableGuard) {
+    ensureBoundaryCallableKind(ctx); // (#6686) admitted JS functions are callable
     ensureLateImport(ctx, "__is_callable", [{ kind: "externref" }], [{ kind: "i32" }]);
   }
   if (allCandidates.length === 0 && !wantProxyArm && !wantBoundArm && !wantTaCtorArm && !wantApplyFallback) return null;
@@ -4807,10 +4840,10 @@ export function tryEmitInlineDynamicCall(
   // the exact Wasm-closure arm still needs to deliver the f64 undefined
   // sentinel / typed-null default marker. Native-first targets route this name
   // to the in-Wasm object runtime, so the check does not create a host import.
-  if (needsProvidedUndefinedCheck || (!ctx.standalone && !ctx.wasi && allowHostBoundaryFallback)) {
+  if (needsProvidedUndefinedCheck || (jsValueBoundary(ctx) && allowHostBoundaryFallback)) {
     ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
   }
-  if (!ctx.standalone && !ctx.wasi && allowHostBoundaryFallback) {
+  if (jsValueBoundary(ctx) && allowHostBoundaryFallback) {
     ensureHostCallFallbackImports(ctx, hostCallPlan);
   }
   const needsHostFacadeUnwrap =
@@ -4837,10 +4870,7 @@ export function tryEmitInlineDynamicCall(
   const maxFormals = candidates.reduce((m, c) => Math.max(m, c.info.paramTypes.length), 0);
   const needsUndefinedPad = maxFormals > arity;
   const needsUndefined =
-    needsUndefinedPad ||
-    wantProxyArm ||
-    wantApplyFallback ||
-    (!ctx.standalone && !ctx.wasi && allowHostBoundaryFallback);
+    needsUndefinedPad || wantProxyArm || wantApplyFallback || (jsValueBoundary(ctx) && allowHostBoundaryFallback);
   const undefinedIdx = needsUndefined ? ensureGetUndefined(ctx) : undefined;
   const undefinedSingletonPad = needsUndefined && undefinedIdx === undefined ? undefinedExternInstrs(ctx) : undefined;
   // (#2611) Flush the deferred late-import shift NOW — every other late-import
@@ -5118,13 +5148,14 @@ function buildInlineDynamicDispatch(
   // so the failure mode is deterministic and catchable. Standalone/WASI have
   // no host: they keep the legacy null default (their callable shapes are the
   // dedicated proxy/bound/ta-ctor arms above).
-  if (!ctx.standalone && !ctx.wasi && allowHostBoundaryFallback) {
+  if (jsValueBoundary(ctx) && allowHostBoundaryFallback) {
     // Imports were ensured (and flushed) before box/unbox indices were captured.
     // (#4313) A bare call's `thisArg` is `undefined`, not a null externref, so it
     // is materialized here and handed to the helper rather than hardcoded there.
     const bareCallThisArg: Instr[] = [];
     pushDynamicUndefinedExternref(bareCallThisArg, undefinedIdx, undefinedSingletonPad);
-    dispatch = buildHostCallFallbackArm(ctx, fctx, hostCallPlan, anyLocal, argLocals, bareCallThisArg) ?? dispatch;
+    const hostArm = buildHostCallFallbackArm(ctx, fctx, hostCallPlan, anyLocal, argLocals, bareCallThisArg);
+    dispatch = composeHostCallFallback(applyFallback && dispatch, hostArm, anyLocal) ?? dispatch;
   }
 
   // (#2933) Variadic builtin value-closure arm — INNERMOST (just above the
@@ -7659,7 +7690,9 @@ function compileCallExpression(
   // runtime callable before the dynamic-dispatch candidate scan.
   const immediateFunctionCtor = isFunctionCtorImmediateCall(expr, ctx.checker);
   {
-    const r = tryStandaloneDynamicFunctionCtorValue(ctx, fctx, expr);
+    const r =
+      tryStandaloneHostFreeCall(ctx, fctx, expr, immediateFunctionCtor) ??
+      tryStandaloneDynamicFunctionCtorValue(ctx, fctx, expr);
     if (r !== undefined) return r;
     if (ctx.standalone && immediateFunctionCtor && ensureRuntimeEvalCallableCarrier(ctx, fctx)) {
       const dyn = tryEmitInlineDynamicCall(ctx, fctx, expr, true);

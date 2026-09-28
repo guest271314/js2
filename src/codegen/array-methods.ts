@@ -35,7 +35,7 @@ import {
   typedArrayPackedSignedness,
 } from "./index.js";
 import { getClosureFuncSelfTypeIdx, getOrCreateFuncRefWrapperTypes } from "./closures/funcref-wrapper-types.js";
-import { getFuncSignature } from "./closures/funcref-wrapper-types.js";
+import { funcValueCallableSignature } from "./closures/func-value-callable-signature.js"; // (#6699) value ABI, not lifted
 import { addStringConstantGlobal, localGlobalIdx } from "./registry/imports.js";
 import { reserveVecMethodHelper } from "./vec-access-exports.js"; // (#4531) extern-receiver push/pop dual-lane
 import { buildThrowJsErrorInstrs, emitThrowTypeError, noJsHost } from "./js-errors.js";
@@ -89,10 +89,18 @@ import {
 } from "./native-strings.js";
 import { emitNativeNumberFormat } from "./number-format-native.js";
 import { ensureNativeArrayHof } from "./hof-native.js";
-import { flatMapSpeciesResult } from "./array-flatmap.js";
+import { flatMapReturnIsDynamic, flatMapSpeciesResult } from "./array-flatmap.js";
+import { compileArrayFlatNativeCall, emitFlattenDepth1Extern } from "./array-flat-native.js"; // (#2717)
 // (§15.4.4.20 / §23.1.3.7) live per-index HasProperty + fresh Get for `filter`.
 import { filterSelectStage, overlayFilterAccess } from "./array-filter-spec-access.js";
 import { nullableElemParamOverrideFor } from "./array-hof-nullable-elem-param.js"; // (#6602)
+import {
+  callbackInvokeInstrs,
+  type DynCallbackFallback,
+  reduceSpecArgs,
+  setupDynCallbackFallback,
+  untypedDynCallbackClosure,
+} from "./array-callback-dyn-invoke.js"; // (#6690)
 import { allocJoinFoldLocals, emitStringJoinFold, hostStringRepr, nativeStringRepr } from "./builtin-scaffold.js";
 import { ensureTimsortHelper } from "./timsort.js";
 import { emitStableMergeSort } from "./merge-sort.js"; // (#3902) shared stable O(n log n) sort skeleton
@@ -102,7 +110,6 @@ import {
   coerceType,
   coercionInstrs,
   defaultValueInstrs,
-  emitGuardedRefCast,
 } from "./type-coercion.js";
 import { staticIntegerRange } from "../ir/analysis/static-numeric-range.js";
 import { tryEmitStaticI32Expression } from "./i32-static-range-expr.js";
@@ -125,12 +132,12 @@ const {
   isLocalizedJoin,
 } = tls;
 import { emitFuncRefAsClosure } from "./closures/funcref-as-closure.js";
-import { emitRuntimeEvalCarrierUnwrapAny } from "./runtime-eval-callable.js";
 import { emitSymbolOperandCoercionThrow } from "./tonumber-symbol-throw.js"; // (#3481)
 import { buildSpreadArgList, hasSpreadArgument } from "./spread-arg-list.js"; // (#5361)
 import { canBuildSpreadArgList, isTupleStructType } from "./spread-arg-list.js"; // (#5361)
 import { compileArrayPushSpread } from "./array-push-spread.js"; // (#5361)
 import { taDynDetachedGuardPrologue } from "./ta-dyn-method-call.js"; // (#6651 E6) join/toLocaleString
+import { reserveNumberToLocaleString } from "./to-locale-string-element.js"; // (#6651 TA1) numeric element Invoke
 
 // (#3264) Array.prototype-borrow subsystem extracted to array-prototype-borrow.ts;
 // re-export the two public entries so existing importers keep resolving.
@@ -5865,8 +5872,18 @@ function compileArrayJoinNative(
     elemToStr.push({ op: "ref.cast", typeIdx: anyStrTypeIdx });
   } else if (isNumeric && numToStrIdx !== undefined) {
     if (elemType.kind !== "f64") elemToStr.push({ op: "f64.convert_i32_s" });
+    // (#6651 TA1) §23.1.3.32 step 6.c.i on a NUMBER element — the arm #4655
+    // deliberately left out, which is the one `%TypedArray%.prototype
+    // .toLocaleString` (§23.2.3.29) lands in (a dyn view arrives here with
+    // `elemType.kind === "i8"`). Same `(f64) -> externref` ABI as
+    // `number_toString`, so the tail below is reused verbatim; `undefined`
+    // (no `Number.prototype.toLocaleString` override in this module) keeps
+    // these bytes unchanged. See num-to-locale-string.ts.
+    const localizedNumIdx = isLocalizedJoin(propAccess)
+      ? reserveNumberToLocaleString(ctx, fctx, propAccess)
+      : undefined;
     const numToStrChain: Instr[] = [
-      { op: "call", funcIdx: numToStrIdx },
+      { op: "call", funcIdx: localizedNumIdx ?? numToStrIdx },
       // number_toString returns the native string boxed as externref.
       { op: "any.convert_extern" },
       { op: "ref.cast", typeIdx: anyStrTypeIdx },
@@ -6499,6 +6516,8 @@ interface ArrayCallbackSetup {
   closureInfo?: ClosureInfo;
   closureTypeIdx?: number;
   closureTmp?: number;
+  /** (#6690) Signature-agnostic `__apply_closure` fallback for a dynamic callback. */
+  dynFallback?: DynCallbackFallback;
   callBridgeIdx?: number;
   cbTmp?: number;
   /** Argument carrier expected by the host callback bridge. */
@@ -6595,7 +6614,7 @@ function resolveDynamicCallbackClosure(
   // type, which is exactly what makes the runtime `ref.cast` + `call_ref` valid.
   const loweredSig =
     ts.isIdentifier(cbArg) && ctx.funcMap.get(cbArg.text) !== undefined
-      ? getFuncSignature(ctx, ctx.funcMap.get(cbArg.text)!)
+      ? funcValueCallableSignature(ctx, cbArg.text, ctx.funcMap.get(cbArg.text)!)
       : undefined;
   const cbType = ctx.checker.getTypeAtLocation(cbArg);
   const sigs = cbType.getCallSignatures();
@@ -6729,6 +6748,7 @@ function setupArrayCallback(
   let closureInfo: ClosureInfo | undefined;
   let closureTypeIdx: number | undefined;
   let closureTmp: number | undefined;
+  let dynFallback: DynCallbackFallback | undefined;
 
   if (cbResult && (cbResult.kind === "ref" || cbResult.kind === "ref_null")) {
     closureTypeIdx = (cbResult as { typeIdx: number }).typeIdx;
@@ -6745,24 +6765,20 @@ function setupArrayCallback(
     // `call_ref` via the callback signature's canonical funcref wrapper. Host
     // mode is untouched (this branch is standalone-gated) and keeps the bridge
     // as its fast path per the dual-mode principle.
-    const dyn = resolveDynamicCallbackClosure(ctx, cbArg);
+    // (#6690) No single static signature (`any`, overloads): an all-externref
+    // wrapper whose typed arm rarely matches — the `__apply_closure` fallback
+    // then calls the value by its real signature instead of the host bridge.
+    const dyn = resolveDynamicCallbackClosure(ctx, cbArg) ?? untypedDynCallbackClosure(ctx, elemParamIndex + 3);
     if (dyn) {
       closureInfo = dyn.closureInfo;
       closureTypeIdx = dyn.selfStructTypeIdx;
-      // The externref callback value is on the stack: convert it to the wrapper
-      // self carrier and store a NON-NULL closure ref. The native invocation
-      // path (`buildClosureCallInstrs` / reduce) pushes `closureTmp` as the
-      // `call_ref` self argument, whose param type is `(ref root)` — non-null,
-      // matching the arrow branch's `(ref …)` `closureTmp`.
-      fctx.body.push({ op: "any.convert_extern" });
-      emitRuntimeEvalCarrierUnwrapAny(ctx, fctx);
-      emitGuardedRefCast(fctx, dyn.selfStructTypeIdx);
-      fctx.body.push({ op: "ref.as_non_null" });
-      closureTmp = allocLocal(fctx, `__arr_${tag}_dyncb_${fctx.locals.length}`, {
-        kind: "ref",
-        typeIdx: dyn.selfStructTypeIdx,
-      });
-      fctx.body.push({ op: "local.set", index: closureTmp });
+      // (#6690) The static signature is a belief about the variable, not the
+      // runtime value: keep a NULLABLE root closure plus the raw value so the
+      // call falls back to `__apply_closure` when the funcref's actual
+      // signature differs (see `array-callback-dyn-invoke.ts`).
+      const dynSetup = setupDynCallbackFallback(ctx, fctx, dyn.selfStructTypeIdx, tag);
+      closureTmp = dynSetup.closureTmp;
+      dynFallback = dynSetup.fallback;
     }
   }
 
@@ -6801,6 +6817,7 @@ function setupArrayCallback(
     closureInfo,
     closureTypeIdx,
     closureTmp,
+    dynFallback,
     callBridgeIdx,
     cbTmp,
     bridgeArgType,
@@ -6949,6 +6966,7 @@ function buildClosureCallInstrs(
   arrTypeIdx: number,
   loop: ArrayLoopLocals,
   elemSource: { kind: "local"; index: number } | { kind: "inline" },
+  resultAsBoolean = false,
 ): Instr[] {
   const { closureInfo, closureTypeIdx, closureTmp } = setup;
   if (!closureInfo || closureTypeIdx === undefined || closureTmp === undefined) return [];
@@ -7028,56 +7046,61 @@ function buildClosureCallInstrs(
   ]);
   if (inlineBody) return inlineBody;
 
+  const loadElem = (): Instr[] => [
+    ...(elemSource.kind === "local"
+      ? ([{ op: "local.get", index: elemSource.index }] satisfies Instr[])
+      : ([
+          { op: "local.get", index: loop.dataTmp },
+          { op: "local.get", index: loop.iTmp },
+          { op: loop.getOp, typeIdx: arrTypeIdx },
+        ] satisfies Instr[])),
+    ...(elemType.kind === "externref" && ctx.usesArrayHoles
+      ? holeToUndefinedInstrs(ctx, fctx)
+      : f64HoleToUndefFor(ctx, fctx, elemType)),
+  ];
+  const typedClosureArgs = (): Instr[] => {
+    // A 0-arg callback compiles to a funcref taking only the closure env, so
+    // each user arg is pushed only when the callback declares that param.
+    // (#2001 S1) `loadElem` maps a visited `$Hole` back to `undefined`.
+    return [
+      ...(numParams >= 1 ? [...loadElem(), ...elemCoerce] : []),
+      ...(numParams >= 2
+        ? ([
+            { op: "local.get", index: loop.iTmp },
+            ...coercionInstrs(ctx, { kind: "i32" }, closureInfo.paramTypes[1] ?? { kind: "i32" }, fctx),
+          ] satisfies Instr[])
+        : []),
+      ...(numParams >= 3
+        ? ([
+            { op: "local.get", index: loop.vecTmp },
+            ...coercionInstrs(
+              ctx,
+              { kind: "ref_null", typeIdx: vecTypeIdx },
+              closureInfo.paramTypes[2] ?? { kind: "ref_null", typeIdx: vecTypeIdx },
+              fctx,
+            ),
+          ] satisfies Instr[])
+        : []),
+    ];
+  };
   return [
     ...argsPlumbing,
     ...installThis,
-    { op: "local.get", index: closureTmp },
-    // Element value (1st user param) — only pushed if callback declares ≥1 param.
-    // A 0-arg callback (e.g. `function() {}`) compiles to a funcref that takes only
-    // the closure env, so pushing elem here produces a call_ref signature mismatch.
-    ...(numParams >= 1
-      ? [
-          ...(elemSource.kind === "local"
-            ? ([{ op: "local.get", index: elemSource.index }] satisfies Instr[])
-            : ([
-                { op: "local.get", index: loop.dataTmp },
-                { op: "local.get", index: loop.iTmp },
-                { op: loop.getOp, typeIdx: arrTypeIdx },
-              ] satisfies Instr[])),
-          // (#2001 S1) Map a `$Hole` slot back to `undefined` before it reaches
-          // the callback — a visited hole must present as `undefined`, never the
-          // sentinel struct (forEach/map/etc still VISIT holes in S1; S2 adds
-          // the visit-skip). Gated on externref element + `usesArrayHoles`.
-          ...(elemType.kind === "externref" && ctx.usesArrayHoles
-            ? holeToUndefinedInstrs(ctx, fctx)
-            : f64HoleToUndefFor(ctx, fctx, elemType)),
-          ...elemCoerce,
-        ]
-      : []),
-    // Index (2nd user param)
-    ...(numParams >= 2
-      ? ([
-          { op: "local.get", index: loop.iTmp },
-          ...coercionInstrs(ctx, { kind: "i32" }, closureInfo.paramTypes[1] ?? { kind: "i32" }, fctx),
-        ] satisfies Instr[])
-      : []),
-    // Array (3rd user param)
-    ...(numParams >= 3
-      ? ([
-          { op: "local.get", index: loop.vecTmp },
-          ...coercionInstrs(
-            ctx,
-            { kind: "ref_null", typeIdx: vecTypeIdx },
-            closureInfo.paramTypes[2] ?? { kind: "ref_null", typeIdx: vecTypeIdx },
-            fctx,
-          ),
-        ] satisfies Instr[])
-      : []),
-    { op: "local.get", index: closureTmp },
-    { op: "struct.get", typeIdx: closureTypeIdx, fieldIdx: 0 },
-    ...guardedFuncRefCastInstrs(fctx, closureInfo.funcTypeIdx),
-    { op: "ref.as_non_null" },
-    { op: "call_ref", typeIdx: closureInfo.funcTypeIdx },
+    ...callbackInvokeInstrs(ctx, fctx, {
+      closureInfo,
+      closureTypeIdx,
+      closureTmp,
+      typedArgs: typedClosureArgs(),
+      guardedCast: (idx) => guardedFuncRefCastInstrs(fctx, idx),
+      fallback: setup.dynFallback,
+      thisTmp: setup.thisArgTmp,
+      resultAsBoolean,
+      specArgs: () => [
+        { load: loadElem, type: elemType },
+        { load: () => [{ op: "local.get", index: loop.iTmp }], type: { kind: "i32" } },
+        { load: () => [{ op: "local.get", index: loop.vecTmp }], type: { kind: "ref_null", typeIdx: vecTypeIdx } },
+      ],
+    }),
     ...restoreThis,
   ];
 }
@@ -7492,7 +7515,7 @@ function buildCallAndCheck(
   check: "truthy" | "falsy" | "none",
 ): Instr[] {
   const callInstrs = setup.closureInfo
-    ? buildClosureCallInstrs(ctx, fctx, setup, elemType, vecTypeIdx, arrTypeIdx, loop, elemSource)
+    ? buildClosureCallInstrs(ctx, fctx, setup, elemType, vecTypeIdx, arrTypeIdx, loop, elemSource, check !== "none")
     : buildBridgeCallInstrs(ctx, setup, elemType, arrTypeIdx, loop, elemSource);
   const checkInstrs =
     check === "truthy" ? buildTruthyCheck(ctx, setup) : check === "falsy" ? buildFalsyCheck(ctx, setup) : [];
@@ -7971,16 +7994,20 @@ function compileArrayReduce(
     callInstrs = inlineBody
       ? [...inlineBody, ...normalizeResult, { op: "local.set", index: accTmp }]
       : [
-          { op: "local.get", index: setup.closureTmp },
-          ...(numParams >= 1 ? ([{ op: "local.get", index: accTmp }, ...accCoerce] satisfies Instr[]) : []),
-          ...(numParams >= 2 ? elemLoad : []),
-          ...(numParams >= 3 ? indexLoad : []),
-          ...(numParams >= 4 ? arrayLoad : []),
-          { op: "local.get", index: setup.closureTmp },
-          { op: "struct.get", typeIdx: setup.closureTypeIdx, fieldIdx: 0 },
-          ...guardedFuncRefCastInstrs(fctx, ci.funcTypeIdx),
-          { op: "ref.as_non_null" },
-          { op: "call_ref", typeIdx: ci.funcTypeIdx },
+          ...callbackInvokeInstrs(ctx, fctx, {
+            closureInfo: ci,
+            closureTypeIdx: setup.closureTypeIdx,
+            closureTmp: setup.closureTmp,
+            typedArgs: [
+              ...(numParams >= 1 ? ([{ op: "local.get", index: accTmp }, ...accCoerce] satisfies Instr[]) : []),
+              ...(numParams >= 2 ? elemLoad : []),
+              ...(numParams >= 3 ? indexLoad : []),
+              ...(numParams >= 4 ? arrayLoad : []),
+            ],
+            guardedCast: (idx) => guardedFuncRefCastInstrs(fctx, idx),
+            fallback: setup.dynFallback,
+            specArgs: () => reduceSpecArgs(ctx, fctx, accTmp, accType, loop, arrTypeIdx, elemType, vecTypeIdx),
+          }),
           ...normalizeResult,
           { op: "local.set", index: accTmp },
         ];
@@ -8179,8 +8206,7 @@ function compileArrayReduceRight(
     const numParams = ci.paramTypes.length;
     const accCoerce = ci.paramTypes[0] ? coercionInstrs(ctx, accType, ci.paramTypes[0], fctx) : [];
     const elemCoerce = ci.paramTypes[1] ? coercionInstrs(ctx, elemType, ci.paramTypes[1], fctx) : [];
-    callInstrs = [
-      { op: "local.get", index: setup.closureTmp },
+    const typedArgs: Instr[] = [
       ...(numParams >= 1 ? ([{ op: "local.get", index: accTmp }, ...accCoerce] satisfies Instr[]) : []),
       ...(numParams >= 2
         ? ([
@@ -8211,11 +8237,27 @@ function compileArrayReduceRight(
             ),
           ] satisfies Instr[])
         : []),
-      { op: "local.get", index: setup.closureTmp },
-      { op: "struct.get", typeIdx: setup.closureTypeIdx, fieldIdx: 0 },
-      ...guardedFuncRefCastInstrs(fctx, ci.funcTypeIdx),
-      { op: "ref.as_non_null" },
-      { op: "call_ref", typeIdx: ci.funcTypeIdx },
+    ];
+    callInstrs = [
+      ...callbackInvokeInstrs(ctx, fctx, {
+        closureInfo: ci,
+        closureTypeIdx: setup.closureTypeIdx,
+        closureTmp: setup.closureTmp,
+        typedArgs,
+        guardedCast: (idx) => guardedFuncRefCastInstrs(fctx, idx),
+        fallback: setup.dynFallback,
+        specArgs: () =>
+          reduceSpecArgs(
+            ctx,
+            fctx,
+            accTmp,
+            accType,
+            { dataTmp, iTmp, vecTmp, getOp },
+            arrTypeIdx,
+            elemType,
+            vecTypeIdx,
+          ),
+      }),
       // Void-returning callback (e.g. `function() {}`): nothing on stack →
       // push default-of-accumulator so the trailing `local.set accTmp`
       // validates. JS: cb returns `undefined` → acc becomes undefined →
@@ -8968,7 +9010,7 @@ function compileArraySort(
       typeIdx: vecTypeIdx,
     });
     compileExpression(ctx, fctx, propAccess.expression);
-    fctx.body.push({ op: "local.tee", index: vecTmp0 });
+    fctx.body.push({ op: "local.set", index: vecTmp0 }); // #6680: not a tee — nothing here consumes the receiver
     emitReceiverNullGuard(ctx, fctx, vecTmp0, propAccess.expression);
     fctx.body.push({ op: "local.get", index: vecTmp0 });
     fctx.body.push({ op: "ref.as_non_null" });
@@ -10614,12 +10656,17 @@ function tryCompileFlatMapNative(
   elemType: ValType,
 ): ValType | null {
   if (callExpr.arguments.length < 1) return null; // flatMap requires a callback
+  if (flatMapReturnIsDynamic(ctx, callExpr.arguments[0]!)) {
+    // (#2717) scalar-or-array returns: the recursive helper's per-element IsArray.
+    return compileArrayFlatNativeCall(ctx, fctx, "flatMap", propAccess.expression, callExpr.arguments) ?? null;
+  }
 
   const mapType = compileArrayMap(ctx, fctx, propAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
   const speciesResult = flatMapSpeciesResult(ctx, mapType, callExpr.arguments[0]!);
   if (speciesResult) return speciesResult;
   if (!mapType || (mapType.kind !== "ref" && mapType.kind !== "ref_null")) {
-    // map couldn't type its result; the caller's unreachable keeps the body valid.
+    // map couldn't type its result (or a custom species widened it and the
+    // callback may return arrays); the caller's unreachable keeps the body valid.
     return null;
   }
   const mapVecTypeIdx = (mapType as { typeIdx?: number }).typeIdx;
@@ -10647,10 +10694,11 @@ function tryCompileFlatMapNative(
     );
   }
 
-  // Dynamic element (externref/anyref) — could be an array at runtime; a native
-  // depth-1 flatten would need per-element runtime IsArray. Out of scope → drop
-  // the map result and refuse loudly.
+  // Dynamic element (externref/anyref) — could be an array at runtime, so the
+  // (#2717) native FlattenIntoArray decides per element on a runtime IsArray.
   if (mapElemType && (mapElemType.kind === "externref" || mapElemType.kind === "anyref")) {
+    fctx.body.push({ op: "extern.convert_any" });
+    if (emitFlattenDepth1Extern(ctx, fctx)) return { kind: "externref" };
     fctx.body.push({ op: "drop" });
     return null;
   }
@@ -10683,6 +10731,9 @@ function compileArrayFlat(
     // receivers (the larger recursive/heterogeneous arm stays a #2717 follow-up).
     const native = tryCompileArrayFlatNativeDepth1(ctx, fctx, propAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
     if (native) return native;
+    // (#2717) Any depth / element kind: the native recursive FlattenIntoArray.
+    const generic = compileArrayFlatNativeCall(ctx, fctx, "flat", propAccess.expression, callExpr.arguments);
+    if (generic) return generic;
     reportError(
       ctx,
       callExpr,

@@ -6,6 +6,7 @@ import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { runtimeEvalStateMayShadowBinding } from "./direct-eval-environment.js";
 import { resolvesToAmbientGlobal } from "./expressions/non-constructable.js";
 import { emitThrowReferenceError } from "./js-errors.js";
+import { BUILTIN_CLASS_NAMES } from "./expressions/builtin-class-names.js";
 
 /**
  * (#6664) Browser (lib.dom) globals that a host-free `--target standalone`
@@ -27,7 +28,31 @@ const STANDALONE_UNAVAILABLE_CONSTRUCTOR_GLOBALS: ReadonlySet<string> = new Set(
   "MessageChannel",
   "MessagePort",
   "ErrorEvent",
+  // (#1472) Node's global — declared ambiently only under `--emulate node`.
+  "Buffer",
 ]);
+
+/**
+ * (#6691) WHATWG Fetch / URL platform classes. None is an ECMAScript global
+ * (host-less engines — d8, QuickJS — lack them too) and a standalone module
+ * has no network stack to hand a `Request` to. hono's `mount`,
+ * `Context#newResponse` and `HonoRequest` merely CONTAIN them; the sample
+ * route registration never evaluates one. Gated on the host-free ENVIRONMENT
+ * as well, so the opt-in JS-environment native regime keeps its host's
+ * constructors.
+ */
+const STANDALONE_UNAVAILABLE_FETCH_GLOBALS: ReadonlySet<string> = new Set([
+  "Request",
+  "Response",
+  "Headers",
+  "URL",
+  "URLSearchParams",
+]);
+
+function isUnavailableName(ctx: CodegenContext, name: string): boolean {
+  if (STANDALONE_UNAVAILABLE_CONSTRUCTOR_GLOBALS.has(name)) return true;
+  return ctx.targetProfile.environment === "none" && STANDALONE_UNAVAILABLE_FETCH_GLOBALS.has(name);
+}
 
 /**
  * lib.dom interfaces that must never be registered as extern classes in a
@@ -43,7 +68,7 @@ const STANDALONE_UNPROVIDED_EXTERN_CLASSES: ReadonlySet<string> = new Set([
 
 /** Skip registering `className` as an `env::`-backed extern class. */
 export function isStandaloneUnprovidedExternClass(ctx: CodegenContext, className: string): boolean {
-  return ctx.standalone && STANDALONE_UNPROVIDED_EXTERN_CLASSES.has(className);
+  return ctx.standalone && (STANDALONE_UNPROVIDED_EXTERN_CLASSES.has(className) || isUnavailableName(ctx, className));
 }
 
 /**
@@ -52,11 +77,23 @@ export function isStandaloneUnprovidedExternClass(ctx: CodegenContext, className
  * Name-level only: the caller proves the reference is the ambient binding.
  */
 export function isStandaloneUnavailableConstructorGlobal(ctx: CodegenContext, name: string): boolean {
-  return (
-    ctx.standalone &&
-    ctx.standaloneGlobalThisImport === undefined &&
-    STANDALONE_UNAVAILABLE_CONSTRUCTOR_GLOBALS.has(name)
-  );
+  return ctx.standalone && ctx.standaloneGlobalThisImport === undefined && isUnavailableName(ctx, name);
+}
+
+/**
+ * (#1472) Whether the generic static-method arm resolves the `X` of `X.m(...)`
+ * through the `__get_builtin("X")` host import rather than as an ordinary
+ * identifier. Node's `Buffer` is in `BUILTIN_CLASS_NAMES` for the JS-host lane
+ * (#1793), but a `--target standalone` module has no `Buffer` — and refuses
+ * that import at compile time. There the receiver is an ordinary reference:
+ * the unresolvable name throws `ReferenceError: Buffer is not defined` before
+ * any argument is evaluated, and a context-linked module reads its owning
+ * realm's global. combined-stream's `!Buffer.isBuffer(stream)` (axios's
+ * form-data) refused the whole axios graph.
+ */
+export function isHostResolvedBuiltinReceiver(ctx: CodegenContext, receiver: ts.Expression): boolean {
+  if (!ts.isIdentifier(receiver) || !BUILTIN_CLASS_NAMES.has(receiver.text)) return false;
+  return !(ctx.standalone && receiver.text === "Buffer");
 }
 
 function unwrapParens(expr: ts.Expression): ts.Expression {

@@ -55,6 +55,7 @@
  * runtime — it emits `struct.get`/`struct.set` directly and never calls
  * `ensureLateImport` for these names.
  */
+import { buildVariadicBuiltinApplyArm } from "./apply-closure-variadic-builtin.js"; // (#6701)
 import {
   createArgumentVectorArrayType,
   createArgumentVectorType,
@@ -65,6 +66,7 @@ import {
 import { inheritedSetAnyDirty } from "./inherited-set-gate.js"; // (#4602) per-key #4504 gate
 import type { FieldDef, Instr, ValType } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
+import { jsValueBoundary } from "./context/types.js";
 import { classObjectDisplayName } from "./class-static-metadata.js";
 import {
   buildArgumentsToPrimitiveArm,
@@ -78,6 +80,7 @@ import { BFN_ID_FIELD_IDX, BFN_STATE_FIELD_IDX } from "./builtin-fn-meta.js"; //
 import { ensureNativeCharCodeAtHelper } from "./char-code-at-helpers.js";
 import { getFuncRefWrapperRootTypeIdx } from "./closures/funcref-wrapper-types.js"; // (#3673 round 19b)
 import { lazyStrFlattenEnabled, redundantFlattenCall } from "./lazy-str-flatten.js"; // (#4157)
+import { buildHashBucketDispatch } from "./hash-bucket-dispatch.js"; // (#6698) bounded nesting
 import {
   ensureAnyToStringHelper,
   ensureNativeStringBoundaryBridge,
@@ -133,6 +136,7 @@ import { buildVecNumericKeyGetArm, buildVecNumericKeyHasArm } from "./vec-numeri
 // (#4194) instance expando substrate — composes AROUND the #3537/#3468 arms and
 // splices the declared-field write-through prologue onto `__extern_set`.
 import {
+  buildInstanceOrVecOrClosurePropMethodCallElseArm, // (#6692)
   buildInstanceOrVecOrClosurePropSetMissArm,
   buildInstancePropGetArm,
   reserveInstanceProps,
@@ -155,7 +159,6 @@ import {
 // arms (vec test first, unchanged closure arm as fallthrough).
 import {
   buildVecOrClosurePropGetMissArm,
-  buildVecOrClosurePropMethodCallElseArm,
   buildVecOrClosurePropSetMissArm,
   reserveVecPropHelpers,
 } from "./vec-props.js";
@@ -3463,21 +3466,26 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                     { op: "local.set", index: 9 },
                   ] satisfies Instr[])
                 : ([
+                    // (#6689) TEST before the cast, as `__extern_get` does
+                    // (#4639): `foo.prototype = new Array(…)` leaves a vec in
+                    // the store. A non-`$Object` (or null) ends the explicit
+                    // walk; the companion tail still runs, a miss inserts own.
                     { op: "local.get", index: 0 },
                     { op: "call", funcIdx: fnctorProtoStartIdx },
                     { op: "local.tee", index: 10 },
-                    { op: "ref.is_null" },
+                    { op: "any.convert_extern" },
+                    { op: "ref.test", typeIdx: objectTypeIdx },
                     {
                       op: "if",
                       blockType: { kind: "empty" },
                       then: [
-                        { op: "ref.null", typeIdx: objectTypeIdx },
-                        { op: "local.set", index: 9 },
-                      ],
-                      else: [
                         { op: "local.get", index: 10 },
                         { op: "any.convert_extern" },
                         { op: "ref.cast", typeIdx: objectTypeIdx },
+                        { op: "local.set", index: 9 },
+                      ],
+                      else: [
+                        { op: "ref.null", typeIdx: objectTypeIdx },
                         { op: "local.set", index: 9 },
                       ],
                     },
@@ -6783,7 +6791,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
           ...(reverseMethodCallIdx !== undefined && boundaryCallResultLocal !== undefined
             ? reverseMethodCallArmInstrs(reversePeerHops, boundaryCallResultLocal)
             : []),
-          ...buildVecOrClosurePropMethodCallElseArm(ctx, externGetIdx, applyClosureIdx, resolvedMethodGuard),
+          ...buildInstanceOrVecOrClosurePropMethodCallElseArm(ctx, externGetIdx, applyClosureIdx, resolvedMethodGuard),
         ],
       },
     ];
@@ -6928,16 +6936,16 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
  * function as its target. The target itself stays the same externref identity.
  */
 export function ensureNativeProxyRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
-  if (
-    ctx.targetProfile.semanticProviders === "native-first" &&
-    ctx.targetProfile.environment === "javascript" &&
-    ctx.targetProfile.hostValueInterop !== "off" &&
-    !ctx.strictNoHostImports
-  ) {
+  ensureBoundaryCallableKind(ctx);
+  return ensureObjectRuntime(ctx);
+}
+
+/** (#6686) Admitted-object callable classifier for `__is_callable`/`typeof` (adds an import). */
+export function ensureBoundaryCallableKind(ctx: CodegenContext): void {
+  if (ctx.targetProfile.semanticProviders === "native-first" && jsValueBoundary(ctx) && !ctx.strictNoHostImports) {
     ensureLateImport(ctx, "__boundary_object_callable_kind", [{ kind: "externref" }], [{ kind: "i32" }]);
     flushLateImportShifts(ctx, null);
   }
-  return ensureObjectRuntime(ctx);
 }
 
 /**
@@ -7590,6 +7598,7 @@ export function fillApplyClosure(ctx: CodegenContext): void {
   locals.push({ name: "result", type: { kind: "externref" } });
 
   const variadicNativeApply = reserveVariadicNativeApplyState(ctx, locals);
+  const variadicBuiltinArm = buildVariadicBuiltinApplyArm(ctx, locals, 3, argcGlobalIdx);
 
   // (#3673) Read the in-module $ObjVec argument carrier directly, avoiding a
   // dynamic `__extern_get_idx` per argument. Non-$ObjVec args keep the generic
@@ -7784,6 +7793,7 @@ export function fillApplyClosure(ctx: CodegenContext): void {
     { op: "local.tee", index: 3 },
     { op: "global.set", index: argcGlobalIdx },
     ...buildVariadicNativeApplyDispatch(ctx, variadicNativeApply, objVecTypeIdx, objVecArrTypeIdx),
+    ...variadicBuiltinArm, // (#6701) Math.max/min, String.fromCharCode values
     ...widen,
     // A compiled closure above the module's TOP dispatcher arity must fail
     // loudly rather than falling through to the undefined sentinel (#1058).
@@ -10637,34 +10647,14 @@ export function fillClosedStructExternGetArms(ctx: CodegenContext): void {
       }
       bucket.push([fieldName, entries]);
     }
-    const orderedBuckets = [...buckets.entries()].sort((a, b) => a[0] - b[0]);
-    const bucketCount = orderedBuckets.length;
-    // br_table depth map: bucket ordinal j breaks out of the j-th nested
-    // block (landing on that bucket's probes); an empty slot takes depth
-    // `bucketCount` — the wrapper block — skipping every arm (a miss).
-    const targets: number[] = new Array<number>(tableSize).fill(bucketCount);
-    orderedBuckets.forEach(([slot], ordinal) => {
-      targets[slot] = ordinal;
-    });
-    let dispatchTree: Instr[] = [
-      { op: "local.get", index: fkeyHashLocal },
-      { op: "i32.const", value: tableMask },
-      { op: "i32.and" },
-      { op: "br_table", targets, defaultDepth: bucketCount },
-    ];
-    for (let ordinal = 0; ordinal < bucketCount; ordinal++) {
-      const probes: Instr[] = [];
-      for (const [fieldName, entries] of orderedBuckets[ordinal]![1])
-        probes.push(...buildNameProbe(fieldName, entries));
-      dispatchTree = [
-        { op: "block", blockType: { kind: "empty" }, body: dispatchTree },
-        ...probes,
-        // Probes exhausted without a hit: skip the outer buckets' probes. The
-        // last bucket falls through to the wrapper block end naturally.
-        ...(ordinal === bucketCount - 1 ? [] : ([{ op: "br", depth: bucketCount - 1 - ordinal }] satisfies Instr[])),
-      ];
-    }
-    stringKeyArms.push({ op: "block", blockType: { kind: "empty" }, body: dispatchTree });
+    // (#6698) Occupied slots in ascending order; the dispatch bounds its own
+    // block nesting (one flat ladder up to 256 buckets, two levels past it).
+    const orderedBuckets = [...buckets.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(
+        ([slot, names]) => [slot, names.flatMap(([fieldName, entries]) => buildNameProbe(fieldName, entries))] as const,
+      );
+    stringKeyArms.push(buildHashBucketDispatch(fkeyHashLocal, tableMask, orderedBuckets));
   }
   const numericKeyArms: Instr[] = [];
   const i31NumericKeyArms: Instr[] = [];

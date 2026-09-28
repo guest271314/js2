@@ -67,7 +67,8 @@ import { bodyNeedsArgumentsObject } from "./helpers/body-uses-arguments.js";
 import { bodyReferencesOwnThis, findOwnThisReference } from "./helpers/body-references-own-this.js";
 import { isSimpleParameterList, isStrictFunction } from "./helpers/is-strict-function.js";
 import { resolveSpillLocalValType } from "./statements/variables.js";
-import { ensureExnTag } from "./registry/imports.js";
+import { collectParamScopeEvalVarNames, readPossiblyBoxedLocal } from "./direct-eval-environment.js";
+import { addIteratorImports, ensureExnTag } from "./registry/imports.js";
 import { buildTargetTaggedTry } from "../ir/try-table.js";
 // (#2895 PR1) The frame ABI (state-struct field offsets + resume modes) and the
 // field-I/O / spill-store emit helpers now live in the shared resumable-frame
@@ -558,6 +559,16 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   const elemIsAny = carrierIsAny(elemValType);
   const yieldValueOk = (expr: ts.Expression | undefined): boolean =>
     elemIsAny ? true : elemIsString ? isStringYieldExpression(ctx, expr) : isNumericExpression(ctx, expr);
+  // (#1691) JS-host lane: a `yield*` delegate that is neither a native-gen call
+  // nor a numeric vec rides the host protocol arm (`__iterator_strict` +
+  // `__gen_yield_star_step`); the other two shapes keep the eager host path.
+  const hostLane = !noJsHostTarget(ctx);
+  // A string delegate yields strings, which a numeric carrier cannot hold.
+  const isHostProtocolDelegate = (subject: ts.Expression): boolean =>
+    hostLane &&
+    nativeGeneratorDelegationName(subject) === undefined &&
+    !isNumericIterableDelegate(ctx, subject) &&
+    (elemIsAny || ctx.oracle.typeFactOf(subject).kind !== "string");
 
   const states: NativeGeneratorState[] = [];
   const spills: string[] = [];
@@ -925,7 +936,8 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
                 !isNumericIterableDelegate(ctx, subject) &&
                 !isStringYieldExpression(ctx, subject),
             )
-          )
+          ) &&
+          !containsDelegatedYield(stmt.tryBlock, isHostProtocolDelegate)
         ) {
           // Legacy kind-L region: finally-only, yield-free finally — the
           // historical replay lowering, byte-identical to pre-#3050.
@@ -1127,7 +1139,12 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
       // delegation states ignore the resume mode, so an abrupt completion
       // could not be routed into the region's catch/finally. Bail to the host
       // path (legacy replay-only regions keep today's behavior).
-      if (unwind.some((e) => e.kind !== "replay") && !(ctx.standalone || ctx.wasi)) return fail();
+      if (
+        unwind.some((e) => e.kind !== "replay") &&
+        !(ctx.standalone || ctx.wasi) &&
+        !(yieldExpr.expression && isHostProtocolDelegate(yieldExpr.expression))
+      )
+        return fail();
       // (#2864 D2) A yield-star terminator SELF-SUSPENDS (its yield arm re-enters
       // the SAME state on the next resume), so it must live in a DEDICATED state:
       //  (a) empty prelude / no resume bindings — otherwise the prelude statements
@@ -1166,7 +1183,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
         // outer has a concrete-ref `value` no repair can bridge — bail it to the
         // host path (standalone: the clean #680 refusal).
         if (!elemIsString && isNumericIterableDelegate(ctx, subject)) {
-          if (unwind.some((entry) => entry.kind !== "replay")) return fail();
+          if (hostLane || unwind.some((entry) => entry.kind !== "replay")) return fail();
           // (#2864 R1) `const x = yield* [..]` — the delegation completion value
           // (§27.5.3.7) of an array is `undefined`; the done-arm delivers the f64
           // undefined sentinel into the binding's spill (a #2106 residual).
@@ -1203,7 +1220,9 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
         // outer passes it through. A direct string operand is the one concrete
         // ref case supported here: the iterator runtime returns native-string
         // refs, and the emitter casts the externref back to that ref below.
-        const protocol = (ctx.standalone || ctx.wasi) && !isStringYieldExpression(ctx, subject);
+        // (#1691) The JS-host lane takes the protocol arm too (host imports).
+        const protocol = !isStringYieldExpression(ctx, subject);
+        if (hostLane && !isHostProtocolDelegate(subject)) return fail();
         if (
           (!elemIsString || isStringYieldExpression(ctx, subject)) &&
           (protocol || isGenericIterableDelegate(ctx, subject))
@@ -1243,7 +1262,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
         }
         return fail();
       }
-      if (!subject || innerName === undefined) return fail();
+      if (!subject || innerName === undefined || hostLane) return fail();
       // (#6651 A5) Inside a native-lowered `for-of` body (A2's bail 4) the chain
       // carries the loop's `iter-close`, possibly with a `catch` of a try inside
       // the body. The delegation state then walks that chain innermost-first
@@ -2672,6 +2691,21 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     }
   }
 
+  // (#6651 SC1) A `var` a PARAMETER-LIST direct eval introduces belongs to the
+  // BODY's VariableEnvironment (§10.2.11 step 20 → step 28 `varEnv`), and the
+  // static-eval-inline splice (#1163) creates it as a FACTORY local — a different
+  // wasm frame from the resume function that runs the body. Carry it exactly like
+  // a destructuring-param binding (#3386): `externref` because the splice's local
+  // type is not knowable here, undef-widened because the checker resolves this
+  // name to the OUTER declaration whose type says nothing about the eval-created
+  // value. Full argument in `collectParamScopeEvalVarNames`.
+  for (const name of collectParamScopeEvalVarNames(decl, ctx.oracle)) {
+    if (spillSet.has(name)) continue;
+    patternParamSpillTypes.set(name, { kind: "externref" });
+    undefWidenedPatternBindings.add(name);
+    addSpill(name);
+  }
+
   if (!lowerStatements(decl.body.statements, [], true)) return null;
   if (!ok) return null;
 
@@ -2986,11 +3020,11 @@ function bodyHasHostUnsupportedYieldShape(decl: GeneratorDecl): boolean {
     if (found) return;
     if (isFunctionLikeScope(node)) return;
     if (ts.isYieldExpression(node)) {
-      if (node.asteriskToken) {
-        found = true; // yield* delegation
-        return;
-      }
-      if (node.expression && containsYield(node.expression)) {
+      // (#1691) A top-level generator's `yield*` routes through the host
+      // protocol arm (the plan builder bails the other delegate shapes); a
+      // nested one keeps the eager path (host for-of over it is unsupported).
+      if (node.asteriskToken && !ts.isSourceFile(decl.parent)) found = true;
+      if (found || (node.expression && containsYield(node.expression))) {
         found = true; // yield nested in a yield operand
         return;
       }
@@ -4175,18 +4209,21 @@ export function registerNativeGenerator(
   }
 
   // (#6651 A2) A `for-of-step` header drives the SAME delegation runtime
-  // (`__gen_delegate_start`/`_step`) from the same frame-slot family, so it has
-  // to flip this flag too — it is what reserves those helpers
-  // (`ensureNativeDelegatedResultHelpers`) and the `executing` re-entrancy field.
-  const nativeDelegates = plan.states.some(
-    (state) =>
-      state.terminator.kind === "for-of-step" ||
-      (state.terminator.kind === "yield-star" &&
-        state.terminator.delegationKind === "iterable" &&
-        state.terminator.protocol),
-  );
-  const executingFieldIdx = nativeDelegates ? stateFields.length : undefined;
-  if (nativeDelegates) stateFields.push({ name: "executing", type: { kind: "i32" }, mutable: true });
+  // (`__gen_delegate_start`/`_step`), so it reserves those helpers too
+  // (`ensureNativeDelegatedResultHelpers`). (#6651 SG1) It no longer gates the
+  // `executing` field — §27.5.3 applies to every generator, delegating or not.
+  // (#1691) The JS-host protocol arm drives host imports, not these helpers.
+  const nativeDelegates =
+    noJsHostTarget(ctx) &&
+    plan.states.some(
+      (state) =>
+        state.terminator.kind === "for-of-step" ||
+        (state.terminator.kind === "yield-star" &&
+          state.terminator.delegationKind === "iterable" &&
+          state.terminator.protocol),
+    );
+  const executingFieldIdx = noJsHostTarget(ctx) ? stateFields.length : undefined;
+  if (executingFieldIdx !== undefined) stateFields.push({ name: "executing", type: { kind: "i32" }, mutable: true });
 
   // (#3032 W6) NOMINAL BRAND for the state struct. Two generators with the
   // same shape (e.g. `function* g1() { yield; }` and `function* g2() {
@@ -5602,6 +5639,20 @@ function emitGenericDelegationState(
   const status = allocLocal(fctx, "__delegate_status", { kind: "i32" });
   const value = allocLocal(fctx, "__delegate_value", { kind: "externref" });
   const body = fctx.body;
+  // (#1691) JS-host lane: the same state machine over host imports. The step
+  // reads IteratorValue itself, so a yielded value is a plain carrier value.
+  const host = !noJsHostTarget(ctx);
+  const carrier = genCarrierFieldType(info.elemValType);
+  const convert = (instrs: Instr[], from: ValType, to: ValType): Instr[] => {
+    if (!host || valTypesMatch(from, to)) return instrs;
+    const previous = fctx.body;
+    fctx.body = instrs;
+    coerceType(ctx, fctx, from, to);
+    fctx.body = previous;
+    return instrs;
+  };
+  const startName = host ? "__iterator_strict" : "__gen_delegate_start";
+  const stepName = host ? "__gen_yield_star_step" : "__gen_delegate_step";
   const get = (fieldIdx: number): Instr[] => [
     { op: "local.get", index: selfLocal },
     { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx },
@@ -5640,7 +5691,7 @@ function emitGenericDelegationState(
   const type = compileExpression(ctx, fctx, term.subject, { kind: "externref" });
   if (!type) throw new Error("Unable to compile generic delegation operand");
   if (type.kind !== "externref") coerceType(ctx, fctx, type, { kind: "externref" });
-  materialize.push({ op: "call", funcIdx: ctx.funcMap.get("__gen_delegate_start")! });
+  materialize.push({ op: "call", funcIdx: ctx.funcMap.get(startName)! });
   fctx.body = body;
   body.push(
     ...get(slot.fieldIdx),
@@ -5666,20 +5717,20 @@ function emitGenericDelegationState(
         {
           op: "if",
           blockType: { kind: "val", type: { kind: "externref" } },
-          then: get(info.abruptFieldIdx),
-          else: get(info.sentFieldIdx),
+          then: convert(get(info.abruptFieldIdx), carrier, { kind: "externref" }),
+          else: convert(get(info.sentFieldIdx), carrier, { kind: "externref" }),
         },
       ],
     },
-    { op: "call", funcIdx: ctx.funcMap.get("__gen_delegate_step")! },
+    { op: "call", funcIdx: ctx.funcMap.get(stepName)! },
     { op: "local.set", index: value },
     { op: "local.set", index: status },
   );
   const suspended: Instr[] = [
     ...setStateInstrs(info, selfLocal, stateId),
     ...setModeInstrs(info, selfLocal, MODE_NEXT),
-    { op: "local.get", index: value },
-    { op: "i32.const", value: -1 },
+    ...convert([{ op: "local.get", index: value }], { kind: "externref" }, info.elemValType),
+    { op: "i32.const", value: host ? 0 : -1 },
     { op: "struct.new", typeIdx: info.resultTypeIdx },
     { op: "local.set", index: resultLocal },
     { op: "br", depth: exitDepth + 1 },
@@ -5698,7 +5749,10 @@ function emitGenericDelegationState(
       op: "if",
       blockType: { kind: "empty" },
       then: [
-        ...frameStore(info.abruptFieldIdx, [{ op: "local.get", index: value }]),
+        ...frameStore(
+          info.abruptFieldIdx,
+          convert([{ op: "local.get", index: value }], { kind: "externref" }, carrier),
+        ),
         ...setModeInstrs(info, selfLocal, 1),
         ...unwind(1),
       ],
@@ -6013,6 +6067,18 @@ export function ensureNativeGeneratorResumeFunction(ctx: CodegenContext, info: N
   }
 
   if (info.nativeDelegates) ensureNativeDelegatedResultHelpers(ctx);
+  // (#1691) The JS-host protocol arm's imports, acquired before the body bakes.
+  else if (!noJsHostTarget(ctx) && info.iterableDelegationSlots?.length) {
+    addIteratorImports(ctx); // demand for the host-side struct dispatch exports
+    ensureLateImport(ctx, "__iterator_strict", [{ kind: "externref" }], [{ kind: "externref" }]);
+    ensureLateImport(
+      ctx,
+      "__gen_yield_star_step",
+      [{ kind: "externref" }, { kind: "i32" }, { kind: "externref" }],
+      [{ kind: "i32" }, { kind: "externref" }],
+    );
+    flushLateImportShifts(ctx, ctx.currentFunc);
+  }
   const selfType: ValType = { kind: "ref", typeIdx: info.stateTypeIdx };
   const resultType: ValType = { kind: "ref", typeIdx: info.resultTypeIdx };
   const typeIdx = addFuncType(ctx, [selfType], [resultType], `${fnName}_type`);
@@ -6421,8 +6487,12 @@ export function compileNativeGeneratorFunction(
     const spillType = info.spillTypes[i]!;
     const bindLocal = info.patternParamBindings?.has(spillName) ? fctx.localMap.get(spillName) : undefined;
     if (bindLocal !== undefined) {
-      const localType = getLocalType(fctx, bindLocal);
-      fctx.body.push({ op: "local.get", index: bindLocal });
+      // (#6651 SC1) Read through the ref cell when a parameter-list closure boxed
+      // this binding — packing the carrier would hand the resume function a cell
+      // where it expects a value. Un-boxed locals keep the direct read.
+      const read = readPossiblyBoxedLocal(fctx, spillName, bindLocal);
+      const localType = read.valType;
+      fctx.body.push(...read.instrs);
       if (localType && !valTypesMatch(localType, spillType)) {
         // ref → ref_null of the same struct is a pure subtype widening — no
         // instruction needed; anything else routes through the coercion engine

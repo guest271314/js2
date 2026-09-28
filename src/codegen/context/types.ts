@@ -176,6 +176,7 @@ export interface CodegenOptions extends BodyRouteAudit.Options {
   standaloneGlobalThisImport?: { module: string; name: string; call?: string };
   /** JS-host direct-eval lowering; see `CompileOptions.directEval`. */
   directEval?: "legacy" | "reified-host";
+  runtimeEvalProvider?: boolean; // see CompileOptions.runtimeEvalProvider (#6676)
   /**
    * (#4035) Host-bridge export policy — see `CompileOptions.hostBridge`.
    * `"auto"` (default) resolves to `"always"` for js-host and `"off"` for
@@ -2529,6 +2530,22 @@ export interface CodegenContext extends StandaloneCapabilityDemandState, BodyRou
    */
   arrayToPrimitiveReserved?: boolean;
   /**
+   * (#6651 TA1) True once a `toLocaleString` join reserved the
+   * `__num_to_locale_string` placeholder (num-to-locale-string.ts). Filled by
+   * `fillNumberToLocaleString` at finalize rather than at the call site, because
+   * whether the element Invoke may consult the `Number.prototype` brand
+   * companion depends on the `nativeProtoSeedersByBrandOffset` registry, which is
+   * only complete after `ensureObjectRuntime` flushes its pending seeders.
+   */
+  numToLocaleStringReserved?: boolean;
+  /**
+   * (#6651 TA1) True once an `any`-receiver `.toLocaleString()` call site
+   * reserved the `__ta_to_locale_string` placeholder — §23.2.3.29 over a
+   * `$__ta_dyn_view`, the spelling test262's `testWithTypedArrayConstructors`
+   * produces. Same finalize-fill reason as `numToLocaleStringReserved`.
+   */
+  taToLocaleStringReserved?: boolean;
+  /**
    * (#2638) True once `__to_primitive` has reserved the `__class_to_primitive`
    * driver — standalone routing of a nominal CLASS-instance struct (neither
    * `$Object` nor `$Vec`) through the per-struct `__call_valueOf`/`__call_toString`
@@ -4226,6 +4243,7 @@ export interface CodegenContext extends StandaloneCapabilityDemandState, BodyRou
   nativeGlobalThisSeedBuilding?: boolean;
   /** Resolved JS-host direct-eval lowering. */
   directEvalMode: "legacy" | "reified-host";
+  runtimeEvalProviderAbsent?: boolean; // (#6676) standalone, no runtime-eval provider linked
   /** Private externref-array carrier used only by reified JS-host direct eval. */
   hostRuntimeEvalVecTypeIdx?: number;
   /** (#2141 S1) Honest generic `any` boxing regime flag — see the
@@ -4881,3 +4899,22 @@ export interface CodegenContext extends StandaloneCapabilityDemandState, BodyRou
 }
 
 export type { SourcePos };
+
+/**
+ * (#5385 S1, #6685) Is there NO JavaScript embedder? Answers the environment
+ * question only (`targetProfile.environment !== "javascript"`); which
+ * ECMAScript implementation lowers the module is `ctx.standalone`. Console
+ * sinks and other environment-shaped arms key on this, never on the regime.
+ */
+export function hostFreeEnvironment(ctx: CodegenContext): boolean {
+  return ctx.targetProfile.environment !== "javascript";
+}
+
+/**
+ * (#5385 S2, #6686) Does the module keep the JS VALUE bridge (string marshal,
+ * admitted-object MOP, callbacks)? `"required"` = JS embedder + bridge on; the
+ * host-free `hostBridge: "always"` projection (`"enabled"`) may not import it.
+ */
+export function jsValueBoundary(ctx: CodegenContext): boolean {
+  return ctx.targetProfile.hostValueInterop === "required";
+}

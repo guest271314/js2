@@ -97,9 +97,10 @@ import { zeroArgPadInstrs } from "./zero-arg-method-pad.js";
 import { HOLE_F64_BITS, UNDEF_F64_BITS } from "./value-tags.js";
 import { ABRUPT_FIELD, MODE_FIELD } from "./frame-core.js";
 import { walkChildren } from "./walk-instructions.js";
+import { fillForOfIteratorStep } from "./forof-iterator-step.js"; // (#6651 G4)
 
-/** Slice-1 IterRec kind tag for a canonical externref `$Vec`. */
-const ITER_KIND_VEC = 3;
+/** Slice-1 IterRec kind tag for a canonical externref `$Vec`. (#6651 IT3 exports it: `ta-dyn-proto-methods.ts` `struct.new`s a record, and a bare `3` there would desync on a renumber.) */
+export const ITER_KIND_VEC = 3;
 
 /**
  * (#2038) IterRec kind tag for a USER iterator: a general `{next()}`-protocol
@@ -2665,6 +2666,8 @@ export function fillNativeIteratorLateArms(ctx: CodegenContext): void {
         keyInstrs: (name: string) => [...nativeStringLiteralInstrs(ctx, name), { op: "extern.convert_any" }],
         missInstrs: () => undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" }],
       };
+      // (#6651 G4) The for-of statement's own OBJ step (cached `next`, §7.4.4).
+      fillForOfIteratorStep(ctx, iterRuntimeTypes(ctx), objDeps, (l) => externIsObjectInstrs(ctx, l));
     }
   }
 

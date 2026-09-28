@@ -53,12 +53,21 @@ import { ensureNativeStringHelpers } from "./native-strings.js";
 import { ensureObjectRuntime, reserveApplyClosure } from "./object-runtime.js";
 import { addFuncType } from "./registry/types.js";
 import { addUnionImportsViaRegistry } from "./shared.js";
+import { ensureNativeArrayFlat, isNativeFlatForm, NATIVE_FLAT_METHODS } from "./array-flat-native.js"; // (#2717)
+import { ensureNativeArraySlice, isNativeSliceForm, NATIVE_SLICE_METHODS } from "./array-slice-native.js"; // (#6683)
+import { ensureNativeArraySplice } from "./array-splice-native.js"; // (#6701)
 
 /**
  * Method names served by {@link ensureNativeArrayProducer} — the single source
  * shared by the dispatcher's reserve gate and its fill arm.
  */
-export const DYN_ARRAY_PRODUCER_METHODS: ReadonlySet<string> = new Set(["concat", "sort"]);
+export const DYN_ARRAY_PRODUCER_METHODS: ReadonlySet<string> = new Set([
+  "concat",
+  "sort",
+  ...NATIVE_FLAT_METHODS,
+  ...NATIVE_SLICE_METHODS, // (#6683) slice / at / reverse
+  "splice", // (#6701)
+]);
 
 /**
  * Arity forms the dispatcher arm may claim. `concat` is variadic in the spec
@@ -68,9 +77,10 @@ export const DYN_ARRAY_PRODUCER_METHODS: ReadonlySet<string> = new Set(["concat"
  * loses an answer it had.
  */
 export function isDynArrayProducerForm(methodName: string, arity: number): boolean {
-  if (methodName === "concat") return arity >= 0;
+  if (methodName === "concat" || methodName === "splice") return arity >= 0;
   if (methodName === "sort") return arity === 0 || arity === 1;
-  return false;
+  if (NATIVE_SLICE_METHODS.has(methodName)) return isNativeSliceForm(methodName, arity); // (#6683)
+  return isNativeFlatForm(methodName, arity); // (#2717) flat / flatMap
 }
 
 interface ProducerDeps {
@@ -605,6 +615,9 @@ function mintHelper(
 export function ensureNativeArrayProducer(ctx: CodegenContext, methodName: string): number | undefined {
   if (!ctx.standalone) return undefined;
   if (!DYN_ARRAY_PRODUCER_METHODS.has(methodName)) return undefined;
+  if (NATIVE_FLAT_METHODS.has(methodName)) return ensureNativeArrayFlat(ctx, methodName); // (#2717)
+  if (NATIVE_SLICE_METHODS.has(methodName)) return ensureNativeArraySlice(ctx, methodName); // (#6683)
+  if (methodName === "splice") return ensureNativeArraySplice(ctx); // (#6701)
   const helperName = `__arrprod_${methodName}`;
   const existing = ctx.funcMap.get(helperName);
   if (existing !== undefined) return existing;

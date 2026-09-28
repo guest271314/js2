@@ -8,6 +8,7 @@
 // via funcMap. It returns `undefined` when the callee is not one of these
 // identifier cases, so the caller in calls.ts continues its dispatch chain.
 // Moved verbatim: the emitted Wasm is byte-identical.
+import { guardedExternRefResultBridge } from "./dispatch-extern-result-bridge.js";
 import { ts } from "../../ts-api.js";
 import { widenJsDefaultGuessSlot } from "../js-default-param-type-guess.js";
 import {
@@ -18,6 +19,7 @@ import {
   recordLiftedCaptureBox,
 } from "../closures/capture-source-slot.js";
 import { usesHostBigIntCarrier } from "../host-bigint-carrier.js";
+import { compileStringConversionArgument } from "../string-conversion-argument.js";
 import { emitBigIntCtorCarrier } from "../bigint-wide-parse.js";
 import { emitI64ToStringCall } from "../bigint-string-context.js";
 import { materializeHoistedFunctionValueBinding } from "../closures/funcref-as-closure.js";
@@ -1424,8 +1426,7 @@ function compileBoundIdentifierCall(
         if (reToStr !== undefined && reToStr !== null) return reToStr;
       }
 
-      const hostBigIntArg = usesHostBigIntCarrier(ctx) && ctx.oracle.staticJsTypeOf(strArg0) === "bigint";
-      const argType = compileExpression(ctx, fctx, strArg0, hostBigIntArg ? { kind: "externref" } : undefined);
+      const argType = compileStringConversionArgument(ctx, fctx, strArg0);
 
       if (argType === null) {
         // String(void-expr) → "undefined"
@@ -3501,8 +3502,10 @@ function compileBoundIdentifierCall(
                     true,
                     canExportCandidateReferenceResult(fc.funcTypeIdx),
                   );
-                  if (bridge !== null) {
-                    fcCallBody.push(...bridge);
+                  const guardedRefBridge =
+                    bridge ?? guardedExternRefResultBridge(ctx, fctx, fc.returnType!, expectedReturn!);
+                  if (guardedRefBridge !== null) {
+                    fcCallBody.push(...guardedRefBridge);
                   } else {
                     fcCallBody.push({ op: "drop" });
                     fcCallBody.push(...defaultValueInstrs(expectedReturn!));

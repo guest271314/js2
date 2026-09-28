@@ -5,6 +5,7 @@
  *
  * Extracted from expressions.ts (#688 step 6).
  */
+import { classConstructorIsOwnKey } from "./class-ctor-own-key.js"; // (#6651 C1) §15.7 own `constructor`
 import { classHierarchyHasDynamicMember } from "./class-dynamic-keys.js"; // (#5195 F5)
 import { inheritedSetAnyDirty } from "./inherited-set-gate.js"; // (#4602) per-key #4504 gate
 import { ts } from "../ts-api.js";
@@ -20,7 +21,7 @@ import {
 } from "./closures.js";
 import { reportError } from "./context/errors.js";
 import { isGlobalObjectExpr } from "./global-environment.js"; // (#4394) host global object, never a struct
-import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
+import { allocLocal, allocTempLocal, getLocalType, releaseTempLocal } from "./context/locals.js";
 import { recordSidecarPropertyOwner } from "./sidecar-owner-scope.js";
 import { singleReturnExpressionOfCall, tracesToProxyConstructorValue } from "./proxy-value-provenance.js"; // (#6651 F3) realm-spelled `new X(t,h)`; (#6651 F4) helper-returned
 import type { CodegenContext, FunctionContext } from "./context/types.js";
@@ -33,7 +34,7 @@ import { widenedStructNameForUse, integrityVarKey } from "./widened-var-key.js";
 import { addUnionImports, cacheStringLiterals, getOrRegisterTupleType, resolveWasmType } from "./index.js";
 import { ensureObjectRuntime } from "./object-runtime.js";
 import { emitVecLengthHoleFill } from "./vec-length-hole-fill.js"; // (#6482 r7) a pre-grow creates holes
-import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
+import { addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "./registry/imports.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterRefCellType, getOrRegisterVecType } from "./registry/types.js";
 import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3) stable-regime minting
 import type { InnerResult } from "./shared.js";
@@ -1636,7 +1637,12 @@ export function compileObjectDefineProperty(
   // `emitExternDefinePropertyNoValue` → `__defineProperty_accessor` path). Splitting
   // on this bit fixes the `const o:any` accessor-get bug without regressing the
   // statically struct-typed (class-instance) accessor path.
-  const receiverIsStaticStruct = structName !== undefined;
+  // (#1691) JS host: a checker-struct binding whose physical slot is externref
+  // (an object literal with callable fields lowered to a host object) must take
+  // the runtime accessor path — a compiled `${struct}_get_<p>` is invisible to
+  // host [[Get]] and so to the iterator-protocol helpers.
+  const receiverIsStaticStruct =
+    structName !== undefined && (ctx.standalone || ctx.wasi || !bindingSlotIsExternref(ctx, fctx, objArg));
   // #4504: `C.prototype` is an inherited-descriptor owner, never the
   // instance's physical struct.  The historical static-struct accessor path
   // recorded `${C}_p` in `classAccessorSet`, which later made the closed-field
@@ -1732,7 +1738,13 @@ export function compileObjectDefineProperty(
     valueExpr === undefined || fields === undefined || fieldIdx < 0
       ? true
       : valueRepresentableInField(ctx, valueExpr, fields[fieldIdx]!.type);
+  // Array length is an exotic descriptor, not an ordinary struct field.
+  // Keep the runtime identity/descriptor checks in the existing vec overlay;
+  // a direct field store bypasses both deletion and non-configurable stops.
+  const needsArrayLengthDescriptor =
+    ctx.standalone && propName === "length" && structTypeIdx !== undefined && getVecInfo(ctx, structTypeIdx) !== null;
   const useStruct =
+    !needsArrayLengthDescriptor &&
     !_anyFlagDynamic &&
     !priorRuntimeDefine &&
     structTypeIdx !== undefined &&
@@ -3219,7 +3231,9 @@ function emitExternDefinePropertyNoValue(
   // a known struct field: the sidecar is the only store that compiled reads can
   // consult for `get: identifierRef` / `set: identifierRef` descriptors.
   const structProperty = resolveKnownStructProperty(ctx, objArg, propArg);
-  const isKnownStructField = structProperty.isKnown;
+  // (#6472) A TS-struct receiver that COMPILED to externref (host plain object)
+  // must reach `__defineProperty_value`; the compile-time-only path drops flags.
+  const isKnownStructField = structProperty.isKnown && objType.kind !== "externref";
   if ((forceRuntime || !isKnownStructField || isAccessorDesc) && propLocal !== undefined) {
     markRuntimeDefinedProperty(ctx, objArg, propArg);
     const propName = ts.isStringLiteral(propArg) ? propArg.text : undefined;
@@ -3230,7 +3244,12 @@ function emitExternDefinePropertyNoValue(
       const varName = ts.isIdentifier(objArg) ? integrityVarKey(ctx, objArg) : undefined; // (#3403) per-declaration key
       if (varName) {
         const key = `${varName}:${propName}`;
-        const existingFlags = ctx.definedPropertyFlags.get(key);
+        // (#6472) an existing literal field starts as a default data property
+        const existingFlags =
+          ctx.definedPropertyFlags.get(key) ??
+          (objType.kind === "externref" && structProperty.isKnown && !ctx.widenedDefinePropertyKeys.has(key)
+            ? PROP_FLAGS_DEFAULT_DATA
+            : undefined);
         const newFlags = applyDescriptorFlags(
           existingFlags,
           descWritable,
@@ -5249,6 +5268,17 @@ export function compilePropertyIntrospection(
     tsProps.add(prop.name);
   }
 
+  // (#6651 C1) §15.7 puts an own `constructor` on `C.prototype`
+  // (MakeConstructor) and on the class OBJECT when the body declares
+  // `static constructor(){}`. Neither is a declared class element, so the walk
+  // above cannot yield either and this fold answered a constant `false` — while
+  // standalone's prototype `$Object` (#3976) genuinely carried the property.
+  // Rule and evidence live in class-ctor-own-key.ts.
+  if (classConstructorIsOwnKey(ctx, receiverType, isPrototypeReceiver, isConstructorReceiver)) {
+    tsProps.add("constructor");
+    nonEnumerableTsProps.add("constructor");
+  }
+
   // Add synthetic own properties for callable types (functions/constructors).
   // ES spec: all functions have own "length" and "name" properties.
   // Non-arrow functions also have "prototype" as an own property.
@@ -5519,4 +5549,13 @@ export function compilePropertyIntrospection(
   }
   fctx.body.push({ op: "i32.const", value: 0 });
   return { kind: "i32", boolean: true };
+}
+
+/** (#1691) True when `expr` names a local / module global whose wasm slot is externref. */
+function bindingSlotIsExternref(ctx: CodegenContext, fctx: FunctionContext, expr: ts.Expression): boolean {
+  if (!ts.isIdentifier(expr)) return false;
+  const localIdx = fctx.localMap.get(expr.text);
+  if (localIdx !== undefined) return getLocalType(fctx, localIdx)?.kind === "externref";
+  const globalIdx = ctx.moduleGlobals.get(expr.text);
+  return globalIdx !== undefined && ctx.mod.globals[localGlobalIdx(ctx, globalIdx)]?.type.kind === "externref";
 }
