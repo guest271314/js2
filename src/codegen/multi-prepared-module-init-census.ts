@@ -191,6 +191,26 @@ function terminalRecordsFor(inventory: IrUnitInventory, sourceId: IrSourceId): r
   return inventory.terminalUnits.filter((terminal) => terminal.sourceId === sourceId);
 }
 
+/**
+ * (#6737) Group `values` by source file in ONE pass, keeping each group in
+ * input order — exactly what a per-source `values.filter(sf === source)` gives,
+ * without the O(sources x values) rescans. The census checks below run once per
+ * module body and overlay, so a per-source filter made every call quadratic.
+ */
+function groupBySourceFile<T>(
+  values: readonly T[],
+  sourceFileOf: (value: T) => ts.SourceFile | undefined,
+): ReadonlyMap<ts.SourceFile | undefined, readonly T[]> {
+  const groups = new Map<ts.SourceFile | undefined, T[]>();
+  for (const value of values) {
+    const sourceFile = sourceFileOf(value);
+    const group = groups.get(sourceFile);
+    if (group) group.push(value);
+    else groups.set(sourceFile, [value]);
+  }
+  return groups;
+}
+
 function snapshotSourceSyntax(sourceFile: ts.SourceFile): SourceSyntaxSnapshot {
   const nodes: ts.Node[] = [];
   const scalarFields: string[] = [];
@@ -330,12 +350,14 @@ function captureLegacyObservation(
   const foreignStatic = staticNodes.some((node) => !knownSources.has(node.getSourceFile()));
   const foreignStatements = moduleStatements.some((statement) => !knownSources.has(statement.getSourceFile()));
   const bySource = new Map<ts.SourceFile, LegacySnapshot>();
+  const staticBySource = groupBySourceFile(staticEntries, (entry) =>
+    (entry.staticBlock ?? entry.initializer)?.getSourceFile(),
+  );
+  const statementsBySource = groupBySourceFile(moduleStatements, (statement) => statement.getSourceFile());
   for (const sourcePlan of sourcePlans) {
     const sourceFile = sourcePlan.sourceFile;
-    const staticForSource = staticEntries.filter(
-      (entry) => (entry.staticBlock ?? entry.initializer)?.getSourceFile() === sourceFile,
-    );
-    const statementsForSource = moduleStatements.filter((statement) => statement.getSourceFile() === sourceFile);
+    const staticForSource = staticBySource.get(sourceFile) ?? [];
+    const statementsForSource = statementsBySource.get(sourceFile) ?? [];
     bySource.set(
       sourceFile,
       Object.freeze({
@@ -601,6 +623,18 @@ export function assertMultiPreparedModuleInitCensusCurrent(census: MultiPrepared
     censusInvariant("source-count", "census source population changed");
   }
   const sourceById = new Map(census.sourcePlans.map((sourcePlan) => [sourcePlan.sourceId, sourcePlan] as const));
+  // (#6737) One index per call, not a scan per source. First record wins, as
+  // `Array.prototype.find` did.
+  const inventorySourceById = new Map<IrSourceId, (typeof census.identityContext.inventory.sources)[number]>();
+  for (const candidate of census.identityContext.inventory.sources) {
+    if (!inventorySourceById.has(candidate.id)) inventorySourceById.set(candidate.id, candidate);
+  }
+  const terminalsBySource = new Map<IrSourceId, IrTerminalUnitRecord[]>();
+  for (const terminal of census.identityContext.inventory.terminalUnits) {
+    const group = terminalsBySource.get(terminal.sourceId);
+    if (group) group.push(terminal);
+    else terminalsBySource.set(terminal.sourceId, [terminal]);
+  }
   const seenFiles = new Set<ts.SourceFile>();
   for (const [semanticOrder, sourceFile] of census.sourceFiles.entries()) {
     if (seenFiles.has(sourceFile)) censusInvariant("source-join", `source ${sourceFile.fileName} occurs twice`);
@@ -617,11 +651,11 @@ export function assertMultiPreparedModuleInitCensusCurrent(census: MultiPrepared
     ) {
       censusInvariant("syntax-changed", `source ${sourceFile.fileName} no longer matches the retained census`);
     }
-    const source = census.identityContext.inventory.sources.find((candidate) => candidate.id === sourceId);
+    const source = inventorySourceById.get(sourceId);
     if (!source || sourcePlan.sourceKey !== source.sourceKey || sourcePlan.canonicalOrder !== source.order) {
       censusInvariant("canonical-order", `source ${sourceFile.fileName} changed canonical identity`);
     }
-    const terminals = terminalRecordsFor(census.identityContext.inventory, sourceId).map((terminal) => terminal.id);
+    const terminals = (terminalsBySource.get(sourceId) ?? []).map((terminal) => terminal.id);
     if (!sameIdentityArray(sourcePlan.terminalUnitIds, terminals)) {
       censusInvariant("terminal-join", `source ${sourceId} changed its terminal denominator`);
     }
