@@ -266,9 +266,10 @@
         "src/backend/wasmgc/resources/native-object-same-value.ts",
         "src/backend/wasmgc/resources/native-object-descriptors.ts",
         "src/backend/wasmgc/resources/native-prototype-layouts.ts",
-        "src/backend/wasmgc/resources/native-prototype-seeder-bindings.ts"
+        "src/backend/wasmgc/resources/native-prototype-seeder-bindings.ts",
+        "src/backend/wasmgc/resources/native-object-get.ts"
       ],
-      "minModules": 37
+      "minModules": 38
     },
     {
       "id": "native-runtime",
@@ -14057,6 +14058,11 @@
       "path": "src/runtime/wasmgc/values/prototype-chain-bodies.ts",
       "state": "clean",
       "layer": "native-runtime"
+    },
+    {
+      "path": "src/backend/wasmgc/resources/native-object-get.ts",
+      "state": "clean",
+      "layer": "backend-wasmgc"
     }
   ]
 }

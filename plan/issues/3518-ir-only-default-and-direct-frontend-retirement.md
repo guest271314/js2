@@ -14529,3 +14529,194 @@ legacy reachability, with2,217 unchanged inputs. Evidence lives under
 .tmp/prototype-class-check and .tmp/prototype-quality. An existing native
 subagent is investigating the two historical claims read-only; do not infer
 abandonment from claim age or take ownership without reconciliation.
+
+### Implementation plan: authentic ordinary Get integration (2026-09-28)
+
+Claim `3518:public-object-get-owner-20260928` is verified on the authoritative
+upstream issue-assignments branch for `ttraenkler/codex-public-object-get-20260928`.
+Use isolated branch `codex/3518-public-object-get-20260928`, starting from signed
+prototype checkpoint4914b41307aaa65f8ffd12a18edb3b5e6b8afe10. Do not edit the
+CI-running parent PR6205 or overwrite the prepared Boolean/getter increment.
+
+The existing ordinary lookup already walks actual Object.proto links and
+returns present=1, explicit-null exhaustion=0, implicit terminal=2. The existing
+buildOrdinaryObjectGetDefinition invokes method0 with its original receiver,
+separate from the lookup cursor. Reuse this body instead of adding a duplicate
+walk. Status2 remains an unresolved companion requirement, never a missing
+property or undefined return. The current five-function lookup owner does not
+own Get. The getter resource fixture's get(null, getter) observer does not
+validate public descriptor lookup or original-receiver routing.
+
+1. Add an issued Get resource owner joining the authentic lookup owner and the
+   genuine C2 getter-dispatch owner in the same physical reservation transaction.
+   Reserve before freeze, fill after freeze, and require all dependencies to be
+   completed before certification. Reject forged, cloned, cross-transaction,
+   stale, substituted and double-filled resource packs. Retain the status/value
+   protocol until a real complete prototype companion can discharge status2.
+2. Validate actual descriptor lookup and inherited getter execution with the
+   original receiver through real source-closure invocation; include data,
+   missing, throwing and inherited accessors. Has must never invoke a getter.
+   Test wrappers are observation only and must not stand in for public providers.
+3. Complete the default-prototype companion graph: real constructor/member
+   descriptors, callable implementations, literals and aliases; reserve cyclic
+   singleton/provider dependencies before filling. No empty seed, foreign-null
+   fallback or freshly-created-object exception may certify this graph.
+4. Connect issued object-access and companion requirements to canonical public
+   physical planning, ABI binding, reservation/fill/completion and emission.
+   Number-owned Get demands must enter this same graph; source-visible getters
+   alone are not a sufficient demand census. Keep located unsupported results
+   until each required owner is physically materialized.
+5. Run the unchanged original712 fixture through preparation, codec roundtrip,
+   public acceptance/emission and fresh-process execution against the Node and
+   retained legacy oracles. Prove getter once, returned function once, untouched
+   toString getter and result712. Preserve all original failing evidence. Full
+   IR coverage and equal behavior, not this increment alone, authorize retirement.
+
+Root owns this issue and shared boundary inventory. Implementation ownership
+must name concrete source/test paths before dispatch; do not touch historical
+4637/4643 tests whose claims have not been reconciled. Publication remains
+ordered after verified upstream delivery of prerequisites.
+
+Current-source audit refines the sequence above. The first internal Get owner
+can use4914 directly: nativeInvocationGetterDispatch already authenticates the
+exact access/invocation join and exposes method0. It does not need the separate
+Boolean increment to execute numeric getters. The full prototype companion
+still needs the canonical constructor, all ten advertised Object methods and
+applicable accessor descriptors, plus genuine runtime callables. Existing
+hasOwnProperty/propertyIsEnumerable reflected routing bodies now exist; do
+not repeat the superseded claim that they are absent. toLocaleString still
+reaches refusal, valueOf lacks full ToObject/canonical-undefined handling, and
+__proto__ installation is absent from the catalog. Seeder descriptor-tail
+checks alone cannot certify those providers.
+
+Number introduces an additional source-authority seam: C1 currently discovers
+getters from explicit js.object.get calls only, while the retained712 program
+requires Get inside js.number.from-value. Add an issued Number-owned demand
+variant anchored to that real occurrence. Track @@toPrimitive lookup, ordered
+valueOf lookup/call and toString fallback, including both actual source getter
+and returned-closure allocation/capture identities. Implement the actual Number
+provider, including its Symbol/BigInt obligations; native unboxNumber is not a
+replacement for these observable semantics. Bind Get's two-result internal
+protocol to a scalar public ABI only through a completed companion-aware
+adapter. Reject incomplete plans before any emitted bytes.
+
+Delegated ownership is restricted to new native-object-get.ts under backend
+resources and new issue-3518-native-object-get-owner.test.ts. Root retains this
+issue, boundary inventory and public integration ownership. The agent must
+freeze and report source hashes before root runs serial validation; it may not
+commit, push or edit historical shared tests in this increment.
+
+#### Fresh public-path probes on4914 (2026-09-28)
+
+The unchanged712 fixture retains SHA256
+c0550b99175c0eb61afa7d5d110a287f3fe90e9fc8e581c6d58a19fe0a971ba9 and independently
+returns712 in Node. With actual source analysis and native number/string
+policy, prepareWholeIrProgram returns invariant/verifier-failure at verify:
+`runtime feature js.number.from-value has no provider`. Public acceptance and
+emission are not reached. This is a fresh measured stopping point, not merely
+an expectation copied from the older source test.
+
+A receiver-observing source getter (`marker:7`, getter returning this.marker)
+returns7 in Node but preparation returns unsupported/body-shape-rejected at
+build: `ir/from-ast: 'this' reference outside an instance method body
+(run__closure_0)`. Preserve this source and result. Current Get-owner tests may
+prove inherited descriptor lookup and genuine captured getter invocation, but
+must not claim execution of source receiver semantics until the producer join
+is implemented. An instruction-level receiver check is distinct evidence.
+
+Both probes ran to exit0 as evidence collectors, not passing native execution
+checks. Reports are .tmp/public-object-get/baseline-712.json and
+baseline-getter-this.json; no production/test bytes changed for the probes.
+
+Receiver-producer implementation constraint: instance-method `selfParam` binds
+`this` to its first IR parameter, but a lifted closure's first `__self` is its
+closure/capture carrier. Reusing that option for a getter would confuse two
+unrelated identities. C2 already reserves currentThis and its real method body
+installs the exact receiver, then restores invocation state on normal and
+exceptional exits. A future source-getter receiver read must be an explicit,
+verified runtime-context obligation bound to this exact invocation owner, or
+an equivalently explicit receiver ABI extension. It must not invent a raw
+global name or reinterpret the capture carrier as the receiver. Arrow lexical
+this, nested/reentrant getters and restoration after throw need separate
+regressions. No receiver-support claim follows from body inspection alone.
+
+The retained-compiler baseline now executes the unchanged 712 fixture with
+`target: standalone` and `disableIrFirst: true`: compilation succeeds without
+diagnostics, irCompiledFuncs is empty, the Wasm import list is empty, and run()
+returns 712, matching Node. Binary SHA256:
+3ec27734dd0b4cd929fdd86696dc20383a333b8a1187d8743147026c5a6fd843.
+Evidence is .tmp/public-object-get/baseline-retained-712.json. This pins the
+behavior the public IR path must match; it is not evidence of IR completion.
+
+The first frozen Get-owner source typechecks with zero diagnostics and 1,659
+unchanged source inputs. Its SHA256 is
+d36a7e7065cc426b1cf86c6ccd8408e4d92cf6faab0baf8687701e55c845ee50.
+Execution/negative tests are still being completed, so no tested resource
+completion or publishable checkpoint is claimed yet.
+
+#### First complete Get-owner validation (2026-09-28)
+
+The pinned six-suite run completed with 589 passed, 2 failed and 18 skipped out
+of 609 rows; all six expected files were present, and all 2,221 snapshotted
+inputs remained unchanged. TS7 passed. This is failed validation, not a ready
+checkpoint. Reports remain in .tmp/public-object-get-validation.
+
+Both real-execution groups stopped at their capture-layout setup assertion:
+frozen IR records use null prototypes, unlike the plain expected literals.
+The duplicate-fill negative similarly compared the filled live module with a
+structuredClone snapshot that had lost those prototypes. No actual module
+mutation is established by that mismatch. The completion row built two fully
+independent provider transactions and exceeded its unchanged 35-second limit.
+
+Repair the test harness without weakening the proof: compare the exact capture
+data; preserve prototype and collection data in unchanged-module snapshots and
+pin their mutation detection; split the independent failed-transaction and
+fresh-positive controls into separate tests. Retain all identity/currentness
+checks, source bodies, actual descriptor execution and the existing timeout.
+Do not count the 18 skipped rows as runtime evidence. Rerun after the test files
+are frozen; retain this first failure report for comparison.
+
+The read-only receiver review also confirms that binding this alone is
+insufficient: prepareOrdinaryObjectAccessResolver currently recognizes
+literal/const receivers, so this.marker needs an actual property intent.
+Proposed next work is an authenticated invocation-receiver callable plus the
+existing js.object.get(receiver,key,receiver) edge. Lexical this in arrows must
+capture the getter-entry receiver, never reread ambient currentThis. This
+proposal is not implemented receiver support, and still requires genuine
+public Get/default-prototype completion. Details are retained in
+.tmp/public-object-get/receiver-producer-review.md.
+
+#### Repaired Get-owner validation (2026-09-28)
+
+The frozen second run passed all 66 Get-owner rows with zero skips and zero
+failures; TS7 passed, and all 2,217 inputs remained unchanged. This includes
+actual descriptor traversal, captured source getters, original thrown values,
+normal/exceptional invocation-state restoration, Has without getter invocation,
+explicit-null exhaustion and unresolved implicit-prototype status2, on both
+original and decoded/offset programs. Receiver-observing source this remains
+an explicit preparation refusal; these rows do not claim that support.
+
+The new snapshot helper preserves prototypes and native collection contents,
+sharing and cycles, with eight direct positive/mutation controls. The two
+independent transaction controls are now separate tests. Each test and each
+real runtime lifecycle stage retains its 35-second bound. No production owner
+code changed during the test repair; its SHA256 remains
+d36a7e7065cc426b1cf86c6ccd8408e4d92cf6faab0baf8687701e55c845ee50.
+
+Eight quality gates passed (format, lint, LOC/function budgets, coercion,
+oracle, boundary inventory, reachability) with 2,216 unchanged inputs.
+Combined evidence is 552 passing rows in the five unchanged suites from the
+first run plus 66 passing Get rows from the second: 618 across two runs, not a
+fresh six-suite all-green run. Preserve the first 589/2/18 report. Evidence:
+.tmp/public-object-get-validation-second and .tmp/public-object-get-quality.
+This prepares an internal-resource checkpoint; public Get, default-prototype
+completion, receiver production and original712/Number conversion remain open.
+
+The public integration review identifies exact remaining joins: both consumer
+acceptance and physical invocation planning currently omit issued object-access
+requirements; supplemental object ABI bindings and complete support-function
+receipts must be added alongside real resource reservation/fill/completion.
+C2 currently admits source callables only. Builtin prototype members require an
+issued builtin callable adapter for their explicit receiver convention; fake
+source getter rows cannot authorize them. Preserve originalReceiver when the
+public scalar adapter resolves status2 through a completed companion reader.
