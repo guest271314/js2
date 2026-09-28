@@ -25,7 +25,7 @@ task_type: bug
 area: compiler
 goal: standalone
 requested_by: ttraenkler/sendev-standalone
-related: [6684, 6704, 6690]
+related: [6684, 6704, 6690, 6711, 6737, 6738]
 ---
 
 # #6720 — lodash-es standalone module-init regression on main
@@ -129,10 +129,13 @@ construct.
 - JS-host is byte-identical: every entry point is gated on `noJsHost`.
 
 Next blocker (from #6704, still true): CI runs this lane in a child with a
-120 s compile budget; the compile takes 10-17 min here. See the perf issue
-filed from this work.
+120 s compile budget; the compile takes 10-17 min here. Profiled and filed as
+[#6737](https://js2wasm.loopdive.com/dashboard/issue.html?slug=6737-lodash-es-compile-time-census-assert-quadratic):
+61 % of compile time is `assertMultiPreparedModuleInitCensusCurrent`, a
+whole-program check run once per module.
 
 Residual, not fixed here: `new (a || B)()` (a non-identifier callee
 expression) still answers null in the host-free lane, before and after —
 lodash's `new (Map || ListCache)` in `_mapCacheClear.js` / `_stackSet.js`
-reaches it at run time (not on the `words`/`kebabCase` path).
+reaches it at run time (not on the `words`/`kebabCase` path). Filed as
+[#6738](https://js2wasm.loopdive.com/dashboard/issue.html?slug=6738-standalone-new-of-logical-or-callee-null).
