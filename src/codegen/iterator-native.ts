@@ -99,6 +99,7 @@ import { ABRUPT_FIELD, MODE_FIELD } from "./frame-core.js";
 import { walkChildren } from "./walk-instructions.js";
 import { fillForOfIteratorStep } from "./forof-iterator-step.js"; // (#6651 G4)
 import { buildRuntimeEvalValueUnwrap } from "./runtime-eval-boundary.js"; // (#6651 A9)
+import { RUNTIME_EVAL_IMPORT_MODULE } from "./expressions/runtime-eval-provider.js"; // (#6651 A9)
 
 /** Slice-1 IterRec kind tag for a canonical externref `$Vec`. (#6651 IT3 exports it: `ta-dyn-proto-methods.ts` `struct.new`s a record, and a bare `3` there would desync on a renumber.) */
 export const ITER_KIND_VEC = 3;
@@ -447,6 +448,16 @@ function readDecoder(
   paramCount: number,
 ): () => Instr[] {
   return () => (deps.decodeRead !== undefined && locals !== undefined ? deps.decodeRead(locals, paramCount) : []);
+}
+
+/**
+ * (#6651 A9) Only a unit that imports the provider can be handed its carrier.
+ * Neither the callback type nor `runtimeEvalCallableBoundaryEnabled` says so:
+ * the inventory also counts a type-position `Function` (`Record<string,
+ * Function>`), which flags benchmark drivers that link no provider at all.
+ */
+function linksRuntimeEvalProvider(ctx: CodegenContext): boolean {
+  return ctx.mod.imports.some((imp) => imp.module === RUNTIME_EVAL_IMPORT_MODULE);
 }
 
 /** Build a fresh `$Object`/`$Proxy` carrier test for dynamic property reads. */
@@ -2686,10 +2697,9 @@ export function fillNativeIteratorLateArms(ctx: CodegenContext): void {
         typeofFunctionIdx: ctx.funcMap.get("__typeof_function"),
         keyInstrs: (name: string) => [...nativeStringLiteralInstrs(ctx, name), { op: "extern.convert_any" }],
         missInstrs: () => undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" }],
-        decodeRead:
-          ctx.runtimeEvalInterpretedCallbackTypeIdx === undefined
-            ? undefined
-            : (locals, paramCount) => buildRuntimeEvalValueUnwrap(ctx, locals, paramCount), // (#6651 A9)
+        decodeRead: linksRuntimeEvalProvider(ctx)
+          ? (locals, paramCount) => buildRuntimeEvalValueUnwrap(ctx, locals, paramCount) // (#6651 A9)
+          : undefined,
       };
       // (#6651 G4) The for-of statement's own OBJ step (cached `next`, §7.4.4).
       fillForOfIteratorStep(ctx, iterRuntimeTypes(ctx), objDeps, (l) => externIsObjectInstrs(ctx, l));
