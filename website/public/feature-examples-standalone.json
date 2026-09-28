@@ -1098,7 +1098,7 @@
     {
       "name": "Modules (import / export)",
       "testCategories": ["language/module-code", "language/import", "language/export"],
-      "passCount": 422,
+      "passCount": 425,
       "totalCount": 731,
       "editionSpread": [
         {
@@ -1108,12 +1108,12 @@
         },
         {
           "edition": "ES2020",
-          "pass": 17,
+          "pass": 18,
           "total": 31
         },
         {
           "edition": "ES2022",
-          "pass": 192,
+          "pass": 193,
           "total": 261
         },
         {
@@ -1133,7 +1133,7 @@
         },
         {
           "edition": "Proposals",
-          "pass": 0,
+          "pass": 1,
           "total": 107
         },
         {
@@ -1246,7 +1246,7 @@
     {
       "name": "Dynamic import()",
       "testCategories": ["language/expressions/dynamic-import"],
-      "passCount": 153,
+      "passCount": 243,
       "totalCount": 557
     },
     {
@@ -1276,7 +1276,7 @@
     {
       "name": "Top-level await",
       "testCategories": ["language/module-code/top-level-await"],
-      "passCount": 180,
+      "passCount": 181,
       "totalCount": 257
     },
     {
@@ -1564,12 +1564,12 @@
     {
       "name": "Temporal",
       "testCategories": ["built-ins/Temporal"],
-      "passCount": 4491,
+      "passCount": 4493,
       "totalCount": 4603,
       "editionSpread": [
         {
           "edition": "ES2026",
-          "pass": 4491,
+          "pass": 4493,
           "total": 4603
         }
       ]
