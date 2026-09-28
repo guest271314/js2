@@ -35,7 +35,7 @@ import {
   typedArrayPackedSignedness,
 } from "./index.js";
 import { getClosureFuncSelfTypeIdx, getOrCreateFuncRefWrapperTypes } from "./closures/funcref-wrapper-types.js";
-import { getFuncSignature } from "./closures/funcref-wrapper-types.js";
+import { funcValueCallableSignature } from "./closures/func-value-callable-signature.js"; // (#6699) value ABI, not lifted
 import { addStringConstantGlobal, localGlobalIdx } from "./registry/imports.js";
 import { reserveVecMethodHelper } from "./vec-access-exports.js"; // (#4531) extern-receiver push/pop dual-lane
 import { buildThrowJsErrorInstrs, emitThrowTypeError, noJsHost } from "./js-errors.js";
@@ -6614,7 +6614,7 @@ function resolveDynamicCallbackClosure(
   // type, which is exactly what makes the runtime `ref.cast` + `call_ref` valid.
   const loweredSig =
     ts.isIdentifier(cbArg) && ctx.funcMap.get(cbArg.text) !== undefined
-      ? getFuncSignature(ctx, ctx.funcMap.get(cbArg.text)!)
+      ? funcValueCallableSignature(ctx, cbArg.text, ctx.funcMap.get(cbArg.text)!)
       : undefined;
   const cbType = ctx.checker.getTypeAtLocation(cbArg);
   const sigs = cbType.getCallSignatures();

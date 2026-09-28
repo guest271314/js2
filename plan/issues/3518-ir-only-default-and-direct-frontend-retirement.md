@@ -14245,3 +14245,16 @@ unchanged inputs. Fresh publication checks found the PR open and not in the
 merge queue, still at published 91d95479; upstream subsequently advanced to
 5bfc069422c7cece3e7f19f84e7ce3e51be2269c with callable-ABI repairs. Validate
 that increment before the single refreshed-head publication.
+
+Upstream 5bfc0694 merged cleanly. All 17 non-policy incoming paths match
+upstream byte for byte; the policy union preserves all previous entries and
+metadata and adds exactly one unmigrated callable-signature helper (1,650
+total entries). Independent review found no historical-receipt input overlap.
+Combined typecheck and five full callable/rest/class regression suites pass
+40/40 with 2,202 unchanged inputs; two additional callback and read-only
+capture suites pass 11/11 with 2,200 unchanged inputs. No old fixture, receipt
+or gate was changed for this increment.
+
+All eight final quality gates pass against exact upstream 5bfc0694, with
+2,197 unchanged inputs. The original three inherited compatibility failures
+remain documented; the additional ABI validation is 51/51 across two runs.

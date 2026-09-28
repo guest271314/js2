@@ -27,7 +27,7 @@ import { emitStandalonePromiseFromExecutorValue } from "./promise-executor.js"; 
 // declarations/expressions (the drive gate self-limits to standalone/wasi).
 import { emitAsyncGenerator, isAsyncGenDriveCandidate } from "./async-frame.js";
 import { genBodyReferencesThis, genBodyReferencesSuper, emitCachedFuncClosureAccess } from "./closures.js"; // (#3132 / #3123 fnctor parent closure)
-import { classMemberFuncKey, fnctorAncestorOfClass } from "./class-member-keys.js"; // (#1983 / #3123)
+import { classMemberFuncKey, classMemberRestParamKey, fnctorAncestorOfClass } from "./class-member-keys.js"; // (#1983 / #3123 / #6699)
 import { dynamicClassKeyGlobalKey, dynamicClassMemberName, isDynamicClassMemberName } from "./class-dynamic-keys.js"; // (#5195 Step 1 / F1)
 import { recordFnMetaMemberDeclaration } from "./function-instance-meta-methods.js"; // (#4440)
 import { resolveClassHeritageAlias } from "./class-expression-identity.js";
@@ -1697,8 +1697,8 @@ export function collectClassDeclaration(
           const vecTypeIdx = getOrRegisterVecType(ctx, elemKey, elemType);
           const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
           methodParams.push({ kind: "ref_null", typeIdx: vecTypeIdx });
-          ctx.funcRestParams.set(fullName, {
-            restIndex: isStatic ? member.parameters.indexOf(param) : member.parameters.indexOf(param),
+          ctx.funcRestParams.set(classMemberRestParamKey(ctx, fullName, memberKind), {
+            restIndex: member.parameters.indexOf(param),
             elemType,
             arrayTypeIdx: arrTypeIdx,
             vecTypeIdx,
