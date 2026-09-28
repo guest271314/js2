@@ -336,12 +336,7 @@ export function compileTailDispatch(
             // Compile body
             if (ts.isArrowFunction(callee) && !ts.isBlock(callee.body)) {
               // Concise body: expression — no return issue
-              const savedDeferredDynamicImportTrap = fctx.deferredDynamicImportTrap;
-              fctx.deferredDynamicImportTrap = !callee.modifiers?.some(
-                (modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword,
-              );
               const result = compileExpression(ctx, fctx, callee.body);
-              fctx.deferredDynamicImportTrap = savedDeferredDynamicImportTrap;
               // (#6651 lane-I5) `null` here means the concise body COMPILED and
               // produced no value (a void call such as `_ => super.increment()`
               // or `_ => o.voidMethod()`) — `compileExpression` erases the
@@ -366,17 +361,6 @@ export function compileTailDispatch(
             if (bodyStmts.length === 0) {
               return VOID_RESULT;
             }
-
-            // #3509 — ordinary IIFEs use the same host-free call-site trap as
-            // invoking a previously-created ordinary closure. The inline path
-            // has no lifted FunctionContext of its own, so carry the marker only
-            // while compiling this function body. Async IIFEs stay on #3494's
-            // explicit unsupported path (a synchronous throw is not a Promise
-            // rejection and would be a semantic lie).
-            const savedDeferredDynamicImportTrap = fctx.deferredDynamicImportTrap;
-            fctx.deferredDynamicImportTrap = !callee.modifiers?.some(
-              (modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword,
-            );
 
             // Determine return type from TS
             const iifeRetType = ctx.checker.getTypeAtLocation(expr);
@@ -510,8 +494,6 @@ export function compileTailDispatch(
               }
               fctx.blockDepth--;
 
-              fctx.deferredDynamicImportTrap = savedDeferredDynamicImportTrap;
-
               // Restore outer function's return type
               fctx.returnType = savedReturnType;
               restoreOuterReturnProtocol(fctx, parkedReturnProtocol);
@@ -591,8 +573,6 @@ export function compileTailDispatch(
                 for (const stmt of bodyStmts) compileStatement(ctx, fctx, stmt);
               }
               fctx.blockDepth--;
-
-              fctx.deferredDynamicImportTrap = savedDeferredDynamicImportTrap;
 
               // Restore outer function's return type
               fctx.returnType = savedReturnType;
