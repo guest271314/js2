@@ -124,7 +124,7 @@ import {
   enclosingVarScope,
   hasInterveningLexicalBinder,
 } from "../annexb-cancel.js";
-import { emitArgumentsVecTail } from "../arguments-vector-tail.js";
+import { emitArgumentsVecTail, emitRestArgs, prepareRestArgs } from "../arguments-vector-tail.js";
 import {
   beginNestedFunctionNameScope,
   endNestedFunctionNameScope,
@@ -4286,9 +4286,11 @@ export function emitArgumentsVecBody(
     arrTmpIdx: number;
   },
   registerWithHost = true,
+  formals?: readonly ts.ParameterDeclaration[],
 ): void {
   const numArgs = paramTypes.length;
   const { vecTypeIdx: vti, arrTypeIdx: ati, argsLocalIdx: argsLocal, arrTmpIdx: arrTmp } = locals;
+  const rest = prepareRestArgs(ctx, fctx, paramTypes, formals); // (#6651 I7) a trailing rest formal
   const argumentsVecTypeIdx = registerWithHost && ctx.standalone ? getOrRegisterArgumentsVecType(ctx, vti, ati) : vti;
   if (argumentsVecTypeIdx !== vti) reserveArgumentsLengthBrand(ctx);
   // (#2743 a) Register this arguments vec with the host so its `[[Prototype]]`
@@ -4344,6 +4346,15 @@ export function emitArgumentsVecBody(
   fctx.body.push({ op: "local.set", index: extrasLocal });
   fctx.body.push({ op: "ref.null", typeIdx: extrasVecTypeIdx });
   fctx.body.push({ op: "global.set", index: extrasGlobalIdx });
+  if (rest) {
+    const restLocalIdx = numArgs - 1 + paramOffset;
+    emitRestArgs(ctx, fctx, rest, {
+      restLocalIdx,
+      fixedCount: numArgs - 1,
+      argcLocalIdx: argcLocal,
+      extrasLocalIdx: extrasLocal,
+    });
+  }
 
   // extrasLen = extrasLocal != null ? extrasLocal.length : 0
   fctx.body.push({ op: "local.get", index: extrasLocal });
@@ -4463,7 +4474,7 @@ function emitNestedArgumentsObject(
 ): void {
   if (!needsImplicitArgumentsObject(stmt, reachesDirectEval)) return;
   const unmapped = isStrictFunction(stmt, ctx.inferModuleStrictArguments) || !isSimpleParameterList(stmt.parameters);
-  emitArgumentsObject(ctx, liftedFctx, paramTypes, paramOffset, unmapped);
+  emitArgumentsObject(ctx, liftedFctx, paramTypes, paramOffset, unmapped, stmt.parameters);
   // (#2676) Expose this nested mapped function's live `mappedArgsInfo` keyed by
   // its declaration node so a `delete args[i]` in a deeper (strict) closure can
   // resolve an aliased `arguments` (`var args = arguments`) back to this
@@ -4485,6 +4496,7 @@ export function emitArgumentsObject(
   paramTypes: ValType[],
   paramOffset: number,
   unmapped = false,
+  formals?: readonly ts.ParameterDeclaration[],
 ): void {
   const numArgs = paramTypes.length;
   const vti = getOrRegisterVecType(ctx, "arguments");
@@ -4517,12 +4529,8 @@ export function emitArgumentsObject(
 
   // Build the arguments vec by concatenating formal params with
   // extras delivered via the __extras_argv global (#1053).
-  emitArgumentsVecBody(ctx, fctx, paramTypes, paramOffset, {
-    vecTypeIdx: vti,
-    arrTypeIdx: ati,
-    argsLocalIdx: argsLocal,
-    arrTmpIdx: arrTmp,
-  });
+  const locals = { vecTypeIdx: vti, arrTypeIdx: ati, argsLocalIdx: argsLocal, arrTmpIdx: arrTmp };
+  emitArgumentsVecBody(ctx, fctx, paramTypes, paramOffset, locals, true, formals);
 }
 
 // Register delegates in shared.ts so index.ts can call these without
