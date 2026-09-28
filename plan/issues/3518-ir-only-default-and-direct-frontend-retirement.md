@@ -14259,6 +14259,282 @@ All eight final quality gates pass against exact upstream 5bfc0694, with
 2,197 unchanged inputs. The original three inherited compatibility failures
 remain documented; the additional ABI validation is 51/51 across two runs.
 
+
+### PR6205 refresh over native array-receiver repairs (2026-09-28)
+
+Delivery claim `3518:pr6205-native-resource-delivery` remains held by
+`ttraenkler/codex-ir-delivery-20260927`. Fresh upstream main is
+`bb41a01224b8173818f4e4cde86f1fdf1905d8aa`, following the incoming array-receiver
+repair. Exact published head `90a0219f954857012e70c0ca6c2f3bc5d71397b4` passed
+its PR checks but has not landed; GitHub reports a conflict and no queue entry.
+Auto-merge was disarmed before this refresh.
+
+Implementation plan: preserve all incoming production/tests/benchmark bytes
+except the two explicitly composed adapters. Union the boundary inventory by
+path, retaining existing classifications and both new unmigrated helpers.
+Retain both closure runtime imports and the variadic builtin import; preserve
+the new dispatch arm order and current-this restoration. Preserve object-runtime
+helper extraction together with new variadic scratch reservation and dispatch.
+Record any changed complete-source preservation witnesses as a new exact
+forward/reverse span receipt, retaining old fixtures, hashes and negatives.
+Run the incoming runtime regressions and affected IR source-preservation suites
+serially, then required quality checks and normal hooks. Re-arm the protected
+queue only for the new verified published head; count delivery only after
+upstream main ancestry and content are verified.
+
+
+The exact main refresh preserved all 20 non-shared incoming files byte for
+byte. Only the boundary inventory, closure exports and object-runtime adapter
+compose contributions from both parents. The inventory now has 1,652 entries;
+both new array helpers remain honestly unmigrated. A separate seven-span
+receipt authenticates the three changed adapter files against actual Git
+objects and the live imported variadic helper. Old fixtures remain unchanged.
+
+Current merged TS7 passed; 22 complete suites measured 892/922 passed, with
+30 failures, no pending rows and 2,236 unchanged pinned inputs. One newly
+written wrong-direction negative expected the wrong diagnostic: the old
+closure import still exists uniquely but moved from offset 1097 to 1220.
+Its exact offset-rejection assertion was corrected, retaining the positive
+round trip and all other negative controls. The complete new receipt suite
+then passed 73/73 with 2,218 unchanged inputs. These are composed results,
+not a new all-green 922-row run. All incoming runtime regressions passed.
+
+The other 29 failures are pre-existing in the unchanged 100-row native closure
+resource suite. An isolated exact-parent
+`90a0219f954857012e70c0ca6c2f3bc5d71397b4` control passed 71/100 and reproduced
+all 29 failures. All 100 statuses and full failure messages match after
+normalizing only the two worktree prefixes; all 2,198 control inputs stayed
+unchanged. No assertion, fixture or gate was weakened to hide these failures.
+
+Deferred preservation follow-up: upstream
+`e765c7fb29449ffefa99784b78db766c8555c936` added the Object.create comment and
+metadata row in `src/codegen/builtin-fn-meta.ts`. The file is byte-identical
+on 90a, 5bfc, bb41 and the merged tree, blob
+`a898c6e57391ad2f6aee3bd694462eab721e4808`. The original donor inverse expects
+a later return at line 308, now 310. Add a separate authenticated historical
+inverse/replay for this exact two-line addition before that original donor
+inverse, preserving its fixture digest and all 100 tests. Do not put it into
+the unrelated array-main receipt or interpret it as a runtime regression.
+
+All eight current quality gates pass with 2,217 unchanged inputs. Commands
+ran serially at observed nice 10 with a single 4 GB test worker. The
+reachability gate remains preservation-only and does not certify retirement.
+Reports and original failures remain under `.tmp/ir6205-refresh/array-*`;
+exact-parent control evidence is recorded in
+`array-main/closure-parent-control.json`. Main was reread as exact bb41 before
+commit. Required CI, queue admission and verified main delivery remain ahead.
+
+
+The final pre-push remote check stopped publication before any push: main
+advanced to `422dbf01a07b58cceefc64846444485eb549d9a5` with compiled-class
+Promise-combinator receiver support. Refresh plan: retain all five non-policy
+incoming files exactly, retain every prior inventory row plus the new honest
+unmigrated helper, and run typecheck, the complete incoming receiver regression
+suite, related Promise receiver coverage and quality gates before normal
+commit/push hooks. Existing array refresh is signed as
+`d7de1281129ddff8d3a48902a5dcf81eaee7f8d3`; neither refresh is yet delivered.
+
+
+The incoming Promise receiver runtime cohort passes TS7 and 33/33 across
+three complete suites, with 2,207 unchanged inputs. A separate complete
+preservation cohort measured 158/176 passed and 18 failures with the same
+input stability. The public-source child still executed all nineteen rows.
+The newly exported `ensureSettledAnyCombinators` modifier changes the whole
+B1 donor and retained declaration hashes; no body was changed. Preserve
+the failing report in `promise-preservation-before/` and add an authenticated
+one-span export receipt for the exact bb41/d7de-to-422 source change.
+
+Apply that explicit preservation view at the two affected tests' initial
+read boundary, before their existing injected mutation controls, retaining
+the original B1/source-receipt helpers, every historical fixture/hash and
+all assertions. Keep actual imported and child-executed code on current
+source. Add positive replay and precise tamper/missing/duplicate/unowned
+change negatives for the new receipt, then rerun both complete suites and
+required gates. This is a merge-preservation repair, not a runtime workaround
+or authority to strip arbitrary export modifiers.
+
+
+The first export-receipt run passed TS7 but measured 180/200 rows, including
+two new positives that exposed another missing historical layer. After
+removing only the exact export delta, the older Promise source still contains
+twelve declarations added by main's D1/D2/D2b repairs after the B1 extraction.
+Its original B1 inversion produces SHA256
+`de52aaf0d41545412617a52381e3204dd4302fe311fedfbd2e788160ea08f335`,
+not the fixed original donor hash. The pre-export file is byte-identical in
+90a, bb41 and d7de; preserve the run and verify the old suites on exact90a.
+
+Complete the missing preservation chain with a separate authenticated
+earlier-main receipt for the actual post-B1 source through commits
+`82b83e1de5`, `94c00fa7b1` and `3388cd36f4`. Derive exact changed spans and
+whole-source/dependency pins from Git, use reciprocal replay, and compose
+the two explicit reader views before existing mutation injection. Retain
+all historical helpers, fixture hashes and positive/negative assertions.
+Do not delete the newly failing positives or normalize away arbitrary
+declarations/modifiers. Actual compiler imports and child execution continue
+to use current source, whose D1/D2/D3 runtime regressions remain mandatory.
+
+
+The exact published-parent control on 90a measured 158/176 and reproduced
+all 18 original failures with identical full messages after only worktree-prefix
+normalization (2,199 unchanged inputs). The complete authenticated preservation
+chain now passes TS7 and all 416/416 assertions in four complete suites, with
+2,213 unchanged inputs and no skipped rows. This includes the original 176
+assertions, 24 export-receipt controls, 216 earlier-main controls, and the actual
+nineteen current-source child executions. All original helpers, historical
+fixtures and assertions remain unchanged; only explicit initial reader views
+compose the receipts before mutation injection. Root independently verified
+three actual Git parents, 28 unique spans and eight live dependency pins.
+
+The incoming runtime regressions separately pass 33/33 and the complete D2b
+drive suite 10/10. The immutable original instrument gate passes 9/9. All eight
+quality gates pass with 2,212 unchanged inputs. Checks ran serially at observed
+nice 10 with one 4 GB fork. Preservation reachability does not certify retirement.
+The original failing runs and exact-parent comparison remain recorded under
+`.tmp/ir6205-refresh/promise-*`. The separate 29 closure-metadata preservation
+failures remain recorded; this Promise repair does not claim to fix them.
+
+Before publication, a fresh upstream read found main advanced from 422dbf01
+to 6b4cc2bbd6e68f6360df17e3d7984e7f101e9417 (standalone callable-property
+argument/result bridges). Complete and sign this validated Promise merge,
+then inspect and preserve those incoming compiler fixes and tests before
+publishing the existing PR. The remote PR head is still 90a and auto-merge is
+disabled. Neither local refresh has been delivered to main.
+
+
+The Promise merge is signed as eb555c6020d67d98ff9874f7a52476eacd84b671,
+with parents d7de1281 and exact upstream 422dbf01. Normal full hooks passed
+428/428 across five complete suites; all code/test validation pins remained
+unchanged. The next upstream merge at exact 6b4cc2bb touches eleven paths.
+All ten non-policy files match upstream byte for byte; the sole conflict is
+the policy registry, resolved by retaining all 1,653 existing rows and adding
+four honestly unmigrated standalone ABI modules (1,657 total). Existing IR
+source receipts and their dependency paths are not changed by this delta.
+
+Validate the three incoming callable-property suites, existing optional-slot,
+deferred-dispatch, extern-result and stored-member regressions, plus typecheck
+and required quality gates. Preserve existing original failures and legacy
+compilation. Publish only the fully checked integrated head to existing PR6205.
+
+
+The exact 6b4cc2bb integration passes TS7 and 25/25 assertions across all
+seven planned complete suites, with 2,220 unchanged inputs and no skipped
+rows. All eight scoped quality gates pass with 2,215 unchanged inputs.
+The policy inventory passes at 1,657 rows; reachability remains explicitly
+preservation-only. All ten upstream non-policy files remain byte-identical.
+Checks ran serially at observed nice 10 with one 4 GB fork. Evidence is in
+`.tmp/ir6205-refresh/callable-runtime`, `callable-quality`, and `callable-main`.
+The upstream assignment was reread before staging and remains held by
+`ttraenkler/codex-ir-delivery-20260927`. Publication and protected queue
+validation still follow; no main delivery or retirement is claimed here.
+
+### Exact upstream refresh: RegExp and collection main, 2026-09-28
+
+PR6205 left the protected queue and became conflicting. Fresh upstream main
+was011e1278f531676b3e255558dc67c06396c21072, verified by GraphQL and fetch;
+merge it into exact published head25f4ec456c1c609629e046ab0f920dcbc8adee9a.
+The sole conflict was compiler-boundaries.json: retain all1,657 existing
+IR entries and add the two upstream unmigrated RegExp files, total1,659.
+All11 incoming source/test files outside policy match upstream byte-for-byte.
+
+TS7 passed. The initial four-suite run passed358/361 with three missing-corpus
+skips, not passes. Restore those exact three test262 files from pinned
+b363f29d3c43c626dc852744ad64a0b48a003693, authenticate their Git blobs, and
+rerun their complete suite:3/3 passed without skips. The original358 results
+retain unchanged source/test inputs. Eight quality gates passed with2,214
+unchanged inputs. Evidence: .tmp/ir6205-refresh/regexp-main-runtime,
+regexp-main-quality, and regexp-corpus. No legacy retirement or default
+change. Main delivery and merge-group conformance remain unverified.
+
+
+## Claimed follow-up — builtin metadata preservation (2026-09-28)
+
+Claim `3518:builtin-metadata-preservation-20260928` is held by
+`ttraenkler/codex-metadata-preservation-20260928` on branch
+`codex/3518-metadata-preservation-20260928`, isolated from armed PR6205.
+This repairs the 29/100 closure preservation failures already reproduced on
+exact parent 90a; it adds no runtime migration scope and does not retire code.
+
+Implementation plan: authenticate the exact two-line Object.create metadata
+addition at e765c7fb29449ffefa99784b78db766c8555c936 against its actual parent
+36f92e89171e7f0735e8ab59a71bd9c8757302d9. Add a dedicated fixture/helper/test,
+then compose its inverse only in the initial metadata reader in
+`tests/helpers/closure-source-composition.ts`, before existing mutations and
+unchanged donor extraction. Require fixed fixture provenance/digest, unique
+nonempty spans, exact UTF-16 offsets, full input/output hashes and reciprocal
+replay. Reject missing/duplicate/tampered/displaced spans, outside edits,
+wrong direction, unknown paths and receipt tampering. No whole-file substitute,
+source fallback, fixture rebaseline or assertion removal is permitted.
+
+Keep the original 100-row native closure suite and both historical fixtures
+byte-identical. Validate the full original suite, full closure composition
+suite and full new receipt suite, then TS7 and scoped quality gates with
+unchanged-input evidence. Preserve the old 71/100 result. Sign with normal hooks;
+publish separately only after verified delivery of its parent PR6205.
+
+
+Also run the unchanged complete Object.create-as-value regression suite from
+main, comparing actual current compiled execution against its Node oracle.
+This independently checks the runtime behavior behind the metadata addition;
+the historical reader view must not suppress the current implementation.
+
+
+Validation on the frozen five-file follow-up passes TS7 and all 156/156
+assertions across four complete suites: unchanged native closure resources
+100/100, unchanged closure composition 27/27, new exact receipt controls
+28/28, and actual Object.create-as-value execution 1/1 against Node.
+There are no failed or skipped rows, and all 2,217 measured inputs stayed
+unchanged. All eight quality gates pass with 2,213 unchanged inputs.
+Runs used observed nice 10 and one 4 GB fork. Root independently verified
+actual Git parents/blobs, both UTF-16 offsets, unique spans, complete hashes
+and reciprocal replay; the four original suite/fixture hashes remain fixed.
+No production source or script changed. Original 71/100 parent evidence is
+retained; these are measured corrected results, not a rebaseline. Reports live
+in `.tmp/metadata-validation` and `.tmp/metadata-quality` in the isolated
+metadata-preservation worktree. Main delivery remains pending and the claim
+stays active until verified publication and merge.
+
+
+### Parent delivery and metadata refresh (2026-09-28)
+
+PR6205 is delivered on upstream main as
+45ce4a8e207742df5ca3888c0a458e8a48ee1655, with exact published head
+cbf0b97309cb9421bfae574b980b8e7103550414 as its second parent. All 102
+merge-group conformance shards, the final regression gate, CI and differential
+tests passed on that exact merge commit. The IR/backend/runtime source paths
+are byte-identical to the published head. Its delivery claim alone is complete;
+the IR migration and this metadata-preservation claim remain open.
+
+Fresh ls-remote verified this exact main before integration into the metadata
+branch. The sole conflict was this issue file: retain the full upstream record
+and the full local follow-up record. No source or regression test was dropped.
+Validate the four complete metadata/closure/Object.create suites again on this
+integrated tree, then commit through normal hooks and publish through the fork.
+The earlier 156/156 evidence belongs to the pre-refresh tree until rerun.
+
+The integrated45ce tree passes TS7 and all156/156 assertions across the four
+complete suites, with no failures/skips and2,219 unchanged inputs. All eight
+quality gates pass with2,215 unchanged inputs. Evidence is retained in
+.tmp/metadata-main-validation and .tmp/metadata-main-quality.
+
+The fresh pre-publication check then found main41be7d9be9240678bf8df71192f853d9d526b73f.
+Its sole additional commit refreshes16 report/baseline/documentation files,
+with no compiler or test changes. Preserve this verified45ce merge, then
+integrate41be and recheck the changed quality baselines before publication.
+
+The signed45ce integration is0ef3e2ed046c2fa3a7308f883e292902bfea76a3.
+Its normal hooks completed, but the inherited B9 corpus suite skipped three
+rows because this worktree lacked harness/corpus inputs. Those were not
+counted as passes. Provisioned all44 harness files and the three exact rows
+from pinned test262 Git objects atb363f29d3c43c626dc852744ad64a0b48a003693;
+all47 files have recorded blob/SHA256 provenance and no existing file was
+overwritten. The subsequent full five-suite run on the41be integration passed
+159/159, zero skipped/failed, with2,267 unchanged inputs; TS7 passed. Eight
+quality gates passed with2,215 unchanged inputs. Source, scripts and workflows
+match41be exactly; the PR remains the original five-file metadata repair.
+Evidence: .tmp/metadata-final-validation, .tmp/metadata-final-quality, and
+.tmp/metadata-pinned-corpus/provenance.json. Publish through the fork and
+protected queue; this follow-up is not delivered until main is verified.
+
 ### Frozen Boolean/getter draft delivery — implementation plan (2026-09-28)
 
 The upstream slice `3518:boolean-getter-native-resource-delivery-20260928`
@@ -14505,3 +14781,21 @@ byte-identical, SHA256
 Neither numeric payload unboxing nor empty prototype seeds substitutes for
 those semantics. Legacy compilation remains operational. Publication of this
 dependent increment waits for verified parent delivery to upstream main.
+
+### Boolean/getter main refresh (2026-09-28)
+
+Refresh signed checkpointb08f2754 onto verified mainbda2657b, including the
+delivered metadata preservation PR6233. Preserve all implementation and test
+files from the checkpoint. Compose the boundary registry by retaining every
+upstream entry and adding only this increment's two entries and its declared
+backend module floor. Preserve both complete issue records. Validation must
+run after the existing Get process finishes, with one heavy process at a time.
+Legacy compilation remains operational; no full public Get or712 parity claim.
+
+Fresh main integration passed TS7 and all406/406 tests across four complete
+suites, zero failures/skips and2,222 unchanged inputs. Seven quality gates
+passed; the format gate found only JSON layout in the composed boundary
+inventory. Format that file, verify parsed JSON is identical, and recheck
+format successfully. Preserve the original format-failure record. No source
+or test bytes changed. Final normal commit and push hooks remain required.
+Evidence: .tmp/boolean-getter/main-validation, main-quality and main-refresh.

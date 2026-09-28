@@ -2,7 +2,7 @@
 import { applyOwnPropertyExtraction } from "./own-property-extraction.js";
 import { readBeforePrototypeRead } from "./prototype-read-extraction.js";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readBeforeArrayMainRefresh } from "./array-main-refresh-port.js";
 import { beforeBigIntCarrierPort } from "./bigint-carrier-port.js";
 import { beforeDescriptorAdapterRelocation } from "./descriptor-adapter-relocation.js";
 import { beforeDeliveryMainRefresh } from "./delivery-main-refresh-port.js";
@@ -30,7 +30,7 @@ export const resumeMainPaths = [
 export const resumeMainSha = (source: string) => createHash("sha256").update(source).digest("hex");
 /** Peel the exact eager-body extraction before every pre-existing source receipt. */
 export const readMergedSource = (path: string): string => {
-  const raw = beforeDeliveryMainRefresh(path, readFileSync(new URL(`../../${path}`, import.meta.url), "utf8"));
+  const raw = beforeDeliveryMainRefresh(path, readBeforeArrayMainRefresh(path));
   const source = path === "src/codegen/object-runtime.ts" ? applyOwnPropertyExtraction(raw, true) : raw;
   return beforeBigIntCarrierPort(path, beforeDescriptorAdapterRelocation(path, source));
 };

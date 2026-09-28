@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readBeforeArrayMainRefresh } from "./array-main-refresh-port.js";
 
 export const deliveryMainPrior = "91d954797abe9e461032a6e7e1d374404157bfa4";
 export const deliveryMainUpstream = "f2e06e122439bc5b4c5629abc6f9d76e5a23c432";
@@ -8,8 +8,7 @@ export const deliveryMainMergeBase = "359c2d63b6753e0c540b8761d13647b00e24a9a4";
 export const deliveryMainFixture = "tests/fixtures/issue-3518-delivery-main-refresh-port.json";
 const receiptHash = "e5d0c8de3cccd647b1f2c77aeb6a208241dcd6248781e580ce050ff8f5b39172";
 export const deliveryMainPaths = ["src/codegen/expressions/calls.ts", "src/codegen/registry/imports.ts"] as const;
-export const readDeliveryMainSource = (path: string): string =>
-  readFileSync(new URL("../../" + path, import.meta.url), "utf8");
+export const readDeliveryMainSource = readBeforeArrayMainRefresh;
 export const deliveryMainHash = (source: string): string => createHash("sha256").update(source).digest("hex");
 export const deliveryMainBlob = (source: string): string =>
   createHash("sha1")
