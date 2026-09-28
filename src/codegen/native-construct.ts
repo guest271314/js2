@@ -67,6 +67,10 @@ import { addFuncType } from "./registry/types.js";
 import type { CodegenContext } from "./context/types.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
 import { constructIsConstructorGuard } from "./construct-is-constructor-guard.js"; // (#6612 / #5383 S25)
+import {
+  builtinCollectionConstructArm,
+  fillBuiltinCollectionDynConstruct,
+} from "./builtin-collection-dyn-construct.js"; // (#6720)
 import { standaloneLinkBoundaryPeerIndex } from "./standalone-link-boundary.js"; // (#5383 S2f R12)
 import { CLASS_CONSTRUCT_DISPATCH, ensureStandaloneClassConstructDispatch } from "./standalone-class-construct.js"; // (#5383 S2g)
 import { RUNTIME_EVAL_INTERP_CALLBACK_BRAND_A, RUNTIME_EVAL_INTERP_CALLBACK_BRAND_B } from "./runtime-eval-boundary.js";
@@ -472,6 +476,7 @@ export function fillNativeConstructDrivers(ctx: CodegenContext): void {
   // It gates itself: a module with no `new <runtime value>` site and no wasm
   // consumer gets `undefined` here and emits identical bytes.
   const classConstructIdx = ensureStandaloneClassConstructDispatch(ctx);
+  fillBuiltinCollectionDynConstruct(ctx); // (#6720) the collection arm's helper, same finalize point
   for (let arity = 0; arity <= MAX_DYNAMIC_CONSTRUCT_ARITY; arity++) {
     const driverIdx = ctx.funcMap.get(driverName(arity));
     if (driverIdx === undefined) continue;
@@ -697,6 +702,7 @@ export function fillNativeConstructDrivers(ctx: CodegenContext): void {
         },
       );
     }
+    body.push(...builtinCollectionConstructArm(ctx, arity, resultLocal)); // (#6720) Map/Set carrier VALUE
     // (#6612 / #5383 S25) §13.3.5.1 EvaluateNew step 5 — IsConstructor. Every
     // arm above answers for a callee that HAS [[Construct]]; the ordinary tail
     // below runs §10.2.2 unconditionally, so a callee that is callable but NOT

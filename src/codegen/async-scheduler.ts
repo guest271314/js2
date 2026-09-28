@@ -56,6 +56,7 @@ import { CARRIER_BAG_HAS } from "./carrier-bag-visibility.js";
 // call these two. `ensureUnhandledRejectionReporter` is imported by index.ts.
 import { ensureUnhandledRejectionTracking, buildNoteUnhandledRejection } from "./unhandled-rejection.js";
 import { buildTargetTaggedTry } from "../ir/try-table.js";
+import { tryEmitObservablePromiseFinally } from "./promise-finally-invoke.js"; // (#6651 D7)
 import { canonicalUndefinedExternInstrs } from "./any-helpers.js";
 import {
   PROMISE_STATE_PENDING,
@@ -3682,6 +3683,7 @@ export function emitStandalonePromiseThen(
   promiseInstrs: Instr[],
   onFulfilled: StandalonePromiseThenCallback | null,
   onRejected?: StandalonePromiseThenCallback | null,
+  intrinsic = false, // (#6651 D7) %Promise.prototype.then% itself: never re-dispatches to an own `then`
 ): void {
   ensurePromiseSettleFunctions(ctx);
   const state = getOrInitState(ctx as CodegenContextWithScheduler);
@@ -3867,7 +3869,7 @@ export function emitStandalonePromiseThen(
   // `ensureObjVecBuilders` → `ensureObjectRuntime` registers the entire
   // `__boundary_object_*` import family (14 host imports the host-import
   // ratchet counts against every plain async module).
-  if (ctx.funcMap.get("__carrier_bag_has") === undefined || ctx.funcMap.get("__extern_get") === undefined) {
+  if (intrinsic || !ctx.funcMap.has("__carrier_bag_has") || !ctx.funcMap.has("__extern_get")) {
     fctx.body.push(...nativeBody);
     return;
   }
@@ -4352,6 +4354,9 @@ export function emitStandalonePromiseFinally(
   promiseInstrs: Instr[],
   onFinally: StandalonePromiseThenCallback | null,
 ): void {
+  // (#6651 D7) §27.2.5.3 step 7: Get `then` first; only an intrinsic `then` on a
+  // native `$Promise` re-enters here for the lowering below (promise-finally-invoke.ts).
+  if (tryEmitObservablePromiseFinally(ctx, fctx, promiseInstrs, onFinally, emitStandalonePromiseFinally)) return;
   if (onFinally === null) {
     emitStandalonePromiseThen(ctx, fctx, promiseInstrs, null, null);
     return;

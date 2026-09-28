@@ -1795,18 +1795,22 @@ async function compileNpmCompatPerfLane({ setup, spec, lane, compileOptions }) {
 }
 
 /**
- * (#6661) Render a module-init throw for a generic npm-compat lane. When the
- * payload cannot be rendered AND the module exports no `__exn_render_*` pair,
- * the throw cannot come from a source `throw` statement (#5384 keeps the pair
- * whenever the source has one) — it was raised by compiler-generated code,
- * e.g. the ReferenceError for an unresolved `require` (#6666). Say so instead
- * of leaving the bare "non-stringifiable payload" label.
+ * (#6661, #6666) Render a module-init throw for a generic npm-compat lane.
+ * Since #6666 every standalone/WASI module that can throw publishes an
+ * `__exn_render_*` pair — the full `__any_to_string` renderer when the source
+ * has a `throw`, else a lite one that renders the compiler-synthesized
+ * `$Error_struct` / string payloads (e.g. "ReferenceError: require is not
+ * defined", a null-guard "TypeError: … at L:C"). So an opaque label that
+ * survives means either an older binary without the pair, or a payload that is
+ * neither an Error nor a string reaching the lite renderer; name which.
  */
 function renderModuleInitThrow(error, instance) {
   const text = renderHarnessThrownText(error, instance);
   if (!instance || !text.includes("non-stringifiable payload")) return text;
-  if (typeof instance.exports?.__exn_render_prepare === "function") return text;
-  return `${text}: raised by compiler-generated code (the module has no source throw, so no __exn_render_* exports; see #6666)`;
+  if (typeof instance.exports?.__exn_render_prepare === "function") {
+    return `${text}: the payload is not an Error or string the module's renderer can read (see #6666)`;
+  }
+  return `${text}: the module publishes no __exn_render_* exports (see #6666)`;
 }
 
 const NPM_COMPAT_REPORT_SCRIPT = join(ROOT, "scripts", "generate-npm-compat-report.mjs");

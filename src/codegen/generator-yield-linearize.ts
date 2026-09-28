@@ -557,6 +557,45 @@ function planForOfPatternHead<U>(
   if (ts.isVariableDeclarationList(stmt.initializer)) return "not-applicable";
   const head = unwrapParens(stmt.initializer);
   if (!isAssignPattern(head) || !hasYield(head)) return "not-applicable";
+  return planForOfLoop(p, stmt, unwind, bodyJumpOk, (value, stack, loopUnwind) => {
+    if (ts.isArrayLiteralExpression(head)) planArrayPattern(p, head, value, stack, loopUnwind);
+    else planObjectPattern(p, head, value, stack, loopUnwind);
+  });
+}
+
+/**
+ * (#680) `for (let|const|var x of <iterable>) body` with a yield in the body,
+ * standalone/WASI. The typed-iterator subject keeps A2's `for-of-step`
+ * terminator (`lowerForOf`); this is the arm for every OTHER subject — an
+ * array, a string, a Set, or an untyped (`any`) JS value, which `__gen_delegate_*`
+ * traps on. The same loop skeleton as the pattern head, with the head reduced
+ * to one PutValue of the stepped value into the loop binding.
+ */
+export function lowerLinearForOfBinding<U>(
+  host: LinearizeHost<U>,
+  stmt: ts.ForOfStatement,
+  unwind: readonly U[],
+  bodyJumpOk: (body: ts.Statement) => boolean,
+): LinearizeAttempt {
+  const init = stmt.initializer;
+  if (!ts.isVariableDeclarationList(init) || init.declarations.length !== 1) return "not-applicable";
+  const declarator = init.declarations[0]!;
+  if (!ts.isIdentifier(declarator.name) || declarator.initializer) return "not-applicable";
+  const target = declarator.name;
+  const p: Planner<U> = { host, fail: false };
+  return planForOfLoop(p, stmt, unwind, bodyJumpOk, (value, stack) => {
+    pushOp(p, { kind: "put-ident", target, value }, stack);
+  });
+}
+
+/** The shared `for-of` skeleton: GetIterator once, step per header entry, bind, body. */
+function planForOfLoop<U>(
+  p: Planner<U>,
+  stmt: ts.ForOfStatement,
+  unwind: readonly U[],
+  bodyJumpOk: (body: ts.Statement) => boolean,
+  bindHead: (value: string, stack: readonly LinearCloseEntry[], loopUnwind: readonly U[]) => void,
+): LinearizeAttempt {
   if (stmt.awaitModifier || hasYield(stmt.expression)) return "failed";
   if (!bodyJumpOk(stmt.statement) || containsReturn(stmt.statement) || containsDelegation(stmt.statement)) {
     return "failed";
@@ -582,8 +621,7 @@ function planForOfPatternHead<U>(
   p.host.branch(done, exit, bodyEntry);
 
   p.host.enter(bodyEntry);
-  if (ts.isArrayLiteralExpression(head)) planArrayPattern(p, head, value, stack, loopUnwind);
-  else planObjectPattern(p, head, value, stack, loopUnwind);
+  bindHead(value, stack, loopUnwind);
   if (p.fail) return "failed";
   const body = ts.isBlock(stmt.statement) ? stmt.statement.statements : [stmt.statement];
   if (!p.host.lowerBody(body, loopUnwind)) return "failed";
