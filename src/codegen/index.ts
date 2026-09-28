@@ -413,6 +413,7 @@ import { unshiftExternGetIterRecArm } from "./iterator-proto-next.js"; // (#6484
 import { unshiftRegExpAccessorGetArm } from "./regexp-accessor-get-arm.js"; // (#6651 B4) §22.2.6 accessor reads
 import { installRegExpLastIndexCarrierArms } from "./regexp-lastindex-carrier.js"; // (#6651 B6) lastIndex MOP
 import { unshiftDateCarrierMemberArms } from "./date-carrier-dynamic-member.js"; // (#6678) untyped Date members
+import { noteUntypedRegExpDemand, unshiftUntypedRegExpReceiverArms } from "./regexp-untyped-receiver.js"; // (#6651 B10)
 import { unshiftExternMethodCallProtoArm } from "./native-proto-method-call.js"; // (#4619) proto-receiver method CALL
 import {
   noteNumberPrimitiveMethodDemand,
@@ -5735,6 +5736,7 @@ export function generateModule(
     // Off by default — programs without holes are byte-identical.
     scanForArrayHoles(ctx, ast.sourceFile);
     noteRegexPropertySource(ctx, ast.sourceFile); // (#6677) link the \p{…} table only if spellable
+    noteUntypedRegExpDemand(ctx, ast.sourceFile); // (#6651 B10)
 
     if (
       options?.experimentalIR &&
@@ -6588,6 +6590,7 @@ export function generateModule(
     // one through `__iter_rec_proto`. No-op unless the module demanded it.
     unshiftExternGetIterRecArm(ctx);
     unshiftDateCarrierMemberArms(ctx); // (#6678) untyped Date members
+    unshiftUntypedRegExpReceiverArms(ctx); // (#6651 B10) untyped-RegExp proto reads
     // (#4619) The CALL twin, which delegates to `__extern_get` — so it must
     // run after the read arm above. See native-proto-method-call.ts.
     unshiftExternMethodCallProtoArm(ctx);
@@ -10936,6 +10939,7 @@ export function generateMultiModule(multiAst: MultiTypedAST, options?: CodegenOp
       for (const sf of multiAst.sourceFiles) {
         scanForArrayHoles(ctx, sf);
         noteRegexPropertySource(ctx, sf); // (#6677)
+        noteUntypedRegExpDemand(ctx, sf); // (#6651 B10)
       }
     });
 
@@ -11354,6 +11358,7 @@ export function generateMultiModule(multiAst: MultiTypedAST, options?: CodegenOp
     // body's PREFIX for the #4157 inline extractor.
     profilePhase("unshift-extern-get-iter-rec", () => unshiftExternGetIterRecArm(ctx));
     profilePhase("unshift-date-carrier-member", () => unshiftDateCarrierMemberArms(ctx)); // (#6678)
+    profilePhase("unshift-untyped-regexp-receiver", () => unshiftUntypedRegExpReceiverArms(ctx)); // (#6651 B10)
     // (#4619) The CALL twin, which delegates to `__extern_get` — so it must
     // run after the read arm above. See native-proto-method-call.ts.
     profilePhase("unshift-extern-method-call-proto", () => unshiftExternMethodCallProtoArm(ctx));

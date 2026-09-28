@@ -169,6 +169,25 @@ assignee: "ttraenkler/fable-es2015-plan"
 #     `$__ta_ctor`, which the Int8Array `$Object` carrier is not). The first cut
 #     inlined the arm here and cost +68 / +65; extracting it left these 8.
 loc-budget-allow:
+  # 2026-09-28 — cluster B, slice B10 (receipt under `## Cluster status`). Three
+  # god-files, call sites only (paths already listed below, restated per the
+  # stranded-grant rule); both mechanisms live in NEW leaves
+  # (`regexp-untyped-receiver.ts`, `regexp-proto-to-string.ts`):
+  #   - `src/codegen/index.ts` +5: the import, the pre-scan demand note in both
+  #     pipelines (it must run before ANY closure is minted, so the RegExp
+  #     `toString` member body is chosen before the companion seeder mints it),
+  #     and the finalize arm call in both pipelines (next to the #6678 Date twin,
+  #     ahead of the proto-cache arm that has to stay `__extern_get`'s prefix).
+  #   - `src/codegen/declarations.ts` +2: the import and one mint call at
+  #     module-init start — the one codegen point every source file reaches
+  #     with a `FunctionContext` (an eval-produced RegExp has no creation site
+  #     in the test module to hook instead).
+  #   - `src/codegen/regexp-standalone.ts` +4: the import and the §22.2.6.17
+  #     hand-off ahead of brand recovery in `emitRegExpProtoMemberBody` (the
+  #     member body is chosen there and nowhere else).
+  - src/codegen/index.ts
+  - src/codegen/declarations.ts
+  - src/codegen/regexp-standalone.ts
   # 2026-09-28 — cluster B, slice B9 (receipt under `## Cluster status`). ONE
   # god-file, `src/codegen/builtin-value-read.ts` +3: the import and the one-line
   # decline (plus its comment) at the top of
@@ -898,6 +917,11 @@ loc-budget-allow:
   - src/codegen/statements/loops.ts
   - src/codegen/iterator-native.ts
 func-budget-allow:
+  # 2026-09-28 — cluster B, slice B10: `compileDeclarations` +1 — the single
+  # `mintUntypedRegExpReceiverMembers(...)` call at the top of its nested
+  # `compileModuleInitBody`, the one codegen point every source file reaches with
+  # a `FunctionContext` (mechanism in the new leaf `regexp-untyped-receiver.ts`).
+  - src/codegen/declarations.ts::compileDeclarations
   # 2026-09-26 — lane SC1: `buildNativeGeneratorPlan` +15 as the gate measures it
   # (path already listed below, restated per the stranded-grant rule), of which 9
   # are the comment
@@ -8460,6 +8484,141 @@ companion miss that answers the glue's method singletons without seeding.
 | 2 | `exec/{failure,success}-lastindex-access` | value-rep (B8's table, unchanged) |
 | 2 | `String.prototype.indexOf/searchstring-tostring-{errors,toprimitive}` | spec ToString at the argument site, cluster H (unchanged) |
 | 1 | `@@split/coerce-flags-err` | cluster C `__module_init` null-deref (unchanged) |
+
+### 2026-09-28 — Cluster B, slice B10
+
+`%RegExp.prototype%` seen through an UNTYPED RegExp: a runtime method read, the
+ToString it feeds, and `Object.getPrototypeOf`. Opus 5 High. Branch
+`issue-6651-b10-regexp-untyped-proto` (local, not pushed), base `origin/main` @
+`f73a4bcd7d` + the B9 head `daa9a67132` merged in (B9 not on main at dispatch).
+A `git archive` of that merge (`ce1302df01`) was taken before the first edit
+(`.tmp/base/`), so every base number below was run, not inherited. Engine for
+every verdict: QuickJS (artifact `073742801ba7`, adapter `d4799bda84cfed0d`),
+`--standalone --isolate`, 24-row chunks, one runner at a time; source sha
+checked first→last on every measured tree (after: `b79d4117…`, base:
+`c2249e48…`).
+
+#### What was wrong (measured on the base, probes `.tmp/b10/p/`)
+
+For `var r; r = /./g;` read inside a function (`r` is `any`) and for
+`var result = eval('/1/g')`:
+
+| expression | base | spec |
+| --- | --- | --- |
+| `r.test` / `r.exec` (value read) | `undefined` | `RegExp.prototype.<m>` |
+| `r.toString()`, `String(r)`, `r + ""` | `"null"` | `"/./g"` |
+| `Object.getPrototypeOf(r)` | `null` | `RegExp.prototype` |
+
+B9's root cause for the first row holds (`__extern_get` reaches the prototype
+only through the companion miss, seeded only under `protoMemberDirty`). The
+`toString` row had TWO further causes, found while probing: the implicit
+`%Object.prototype%` consult answered `Object.prototype.toString` ahead of the
+RegExp prototype (so the #4564 `__to_primitive` RegExp arm found a callable
+`toString`, called the wrong one, and never reached its own intrinsic), and the
+reified `RegExp.prototype.toString` closure body is a `null` PLACEHOLDER in
+`emitRegExpProtoMemberBody` (`RegExp.prototype.toString.call(/1/g)` read back
+`"null"` through the value). The six `statementList/eval-*-regexp-literal*`
+rows need both `gPO` and `toString` — fixing `gPO` alone would have flipped
+none of them.
+
+#### What landed (two NEW leaves; god-files carry call sites only)
+
+1. **`regexp-untyped-receiver.ts`** — B9's suggested narrow lever: when a
+   runtime lookup on a `$NativeRegExp` misses its own properties, answer from
+   the builtin method list. A `__extern_get` prologue (`ref.test
+   $NativeRegExp`, own carrier-bag entry still shadows, runs ahead of the
+   implicit `%Object.prototype%` consult — §10.1.8 order) answers
+   `exec|test|compile|toString` with the seeded companion value when the
+   module seeded that member (a replacement/`delete` stays observable), else
+   the identity-stable builtin singleton. A `__getPrototypeOf` arm answers the
+   lazy `%RegExp.prototype%` singleton — the carrier has no `[[Prototype]]`
+   slot, which is why the TYPED spelling already folds to that exact value.
+2. **`regexp-proto-to-string.ts`** — the §22.2.6.17 body (generic, no brand
+   check): `Type(R)` Object check, `ToString(Get(R,"source"))`,
+   `ToString(Get(R,"flags"))` through the coercion engine's spec ToString,
+   `"/" ++ … ++ "/" ++ …`.
+3. **Demand gate** (one cached AST walk per source file, `ctx.oracle`): an
+   identifier bound (initializer or plain `=`) to a regexp literal,
+   `[new] RegExp(…)` or `eval(<string>)` whose text parses to a regexp literal,
+   USED where the checker types it `any`/`unknown` as a non-call
+   `exec|test|compile` read, any `toString` spelling (incl. `String(x)`,
+   `x + …`, a template span), or a `getPrototypeOf` argument. Decided in the
+   PRE-SCAN (before any closure is minted, so the real `toString` body is chosen
+   before the RegExp companion seeder mints that member); closures minted at
+   module-init start; arms at finalize, next to the #6678 Date twin. A module
+   without demand emits exactly as before — including the placeholder
+   `toString` body.
+
+#### Measurements
+
+| set | rows | before | after | Δ |
+| --- | ---: | --- | --- | --- |
+| manifest `B-regexp-protocol.txt` (sha `f34bba06`), standalone | 147 | 134 pass / 13 fail / 0 CE (`.tmp/b10/bm-chunk-0*.log`) | **134** / 13 / 0 (`.tmp/b10/am-chunk-0*.log`) | 0 — the identical 13-row non-pass set as B9's; no row changed status |
+| `language/statementList/*regexp-literal*`, standalone | 16 | 10 pass / 6 fail (`.tmp/b10/bstmt-chunk-00.log`) | **16** / 0 (`.tmp/b10/astmt-chunk-00.log`) | **+6**: `eval-{block,class,fn}-regexp-literal{,-flags}` (the two `eval-class-*` are manifest `I-language-misc.txt` rows 88-89; the other four are in no manifest) |
+
+Target 1 (the method VALUE read) flips no corpus row: the syntactic superset
+below found no scored row that reads `exec|test|compile` as a value off an
+untyped RegExp binding; it is pinned inline and ships because the same arm is
+what makes the `toString` row family correct.
+
+#### Controls
+
+- **Reach, by a superset scan then bytes.** A syntactic superset of the demand
+  gate (types ignored), run over EVERY scored row's ASSEMBLED source (harness
+  included; `.tmp/b10/cand.mts`): **62 rows**. Only three harness files bind a
+  regexp source to a name (`nativeFunctionMatcher.js`, `temporalHelpers.js`,
+  `testIntl.js`), all as typed `const`s, and none uses them in a demand shape.
+- **Byte differential** (compile-only, primary + strict rerun, BOTH targets,
+  base = `.tmp/base`): the 62 candidates + the 16 statementList rows + 80
+  controls (10 rows each including `temporalHelpers`/`nativeFunctionMatcher`/
+  `regExpUtils`/`deepEqual`/`testAtomics`, 20 non-candidate B-manifest rows,
+  the 10 scored rows naming `RegExp.prototype.toString`) = 151 rows, 301
+  (row, target) pairs: **295 identical, 6 changed — all standalone, 0 host**;
+  the 6 are exactly the six eval rows (`.tmp/b10/chg-standalone.tsv`).
+- **Verdicts on every changed row**: base 0 pass / 6 fail → after **6 pass**.
+- **Zero pass→non-pass.**
+- **Byte identity** `website/playground/examples/**` + 3 benchmarks, both
+  targets: **32/32 identical** (`.tmp/b10/bytes-{base,after}.txt`).
+- `node scripts/equivalence-gate.mjs`: 22 failing / 1,720 passing = the 22
+  known, no new. `pnpm run check:ir-fallbacks`: OK.
+- **Pins**: `tests/issue-6651-b10-regexp-untyped-receiver.test.ts` (the 6 rows)
+  and `…-inline.test.ts` (3 programs: method read + identity + call; the three
+  ToString spellings + own-property shadowing and its `delete`; `gPO`) —
+  **9/9 red on the base tree** (`.tmp/b10/pin-ONBASE.log`, `pin3-ONBASE.log`),
+  green after. B-family and neighbour pins, one worker,
+  `VITEST_FORK_MAX_OLD_SPACE_SIZE=2048` (`.tmp/b10/pins-after.log`): B10 ×2,
+  B9 ×2, B8 ×2, B7 ×2, B6 ×2, B5 ×4, B4, B3, exec protocol,
+  `string-symbol-protocol`, `issue-3794`, `issue-6662`, `issue-6665`,
+  `issue-6677`, `issue-4556`, `issue-4176` all green (214/221); the 7 failures
+  are the `issue-3051.test.ts` host-lane cases, which fail identically on this
+  base tree (same 7 names, `.tmp/b10/pin2-ONBASE.log`).
+- Gates (bare): loc (grant above), func (grant above), coercion-sites,
+  oracle-ratchet, dead-exports, typecheck, biome lint, compiler-boundaries
+  inventory (two new leaves classified) — all exit 0; `LOC_GATE_BASE=732d9f75e6`
+  (origin/main at hand-back) loc/func re-runs exit 0. `origin/main` advanced
+  `f73a4bcd7d → 732d9f75e6` during the slice (#6218, #6219, #6220; D3's
+  `promise-class-receiver-drive.ts`, #6704's callable-property leaves, #5151);
+  NOT merged, so every measurement above is against `ce1302df01`.
+
+#### Recorded narrowings / found while probing
+
+- **The `toString` placeholder stays in every module WITHOUT demand.** The
+  member is minted in every module that seeds the RegExp companion, so a global
+  body change reaches that whole set; it is gated like the arms. Any other route
+  that CALLS the reified closure (`var t = RegExp.prototype.toString;
+  t.call(re)` in a typed file) still answers `null` — the next owner can drop
+  the gate once that set is measured.
+- `RegExp.prototype.toString.call(r)` (the STATIC spelling) answers `undefined`
+  on both trees, and a module-level `var r2; r2 = /1/g; r2.toString()` (typed by
+  flow) answers `"undefined"` on both trees — separate static lowerings, not
+  touched.
+- A value-extracted `test` closure's `.call` boxes its i32 result as a NUMBER
+  (`t.call(r, "abc") === true` is false; truthy) — the closure ABI, not this
+  slice; the inline pin asserts truthiness.
+- Evidence is by binding: a RegExp that reaches an untyped slot through a
+  parameter, a property, or a computed `eval` string is not demanded; only
+  literal keys are demand shapes (once a member is demanded, a runtime-keyed
+  `r[k]` read of it is answered too).
 
 ## Handoff — 2026-09-21 (round 1 closed, round 2 ready to dispatch)
 
