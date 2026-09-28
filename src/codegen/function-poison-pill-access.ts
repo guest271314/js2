@@ -67,7 +67,13 @@ function hasRestrictedProperties(
   // it has no own `caller`/`arguments` and inherits the %ThrowTypeError%
   // accessors (§10.2.4), whatever the surrounding strictness. Those accessors
   // are configurable, so the same custodial-use proof as the arrow arm applies.
-  if (isGeneratorFunctionLike(sourceFunction)) return arrowValueStillCarriesRestrictedAccessors(receiver);
+  // A STRICT generator keeps base's unconditional answer (monotone: never fewer folds).
+  if (isGeneratorFunctionLike(sourceFunction)) {
+    return (
+      isStrictFunction(sourceFunction, ctx.inferModuleStrictArguments) ||
+      arrowValueStillCarriesRestrictedAccessors(receiver)
+    );
+  }
   return isStrictFunction(sourceFunction, ctx.inferModuleStrictArguments);
 }
 
@@ -142,7 +148,8 @@ function isCustodialIdentifierUse(node: ts.Identifier): boolean {
   const parent = node.parent as ts.Node | undefined;
   if (parent === undefined) return false;
   if (ts.isVariableDeclaration(parent) && parent.name === node) return true;
-  if (ts.isFunctionDeclaration(parent) && parent.name === node) return true; // (#6651 A8) `function* g(){}`
+  // (#6651 A8) `function* g(){}` names itself; a same-name PLAIN redeclaration rebinds, so it escapes.
+  if (ts.isFunctionDeclaration(parent) && parent.name === node && parent.asteriskToken !== undefined) return true;
   if ((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) && parent.expression === node) {
     return true;
   }
