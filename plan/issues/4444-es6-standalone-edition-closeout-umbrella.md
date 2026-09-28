@@ -951,11 +951,11 @@ as PR-2 after two more reviewed rounds.
 
 Three PRs landed, all through the merge queue:
 
-| PR | content | merged (UTC) | promoted standalone baseline |
-| --- | --- | --- | --- |
-| #5688 | the five PR-1 lanes | 2026-09-06 20:21 | ES2015 **10,219 / 11,704 (87.3 %)**; whole corpus +46 / −2 vs the pre-merge baseline |
-| #5694 | #5349 species r5, rounds 1–5 | 2026-09-07 03:14 | ES2015 **10,228 / 11,704 (87.4 %)**; whole corpus +21 / 0 (11 `Array`, 9 `ArrayBuffer`, 1 `TypedArrayConstructors`) |
-| #5696 | #5316 r6 — the 2-row Annex B regression #5688 introduced | 2026-09-07 03:57 | the two rows promote with the next baseline (not yet in the 04:10 fetch) |
+| PR    | content                                                  | merged (UTC)     | promoted standalone baseline                                                                                        |
+| ----- | -------------------------------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------- |
+| #5688 | the five PR-1 lanes                                      | 2026-09-06 20:21 | ES2015 **10,219 / 11,704 (87.3 %)**; whole corpus +46 / −2 vs the pre-merge baseline                                |
+| #5694 | #5349 species r5, rounds 1–5                             | 2026-09-07 03:14 | ES2015 **10,228 / 11,704 (87.4 %)**; whole corpus +21 / 0 (11 `Array`, 9 `ArrayBuffer`, 1 `TypedArrayConstructors`) |
+| #5696 | #5316 r6 — the 2-row Annex B regression #5688 introduced | 2026-09-07 03:57 | the two rows promote with the next baseline (not yet in the 04:10 fetch)                                            |
 
 The −2 of #5688 was found by set-diffing the promoted baseline against the
 previous copy, not by any gate: `Object.prototype.__defineGetter__` /
@@ -1021,14 +1021,14 @@ executes its site at least twice.
   adapter; a lane snapshot or a stale checkout would have blamed the wrong
   change.
 
-| lane | shipped | owned rows (base → lane) | control | review rounds |
-| --- | --- | --- | --- | --- |
-| #5316 Proxy r5 (Opus high) | integrity bag learns the instance carrier; gopd fold asks the native on a guard miss; `in` stops folding over a Proxy; §10.5 clauses restored; false PreventExtensions/SetPrototypeOf status; `Reflect.set` with receiver (§10.1.9.2), receiver-Proxy define route, target-Proxy set trap with receiver, non-Object TypeError | +16 (Proxy+Reflect 350 → 366) +1 (integrity) | 464 + 317 rows, 0 lost | review → fix round → clean |
-| #5350 super property r1 | class [[HomeObject]] read, base-before-key element read, `extends null` TypeError, uninitialised-`this` guard (lexical + runtime flag), object-literal `super.m()` incl. accessor bodies, `__proto__:` literal links its prototype, callable check | +8 on the 53-row super control (18 → 26; 2 of them main drift), 6 / 13 target rows | 53 rows, 0 lost; 1,089-row class/super control run on the integrated tree (see PR) | review + 5 fix rounds (rounds 3–5 on the loop guard; round 5 by Fable) |
-| #5318 class r4 round 2 | tri-state static-accessor gate with a hardened syntactic walker; object-literal evaluated-key accessors; later same-key members DEFINE; host `__proto__:` after a dynamic accessor; spread after a same-key accessor copies via define | +2 (`computed-property-names/object/accessor/{getter,setter}`) | 61 rows identical; 783-row class sweep 0 lost | review + 3 fix rounds |
-| #3371 Reflect.construct r2 | nested-function `new.target` stop, symbol-resolved binding count, dynamic in-file targets gated on their whole value set, JSDoc/annotation refusals, `neverConstructed` for named function expressions, destructuring-assignment writes | +10 (218-row control 156 → 166); fix rounds 0 net, ~14 wrong-answer admissions turned back into refusals | 218 + 24 rows, 0 lost; 89-file probe corpus 0 base drift | review + 3 fix rounds |
-| #5351 lib.dom shadow (Sonnet high) | a user top-level binding excludes the same-named lib.dom ambient from the import set, scoped per source file | +6 (24 leak rows: 24/24 import-free, 6 pass, 18 now fail on unrelated gaps) | 40-name sweep, 24 rows, byte identity | review → fix round (multi-file scoping) → clean |
-| #5349 species r5 (PR-2) | Array ctor null TypeError, defineProperty arming, `ArrayBuffer.prototype.slice` SpeciesConstructor; round 2 brands `$__vec_i8_byte` (`final`) vs the open `$__vec_i32_byte` so step 16 discriminates; round 3 audits every cast/test site that relied on the old identity | +19 measured on the lane (57-row target set 6 → 25), 3,147-row TA/AB/DV control 0 lost on round 2 | in round 3 (Opus high) | review + 2 fix rounds so far |
+| lane                               | shipped                                                                                                                                                                                                                                                                                                                       | owned rows (base → lane)                                                                                 | control                                                                            | review rounds                                                          |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| #5316 Proxy r5 (Opus high)         | integrity bag learns the instance carrier; gopd fold asks the native on a guard miss; `in` stops folding over a Proxy; §10.5 clauses restored; false PreventExtensions/SetPrototypeOf status; `Reflect.set` with receiver (§10.1.9.2), receiver-Proxy define route, target-Proxy set trap with receiver, non-Object TypeError | +16 (Proxy+Reflect 350 → 366) +1 (integrity)                                                             | 464 + 317 rows, 0 lost                                                             | review → fix round → clean                                             |
+| #5350 super property r1            | class [[HomeObject]] read, base-before-key element read, `extends null` TypeError, uninitialised-`this` guard (lexical + runtime flag), object-literal `super.m()` incl. accessor bodies, `__proto__:` literal links its prototype, callable check                                                                            | +8 on the 53-row super control (18 → 26; 2 of them main drift), 6 / 13 target rows                       | 53 rows, 0 lost; 1,089-row class/super control run on the integrated tree (see PR) | review + 5 fix rounds (rounds 3–5 on the loop guard; round 5 by Fable) |
+| #5318 class r4 round 2             | tri-state static-accessor gate with a hardened syntactic walker; object-literal evaluated-key accessors; later same-key members DEFINE; host `__proto__:` after a dynamic accessor; spread after a same-key accessor copies via define                                                                                        | +2 (`computed-property-names/object/accessor/{getter,setter}`)                                           | 61 rows identical; 783-row class sweep 0 lost                                      | review + 3 fix rounds                                                  |
+| #3371 Reflect.construct r2         | nested-function `new.target` stop, symbol-resolved binding count, dynamic in-file targets gated on their whole value set, JSDoc/annotation refusals, `neverConstructed` for named function expressions, destructuring-assignment writes                                                                                       | +10 (218-row control 156 → 166); fix rounds 0 net, ~14 wrong-answer admissions turned back into refusals | 218 + 24 rows, 0 lost; 89-file probe corpus 0 base drift                           | review + 3 fix rounds                                                  |
+| #5351 lib.dom shadow (Sonnet high) | a user top-level binding excludes the same-named lib.dom ambient from the import set, scoped per source file                                                                                                                                                                                                                  | +6 (24 leak rows: 24/24 import-free, 6 pass, 18 now fail on unrelated gaps)                              | 40-name sweep, 24 rows, byte identity                                              | review → fix round (multi-file scoping) → clean                        |
+| #5349 species r5 (PR-2)            | Array ctor null TypeError, defineProperty arming, `ArrayBuffer.prototype.slice` SpeciesConstructor; round 2 brands `$__vec_i8_byte` (`final`) vs the open `$__vec_i32_byte` so step 16 discriminates; round 3 audits every cast/test site that relied on the old identity                                                     | +19 measured on the lane (57-row target set 6 → 25), 3,147-row TA/AB/DV control 0 lost on round 2        | in round 3 (Opus high)                                                             | review + 2 fix rounds so far                                           |
 
 Expected ES2015 delta from PR-1: roughly +43 owned rows plus collateral; take
 the real figure from the promoted baseline. Every number above was measured
@@ -1089,12 +1089,12 @@ ES2015 standalone stood at **10,131 / 11,704 (86.6 %)** after #5576 landed
 each followed by an adversarial review (one reviewer, two skeptics per finding)
 and a reviewed fix round; this PR integrates all four:
 
-| lane | shipped | owned rows (base → lane) | control | review outcome |
-| --- | --- | --- | --- | --- |
-| #5317 TypedArray | `join` separator arming, `fill`/`copyWithin` end argument | +11 | 259 rows, 0 lost | one inert-fix finding, fixed and re-reviewed |
-| #5316 Proxy | §10.5 descriptor-model invariants (step 1) | +19 (0 → 19) | 464 rows, 348 vs 312, 0 lost | wasi false positives → wasi gate, re-reviewed clean |
-| #5318 class | computed accessor names, §15.7.14 sidecar order, compiled-body receiver gate | +24 | 783 rows, 246 non-pass vs 271, 0 lost | order + trap fixed; one over-decline left for round 2 (recorded in the issue) |
-| #3371 Reflect.construct | runtime `Get(NT,"prototype")`, bound-function `[[Construct]]`, ordinary-construct driver, refusal gate | +11 (+9 collateral in `Function/prototype/bind`) | 218 rows, 166 vs 156, 0 lost | five refusal→wrong-answer findings, all closed by restoring base's refusal |
+| lane                    | shipped                                                                                                | owned rows (base → lane)                         | control                               | review outcome                                                                |
+| ----------------------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------ | ------------------------------------- | ----------------------------------------------------------------------------- |
+| #5317 TypedArray        | `join` separator arming, `fill`/`copyWithin` end argument                                              | +11                                              | 259 rows, 0 lost                      | one inert-fix finding, fixed and re-reviewed                                  |
+| #5316 Proxy             | §10.5 descriptor-model invariants (step 1)                                                             | +19 (0 → 19)                                     | 464 rows, 348 vs 312, 0 lost          | wasi false positives → wasi gate, re-reviewed clean                           |
+| #5318 class             | computed accessor names, §15.7.14 sidecar order, compiled-body receiver gate                           | +24                                              | 783 rows, 246 non-pass vs 271, 0 lost | order + trap fixed; one over-decline left for round 2 (recorded in the issue) |
+| #3371 Reflect.construct | runtime `Get(NT,"prototype")`, bound-function `[[Construct]]`, ordinary-construct driver, refusal gate | +11 (+9 collateral in `Function/prototype/bind`) | 218 rows, 166 vs 156, 0 lost          | five refusal→wrong-answer findings, all closed by restoring base's refusal    |
 
 Expected ES2015 delta on the merge-group report: roughly +65 owned rows plus
 collateral; take the real figure from the promoted baseline, not from this
@@ -1147,11 +1147,11 @@ compile_error count did not move (380) — every wave was `fail` work.
 
 ### What is in flight (this PR and the lanes behind it)
 
-| lane | issue | worktree / branch | state at handover |
-| --- | --- | --- | --- |
-| class | #5195 | `.claude/worktrees/wf_16f0b7f5-bf0-5` / `worktree-wf_16f0b7f5-bf0-5` | **in this PR** — r3-2/4/5/7 kept, r3-3 reverted; three review rounds; 19 rows |
-| proxy + reflect | #5196 | `.claude/worktrees/wf_16f0b7f5-bf0-3` / `worktree-wf_16f0b7f5-bf0-3` | **in this PR** — R3-0/2/4/3-E2 + review fixes F1–F6; +20 rows; F9 (WASI-only trap where main compile-failed) recorded, not fixed |
-| for-of + collections | #5267 | `.claude/worktrees/wf_9d1e6808-4e2-1` / `worktree-wf_9d1e6808-4e2-1` | **in this PR** — five steps kept, R3-6 reverted after review; 15 rows |
+| lane                 | issue | worktree / branch                                                    | state at handover                                                                                                                |
+| -------------------- | ----- | -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| class                | #5195 | `.claude/worktrees/wf_16f0b7f5-bf0-5` / `worktree-wf_16f0b7f5-bf0-5` | **in this PR** — r3-2/4/5/7 kept, r3-3 reverted; three review rounds; 19 rows                                                    |
+| proxy + reflect      | #5196 | `.claude/worktrees/wf_16f0b7f5-bf0-3` / `worktree-wf_16f0b7f5-bf0-3` | **in this PR** — R3-0/2/4/3-E2 + review fixes F1–F6; +20 rows; F9 (WASI-only trap where main compile-failed) recorded, not fixed |
+| for-of + collections | #5267 | `.claude/worktrees/wf_9d1e6808-4e2-1` / `worktree-wf_9d1e6808-4e2-1` | **in this PR** — five steps kept, R3-6 reverted after review; 15 rows                                                            |
 
 ### What the next session should do first
 
@@ -1247,21 +1247,21 @@ map as the censuses below.
 compile_error · 1 compile_timeout): **+41 rows** over the post-#5558 census.
 The rows sum to 1,625.
 
-| Cluster | rows | fail | CE |
-| --- | ---: | ---: | ---: |
-| expressions | 228 | 131 | 96 |
-| typedarray | 201 | 183 | 18 |
-| class | 191 | 135 | 56 |
-| other built-ins | 168 | 160 | 8 |
-| proxy + reflect | 155 | 131 | 24 |
-| regexp | 139 | 129 | 10 |
-| generators | 121 | 75 | 46 |
-| array + object | 121 | 111 | 10 |
-| promise | 101 | 51 | 50 |
-| for-of + collections | 98 | 62 | 36 |
-| statements + lang | 75 | 55 | 20 |
-| module-code | 25 | 19 | 6 |
-| rest | 2 | 2 | 0 |
+| Cluster              | rows | fail |  CE |
+| -------------------- | ---: | ---: | --: |
+| expressions          |  228 |  131 |  96 |
+| typedarray           |  201 |  183 |  18 |
+| class                |  191 |  135 |  56 |
+| other built-ins      |  168 |  160 |   8 |
+| proxy + reflect      |  155 |  131 |  24 |
+| regexp               |  139 |  129 |  10 |
+| generators           |  121 |   75 |  46 |
+| array + object       |  121 |  111 |  10 |
+| promise              |  101 |   51 |  50 |
+| for-of + collections |   98 |   62 |  36 |
+| statements + lang    |   75 |   55 |  20 |
+| module-code          |   25 |   19 |   6 |
+| rest                 |    2 |    2 |   0 |
 
 Day total since the 2026-09-02 census (9,905): **+174 rows** across seven
 PRs. The compile_error count is unchanged at 380 across all of them — every
@@ -1277,21 +1277,21 @@ from the merge of PR #5558 — promise r3, #5197), same script and edition map.
 compile_error · 1 compile_timeout): **+17 rows** over the post-#5550 census.
 The rows sum to 1,666.
 
-| Cluster | rows | fail | CE |
-| --- | ---: | ---: | ---: |
-| typedarray | 242 | 224 | 18 |
-| expressions | 228 | 131 | 96 |
-| class | 191 | 135 | 56 |
-| other built-ins | 168 | 160 | 8 |
-| proxy + reflect | 155 | 131 | 24 |
-| regexp | 139 | 129 | 10 |
-| generators | 121 | 75 | 46 |
-| array + object | 121 | 111 | 10 |
-| promise | 101 | 51 | 50 |
-| for-of + collections | 98 | 62 | 36 |
-| statements + lang | 75 | 55 | 20 |
-| module-code | 25 | 19 | 6 |
-| rest | 2 | 2 | 0 |
+| Cluster              | rows | fail |  CE |
+| -------------------- | ---: | ---: | --: |
+| typedarray           |  242 |  224 |  18 |
+| expressions          |  228 |  131 |  96 |
+| class                |  191 |  135 |  56 |
+| other built-ins      |  168 |  160 |   8 |
+| proxy + reflect      |  155 |  131 |  24 |
+| regexp               |  139 |  129 |  10 |
+| generators           |  121 |   75 |  46 |
+| array + object       |  121 |  111 |  10 |
+| promise              |  101 |   51 |  50 |
+| for-of + collections |   98 |   62 |  36 |
+| statements + lang    |   75 |   55 |  20 |
+| module-code          |   25 |   19 |   6 |
+| rest                 |    2 |    2 |   0 |
 
 Day total since the 2026-09-02 census (9,905): **+133 rows** across #5505,
 #5526, #5527, #5534, #5550 and #5558. The compile_error count has not moved
@@ -1308,21 +1308,21 @@ compile_error · 1 compile_timeout): **+15 rows** over the evening census.
 Array + object went 135 → 121 (−14), typedarray 243 → 242 (−1); every other
 cluster is unchanged, and the rows still sum to 1,683.
 
-| Cluster | rows | fail | CE |
-| --- | ---: | ---: | ---: |
-| typedarray | 242 | 224 | 18 |
-| expressions | 228 | 131 | 96 |
-| class | 191 | 135 | 56 |
-| other built-ins | 168 | 160 | 8 |
-| proxy + reflect | 155 | 131 | 24 |
-| regexp | 139 | 129 | 10 |
-| generators | 121 | 75 | 46 |
-| array + object | 121 | 111 | 10 |
-| promise | 118 | 68 | 50 |
-| for-of + collections | 98 | 62 | 36 |
-| statements + lang | 75 | 55 | 20 |
-| module-code | 25 | 19 | 6 |
-| rest | 2 | 2 | 0 |
+| Cluster              | rows | fail |  CE |
+| -------------------- | ---: | ---: | --: |
+| typedarray           |  242 |  224 |  18 |
+| expressions          |  228 |  131 |  96 |
+| class                |  191 |  135 |  56 |
+| other built-ins      |  168 |  160 |   8 |
+| proxy + reflect      |  155 |  131 |  24 |
+| regexp               |  139 |  129 |  10 |
+| generators           |  121 |   75 |  46 |
+| array + object       |  121 |  111 |  10 |
+| promise              |  118 |   68 |  50 |
+| for-of + collections |   98 |   62 |  36 |
+| statements + lang    |   75 |   55 |  20 |
+| module-code          |   25 |   19 |   6 |
+| rest                 |    2 |    2 |   0 |
 
 The lane had measured +21 directory rows on `Array/{from,of}` + `concat` +
 `hasOwnProperty`; the census counts only ES2015-edition rows, which is where
@@ -1348,21 +1348,21 @@ in #5270 and the lesson is now part of the wave pipeline: a random ~1,200-row
 sample of baseline-passing rows, every flagged row A/B'd against a git
 archive of `origin/main`, runs before each wave PR.
 
-| Cluster | rows | fail | CE | owner / state (evening) |
-| --- | ---: | ---: | ---: | --- |
-| typedarray | 243 | 225 | 18 | #5194 r3 — implemented, round-3 review fixes in flight |
-| expressions | 228 | 131 | 96 | #5270 r2 landed (#5534); residual is mostly CE |
-| class | 191 | 135 | 56 | #5195 r3 — implementer suspended (WIP patch kept), re-dispatch |
-| other built-ins | 168 | 160 | 8 | #5269 r2 landed (#5527); no r3 planned yet |
-| proxy + reflect | 155 | 131 | 24 | #5196 r3 — implementer suspended (WIP patch kept), re-dispatch |
-| regexp | 139 | 129 | 10 | #5198 codex lane (checkpoint PR #5393) |
-| array + object | 135 | 125 | 10 | #5268 r3 — validated, shipping in this PR |
-| generators | 121 | 75 | 46 | #2864 claimed and live; 233 rows across clusters gate on it |
-| promise | 118 | 68 | 50 | #5197 r3 — validated, ships next |
-| for-of + collections | 98 | 62 | 36 | #5267 r3 planned, not yet dispatched |
-| statements + lang | 75 | 55 | 20 | residual unowned |
-| module-code | 25 | 19 | 6 | #4759 codex closeout lane |
-| rest | 2 | 2 | 0 | unowned |
+| Cluster              | rows | fail |  CE | owner / state (evening)                                        |
+| -------------------- | ---: | ---: | --: | -------------------------------------------------------------- |
+| typedarray           |  243 |  225 |  18 | #5194 r3 — implemented, round-3 review fixes in flight         |
+| expressions          |  228 |  131 |  96 | #5270 r2 landed (#5534); residual is mostly CE                 |
+| class                |  191 |  135 |  56 | #5195 r3 — implementer suspended (WIP patch kept), re-dispatch |
+| other built-ins      |  168 |  160 |   8 | #5269 r2 landed (#5527); no r3 planned yet                     |
+| proxy + reflect      |  155 |  131 |  24 | #5196 r3 — implementer suspended (WIP patch kept), re-dispatch |
+| regexp               |  139 |  129 |  10 | #5198 codex lane (checkpoint PR #5393)                         |
+| array + object       |  135 |  125 |  10 | #5268 r3 — validated, shipping in this PR                      |
+| generators           |  121 |   75 |  46 | #2864 claimed and live; 233 rows across clusters gate on it    |
+| promise              |  118 |   68 |  50 | #5197 r3 — validated, ships next                               |
+| for-of + collections |   98 |   62 |  36 | #5267 r3 planned, not yet dispatched                           |
+| statements + lang    |   75 |   55 |  20 | residual unowned                                               |
+| module-code          |   25 |   19 |   6 | #4759 codex closeout lane                                      |
+| rest                 |    2 |    2 |   0 | unowned                                                        |
 
 The rows sum to 1,698, so coverage is still complete. The compile_error
 share barely moved (391 → 380): the day's two waves were `fail` work, and the
@@ -1386,24 +1386,24 @@ language semantics r2, #5271) and the other lanes that landed overnight.
 Note the clustering here is the one in `.tmp/census0903/census.mjs`, which
 differs from the 09-02 census: `class` and `generators` are pulled out of
 `language/expressions` and `language/statements` first, so `expressions` here
-collects what is left of `language/expressions/*`. Compare cluster *sizes*
+collects what is left of `language/expressions/*`. Compare cluster _sizes_
 across censuses only via that script, not against the 09-02 table.
 
-| Cluster | rows | fail | CE | owner / state |
-| --- | ---: | ---: | ---: | --- |
-| expressions | 244 | 147 | 96 | #5270 — lane complete, in validation |
-| typedarray | 244 | 226 | 18 | #5194 — r2 landed (#5479), r3 planned 09-03 |
-| other built-ins | 197 | 178 | 19 | #5269 — lane complete, in round-3 review |
-| class | 191 | 135 | 56 | #5195 — r2 landed (#5489), r3 planned 09-03 |
-| proxy + reflect | 157 | 133 | 24 | #5196 — **never dispatched**, r3 planned 09-03 |
-| regexp | 140 | 130 | 10 | #5198 codex lane (checkpoint PR #5393) |
-| array + object | 137 | 127 | 10 | #5268 — r2 partial (#5494), r3 planned 09-03 |
-| generators | 121 | 75 | 46 | #680 / #2864 / #1691 codex lane (PR #5063 held) |
-| promise | 118 | 68 | 50 | #5197 — slices B–D landed (#5454), r3 planned 09-03 |
-| for-of + collections | 101 | 65 | 36 | #5267 — r2 landed (#5458), r3 planned 09-03 |
-| statements + lang | 75 | 55 | 20 | #5271 r2 landed (#5505) — residual unowned |
-| module-code | 25 | 19 | 6 | #4759 codex closeout lane |
-| rest | 6 | 6 | 0 | unowned |
+| Cluster              | rows | fail |  CE | owner / state                                       |
+| -------------------- | ---: | ---: | --: | --------------------------------------------------- |
+| expressions          |  244 |  147 |  96 | #5270 — lane complete, in validation                |
+| typedarray           |  244 |  226 |  18 | #5194 — r2 landed (#5479), r3 planned 09-03         |
+| other built-ins      |  197 |  178 |  19 | #5269 — lane complete, in round-3 review            |
+| class                |  191 |  135 |  56 | #5195 — r2 landed (#5489), r3 planned 09-03         |
+| proxy + reflect      |  157 |  133 |  24 | #5196 — **never dispatched**, r3 planned 09-03      |
+| regexp               |  140 |  130 |  10 | #5198 codex lane (checkpoint PR #5393)              |
+| array + object       |  137 |  127 |  10 | #5268 — r2 partial (#5494), r3 planned 09-03        |
+| generators           |  121 |   75 |  46 | #680 / #2864 / #1691 codex lane (PR #5063 held)     |
+| promise              |  118 |   68 |  50 | #5197 — slices B–D landed (#5454), r3 planned 09-03 |
+| for-of + collections |  101 |   65 |  36 | #5267 — r2 landed (#5458), r3 planned 09-03         |
+| statements + lang    |   75 |   55 |  20 | #5271 r2 landed (#5505) — residual unowned          |
+| module-code          |   25 |   19 |   6 | #4759 codex closeout lane                           |
+| rest                 |    6 |    6 |   0 | unowned                                             |
 
 The cluster sizes sum to exactly 1,756, so **every non-pass row is accounted
 for**: 948 in the six lanes planned on 09-03, 441 in the two waves in flight,
@@ -1421,17 +1421,17 @@ Three defects are not clusters at all: they are single missing capabilities
 whose rows are scattered across other lanes' residual lists. A cluster plan
 that counts them is promising rows it cannot deliver.
 
-| blocker | issue | rows | where they sit |
-| --- | --- | ---: | --- |
-| standalone native generator lowering | #2864 (claimed, live) | 233 | expressions 91 · generators 46 · class 45 · for-of 35 · statements 13 · module-code 2 · proxy 1 |
-| `Reflect.construct` with a distinct NewTarget | #3371 (design checkpoint PR #5400) | 33 | proxy+reflect 11 · typedarray 11 · other built-ins 6 · expressions 2 · promise 2 · array+object 1 |
-| `Reflect.set` with an explicit receiver | #2046 (design checkpoint PR #5397) | 15 | proxy+reflect 7 · typedarray 6 · statements 2 |
+| blocker                                       | issue                              | rows | where they sit                                                                                    |
+| --------------------------------------------- | ---------------------------------- | ---: | ------------------------------------------------------------------------------------------------- |
+| standalone native generator lowering          | #2864 (claimed, live)              |  233 | expressions 91 · generators 46 · class 45 · for-of 35 · statements 13 · module-code 2 · proxy 1   |
+| `Reflect.construct` with a distinct NewTarget | #3371 (design checkpoint PR #5400) |   33 | proxy+reflect 11 · typedarray 11 · other built-ins 6 · expressions 2 · promise 2 · array+object 1 |
+| `Reflect.set` with an explicit receiver       | #2046 (design checkpoint PR #5397) |   15 | proxy+reflect 7 · typedarray 6 · statements 2                                                     |
 
 **281 rows, 16% of the residual.** Net of them, the six lanes planned today can
 claim at most: typedarray 227, class 146, proxy+reflect 138, array+object 136,
 promise 116, for-of+collections 66. Two caveats on that arithmetic — the 44
 `env::Promise_*` leaks inside the promise cluster and the 3 RegExp-engine
-refusals inside the regexp cluster are *those lanes' own scope*, so they are
+refusals inside the regexp cluster are _those lanes' own scope_, so they are
 not subtracted; and #3371/#2046 are the proxy+reflect lane's own subject
 matter, held at design checkpoints rather than blocked elsewhere, so #5196's
 plan should treat its 18 as dependent-on-design rather than out of scope.
@@ -1453,17 +1453,17 @@ merged at 19:44 UTC, so every wave below is reflected), edition map
 
 Landed this day (all merged to `main`), in order:
 
-| PR | wave | issue | rows claimed |
-| --- | --- | --- | ---: |
-| #5454 | Promise slices B–D | #5197 | +19 |
-| #5458 | for-of / iterators / collections r2 | #5267 | +37 |
-| #5224 | buffers wave 1 | #5150 | +16 |
-| #5461 | runner: standalone leak check on the in-process path | #5272 | (honesty fix) |
-| #5469 | post-#5224 regression fix (module-global `$__ta_view` pin) | #5150 | (restores 9 host rows) |
-| #5475 | r2 implementation plans (expressions, statements) | #5270/#5271 | (docs) |
-| #5479 | TypedArray r2 | #5194 | +84 |
-| #5489 | class r2 (+ #5194 null-proto follow-up) | #5195 | +28 |
-| #5494 | Array/Object built-ins r2 | #5268 | +21 |
+| PR    | wave                                                       | issue       |           rows claimed |
+| ----- | ---------------------------------------------------------- | ----------- | ---------------------: |
+| #5454 | Promise slices B–D                                         | #5197       |                    +19 |
+| #5458 | for-of / iterators / collections r2                        | #5267       |                    +37 |
+| #5224 | buffers wave 1                                             | #5150       |                    +16 |
+| #5461 | runner: standalone leak check on the in-process path       | #5272       |          (honesty fix) |
+| #5469 | post-#5224 regression fix (module-global `$__ta_view` pin) | #5150       | (restores 9 host rows) |
+| #5475 | r2 implementation plans (expressions, statements)          | #5270/#5271 |                 (docs) |
+| #5479 | TypedArray r2                                              | #5194       |                    +84 |
+| #5489 | class r2 (+ #5194 null-proto follow-up)                    | #5195       |                    +28 |
+| #5494 | Array/Object built-ins r2                                  | #5268       |                    +21 |
 
 Two process notes worth keeping:
 
@@ -1483,27 +1483,27 @@ Two process notes worth keeping:
   shared carrier-bag key merge (`Reflect.defineProperty` on an existing
   closed-struct field double-listed the key on `main` too). A row list is not a
   regression test: none of these shapes were in the cluster lists the planners
-  built, because the lists are drawn from *failing* rows and these broke
-  *passing* behaviour outside the cluster.
+  built, because the lists are drawn from _failing_ rows and these broke
+  _passing_ behaviour outside the cluster.
 
 Remaining non-pass by cluster (same split as the 09-01 census, so the two are
 comparable):
 
-| Cluster | 09-01 | 09-02 | Δ | Owner |
-| --- | ---: | ---: | ---: | --- |
-| class | 209 | 225 | +16 | #5195 r3 residuals R3-1…R3-7 recorded |
-| typedarray | 300 | 208 | −92 | #5194 residuals (F3/F4 documented) |
-| generators | 318 | 195 | −123 | #680 / #2864 codex lane |
-| array + object | 159 | 179 | +20 | #5268 steps 4/5/7/8/9/10 not started |
-| other built-ins | 150 | 165 | +15 | #5269 in flight (G/H/A/B/L/J/E/D landed) |
-| expressions | 117 | 163 | +46 | #5270 in flight (steps 4–7, 9, 11 open) |
-| proxy + reflect | 157 | 157 | 0 | #5196 not dispatched; #3371 / #2046 blocked |
-| regexp | 148 | 140 | −8 | #5198 codex lane |
-| for-of + collections | 155 | 119 | −36 | #5267 residuals |
-| promise | 140 | 118 | −22 | #5197 slices E–H open |
-| statements + lang | 84 | 79 | −5 | #5271 in flight (0 → 39 of 68 in scope) |
-| module-code | 23 | 24 | +1 | #4759 codex closeout lane |
-| rest | 18 | 27 | +9 | folded into the nearest cluster plan |
+| Cluster              | 09-01 | 09-02 |    Δ | Owner                                       |
+| -------------------- | ----: | ----: | ---: | ------------------------------------------- |
+| class                |   209 |   225 |  +16 | #5195 r3 residuals R3-1…R3-7 recorded       |
+| typedarray           |   300 |   208 |  −92 | #5194 residuals (F3/F4 documented)          |
+| generators           |   318 |   195 | −123 | #680 / #2864 codex lane                     |
+| array + object       |   159 |   179 |  +20 | #5268 steps 4/5/7/8/9/10 not started        |
+| other built-ins      |   150 |   165 |  +15 | #5269 in flight (G/H/A/B/L/J/E/D landed)    |
+| expressions          |   117 |   163 |  +46 | #5270 in flight (steps 4–7, 9, 11 open)     |
+| proxy + reflect      |   157 |   157 |    0 | #5196 not dispatched; #3371 / #2046 blocked |
+| regexp               |   148 |   140 |   −8 | #5198 codex lane                            |
+| for-of + collections |   155 |   119 |  −36 | #5267 residuals                             |
+| promise              |   140 |   118 |  −22 | #5197 slices E–H open                       |
+| statements + lang    |    84 |    79 |   −5 | #5271 in flight (0 → 39 of 68 in scope)     |
+| module-code          |    23 |    24 |   +1 | #4759 codex closeout lane                   |
+| rest                 |    18 |    27 |   +9 | folded into the nearest cluster plan        |
 
 The clusters that grew did not regress — the counts move because rows leave a
 cluster when they pass and because this census clusters by path prefix while
@@ -1530,22 +1530,22 @@ edition map `website/public/benchmarks/results/test262-file-editions.json`
 Cluster split (path-disjoint; lists under `.tmp/es2015/<cluster>-{paths.txt,errors.tsv}`,
 regenerable from the JSONL + edition map):
 
-| Cluster | Rows | Owner / tracker | Dispatch (this session) |
-| --- | ---: | --- | --- |
-| generators (`language/*/generators`, `yield`, GeneratorFunction/Prototype, `__create_generator` leaks, "sequential numeric yields" refusal) | 318 | #680 / #2864 codex lane (PR #5383 merged; #5406/#5407 drafts) | **not re-dispatched** |
-| typedarray (`built-ins/TypedArray*`, excl. buffers) | 300 | #5194 (Slice A merged #5300; #5385 species merged) | Fable planner → r2 plan in #5194 → Opus |
-| class (`language/*/class`, `computed-property-names/class`, `super`, `new.target`) | 209 | #5195 (stub) | Fable planner → plan → Opus |
-| array + object built-ins | 159 | new **#5268** | Fable planner → plan → Opus |
-| proxy + Reflect | 157 | #5196 (2-row revoker slice merged #5389); #3371 (33 CE, blocked design PR #5400); #2046 (15 CE, design PR #5397) | Fable planner on the unowned trap-invariant residual → Opus |
-| for-of + Iterator/*IteratorPrototype + Map/Set/Weak* | 155 | new **#5267** (wave-1 #5144/#5147/#5151; draft PR #5225 mined, not merged) | Fable planner → plan → Opus |
-| function/error/symbol/string/JSON/number built-ins | 150 | new **#5269** (wave-1 #5156/#5152) | Fable planner → plan → Opus |
-| regexp (`built-ins/RegExp`, annexB RegExp, `Symbol.{match,replace,search,split}`) | 148 | #5198 codex lane (Slice A merged #5296; Slice B draft #5393) | **not re-dispatched** |
-| promise | 140 | #5197 (Slice A merged #5292; slices B–H planned) | Opus implementer on Slices B–D directly |
-| expressions (object literal, assignment, arrow, call, template, instanceof, …) | 117 | new **#5270** (wave-1 #5149/#5146) | Fable planner → plan → Opus |
-| statements + lang semantics (for-in/for/let/const/with/try, global/eval code, arguments, rest, dstr) | 84 | new **#5271** (wave-1 #5154/#5158/#5157) | Fable planner → plan → Opus |
-| buffers (ArrayBuffer/DataView) | 53 | #5150 (full plan; WIP draft PR #5224 unvalidated) | Opus implementer directly (mines the WIP) |
-| module-code | 23 | #4759 codex closeout lane | not re-dispatched |
-| rest (misc singletons) | 18 | — | folded into the nearest cluster plan |
+| Cluster                                                                                                                                     | Rows | Owner / tracker                                                                                                  | Dispatch (this session)                                     |
+| ------------------------------------------------------------------------------------------------------------------------------------------- | ---: | ---------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| generators (`language/*/generators`, `yield`, GeneratorFunction/Prototype, `__create_generator` leaks, "sequential numeric yields" refusal) |  318 | #680 / #2864 codex lane (PR #5383 merged; #5406/#5407 drafts)                                                    | **not re-dispatched**                                       |
+| typedarray (`built-ins/TypedArray*`, excl. buffers)                                                                                         |  300 | #5194 (Slice A merged #5300; #5385 species merged)                                                               | Fable planner → r2 plan in #5194 → Opus                     |
+| class (`language/*/class`, `computed-property-names/class`, `super`, `new.target`)                                                          |  209 | #5195 (stub)                                                                                                     | Fable planner → plan → Opus                                 |
+| array + object built-ins                                                                                                                    |  159 | new **#5268**                                                                                                    | Fable planner → plan → Opus                                 |
+| proxy + Reflect                                                                                                                             |  157 | #5196 (2-row revoker slice merged #5389); #3371 (33 CE, blocked design PR #5400); #2046 (15 CE, design PR #5397) | Fable planner on the unowned trap-invariant residual → Opus |
+| for-of + Iterator/_IteratorPrototype + Map/Set/Weak_                                                                                        |  155 | new **#5267** (wave-1 #5144/#5147/#5151; draft PR #5225 mined, not merged)                                       | Fable planner → plan → Opus                                 |
+| function/error/symbol/string/JSON/number built-ins                                                                                          |  150 | new **#5269** (wave-1 #5156/#5152)                                                                               | Fable planner → plan → Opus                                 |
+| regexp (`built-ins/RegExp`, annexB RegExp, `Symbol.{match,replace,search,split}`)                                                           |  148 | #5198 codex lane (Slice A merged #5296; Slice B draft #5393)                                                     | **not re-dispatched**                                       |
+| promise                                                                                                                                     |  140 | #5197 (Slice A merged #5292; slices B–H planned)                                                                 | Opus implementer on Slices B–D directly                     |
+| expressions (object literal, assignment, arrow, call, template, instanceof, …)                                                              |  117 | new **#5270** (wave-1 #5149/#5146)                                                                               | Fable planner → plan → Opus                                 |
+| statements + lang semantics (for-in/for/let/const/with/try, global/eval code, arguments, rest, dstr)                                        |   84 | new **#5271** (wave-1 #5154/#5158/#5157)                                                                         | Fable planner → plan → Opus                                 |
+| buffers (ArrayBuffer/DataView)                                                                                                              |   53 | #5150 (full plan; WIP draft PR #5224 unvalidated)                                                                | Opus implementer directly (mines the WIP)                   |
+| module-code                                                                                                                                 |   23 | #4759 codex closeout lane                                                                                        | not re-dispatched                                           |
+| rest (misc singletons)                                                                                                                      |   18 | —                                                                                                                | folded into the nearest cluster plan                        |
 
 Ids #5267–#5271 were reserved via `claim-issue.mjs --allocate`
 (`--no-pr-scan --allow-unscanned`: no `gh` in this container, so the open-PR
@@ -1574,7 +1574,7 @@ completion claim.
   `test262-standalone-current.jsonl` from immutable
   `loopdive/js2wasm-baselines` commit
   `8a39bd1d4ddf200f8db3751c878ece02aa8688fe` (GitHub Actions commit time
-  `2026-09-01T00:28:18Z`).  The 22,858,445-byte cache has SHA-256
+  `2026-09-01T00:28:18Z`). The 22,858,445-byte cache has SHA-256
   `4426cbf6f305ab4a092468b201cc5854d4470b5fe87edf2fe47ba0195a6e8cbf`.
   Its row timestamps span `2026-09-01T02:02:14Z` through
   `2026-09-01T02:24:30Z`. The baselines repository's `main` moved after this
@@ -1582,11 +1582,11 @@ completion claim.
 - **Schema/completeness check:** all 48,735 JSONL rows parse; every row has
   the required string/number/boolean baseline fields, one of
   `pass|fail|compile_error|compile_timeout|skip`, and a unique `(file,strict)`
-  identity.  Optional timing/error fields are absent only where the maintained
+  identity. Optional timing/error fields are absent only where the maintained
   runner schema permits them.
 - **Edition authority:**
   `website/public/benchmarks/results/test262-file-editions.json` maps every
-  fetched row.  Selecting entries whose exact label is `ES2015` produces
+  fetched row. Selecting entries whose exact label is `ES2015` produces
   11,704 rows, all `scope_official: true` (11,536 standard and 168 Annex B).
 - **Measured result at `f841cddc`:** **9,616 pass / 11,704 total** (82.16%);
   **1,644 fail, 444 compile_error, 0 compile_timeout, 0 skip** — **2,088
@@ -1596,9 +1596,9 @@ completion claim.
 
 ### Acceptance runner and positive control
 
-Do not infer acceptance from this fetched baseline.  A subsequent implementation
+Do not infer acceptance from this fetched baseline. A subsequent implementation
 must use the maintained runner, an exact 11,704-path filter derived from the
-authoritative edition map, and the runner's completion-manifest validator.  The
+authoritative edition map, and the runner's completion-manifest validator. The
 shape is:
 
 ```bash
@@ -1632,22 +1632,22 @@ pnpm run test:262 -- --official-scope-only
 
 - **Do not duplicate:** the three ES2015 dynamic-`RegExp` `Symbol.match`
   flag-refusal paths are isolated, but a live sibling worktree owns #5198
-  (`codex/5198-regexp-exec-r2-f841-20260901`).  Generator continuations are
+  (`codex/5198-regexp-exec-r2-f841-20260901`). Generator continuations are
   covered by open PR #5383; TypedArray species work by #5385; and builtin
   prototype/null-prototype work by #5384.
 - **Free, bounded implementation candidate:** #2046's explicit
   `Reflect.set(target,key,value,receiver)` refusal has **15 exact
-  compile-error paths**, all with the same fail-loud diagnostic.  The single
+  compile-error paths**, all with the same fail-loud diagnostic. The single
   gate is `src/codegen/expressions/call-namespace-static.ts:903-920`; #2046 is
   in progress, no current GitHub PR matches it, and its visible remote branches
-  are June-era checkpoints.  The implementation must preserve the positive
+  are June-era checkpoints. The implementation must preserve the positive
   control above and add receiver plumbing rather than drop the fourth argument.
 - **Unowned but not yet a safe parallel coding slice:** #3371's arbitrary
   distinct-`Reflect.construct` NewTarget refusal remains on **33 exact
   compile-error paths** at
   `src/codegen/expressions/call-namespace-static.ts:1620-1627`, despite its
-  tracker being marked done.  It needs a reopened/new bounded owner before
-  implementation; it is not a substitute for the #2046 slice.  The apparent
+  tracker being marked done. It needs a reopened/new bounded owner before
+  implementation; it is not a substitute for the #2046 slice. The apparent
   three-row `Array.prototype.flat` refusal is already a tail of #5145's
   in-review ArraySpecies/target-property wave, so do not duplicate it.
 
@@ -1667,18 +1667,18 @@ Counts are non-passing ES2015-classified tests in the standalone lane; clusters
 overlap paths (a generator test under `language/statements/class` counts in the
 generator row).
 
-| # | Cluster (root cause) | ~Tests | Owning issue(s) | State |
-|---|---|---|---|---|
-| 1 | **Native generator carrier** — standalone lowering only supports "sequential numeric yields"; everything else leaks `__create_generator`/`__gen_*` host imports (CE) or mis-executes. Spread across `language/{expressions,statements}/generators`, `yield`, `class` (gen methods), `object` (gen shorthand), for-of/dstr | ~500 | #2864 (in-progress), #2906 (in-progress), #3032, #680; umbrella #3178 | tracked — do NOT duplicate |
-| 2 | **Promise/microtask carrier** — `Promise.all/race` leak `Promise_all`/`Promise_race`/`__js_array_new` (CE); `Promise.resolve` "not yet implemented"; `illegal cast [__then_fulfill_N]` in the async drive layer | ~233 | #2867 (ready), #2906, umbrella #3178 | tracked |
-| 3 | **Built-in method reflection** — `length.js`/`name.js`/`prop-desc.js`/`not-a-constructor.js`/`invoked-as-func.js` across every built-in: methods are not reified function objects (`Object.getOwnPropertyDescriptor` → "Cannot convert undefined or null to object", `typeof m === "undefined"`) | ~324 | #2175 (ready, arch spec written), #2158, #2159; sibling lane PR #4553 (method name/length meta) is in flight | tracked — architectural |
-| 4 | **TypedArray.prototype semantics** — species-constructor protocol (`speciesctor-*`, 55), custom-ctor paths, detached-buffer TypeErrors (~41), coercion/validation order. Excludes row-3 reflection files | ~556 | **#4449** (filed this session, triage-first; reflection part stays #2159) | tracked |
-| 5 | **RegExp `@@replace`/`@@match`/`@@split`/`@@search`** — function replacer refusal (CE, "#1913 follow-up"), coercion order, `lastIndex` protocol | ~161 | #2161 (blocked on #2175), F7 dynamic-receiver arch spec pending | tracked/blocked |
-| 6 | **for-of destructuring residual** — iterator close/return/throw propagation, trailing-iterator state (`trlg-iter`, 23), nested patterns, fn-name inference, TDZ | ~200 (non-generator) | **#4447 — slice 1 LANDED** (standalone dstr 342→400/569, gc +51, assignment/dstr +6, 0 lost; binding form + eval-order deferred, see issue) | landed |
-| 7 | **Class semantics residual** — `class/dstr` method-param destructuring dominates (112, shares #4447's machinery), subclass (46), definition (36), NamedEvaluation `NaN vs undefined` | ~321 (non-generator) | **#4450** (filed this session; re-measure after #4447 lands; overlaps #2158/#2175) | tracked |
-| 8 | **annexB String HTML methods** — the direct-call lowering existed (#3069); the gap was the value-erased proto-closure shape | 79 | **#4445 — DONE** (filter 17→95/111 standalone, 13 HTML dirs 82/82, gc identical; reflection files flipped free via method-meta) | done |
-| 9 | **Array.prototype extern fallback leak** — `compileArrayConcatExtern` emits `__array_concat_any`/`__js_array_new`/`__js_array_push` → standalone leak-guard CE | ~30 | **#4446 (this session)** | dispatched |
-| 10 | Long tail — `Object.prototype` (38), `Function.prototype` (35), `let`/TDZ (26), `arrow-function` (25), `switch` (23), DataView (45), Iterator.prototype (55) | ~250 | untracked — file per-cluster on pickup | open |
+| #   | Cluster (root cause)                                                                                                                                                                                                                                                                                                      | ~Tests               | Owning issue(s)                                                                                                                             | State                      |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
+| 1   | **Native generator carrier** — standalone lowering only supports "sequential numeric yields"; everything else leaks `__create_generator`/`__gen_*` host imports (CE) or mis-executes. Spread across `language/{expressions,statements}/generators`, `yield`, `class` (gen methods), `object` (gen shorthand), for-of/dstr | ~500                 | #2864 (in-progress), #2906 (in-progress), #3032, #680; umbrella #3178                                                                       | tracked — do NOT duplicate |
+| 2   | **Promise/microtask carrier** — `Promise.all/race` leak `Promise_all`/`Promise_race`/`__js_array_new` (CE); `Promise.resolve` "not yet implemented"; `illegal cast [__then_fulfill_N]` in the async drive layer                                                                                                           | ~233                 | #2867 (ready), #2906, umbrella #3178                                                                                                        | tracked                    |
+| 3   | **Built-in method reflection** — `length.js`/`name.js`/`prop-desc.js`/`not-a-constructor.js`/`invoked-as-func.js` across every built-in: methods are not reified function objects (`Object.getOwnPropertyDescriptor` → "Cannot convert undefined or null to object", `typeof m === "undefined"`)                          | ~324                 | #2175 (ready, arch spec written), #2158, #2159; sibling lane PR #4553 (method name/length meta) is in flight                                | tracked — architectural    |
+| 4   | **TypedArray.prototype semantics** — species-constructor protocol (`speciesctor-*`, 55), custom-ctor paths, detached-buffer TypeErrors (~41), coercion/validation order. Excludes row-3 reflection files                                                                                                                  | ~556                 | **#4449** (filed this session, triage-first; reflection part stays #2159)                                                                   | tracked                    |
+| 5   | **RegExp `@@replace`/`@@match`/`@@split`/`@@search`** — function replacer refusal (CE, "#1913 follow-up"), coercion order, `lastIndex` protocol                                                                                                                                                                           | ~161                 | #2161 (blocked on #2175), F7 dynamic-receiver arch spec pending                                                                             | tracked/blocked            |
+| 6   | **for-of destructuring residual** — iterator close/return/throw propagation, trailing-iterator state (`trlg-iter`, 23), nested patterns, fn-name inference, TDZ                                                                                                                                                           | ~200 (non-generator) | **#4447 — slice 1 LANDED** (standalone dstr 342→400/569, gc +51, assignment/dstr +6, 0 lost; binding form + eval-order deferred, see issue) | landed                     |
+| 7   | **Class semantics residual** — `class/dstr` method-param destructuring dominates (112, shares #4447's machinery), subclass (46), definition (36), NamedEvaluation `NaN vs undefined`                                                                                                                                      | ~321 (non-generator) | **#4450** (filed this session; re-measure after #4447 lands; overlaps #2158/#2175)                                                          | tracked                    |
+| 8   | **annexB String HTML methods** — the direct-call lowering existed (#3069); the gap was the value-erased proto-closure shape                                                                                                                                                                                               | 79                   | **#4445 — DONE** (filter 17→95/111 standalone, 13 HTML dirs 82/82, gc identical; reflection files flipped free via method-meta)             | done                       |
+| 9   | **Array.prototype extern fallback leak** — `compileArrayConcatExtern` emits `__array_concat_any`/`__js_array_new`/`__js_array_push` → standalone leak-guard CE                                                                                                                                                            | ~30                  | **#4446 (this session)**                                                                                                                    | dispatched                 |
+| 10  | Long tail — `Object.prototype` (38), `Function.prototype` (35), `let`/TDZ (26), `arrow-function` (25), `switch` (23), DataView (45), Iterator.prototype (55)                                                                                                                                                              | ~250                 | untracked — file per-cluster on pickup                                                                                                      | open                       |
 
 ## Strategy
 
@@ -1960,11 +1960,11 @@ No GitHub issue is created.
 Measured on the standalone baseline fetched 2026-09-16 10:46 UTC
 (ES2015 `10,303 / 11,704 = 88.0 %`, 1,401 non-pass):
 
-| slice of the remaining 1,401 | rows |
-| --- | --- |
-| path or body mentions a realm | 103 |
-| of those, satisfiable if `$262.createRealm().global` aliased the current global | 91 |
-| of those, genuinely need two DISTINCT realms (`notSameValue`, or two realms in one test) | 12 |
+| slice of the remaining 1,401                                                             | rows |
+| ---------------------------------------------------------------------------------------- | ---- |
+| path or body mentions a realm                                                            | 103  |
+| of those, satisfiable if `$262.createRealm().global` aliased the current global          | 91   |
+| of those, genuinely need two DISTINCT realms (`notSameValue`, or two realms in one test) | 12   |
 
 **Why they fail today is a harness fact, not an engine fact.**
 `tests/test262-runner.ts:2331` returns `const realm = {}; realm.global = realm`
@@ -2019,36 +2019,36 @@ Taken **before** the three PRs that merged on 2026-09-18 (#5968/#6493,
 #5969/#6494, #5970/#6500+#6501), so the counts are a low-water mark by roughly
 a dozen rows. Edition classification is `scripts/generate-editions.ts`.
 
-| ES2015 standalone | rows |
-| --- | --- |
-| non-pass | **1,401** |
-| — host **passes** → MIRRORABLE (standalone-only gap) | **559** |
-| — host **also fails** → dual-lane, new work in both | **842** |
-| — absent from the host baseline | 0 |
+| ES2015 standalone                                    | rows      |
+| ---------------------------------------------------- | --------- |
+| non-pass                                             | **1,401** |
+| — host **passes** → MIRRORABLE (standalone-only gap) | **559**   |
+| — host **also fails** → dual-lane, new work in both  | **842**   |
+| — absent from the host baseline                      | 0         |
 
 ### Top clusters by mirrorable rows
 
-| mirror | dual | cluster |
-| ---: | ---: | --- |
-| **86** | 24 | `built-ins/RegExp/prototype` |
-| 38 | 41 | `built-ins/TypedArray/prototype` |
-| 32 | 79 | `language/statements/class` |
-| 26 | 24 | `language/expressions/generators` |
-| 19 | 28 | `language/expressions/class` |
-| 17 | 39 | `language/expressions/object` |
-| 16 | 35 | `built-ins/Array/prototype` |
-| 14 | 10 | `built-ins/String/prototype` |
-| 13 | 11 | `built-ins/Function/prototype` |
-| 13 | 4 | `built-ins/Proxy/construct` |
-| 12 | 4 | `built-ins/TypedArrayConstructors/internals` |
-| 12 | 7 | `built-ins/ArrayIteratorPrototype/next` |
-| 12 | 19 | `language/statements/generators` |
-| 9 | 0 | `annexB/built-ins/RegExp` |
-| 9 | 3 | `built-ins/Proxy/defineProperty` |
-| 8 | 36 | `built-ins/Promise/all` |
-| 8 | 23 | `built-ins/Promise/race` |
-| 6 | 53 | `language/statements/for-of` |
-| 5 | 0 | `built-ins/{Set,Map}IteratorPrototype/next` |
+| mirror | dual | cluster                                      |
+| -----: | ---: | -------------------------------------------- |
+| **86** |   24 | `built-ins/RegExp/prototype`                 |
+|     38 |   41 | `built-ins/TypedArray/prototype`             |
+|     32 |   79 | `language/statements/class`                  |
+|     26 |   24 | `language/expressions/generators`            |
+|     19 |   28 | `language/expressions/class`                 |
+|     17 |   39 | `language/expressions/object`                |
+|     16 |   35 | `built-ins/Array/prototype`                  |
+|     14 |   10 | `built-ins/String/prototype`                 |
+|     13 |   11 | `built-ins/Function/prototype`               |
+|     13 |    4 | `built-ins/Proxy/construct`                  |
+|     12 |    4 | `built-ins/TypedArrayConstructors/internals` |
+|     12 |    7 | `built-ins/ArrayIteratorPrototype/next`      |
+|     12 |   19 | `language/statements/generators`             |
+|      9 |    0 | `annexB/built-ins/RegExp`                    |
+|      9 |    3 | `built-ins/Proxy/defineProperty`             |
+|      8 |   36 | `built-ins/Promise/all`                      |
+|      8 |   23 | `built-ins/Promise/race`                     |
+|      6 |   53 | `language/statements/for-of`                 |
+|      5 |    0 | `built-ins/{Set,Map}IteratorPrototype/next`  |
 
 ### How to read this, and how NOT to
 
@@ -2073,10 +2073,10 @@ a dozen rows. Edition classification is `scripts/generate-editions.ts`.
 The 190 rows under `built-ins/RegExp/prototype/Symbol.{match,replace,search,split}`
 were run on both lanes on `origin/main` `a8b8dfc180`:
 
-| lane | pass | non-pass |
-| --- | --- | --- |
-| host (gc) | 149 | 41 |
-| standalone | 86 | 104 |
+| lane       | pass | non-pass |
+| ---------- | ---- | -------- |
+| host (gc)  | 149  | 41       |
+| standalone | 86   | 104      |
 
 Of the 104 standalone non-pass, **64 pass in host** and 40 fail in both — the
 same shape this table predicts for the cluster. That split then changed the
@@ -2574,7 +2574,7 @@ exact callback does enter legacy symbol dispatch, both protocol and native
 arms decline, and the native arm specifically rejects the object subject at
 its string-like admission guard. The dispatcher then calls `reportError` and
 returns null, yet the final artifact still contains only the subject load and
-drop. Thus the earlier observation disproved a *terminal compile error*, not
+drop. Thus the earlier observation disproved a _terminal compile error_, not
 the existence of an internal refusal. Root verified trace SHA-256
 `f1c2d403024d9e9f35bdc0e6e9d65d818d9ccdcf2ea99b6ec00d18d35354d693`
 in `.tmp/5198/exact-original-symbol-match-coerce-arg-emission-trace-20260920.log`.
@@ -3084,9 +3084,10 @@ Evidence remains in the isolated `manifest-baseline` worktree:
 - Execution ledger: `.tmp/4444/es2015-fullscope-128-execution-ledger.json`.
 
 Re-reading all 25 accepted shard artifacts verified their hashes and unique
-membership in the unchanged manifest: **2,282 measured = 2,138 pass + 122 fail
-+ 22 compile errors; 9,496 remain unmeasured**. Next index is 25. These are
-frozen-baseline counts, not post-fix acceptance or evidence of pass-rate gains.
+membership in the unchanged manifest: \*\*2,282 measured = 2,138 pass + 122 fail
+
+- 22 compile errors; 9,496 remain unmeasured\*\*. Next index is 25. These are
+  frozen-baseline counts, not post-fix acceptance or evidence of pass-rate gains.
 
 The five original failures remain in scope:
 
@@ -3711,7 +3712,7 @@ not change the frozen census checkout or imply any new compiler repair.
 
 Fresh main cb50f21b90 includes PR 6230 and B10 commit fc823b5de3, introducing
 regexp-untyped-receiver.ts and regexp-proto-to-string.ts. Source inspection
-confirms a native RegExp __getPrototypeOf patch; the new focused test explicitly
+confirms a native RegExp \_\_getPrototypeOf patch; the new focused test explicitly
 covers eval-{block,class,fn}-regexp-literal{,-flags}. Therefore the earlier
 eval-class RegExp source audit at 1032526/25834 describes historical source,
 not the current upstream implementation. A remaining it.fails pin alone cannot
@@ -3974,7 +3975,7 @@ Next index 41. This remains frozen-source evidence, not an integrated pass rate.
 
 Nonpasses concern computed static accessors, computed yield-name methods,
 TypedArray subarray detachment, Promise.all subclass construction host imports,
-DataView property extension, Proxy cross-realm NewTarget, ordinary __proto__
+DataView property extension, Proxy cross-realm NewTarget, ordinary **proto**
 setting, eval new.target, and Iterator.windows return exceptions. Each needs
 current-source verification before repair dispatch, including potential landed
 Promise D4 changes. No scope exclusions or retry-based substitutions were made.
@@ -4840,8 +4841,9 @@ has a read-only routing audit assigned; error text alone is not attribution.
 
 All 48 accepted receipt pairs were hash-checked and their paths checked for
 uniqueness and exact manifest membership: 4,417 measured = 4,143 pass + 238 fail
-+ 36 compile errors; 7,361 remain unmeasured. This is frozen-source census
-evidence, not integrated current-source conformance. Next census index: 48.
+
+- 36 compile errors; 7,361 remain unmeasured. This is frozen-source census
+  evidence, not integrated current-source conformance. Next census index: 48.
 
 ### ArrayBuffer reflective slice: isolated implementation assigned
 
@@ -5199,7 +5201,7 @@ with number hint; generic number unboxing alone maps unknown boxes to NaN.
 All supplied argument expressions must be staged before builtin conversions.
 
 The census-50 revoked-proxy filter failure was attributed by read-only audit
-to existing issue 6506: reflective filter calls __extern_length and bypasses
+to existing issue 6506: reflective filter calls \_\_extern_length and bypasses
 the direct ArraySpeciesCreate path. The prior revoked-bit guard was reverted
 after competing prologue insertions caused broad TypedArray regressions.
 This requires an ordering-safe shared-runtime repair, not a filter-local
@@ -5391,7 +5393,7 @@ Root reran completeness against the exact manifest snapshot. JSONL SHA256
 completion SHA256
 `aac91e51ccc27c196f6f9911b1c9fd1e35f231c4b1851a88b13dcd15d9797950`.
 Only `separator-undef-limit-zero.js` fails: 2**32 yields length 1 instead of 0.
-It is outside the frozen ES2015 manifest; root verified all **12/12** members
+It is outside the frozen ES2015 manifest; root verified all **12/12\*\* members
 of that scope pass on this baseline. Do not count a potential flip here as an
 ES2015 gain.
 
@@ -6020,8 +6022,7 @@ completion SHA256:
 `cbdddbebcb74a2b6374d415db88e204c1b04f47e96c4d18fcdf5070e1acd1a6e`.
 The frozen execution ledger now includes 67 shards, 6,165 unique scope members:
 5,774 pass, 342 fail, 49 compile errors; 5,613 remain unmeasured. All accepted
-receipt hashes and unique manifest membership were revalidated. Next index is
-67. These are frozen-source observations, not integrated-current conformance.
+receipt hashes and unique manifest membership were revalidated. Next index is 67. These are frozen-source observations, not integrated-current conformance.
 
 ### Promise resolve admission guard audit
 
@@ -6253,3 +6254,250 @@ passed staged formatting/lint, LOC/function budgets, changed-root 8/8 tests,
 and oracle ratchet. No push or PR is claimed. Renewed authorization for this
 branch's source/test/handoff upload and upstream PR was requested explicitly;
 do not infer it from automatic goal continuation.
+
+### 2026-09-28 frozen census index 70 accepted
+
+Session 89934 terminated with exit 1 after 118.21s: **87 pass, 4 fail,
+1 compile error of 92**, no skips. Maintained completeness confirms 92
+registered verdicts with zero exclusions. JSONL SHA256:
+`3498bb522af1afa31498dd71db7737781eb7e50e03290717e6160397f5a9cf4d`;
+completion SHA256:
+`ffd48555a96ae83517f873d55233d42498d670a8c5a23e4d539d886df2715d10`.
+All 71 accepted receipt pairs and manifest identities revalidate: **6,533
+unique = 6,112 pass + 370 fail + 51 compile errors**, 5,245 unmeasured.
+Next index is 71. Failures include Promise.all host-import refusal, DataView
+and PluralRules constructor realms, default-constructor arguments, and Reflect
+deleteProperty. They are frozen observations, not current-source attribution.
+
+### Promise unchanged checkpoint: broader original cohort 10/10
+
+On unchanged commit `65764586be`, run `20260928-183512` (session 3147 terminal)
+passed **10/10** original resolve-element reflection/call rows plus the
+independent resolve-function-prototype control. Root read every verdict
+(`reached_test: true`) and independently verified ten registered/settled rows,
+zero exclusions. JSONL SHA256:
+`8664009920188eca3472114c3caea26ada440a3669bf1f8025be27350f6c3a63`;
+completion SHA256:
+`f2bce8943eb50c4880bdb99d63f7f13142890ae3f70fc7ed0516cd786185b919`.
+This is additional candidate regression coverage, not ten attributed flips;
+the matched original/control baseline still proves only the recorded one-row
+repair. No source change, commit amendment, push, or semantic retry occurred.
+The runner emitted a temporary-checkout hook-path configuration warning but
+completed all semantic rows; that warning is not a suppressed test failure.
+
+### 2026-09-28 frozen census index 71 accepted
+
+Session 48025 terminated with exit 1 after 138.47s: **84 pass, 7 fail,
+1 compile error of 92**, no skips. Maintained completeness confirms 92
+registered verdicts with zero exclusions. JSONL SHA256:
+`71b07e2c8807ace72928428ca56873c05b1cb6d8b564df173544362a4e065360`;
+completion SHA256:
+`873a7f5d00a86a3090ef1aeafa746327ae8da1127ed3cfa366e224ebbfe9cbaf`.
+All 72 accepted receipt pairs and manifest identities revalidate: **6,625
+unique = 6,196 pass + 377 fail + 52 compile errors**, 5,153 unmeasured.
+Next index is 72. Frozen failures cover closure TDZ, generator parameter scope,
+Proxy set, Promise tag deletion, spreadable-function concat, Intl Segmenter,
+and a labeled Annex B function refusal. No current-source attribution is made.
+
+### Iterator #6739 pre-baseline fixture review
+
+The new isolated vec-override lane has no production edits yet. Root found
+two fixture defects before accepting a baseline: assigning to a getter-only
+`next` does not test replacement (it throws in strict mode or fails silently),
+and a values-only override returning `done:false` forever could hang precisely
+when the bug is present. Require a configurable accessor replaced by a real
+data property and a finite iterator. Also retain the planned done-true result
+with a throwing value getter control. Freeze the revised fixture only after
+the Node/spec-adapted oracle checks; no result from the flawed fixture can
+establish the intended acceptance contract.
+
+### Iterator #6739 executable baseline does not isolate the provider
+
+Root inspected the terminal receipt
+`/private/tmp/js2-6739-baseline-valid.iuF6vh/6739-baseline-valid-20260928-184836.log`:
+all ten focused assertions failed after execution (27.88s), including the
+values-only positive control. Earlier missing-artifact and missing-adapter
+attempts never reached execution and are setup failures, not semantic rows.
+The executed eval-facing fixture is entangled with unfinished #5157 and does
+not establish ten strict-provider defects. Preserve it as diagnostic evidence;
+no production change is justified by this denominator alone.
+
+The owner is isolating the same iterator contracts through the established
+Proxy constructor spread consumer, with fresh Node oracles and a passing
+positive control required before implementation. A done-true iterator supplies
+zero arguments: that control must supply valid trailing target/handler values
+or explicitly distinguish the subsequent constructor error from iterator
+failure. Otherwise it would replace the eval confounder with an arity one.
+The existing #5157 regression fixture remains unchanged. The owner retains
+the single heavy-test lease; census index 72 has not started.
+
+Issue #4016 remains locally committed at `568d249ee5481bb64dbbcc06b06d62c9d1cd9f34`
+with a clean checkout. Shared-file clearance is unanswered. A read-only review
+is checking whether any of its three remaining focused failures has a valid
+repair inside the already-owned string subsystem; no permission to edit the
+held call, expression, or literal seams is inferred from goal continuation.
+
+### 2026-09-28 frozen census index 72 accepted
+
+Session 53477 terminated with exit 1 after 115.90s: **85 pass, 7 fail,
+0 compile errors of 92**, no skips. Maintained completeness verifies all 92
+registered verdicts with zero exclusions. JSONL SHA256:
+`2d463997b083559f1d16faee491d65b92f024886117ea1260c57756e7757368f`;
+completion SHA256:
+`d5b6e8a39f3c5332c18c2907dfa5bd17cd2af175f43278b9997fc462c4f28a8d`.
+All 73 accepted receipt pairs and exact-scope identities revalidate: **6,717
+unique = 6,281 pass + 384 fail + 52 compile errors**, 5,061 unmeasured.
+Next census index is 73; no census process remains live.
+
+Failures cover super constructor receiver identity, Proxy ownKeys realm and
+non-extensible-target invariants, GeneratorFunction constructibility, bound
+function realm prototype, array-prototype iterator failure during for-of
+destructuring, and Intl DisplayNames abrupt option conversion. These are
+frozen-source observations, not current-source attribution. The iterator
+observation was sent to #6739 as a separate possible regression control, not
+authorization to widen its strict-vec scope. The heavy lease returned to that
+owner for the new Proxy-consumer focused baseline after its reported 10/10
+isolated Node oracle results.
+
+### #4016 frozen residual ownership audit
+
+Independent read-only review of clean `568d249ee5481bb64dbbcc06b06d62c9d1cd9f34`
+found no sound repair for the three remaining controls solely inside the
+owned split sources. `calls.ts::emitReflectiveNativeProtoClosureCall` emits
+the same null carrier for omission as for explicit null; the downstream
+reflective helper cannot recover that distinction. `literals.ts` stores the
+computed well-known-symbol method as a textual struct field while split's
+existing GetMethod uses the actual Symbol key. Finally,
+`misc.ts::compileConditionalExpression` converts the Symbol/number producer
+to f64 before the split helper receives it. Its Symbol guard cannot reconstruct
+the lost value. These findings corroborate the existing #4016 handoff rather
+than justify split-specific workarounds. All three red controls remain intact;
+no shared-seam edit or permission was inferred.
+
+### #6739 independent consumer baseline and non-vacuity correction
+
+The terminal Proxy-consumer baseline has 2 pass / 8 fail of 10; its values-only
+positive control passes, unlike the eval-entangled instrument. Receipt:
+`/private/tmp/js2-6739-proxy-baseline.d2D2cq/6739-proxy-baseline-20260928-185547.log`,
+SHA256 `bf8b013a7169aa0ccf938ec74df75ef71aef1d73d0fd949e599e5963fc63773c`.
+Root found the other passing control insufficient: a done-result test with an
+original `[target, handler]` array and trailing valid Proxy arguments also
+passes when the iterator override is completely ignored. Require exactly one
+override call and one next call in addition to zero value reads. Preserve the
+2/8 receipt as pre-strengthening evidence; a newly frozen ten-control baseline
+must precede implementation. No production edit was made before that review.
+
+### #6739 strengthened baseline accepted
+
+The final fixture adds a separate raw-iterator non-reacquisition control,
+bringing its scope to eleven. Root inspected the terminal receipt and hash:
+**1 pass / 10 fail of 11**, 42.46s; the intentional values-only positive control
+passes. Receipt
+`/private/tmp/js2-6739-proxy-baseline-strengthened.clHOmV/6739-proxy-baseline-strengthened-20260928-185821.log`,
+SHA256 `00fb10c98c10c21d8262055cb25431529f8487727fc0a1c5e005c2f08bc67c50`.
+The owner reports isolated Node oracle 11/11 on the same fixture. This is a
+focused current-base baseline, not an original Test262 conformance count.
+Implementation may now proceed within the two approved iterator/proto-override
+files, retaining the strengthened controls. Root started frozen census index
+73 in session 43119 after explicit lease transfer; it has no terminal result yet.
+
+An action-linked, read-only PR #6246 check still shows OPEN/draft at
+`4d35876fb17380df7ebe57b2a4f4a3b60bfd5485`, MERGEABLE but BEHIND, with the same
+quality failure (job 108869335772). The known local boundary-metadata repair
+has not been published. No ready/merge claim or GitHub mutation is made.
+
+### 2026-09-28 frozen census index 73 accepted
+
+Session 43119 terminated with exit 1 after 174.67s: **87 pass, 5 fail of 92**,
+zero compile errors/skips. Maintained completeness verifies 92 registered
+verdicts and zero exclusions. JSONL SHA256:
+`6904ff3fcb1a75e27b04296c308e3435959c48ba84cfaf8446b3cafd069799c0`;
+completion SHA256:
+`675741c750a94f75945297f4895a83794ea46413747d7a50b1eb1dd8098e2635`.
+All 74 accepted receipt pairs revalidate with exact-scope membership and no
+duplicate files: **6,809 unique = 6,368 pass + 389 fail + 52 compile errors**,
+4,969 unmeasured. Next index is 74; no census process remains live.
+The five frozen failures concern nested Proxy get forwarding, with-base method
+lookup, GeneratorFunction subclassing, abrupt getPrototypeOf during
+Symbol.hasInstance, and Intl Segmenter realm prototype. No attribution to
+current integrated source or new fix is claimed.
+
+### GeneratorFunction constructibility: bounded source-only audit
+
+The index-72 original `built-ins/GeneratorFunction/is-a-constructor.js` fails
+inside `Reflect.construct(function(){}, [], GeneratorFunction)` in the harness
+helper; the later `new GeneratorFunction()` is not reached. Its intrinsic is
+obtained through dynamic `new Function`, making child-to-parent value transfer
+relevant. The audit inspected old base `86dbc35c4e`, not current integration.
+
+At that base the A3 GeneratorFunction builder sets callable and constructor
+flags, but `builtin-callable-brand.ts` emits its Object-flags classifier arm
+only if the outer context branded a carrier. A correctly flagged dynamic child
+result might therefore be rejected by the outer Reflect classifier. This is
+a source-supported hypothesis, not runtime attribution. A separate generic
+generator-expression `.constructor` identity path also needs distinguishing.
+The discriminator is an identical same-module versus dynamic-Function pair,
+then emitted child-result and outer `__reflect_is_constructor` inspection.
+Existing #6651 A3 explicitly tracks the original row; #3371 and #2175 cover
+overlapping reflection/brand seams. Do not file a duplicate implementation or
+assume their locally recorded ownership is remotely current. No patch or
+additional compiler run was performed for this audit.
+
+### 2026-09-28 frozen census index 74 accepted
+
+Session 20762 terminated with exit 1 after 140.32s: **82 pass, 8 fail,
+2 compile errors of 92**, no skips. Maintained completeness verifies 92
+registered verdicts and zero exclusions. JSONL SHA256:
+`d3aca386f4dc1af207825eb6c6ee0f2c5c048ffff28a7a168003e2d57579ee13`;
+completion SHA256:
+`9222d93617da0cb0acbe0863e28853daca49b26085209d9c0855e4c1b9a17e05`.
+All 75 accepted receipt pairs and exact-scope identities revalidate: **6,901
+unique = 6,450 pass + 397 fail + 54 compile errors**, 4,877 unmeasured.
+Next index is 75; no census process remains live. Frozen failures include
+TypedArray-subclass isView, generator eval host-import leakage, destructuring
+evaluation order, RegExp lastIndex identity/enumeration, nested Proxy construct,
+Symbol/eval realms, primitive getter receiver, and Intl Segmenter coercion.
+These observations are not current integrated-source attribution.
+
+### 2026-09-28 frozen census index 75 accepted
+
+Session 84677 terminated with exit 1 after 128.52s: **90 pass, 1 fail,
+1 compile error of 92**, no skips. Maintained completeness verifies all 92
+registered verdicts with zero exclusions. JSONL SHA256:
+`9c6d65cff9b42e0cc57ca0553929a9f088088d02620ce3bb0ffaf7ecc044c50b`;
+completion SHA256:
+`4f18b1a1c7cb4cb77aa76977a3100b477f077f59bfbe7ce0f7a0712eb601b18d`.
+All 76 accepted receipt pairs and exact-scope identities revalidate: **6,993
+unique = 6,540 pass + 398 fail + 55 compile errors**, 4,785 unmeasured.
+The two frozen residuals are the contextual `let` for-head parse refusal and
+Intl Locale getWeekInfo. Next index is 76; no census process remains live.
+
+### RegExp lastIndex audit: existing #5198 ownership
+
+Read-only source review at clean Promise candidate `65764586be` found that
+`exec/failure-lastindex-access.js` asserts raw lastIndex identity only after
+calling non-global/non-sticky exec and verifying its null result. The source
+coerces lastIndex once but gates writeback/RAW_PRESENT clearing on g/y flags;
+the raw assignment and reflective read paths preserve the reference.
+Existing #5198 WAT evidence instead points to a later generic typed-consumer
+conversion copying the object, with #6651 recording direct equality passing
+while assert.sameValue/helper/local consumers fail. This is corroborated
+source/record evidence, not a fresh runtime attribution. Both exec lastIndex
+rows are explicitly reserved to #5198's existing slice and require alias,
+overwrite, writeback, mutation, and rebinding coverage. No independent exec
+ordering patch, duplicate claim, or compiler run was made.
+
+### 2026-09-28 frozen census index 76 accepted
+
+Session 31160 terminated with exit 1 after 110.93s: **86 pass, 5 fail,
+1 compile error of 92**, no skips. Maintained completeness verifies all 92
+registered verdicts with zero exclusions. JSONL SHA256:
+`b6ace02dd3b72b3294f264661ef70a803a999dc6501cdf75a0691d3931b7d5ca`;
+completion SHA256:
+`f5cc11f716d0c79a4fe6e0fdb676c4a611c522d5ed9a61a10ae59b4cd540e407`.
+All 77 receipt pairs and exact-scope identities revalidate: **7,085 unique =
+6,626 pass + 403 fail + 56 compile errors**, 4,693 unmeasured. Next index is
+77; no census process remains live. Frozen residuals cover TypedArray copy
+construction, JSON replacer-array abrupt access, super distinct NewTarget,
+computed Symbol method, global lexical declaration, and Intl DateTimeFormat.
+These are not current-source attribution or candidate regression counts.
