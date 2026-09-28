@@ -117,10 +117,12 @@ const GENERATOR_FUNCTION_KEYWORD = /function\s*\*/;
 /**
  * (#6651 A9) Does `expression` denote `%GeneratorFunction%` by SYNTAX alone?
  *
- *  - `Object.getPrototypeOf(G).constructor` or `(G).constructor`, where `G` is
- *    a sync generator function EXPRESSION — both read the `constructor` that
- *    `%GeneratorFunction.prototype%` owns (§27.3.3.1);
- *  - an identifier whose variable initializer is one of those (one hop).
+ *  - `Object.getPrototypeOf(G).constructor`, where `G` is a sync generator
+ *    function EXPRESSION — the `constructor` that `%GeneratorFunction.prototype%`
+ *    owns (§27.3.3.1). The shorter `(G).constructor` reads the same property
+ *    but is NOT claimed: standalone routes only the `getPrototypeOf` spelling
+ *    to the reified intrinsic (A3), so the run-time guard would reject it;
+ *  - an identifier whose variable initializer is that expression (one hop).
  *
  * This is the inventory's half of the claim. The codegen half
  * (`generator-function-dynamic.ts`) additionally proves the binding is never
@@ -140,15 +142,13 @@ export function isStaticGeneratorFunctionConstructorSyntax(
     return init !== undefined && isStaticGeneratorFunctionConstructorSyntax(init, oracle, true);
   }
   if (!ts.isPropertyAccessExpression(e) || e.name.text !== "constructor") return false;
-  let holder = unwrapExpression(e.expression);
-  if (ts.isCallExpression(holder)) {
-    const callee = unwrapExpression(holder.expression);
-    if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== "getPrototypeOf") return false;
-    const receiver = unwrapExpression(callee.expression);
-    if (!ts.isIdentifier(receiver) || receiver.text !== "Object" || !isGlobalIntrinsic(receiver, oracle)) return false;
-    if (holder.arguments.length !== 1) return false;
-    holder = unwrapExpression(holder.arguments[0]!);
-  }
+  const call = unwrapExpression(e.expression);
+  if (!ts.isCallExpression(call) || call.arguments.length !== 1) return false;
+  const callee = unwrapExpression(call.expression);
+  if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== "getPrototypeOf") return false;
+  const receiver = unwrapExpression(callee.expression);
+  if (!ts.isIdentifier(receiver) || receiver.text !== "Object" || !isGlobalIntrinsic(receiver, oracle)) return false;
+  const holder = unwrapExpression(call.arguments[0]!);
   return (
     ts.isFunctionExpression(holder) &&
     holder.asteriskToken !== undefined &&
