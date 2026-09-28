@@ -169,6 +169,22 @@ assignee: "ttraenkler/fable-es2015-plan"
 #     `$__ta_ctor`, which the Int8Array `$Object` carrier is not). The first cut
 #     inlined the arm here and cost +68 / +65; extracting it left these 8.
 loc-budget-allow:
+  # 2026-09-28 — cluster H, slice H1 (receipt under `## Cluster status`). Both
+  # paths already listed below; restated per the stranded-grant rule. The
+  # mechanism lives in the NEW leaves `spec-arg-coercion.ts` (the object-literal
+  # hand-off and the argument's spec ToString provider) and
+  # `symbol-to-primitive-arms.ts` (the Symbol-wrapper arm); the walk and the
+  # branded-result box decision are `ordinary-to-primitive-probe.ts` /
+  # `class-to-primitive.ts`, neither a god-file.
+  #   - `src/codegen/string-ops.ts` +19: one import, the `specToString`
+  #     parameter of `compileNativeConcatOperand` (and prettier's wrap of its
+  #     signature), the spec-provider choice in its externref arm, the 5-line
+  #     object-literal arm beside it, and the 2-line hand-off in
+  #     `compileStringIntegerArg`. Both arms have to sit where the operand is
+  #     already compiled and typed.
+  #   - `src/codegen/index.ts` +2: the two-line branded-i32 arm in
+  #     `emitToPrimitiveMethodExports`'s `boxResult` (where every dispatcher
+  #     result is boxed); the import joins the existing class-to-primitive one.
   # 2026-09-28 — cluster A, slice A7 (receipt under `## Cluster status`). Both
   # paths already listed below; restated per the stranded-grant rule. The write
   # semantics live in `expressions/identifier-assignment.ts`
@@ -1013,6 +1029,14 @@ loc-budget-allow:
   # `promise-subclass-cell-read.ts`; the hand-off cannot move, because it is the
   # arm that would otherwise emit the bare `global.get` of the cell.
 func-budget-allow:
+  # 2026-09-28 — cluster H, slice H1. `emitToPrimitiveMethodExports` +2 and its
+  # nested `emitDispatchForMethod` +2 (the same two lines, counted once per
+  # enclosing function): `boxResult`'s branded-i32 arm, which boxes a
+  # `toString`/`valueOf` returning a Symbol / boolean as that type instead of
+  # the number its i32 is carried as. The decision itself is
+  # `class-to-primitive.ts::brandedI32ResultBoxIdx`.
+  - src/codegen/index.ts::emitToPrimitiveMethodExports
+  - src/codegen/index.ts::emitDispatchForMethod
   # 2026-09-28 — cluster A, slice A7. `ensureNativeGeneratorResumeFunction` +2:
   # one call line (`bindNamedExpressionOwnName`) and its spacing, placed after
   # the param copy / capture rehydration (so the `__self` local exists) and
@@ -9849,6 +9873,111 @@ side removes it (0 spurious moves).
   `var r = Custom.resolve.bind(Custom)(1)` is stored as a number (`.tmp/d6/p/r5.js`). A JS
   expando-inference question, not this lowering; no test262 row found hitting it.
 - The remaining 22 manifest fails are unchanged and belong to D2b/D3/D4/D5's residual tables.
+
+### 2026-09-28 — Cluster H, slice H1
+
+Target: the ToPrimitive / ToString cause set this plan recorded under "`String.prototype.indexOf`
+ToPrimitive — a genuine 3-row cause" and the B8 residual row for
+`indexOf/searchstring-tostring-{errors,toprimitive}` — the four rows
+`built-ins/String/prototype/indexOf/{searchstring-tostring-errors,searchstring-tostring-toprimitive,position-tointeger-errors,position-tointeger-toprimitive}.js`.
+Branch `issue-6651-h1-toprimitive`, base `origin/main` `17fd40474d`.
+
+| lane (standalone) | rows | base | branch | gained | lost | changed non-pass |
+| --- | ---: | --- | --- | ---: | ---: | ---: |
+| the 4 targets, `--isolate` | 4 | 0 pass | **4 pass** | 4 | 0 | 0 |
+| control, in-process runner (`runTest262File`), one process per tree | 1,555 | 1,420 / 119 fail / 16 CE | **1,427** / 112 / 16 | **7** | **0** | 1 |
+| its 233 byte-changed (or CE) rows, `--isolate`, 24-row chunks, one runner at a time | 233 | 175 pass | **182** | 7 | **0** | 1 |
+
+Gained (both lanes): the 4 targets, `indexOf/searchstring-tostring-bigint.js` (object-literal
+searchStrings whose `valueOf`/`toString` return `0n`, one behind a `toString: null`), and
+`pad{Start,End}/observable-operations.js` (an object-literal borrowed receiver, `maxLength` and
+`fillString` whose first method returns an OBJECT: the runtime walk falls through to the second
+method in the order the log observes).
+
+#### Diagnosis — four facts, measured per assertion
+
+Each target's assertions were split into single-assertion modules (`.tmp/h1/split.mts`, the real
+`sta.js` + `assert.js` prefix): 2 + 4 + 6 + 3 failing assertions on base. They are four
+mechanisms, not one:
+
+1. **An object-LITERAL argument never reached a complete §7.1.1.1.** The literal is a closed
+   `__anon_*` struct and both argument sites used the compile-time struct dispatch
+   (`tryStructToString`, `coerceType(ref → f64)`), which resolves only the shapes it can name:
+   `{valueOf: null, toString(){…}}` as a position lowered to `drop; f64.const NaN` (a non-closure
+   `valueOf` field is "not callable" there, and the walk stopped instead of skipping it), and
+   `{valueOf: null|1|{}, toString: null|1|{}}` answered `"[object Object]"` / NaN instead of
+   throwing. The runtime walk those values could fall back to (`__class_to_primitive`'s
+   `buildOrdinaryToPrimitiveProbe` tail) DECLINES rather than finishes: a present non-callable
+   member stopped it, and nothing ever threw.
+2. **`Object(sym)` went through the lenient ToString.** An `any` argument used
+   `__extern_toString`, which renders a Symbol (correctly — it also backs `String(sym)`). And even
+   the spec wrapper `__extern_to_string_spec` answers `"Symbol(…)"` for a Symbol WRAPPER, because
+   `__to_primitive` cannot see the intrinsic `Symbol.prototype[@@toPrimitive]` on a wrapper (the
+   #2175 gate H5 measured) and falls through to OrdinaryToPrimitive.
+3. **A method returning a Symbol was boxed as a NUMBER.** The `__call_toString`/`__call_valueOf`
+   dispatchers box every i32 result with `__box_number`, ignoring the `symbol`/`boolean` brands
+   (#1788/#2785) — so ToString of `{toString(){return Symbol()}}` rendered a digit.
+4. `ToInteger` of a `valueOf` returning a Symbol is fact 3 on the number side.
+
+#### What landed
+
+- **The argument sites hand an object literal to the runtime engine.** NEW leaf
+  `src/codegen/spec-arg-coercion.ts`: `externalizeObjectLiteralArg` (standalone, `__anon_*`
+  struct only → `extern.convert_any`) and `ensureSpecArgToString` (the argument's §7.1.17
+  provider). `emitArgAsNativeString` (every `String.prototype.*` ToString argument, the borrowed
+  `this`, `JSON.parse`'s text) passes `specToString` into `compileNativeConcatOperand`, which then
+  uses `__extern_to_string_spec` for an `any` argument and routes an object literal through it;
+  `compileStringIntegerArg` routes an object-literal position to `coerceType(externref → f64)`.
+  The `+`/template operand cascade is untouched (the flag defaults off).
+- **The runtime walk can finish §7.1.1.1.** `buildOrdinaryToPrimitiveProbe` gains
+  `onExhausted` (skip a present non-callable member — step 2.b; a leading ABSENT `valueOf`
+  proceeds, since `Object.prototype.valueOf` answers the object; throw when every reached step
+  failed — step 3) and `nullResultIsPrimitive` (under the #2106 singleton regime a null method
+  result IS `null`, so `{valueOf(){return null}, toString: null}` converts to `"null"`). An
+  absent `toString` and an absent trailing `valueOf` still decline — the cases the walk cannot
+  prove.
+- **Armed per module, deliberately.** `__class_to_primitive`'s walk is emitted into every
+  standalone module that reserves the driver; making it exhaustive everywhere moved the bytes of
+  EVERY test262 row (measured: `built-ins/Array/length.js` changed), a corpus-wide control this
+  slice cannot run. `requireExhaustiveClassToPrimitive(ctx)` is set only by
+  `externalizeObjectLiteralArg`, so only modules that route an object-literal argument get the
+  exhaustive walk and the branded-result box (`brandedI32ResultBoxIdx`: `__box_symbol` /
+  `__box_boolean` in `boxResult`). All other modules are byte-identical.
+- **The Symbol-wrapper arm.** NEW leaf `src/codegen/symbol-to-primitive-arms.ts`:
+  `__extern_to_string_spec` throws for a `$Object` whose internal `[[PrimitiveValue]]` is a
+  `$Symbol` when `__extern_get(v, @@toPrimitive)` finds no user method — the intrinsic's answer.
+  A user-installed `@@toPrimitive` on the wrapper still wins (pinned).
+
+Two regressions the control caught in the first cut, both fixed and pinned: `concat/S15.5.4.6_A1_T10`
+(`{toString(){return true}}` → `"1"`: the boolean brand, fact 3's twin) and
+`indexOf/searchstring-tostring-wrapped-values` (`valueOf` returning `null` declined).
+
+#### Receipts
+
+| control | result |
+| --- | --- |
+| reach set `.tmp/h1/cand3.txt` (1,555 rows): every row under `built-ins/{String,Symbol}/`, `built-ins/JSON/parse/`; the RegExp rows on `__extern_to_string_spec`'s other callers (`RegExp/prototype/Symbol.*`, `prototype/toString`, top-level `RegExp/*.js`) that mention `Symbol(`/`Object(`/`toString`/`valueOf`; and any other row calling a String method with an object-literal argument, on a string-literal receiver, or via `String.prototype.<m>.call/apply` | see table above; base eval rows re-run after the QuickJS adapter was built for both trees (identical adapter bytes) |
+| standalone bytes over the reach set | 220 rows move, 1,322 identical, 13 CE both sides |
+| gc bytes over the reach set (compile-only, original-harness assembly, runner options) | **1,555 / 1,555 identical** (all arms are standalone-gated) |
+| playground examples + `benchmarks/suites` + `benchmarks/{strings,arrays}.bench.ts` × gc/standalone/wasi | **57 / 57 identical** |
+| pin `tests/issue-6651-h1-toprimitive.test.ts` (6 tests, no eval) | 6/6 green; on base (`.tmp/base`) **4 red** — the two control tests are green on both by design |
+| gates | `check-loc-budget`, `check-func-budget` (both also with `LOC_GATE_BASE` = origin/main `f083fd4a9a`), `check-coercion-sites`, `check:oracle-ratchet`, `check:dead-exports`, `typecheck`, `biome lint --diagnostic-level=error`, `check:host-import-policy` (`src/runtime.ts` untouched), `check-compiler-boundaries --mode inventory --base origin/main` (`inventoryValid: true`, both leaves classified), `check:ir-fallbacks` OK. Grants: dated H1 notes at the head of `loc-budget-allow` (`string-ops.ts` +19, `index.ts` +2) and `func-budget-allow` (`emitToPrimitiveMethodExports`/`emitDispatchForMethod` +2) |
+
+#### Residuals (measured, not taken)
+
+- `Symbol/prototype/Symbol.toPrimitive/removed-symbol-wrapper-ordinary-toprimitive.js` fails
+  before and after, with a different message: the test DELETES `Symbol.prototype[@@toPrimitive]`,
+  and the wrapper arm assumes the intrinsic is present (`__extern_get` cannot tell deleted from
+  invisible — H5's gate). The honest fix is the H5 proto-member consult, not this arm.
+- The same object-literal shapes through the OTHER ToPrimitive consumers are still wrong
+  (`.tmp/h1/p2.js`): `"" + {valueOf: null, toString: null}` and `` `${…}` `` do not throw,
+  `+{valueOf: null, toString(){return "2"}}` folds to NaN without calling anything, and
+  `String(Object(Symbol()))` answers `"Symbol()"` (spec: TypeError — pinned at today's answer).
+  Each is its own site; the `+` cascade is the largest and needs its own corpus control.
+- A NON-literal object argument (a class instance, an `any`-typed struct) keeps the static
+  dispatch, and a module that routes no object literal keeps the declining walk.
+- `{toString: null}` alone (no own `valueOf`) still declines where the spec throws (the absent
+  trailing `valueOf` case above).
 
 ## Handoff — 2026-09-21 (round 1 closed, round 2 ready to dispatch)
 
