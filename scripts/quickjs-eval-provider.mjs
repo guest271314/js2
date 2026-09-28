@@ -1560,13 +1560,19 @@ function qjsEnsureBoxHelpers(c: number): boolean {
       // protocol methods for an object that inherits from it, else undefined.
       // Captured once, here, so a later realm-side replacement of
       // \`isPrototypeOf\` cannot change the classification.
+      // The capture runs at install, i.e. at the FIRST outward box of the
+      // context, after evaluated code may have run; a realm that has already
+      // broken these intrinsics gets the never-a-generator answer instead of
+      // an install failure that would disable every box helper above.
       "globalThis.__js2wasm_eval_genmethods__ = (function () {" +
-      " var gp = Object.getPrototypeOf(function* () {}).prototype;" +
-      " var isProto = Object.prototype.isPrototypeOf;" +
-      " var m = { next: gp.next, return: gp.return, throw: gp.throw," +
-      "  iterator: Object.getPrototypeOf(gp)[Symbol.iterator] };" +
-      " return function (o) {" +
-      "  return o !== null && typeof o === 'object' && isProto.call(gp, o) ? m : undefined; }; })();" +
+      " try {" +
+      "  var gp = Object.getPrototypeOf(function* () {}).prototype;" +
+      "  var isProto = Object.prototype.isPrototypeOf;" +
+      "  var m = { next: gp.next, return: gp.return, throw: gp.throw," +
+      "   iterator: Object.getPrototypeOf(gp)[Symbol.iterator] };" +
+      "  return function (o) {" +
+      "   return o !== null && typeof o === 'object' && isProto.call(gp, o) ? m : undefined; };" +
+      " } catch (e) { return function () { return undefined; }; } })();" +
       "0"
   );
   if (installed === 0) return false;
