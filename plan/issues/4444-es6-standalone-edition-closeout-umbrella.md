@@ -3454,3 +3454,255 @@ not repair option conversion, realm/NewTarget, or deletion behavior. Existing
 #6717 remains the proof-first implementation plan, with host-free provider
 and ownership design still required; no safely independent Intl leaf was
 identified by this audit.
+
+### Frozen census index 31 accepted (next documentation checkpoint)
+
+Session 33532 terminated exit 1 in 83.59 seconds: 93 originals, 86 pass,
+6 fail, 1 compile error, zero skips. Completeness passed 93/93 with zero
+exclusions. Receipt basename:
+`test262-standalone-es2015-fullscope-128-results-es2015-fullscope-128-f924650-chunk031-a01`.
+JSONL SHA-256 `a9542efb470872690aa7b12b84c44f768aa2ceccf1a511e1ce0a97ee6a55c865`;
+completion `.shard-32-of-128.complete.json` SHA-256
+`167f5cccae93f6c174240d12c78b1546d8ffcf153c320ffe62f41f9fa4b3f0e4`.
+
+All 32 accepted artifact pairs and exact-scope identities revalidated:
+**2,931 measured: 2,747 pass, 156 fail, 28 compile errors; 8,847 unmeasured**.
+Next index 32. Nonpassing rows concern copyWithin abrupt `has`, non-eval
+tail call in `with`, Promise.all capability resolution, sloppy generator
+method receiver, derived-class explicit return identity, a computed accessor
+name containing yield (compile refusal), and Error.stack cross-realm setter.
+No fix or current integrated pass rate is inferred. This follow-on record
+postdates PR 6239's checkpoint and is not part of its published commit.
+
+### Frozen census index 32 accepted (next documentation checkpoint)
+
+Session 77009 terminated exit 1 in 87.66 seconds: 93 originals, 87 pass,
+6 fail, zero compile errors/skips. Completeness passed 93/93 with zero
+exclusions. Receipt basename:
+`test262-standalone-es2015-fullscope-128-results-es2015-fullscope-128-f924650-chunk032-a01`.
+JSONL SHA-256 `e2340eef908f36f1bd187c87cbe80dddec64c1887d3638a760578c8d0e49e7d0`;
+completion `.shard-33-of-128.complete.json` SHA-256
+`05824c7b9342bfe5f86494b9e77a276f994cc144a74cd099d19dff4b175e214e`.
+
+All 33 accepted artifact pairs and exact-scope identities revalidated:
+**3,024 measured: 2,834 pass, 162 fail, 28 compile errors; 8,754 unmeasured**.
+Next index 33. Failures concern generator default-prototype identity, a class
+computed-key assignment effect, DataView getter identity, Promise.race
+self-resolution completion, nested Proxy null-get-trap forwarding, and
+Error.stack setter nonconstructibility. They remain failures pending
+current-source attribution and repair; no inferred exclusions or fix credit.
+
+### Verified landing and active implementation handoff, 2026-09-28
+
+Decorator slice PR 6238 landed in upstream main
+`25834c4af68c688e53c420b9c057bd26153dadf9`. The implementation commit
+`f90c59801b04edf8f13c6798e5c1ec02c3a6b2ee` is an ancestor, and its predicate
+and focused-test content matches that main revision. This confirms landing
+of the previously measured six-original repair, not completion of broad #5141
+or a new integrated full-scope measurement.
+
+The independent reflective copyWithin slice is claimed as
+`5145:copywithin-reflective` for `ttraenkler/codex-copywithin-reflective`,
+verified by the claim tool on upstream issue-assignments. A Terra Max worker
+owns isolated branch `codex/5145-copywithin-reflective` at that main revision.
+The implementation plan is recorded in #5145 before dispatch. Missing
+reflective admission currently throws before the original's Proxy HasProperty
+trap; use existing string-keyed object operations, not indexed shortcuts that
+bypass live Proxy dispatch. Fresh baseline and implementation are pending.
+The worker owns the team's single heavy build/test/hook lease.
+
+The eval spread candidate is NOT complete. Its intermediate seven-original
+result was green before a stricter implementation and adversarial controls.
+The latest focused split receipt reported five of six passing in
+`/private/tmp/5157-focused-split-direct-20260928-1000.log`. Inline literal-array
+spread can lower to a tuple carrier that the strict iterator provider does
+not admit; binding the same array first changes its carrier and passes.
+Separately, the provider's vector fast path bypasses a runtime override of
+Array.prototype's iterator: the retained grouped probe returns 23 in compiled
+execution versus 7 in the isolated Node oracle. Neither mismatch is excused
+by rearranging the controls. The eval worker is auditing exact provider
+ownership and recording the residuals in #5157; provider/IR edits are not
+authorized by the narrow eval-file claim. No eval fix credit or merge-ready
+claim is made from the intermediate result.
+
+Review correction: raw Node's grouped result of 7 is diagnostic, not the
+acceptance oracle. The grouped probe's specified score is 15: the first three
+protocol checks contribute 1+2+4, the overridden iterator must supply the direct
+eval source (8), and the subsequent ordinary method must receive the overridden
+string rather than its original literal (so no 16). Matching Node's known
+direct-spread behavior would preserve a defect. The worker was instructed to
+keep the historical discrepancy but correct the executable expectation.
+The [function-call algorithm](https://tc39.es/ecma262/2023/multipage/ecmascript-language-expressions.html#sec-function-calls-runtime-semantics-evaluation)
+requires ArgumentListEvaluation followed by direct PerformEval; section
+13.3.8.1 requires iteration of the spread operand. No new compiler pass result
+is asserted by this test-oracle correction.
+
+Issue 4016's historical plain-string-conversion completion is separate from
+its protected custom-Symbol.split diagnostic continuation. The user's bare
+4016 reference has not established clearance to edit overlapping IR work.
+Keep that checkout and its uncommitted diagnostics intact pending clarification.
+
+### Index-32 Promise.race follow-up boundary
+
+Reading the exact `built-ins/Promise/race/resolve-self.js` original shows it
+temporarily replaces Promise.resolve with an identity function, captures the
+race capability resolver through a thenable, restores Promise.resolve, and
+then resolves the result promise with itself. The frozen failure is missing
+async completion, not a measured assertion about the eventual rejection value.
+Do not label this a missing self-resolution check solely from its filename.
+Completed #4727 covers a different original under `Promise/resolve/` and a
+custom-constructor admission path; its historical success is not proof for
+this `race` original. Follow-up under the Promise #5143/#5197 plans needs
+stage-by-stage controls for override observation, resolver capture, result
+identity, rejection and job draining before choosing a source edit. No fresh
+current-base run or additional implementation claim has been made here.
+
+### Index-32 DataView and Error.stack audit boundaries
+
+The DataView original `defined-bytelength-and-byteoffset.js` checks byteLength,
+byteOffset, buffer identity, constructor identity, then prototype identity, in
+that order for six instances. Its frozen error prints two native functions.
+Although current Object.getPrototypeOf lowering lacks an explicit DataView
+instance route, that absence does not establish the first failing assertion:
+`sample.constructor === DataView` precedes it and requires investigation of
+the two constructor singleton materialization paths. A fresh step-separated
+probe must distinguish these before dispatching a prototype-only fix.
+
+For Error.prototype.stack `setter-not-a-constructor.js`, the reported exception
+assertion failure occurs after its isConstructor check, at `new set('')`.
+Source audit finds the accessor is already marked nonconstructible, while
+the static new-expression admission does not recognize this descriptor-derived
+local. The candidate responsibility is construct admission/guarding, not the
+setter's body. Shared new-super/non-constructable analysis remains protected;
+do not mask this failure with an accessor-specific special case. Both audits
+are source-level findings, not new current-base runtime measurements or fixes.
+
+### Frozen census index 33 accepted
+
+Retained terminal session 64824 exited 1 in 78.78 seconds: 93 originals,
+85 pass, 8 fail, no compile errors or skips. Completeness passed 93/93 with
+zero exclusions. The launch used TEST262_RUN_TIMESTAMP instead of the runner's
+RUN_TIMESTAMP, so its actual unique timestamp is `20260928081032`; this only
+affects receipt naming. No restart, overwrite or exclusion was performed.
+Receipt basename:
+`test262-standalone-es2015-fullscope-128-results-20260928081032`.
+JSONL SHA-256 `3299d46b1b140427b0b66f2dd19c812198e5256bea10a241d5c278bbfba0048a`;
+completion `.shard-34-of-128.complete.json` SHA-256
+`356d955cfc99dec5b19ca9e8d5745831b0d34a1c7b4ba9e30ce2e204ccd546ec`.
+
+All 34 accepted artifact pairs and exact-scope identities revalidated:
+**3,117 measured: 2,919 pass, 170 fail, 28 compile errors; 8,661 unmeasured**.
+Next index 34. Remaining failures in this shard concern Promise constructor
+realm, class setter descriptors, TypedArray.map callback receiver identity,
+strict object-method receiver, GeneratorFunction prototype and invocation,
+Iterator.windows return forwarding, and RangeError constructor realm.
+This remains the frozen-source census, not integrated post-fix conformance.
+The heavy test lease was returned to the copyWithin worker after termination.
+
+### DataView/construct ownership preflight follow-up
+
+Elevated read-only registry access resolved the earlier DNS-unknown state:
+#5269 is reserved (ID allocated) but has no live claim. It is not permission
+to allocate that ID again. The exact open-PR file scan found #5784 touches
+property-access-dispatch.ts, new-super.ts and array-object-proto.ts; #5753
+touches object-get-prototype-of.ts, new-super.ts and array-object-proto.ts.
+Both proposed DataView routes and the shared construct guard therefore have
+concrete overlap, despite there being no live #5269 claim. Do not dispatch a
+production fix from this audit. The audit checkout also contains preserved
+#5267/#4497 documentation at stale base 5bfc069422c7; it must not be repurposed
+by discarding those changes. Future diagnostics need a current-base isolated
+checkout, unchanged original, and separate field/constructor/prototype probes.
+
+### Frozen census index 34 accepted
+
+Terminal session 26064 exited 1 in 88.52 seconds: 93 originals, 90 pass,
+2 fail, 1 compile error, zero skips. Completeness passed 93/93 without
+exclusions. Receipt basename:
+`test262-standalone-es2015-fullscope-128-results-es2015-fullscope-128-f924650-chunk034-a01`.
+JSONL SHA-256 `c07637716afc668f647eef29b3d763f5648b294ebc5ffca8154465e63b70fce3`;
+completion `.shard-35-of-128.complete.json` SHA-256
+`f7865cfefcee3551e6d6f69b3c95666ee2af8ccdb36a89bd4d8fc1679df751c7`.
+All 35 accepted artifact pairs and exact-scope identities revalidated:
+**3,210 measured: 3,009 pass, 172 fail, 29 compile errors; 8,568 unmeasured**.
+Next index 35. Failures are new.target/value-via-new.js (undefined rather than
+constructor identity), Promise.any/resolve-throws-iterator-return-is-not-callable.js
+(host import), and Iterator.windows/next-method-returns-throwing-value.js
+(expected getter exception absent). These remain in the exact scope; no
+inferred fixes or exclusions. The copyWithin worker has the heavy lease again.
+
+### Frozen census index 35 accepted
+
+Terminal session 90861 exited 1 in 91.63 seconds: 93 originals, 90 pass,
+3 fail, no compile errors/skips. Completeness passed 93/93, zero exclusions.
+Receipt basename:
+`test262-standalone-es2015-fullscope-128-results-es2015-fullscope-128-f924650-chunk035-a01`.
+JSONL SHA-256 `e82d90d3d7e3cee331b3a9076f457bbac1b266d46811953ab3903b87ea63a999`;
+completion `.shard-36-of-128.complete.json` SHA-256
+`15aed76af785d9f35f5957548554c79a4f60cd5feacea07e4a5f466759e32238`.
+All 36 artifact pairs and exact-scope identities revalidated:
+**3,303 measured: 3,099 pass, 175 fail, 29 compile errors; 8,475 unmeasured**.
+Next index 36. Failures: Proxy construct trap-undefined NewTarget realm,
+statementList/eval-class-regexp-literal.js (null rather than object), and
+Iterator.windows/next-method-throws.js. The eval result-value row is assigned
+for separate read-only attribution, not folded into the incomplete spread fix.
+
+The copyWithin draft additionally needs real ToObject boxing for primitive
+receivers, not only a nullish guard, and a one-line variadic ABI admission in
+array-object-proto.ts to retain optional end. User clearance for that overlapping
+seam is pending. No incompatible draft build was attempted. Root holds the
+heavy lease after the worker explicitly returned it; no process remains live.
+
+### Frozen census index 36 accepted
+
+Terminal session 23778 exited 1 in 88.10 seconds: 93 originals, 87 pass,
+6 fail, no compile errors/skips. Completeness passed 93/93, zero exclusions.
+Receipt basename:
+`test262-standalone-es2015-fullscope-128-results-es2015-fullscope-128-f924650-chunk036-a01`.
+JSONL SHA-256 `7868e5d4fcbaa8c8df2a9e713ce81acad406cc6e68a74e9b406f4208223695cb`;
+completion `.shard-37-of-128.complete.json` SHA-256
+`9a8e757e21326894dd833b6ebeb3fe05e6fd8be4826210c091a9e1220d6ad5e5`.
+All 37 receipt pairs and exact-scope identities revalidated:
+**3,396 measured: 3,186 pass, 181 fail, 29 compile errors; 8,382 unmeasured**.
+Next index 37. Failures concern splice species trap ordering, Array.from
+missing source elements (NaN rather than undefined), Boolean subclassing,
+derived-constructor this-check ordering, Function constructibility, and
+Iterator.windows nonconstructibility. No failure is excluded; this is still
+the frozen-source census, not an integrated post-fix pass rate.
+
+### Frozen census index 37 accepted
+
+Terminal session 97914 exited 1 in 83.97 seconds: 93 originals, 89 pass,
+3 fail, 1 compile error, no skips. Completeness passed 93/93, zero exclusions.
+Receipt basename:
+`test262-standalone-es2015-fullscope-128-results-es2015-fullscope-128-f924650-chunk037-a01`.
+JSONL SHA-256 `5d65cff98153022f3d160c3c62a47d39c85926c3b98de47e64436eb796128eb0`;
+completion `.shard-38-of-128.complete.json` SHA-256
+`be9267f09b34ddb56596bc0332e48e5e91a4b8c945424f7a9a83d9bade1a7c44`.
+All 38 receipt pairs and exact-scope identities revalidated:
+**3,489 measured: 3,275 pass, 184 fail, 30 compile errors; 8,289 unmeasured**.
+Next index 38. Failures concern TypedArray construction observing an overridden
+Array iterator, class computed-accessor assignment effects, nested Proxy
+construction with distinct NewTarget (compile refusal), and Iterator.windows
+throwing done getter. Frozen-source evidence only; all remain in scope.
+
+### Frozen census index 38 accepted and next checkpoint base
+
+Terminal session 82652 exited 1 in 88.92 seconds: 93 originals, 86 pass,
+4 fail, 3 compile errors, no skips. Completeness passed 93/93, zero exclusions.
+Receipt basename:
+`test262-standalone-es2015-fullscope-128-results-es2015-fullscope-128-f924650-chunk038-a01`.
+JSONL SHA-256 `f1a54be83e6c7aecd1c62b2991669f75da97e2ada84e2f6a9e08d67167859111`;
+completion `.shard-39-of-128.complete.json` SHA-256
+`9ae4bf795442c76d9e65867322622d97c583536d6a8b360fa413d065853ff372`.
+All 39 receipt pairs and exact-scope identities revalidated:
+**3,582 measured: 3,361 pass, 188 fail, 33 compile errors; 8,196 unmeasured**.
+Next index 39. Remaining rows concern computed-accessor generator yield,
+yield RegExp, noncallable Symbol values, yield-star in finally, captured-local
+TDZ writes, generator spread, and rest-parameter constructor arguments.
+
+PR 6239 is confirmed merged as 9b89b94de26530b83935e41d2e9a3751551b517c;
+its exact head 01ee5deff06ca47afd80d2a5c2ef28399889826f is an ancestor of
+fetched upstream main cb50f21b90, with unchanged handoff document content.
+The next docs-only checkpoint branch is `codex/4444-census-handoff-038`,
+fast-forwarded to that main while preserving these local updates. This does
+not change the frozen census checkout or imply any new compiler repair.
