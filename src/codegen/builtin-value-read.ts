@@ -99,6 +99,7 @@ import {
 import { emitExternrefSlotToAnyStr } from "./native-string-slot-bridge.js";
 import { emitNativeReflectTargetGuard } from "./reflect-target-guard.js";
 import { sourceShadowsGlobalName } from "./source-function-members.js"; // (#5194 review F2)
+import { sourceWritesRegExpProtoSymbol } from "./regexp-proto-symbol-writes.js"; // (#6651 B9)
 
 export const BUILTIN_CTOR_NAMES = new Set([
   "Object",
@@ -940,6 +941,8 @@ function tryCompileStandaloneBuiltinProtoIteratorRead(
   if (!ts.isIdentifier(receiver.expression)) return undefined;
 
   const builtinName = receiver.expression.text;
+  // (#6651 B9) A replaced member is a runtime value: the dynamic read consults the companion.
+  if (builtinName === "RegExp" && sourceWritesRegExpProtoSymbol(expr, key.name.text)) return undefined;
   const isIteratorAlias = key.name.text === "iterator" && (builtinName === "Map" || builtinName === "Set");
   if (!isIteratorAlias && !BUILTIN_CTOR_NAMES.has(builtinName)) return undefined;
   if (

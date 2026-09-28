@@ -892,6 +892,20 @@ loc-budget-allow:
   # before the `env::Promise_<method>` host-import fall-through it replaces.
   # `promise-combinators.ts` +0 (an `export` on `ensureSettledAnyCombinators`,
   # whose AggregateError builder the `any` finish reuses). Path already listed.
+  # 2026-09-28 — cluster B, slice B9 (receipt under `## Cluster status`). ONE
+  # god-file, `src/codegen/builtin-value-read.ts` +3: the import and the one-line
+  # decline (plus its comment) at the top of
+  # `tryCompileStandaloneBuiltinProtoIteratorRead` — the static fold of
+  # `RegExp.prototype[Symbol.<m>]` to the builtin singleton has to stop being
+  # taken when the file replaces that member, and that fold only exists there.
+  # The whole-file write scan and the Invoke lowering live in NEW leaves
+  # (`regexp-proto-symbol-writes.ts`, `regexp-proto-symbol-invoke.ts`).
+  # Also `src/codegen/property-access.ts` +1 (path already listed below,
+  # restated per the stranded-grant rule): one comment line on B6's
+  # `__StandaloneRegExp` skip in `findAlternateStructsForField`, whose condition
+  # now names `flags` beside `lastIndex` (the i32 bitfield is not §22.2.6.4's
+  # string).
+  - src/codegen/builtin-value-read.ts
 func-budget-allow:
   # 2026-09-26 — lane SC1: `buildNativeGeneratorPlan` +15 as the gate measures it
   # (path already listed below, restated per the stranded-grant rule), of which 9
@@ -8422,6 +8436,177 @@ drive already takes any constructible `C`.
 - The remaining 23 fails are unchanged and belong to D2b's residual table (`prototype/then`
   species reads, realm, `Object.prototype.toString` tag, executor/resolve-element
   `[[Prototype]]`, `exception-after-resolve-*`, `regular-subclassing`, `iter-arg-is-string`).
+
+### 2026-09-28 — Cluster B, slice B9: a replaced `RegExp.prototype[Symbol.match|search]` is observable
+
+- **Branch** `issue-6651-b9-regexp-symbol-members` (local, not pushed), base
+  `origin/main` @ `fb006fe124` + the B8 commit `4c63534366` merged in (B8 was
+  not on main at dispatch). Engine for every verdict: QuickJS (artifact
+  `073742801ba7`, adapter `d4799bda84cfed0d`), `--standalone --isolate`, 24-row
+  chunks, one runner at a time; source sha checked unchanged first→last on
+  every measured tree. Main advanced twice during the slice (B8 landed as
+  #6209, plus #6175 and others); both were merged and the verdict set was
+  re-measured on the merged tree — see "Post-merge re-verification" below.
+
+#### What was already true (measured on the base, not assumed)
+
+The WRITE lands. `RegExp.prototype[Symbol.match] = f` goes through
+`__extern_set`'s `$NativeProto` arm into the RegExp brand companion
+(`__protoidx_norm_key` admits Symbol carriers), and every RUNTIME-keyed reader
+already saw it: an aliased `p[Symbol.match]`,
+`gOPD(RegExp.prototype, Symbol.match).value`, and `r[Symbol.match]` on both a
+typed and an `any` RegExp answered `f` (probes `.tmp/b9/p/m2.js`, `m4.js`,
+passing on base). The B8 residual note ("needs the seeded mutable own-property
+table") was therefore half right: the table exists; three COMPILE-TIME answers
+bypassed it.
+
+#### What landed
+
+1. **The literal read-back** (`builtin-value-read.ts`, +3):
+   `tryCompileStandaloneBuiltinProtoIteratorRead` folded
+   `RegExp.prototype[Symbol.<m>]` to the builtin singleton. It now declines when
+   the file writes that member, and the ordinary computed read consults the
+   companion. The whole-file write scan is a NEW pure-syntax leaf,
+   `regexp-proto-symbol-writes.ts` (assignment of any operator, `delete`,
+   `Object|Reflect.defineProperty(RegExp.prototype, Symbol.<m>, …)`, for
+   `match|matchAll|replace|search|split`; cached per source file).
+2. **The companion holds the builtin BEFORE the write** (`array-holes.ts`, +4):
+   the pre-scan arms `protoMemberDirty` on such a write, so the seeder installs
+   the builtin `@@<id>` entries (`assert.notSameValue(originalSearch,
+   undefined)` reads the member BEFORE the replacement; with the static fold
+   declined and nothing seeded that read `undefined`).
+3. **`String.prototype.{match,search}(string)` Invokes `rx[@@<m>]`**
+   (`string-search-value.ts` +34, NEW leaf `regexp-proto-symbol-invoke.ts`):
+   §22.1.3.11/.17 step 5 is `Invoke(RegExpCreate(…), @@<m>, «S»)`; the coerced
+   lane lowered the builtin body inline. In a file that replaces the member it
+   now does `__extern_get(rx, @@<m>)` → IsCallable → TypeError /
+   `__apply_closure(F, rx, «S»)`.
+4. **The same Invoke for the other two spellings in such a file**: a RegExp
+   ARGUMENT (`"s".match(re)` — step 2, `Call(GetV(re, @@match), re, «O»)`,
+   gated on `ctx.oracle.wellKnownSymbolMemberOf(arg, protocol) === true`), and
+   B3's direct spelling `re[Symbol.<m>](…)` (`regexp-symbol-protocol-call.ts`
+   +7: the Get runs before the arguments, §13.3.6.1). Neither is in the
+   manifest; both are the same defect and were one call each.
+5. **`anyRegExp.flags` read the i32 bitfield** (`property-access.ts`, the B6
+   line widened): `thisVal.flags` on an untyped receiver went through the
+   `__get_member_flags` struct-field arm, which reads `$NativeRegExp.flags` raw
+   (`1` for `/a/g`, probe `m6.js`); `findAlternateStructsForField` now skips
+   that slot exactly as B6 skips `lastIndex`, so the read falls to
+   `__extern_get`, whose B4 prologue runs §22.2.6.4. This was the last blocker
+   on all three rows (`assert.sameValue(thisVal.flags, '')`).
+
+#### Measurements
+
+| set | rows | before | after | Δ |
+| --- | ---: | ---: | ---: | --- |
+| manifest `B-regexp-protocol.txt`, standalone | 147 | 131 pass / 16 fail / 0 CE (`.tmp/b9/bm-chunk-0*.log`, base tree `.tmp/basetree`) | **134** / 13 / 0 (`.tmp/b9/am-chunk-0*.log`, frozen source `aeb5b3e3…` first→last) | **+3, 0 pass→non-pass** |
+
+The three flips are exactly the targets: `String.prototype.match/invoke-builtin-match`,
+`search/invoke-builtin-search{,-searcher-undef}`. Every after non-pass row was
+non-pass before, same status.
+
+#### Controls
+
+- **Reach, by construction.** Mechanisms 1-4 fire only in a file whose AST
+  writes `RegExp.prototype[Symbol.<m>]` (or defines/deletes it); mechanism 5
+  only where a member access / dispatcher is keyed on the NAME `flags`. The
+  candidate set is every test262 row whose source contains
+  `RegExp.prototype[` or `defineProperty(RegExp.prototype, Symbol` (194), every
+  row whose BODY (frontmatter stripped — `flags:` metadata is not code) names
+  the identifier `flags` (107), the `["flags"]` spelling (1), and the manifest —
+  **346 rows**, plus a control sample of 52 non-candidates (40 random from
+  `built-ins/RegExp` + `String.prototype.{match,search,replace,split}`, 12 from
+  `Array`/`Object`/class expressions). No harness file writes a RegExp
+  prototype symbol member or names `flags` in code (`wellKnownIntrinsicObjects.js`
+  mentions `RegExp.prototype[Symbol.matchAll]` inside a string only).
+- **Byte differential** (compile-only, primary + strict rerun, BOTH targets,
+  base = `.tmp/basetree`, `git archive` of the base commit): 398 rows, 746
+  (row, target) pairs, **730 identical, 16 changed — all standalone, 0 host**;
+  none of the 52 control rows changed.
+- **Verdicts on every changed row** (`.tmp/b9/v{b,a}-sa.log`, `--isolate`):
+  base 1 pass / 15 fail → after **4 pass** / 12 fail. The +3 are the targets;
+  `Symbol.split/species-ctor-y` passes on both; the other 12
+  (`Symbol.matchAll/isregexp-called-once`, five `String.prototype.matchAll/*`,
+  six `language/statementList/eval-*-regexp-literal*`) fail on both, same
+  assertion — the matchAll ones because `String.prototype.matchAll` never
+  consults a replaced `@@matchAll` (no Invoke lane; out of the manifest), the
+  statementList ones on `Object.getPrototypeOf(<regexp>) === RegExp.prototype`
+  (the B8 `gPO` finding, below).
+- **Zero pass→non-pass.**
+- **Byte identity** `website/playground/examples/**` + 3 benchmarks, both
+  targets: **32/32 identical** (`.tmp/b9/bytes-{base,after}.txt`).
+- `node scripts/equivalence-gate.mjs`: 22 failing = the 22 known.
+  `pnpm run check:ir-fallbacks`: OK.
+- **Pins**: `tests/issue-6651-b9-regexp-proto-symbol-override.test.ts` (3
+  test262 rows) and `…-inline.test.ts` (4 programs) — **7/7 red on the base
+  tree** (`.tmp/b9/pin-ONBASE.log`), green after. B-family and neighbour pins,
+  one worker, `VITEST_FORK_MAX_OLD_SPACE_SIZE=2048` (`.tmp/b9/pins-after.log`):
+  B3, B4, B5 ×4, B6 ×2, B7 ×2, B8 ×2, exec protocol, `string-symbol-protocol`,
+  `issue-3794`, `issue-6662`, `issue-6665`, `issue-6677`, `issue-4556`
+  builtin-proto override, `issue-4176` all green; the 7 failures are the
+  `issue-3051.test.ts` host-lane cases that fail identically on the base tree
+  (same 7 names, `.tmp/b9/pin-ONBASE.log`).
+- Gates (bare): loc (grant above), func, coercion-sites, oracle-ratchet,
+  dead-exports, typecheck, biome lint, compiler-boundaries inventory — all
+  exit 0.
+
+#### Post-merge re-verification
+
+`origin/main` @ `d31c9c98d2` (B8 landed, #6175 lodash-es RegExp work, ~18
+`src` files) was merged and the whole control set re-run against a fresh
+`git archive` of that commit: manifest **131 → 134**, the identical 13-row
+non-pass set as above (`.tmp/b9/r2/`); byte differential over the same 398
+rows, **16 standalone changed (the same 16 rows), 0 host**; verdicts on them
+1 → 4 pass, the same three flips; 32/32 playground/benchmark binaries
+identical; equivalence gate 22 = 22 known; `check:ir-fallbacks` OK; all 23
+B-family/neighbour pin files 204 pass + the 7 known `issue-3051` host-lane
+failures, which fail identically on that base (where all 7 B9 pins are red). Gates
+re-run bare, incl. `LOC_GATE_BASE=d31c9c98d2` loc/func: all exit 0. Main then
+advanced to `5bfc069422` (#6210/#6212/#6213/#6214, no file shared with this
+slice except this plan file and `compiler-boundaries.json`); merged — the only
+conflict was this section (the G4 entry landed at the same anchor; both kept,
+chronological) — and the manifest re-run on the final tree (`.tmp/b9/am-chunk-0*.log`, frozen source `933f40f5…`): **134 / 13 / 0**, the same 13-row non-pass set; B9 pins 7/7; every gate re-run bare incl. `LOC_GATE_BASE=5bfc069422` loc/func — all exit 0.
+
+#### Recorded narrowings
+
+- A **typed binding of the result** keeps its declared shape: in a file that
+  replaces `@@search`, `var n; n = "x".search("a")` inside a function types `n`
+  `number` (the declared return), so a replacement returning an object reads
+  back `NaN`. The rows (and the pin) use an untyped module-level binding.
+- A write through an ALIAS (`var p = RegExp.prototype; p[Symbol.match] = f`)
+  is not recognised by the whole-file scan; such a file keeps the pre-B9
+  compile-time answers.
+- `String.prototype.{replace,split}(regexp)` with a replaced `@@replace` /
+  `@@split` still call the builtin (their RegExp-argument lanes are separate
+  sites; no manifest row needs them). `matchAll` has no Invoke lane at all.
+- The step-2 lowering for a RegExp argument throws the Call's TypeError directly
+  when the member was DELETED, skipping steps 3-4 (`ToString(O)`,
+  `RegExpCreate`), which end in the same TypeError — only a user `toString`
+  could observe the difference.
+
+#### The B8 side finding (`var t = r.test` on an `any` RegExp) — root-caused, not landed
+
+`__extern_get` on a `$NativeRegExp` reaches `%RegExp.prototype%` only through
+the companion's terminal-miss consult, and the companion is seeded only under
+`protoMemberDirty`; a file whose only dynamic proto use is `r.test` never arms
+it, so the read answers `undefined` (probe `.tmp/b9/p/w2.js`; with any
+`Object.getPrototypeOf` in the file it passes). A pre-scan arm ("an untyped
+`.exec|.test|.compile` in a file that creates a RegExp") fixed the probe, but
+five harness files carry such reads (`temporalHelpers.js` alone is included by
+~2,800 rows), so the byte reach was thousands of rows; it was reverted rather
+than landed unmeasured. The narrower lever is a `$NativeRegExp` arm in the
+companion miss that answers the glue's method singletons without seeding.
+`Object.getPrototypeOf(anyRegExp)` answering `null` (the six
+`statementList/eval-*-regexp-literal*` rows) is a separate `gPO` arm gap.
+
+#### Residuals in the manifest (13)
+
+| rows | first failure | what it needs |
+| ---: | --- | --- |
+| 8 | `*/cross-realm` (6), `proto-from-ctor-realm`, `@@split/splitter-proto-from-ctor-realm` | `$262.createRealm` — wont-fix per definition of done |
+| 2 | `exec/{failure,success}-lastindex-access` | value-rep (B8's table, unchanged) |
+| 2 | `String.prototype.indexOf/searchstring-tostring-{errors,toprimitive}` | spec ToString at the argument site, cluster H (unchanged) |
+| 1 | `@@split/coerce-flags-err` | cluster C `__module_init` null-deref (unchanged) |
 
 ## Handoff — 2026-09-21 (round 1 closed, round 2 ready to dispatch)
 
