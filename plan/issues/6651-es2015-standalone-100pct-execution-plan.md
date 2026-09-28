@@ -4,7 +4,7 @@ title: "ES2015 standalone → 100%: cluster execution plan from the 2026-09-20 c
 status: in-progress
 sprint: current
 created: 2026-09-20
-updated: 2026-09-28
+updated: 2026-09-27
 priority: high
 horizon: xl
 feasibility: hard
@@ -465,16 +465,6 @@ loc-budget-allow:
   # +5, the one dispatch line (and its comment) at the dynamic-argument exit,
   # which has to sit where `__combinator_to_vec` would otherwise be chosen.
   # Both paths are already listed below (D2 / F2).
-  # 2026-09-28 — cluster D slice D3 (compiled-CLASS receiver for
-  # `Promise.{all,race,allSettled,any}.call(C, iterable)`). The mechanism —
-  # Construct(C, «executor») through the native construct driver, the step-wise
-  # drive with IteratorClose, and the four element/finish bodies — is the NEW
-  # leaf `src/codegen/promise-class-receiver-drive.ts`. `call-namespace-static.ts`
-  # +4: one import and the one dispatch line (plus its comment) in the `.call`
-  # aggregator arm, which has to sit after D1's function-constructor arm and
-  # before the `env::Promise_<method>` host-import fall-through it replaces.
-  # `promise-combinators.ts` +0 (an `export` on `ensureSettledAnyCombinators`,
-  # whose AggregateError builder the `any` finish reuses). Path already listed.
   # 2026-09-23 — cluster G slice G2: `statements/for-of-destructuring.ts` +22 —
   # the `emitHoleBoundaryBeforeDefault` helper (a 1-line body under a comment
   # naming the #2001 invariant it enforces) and its four call sites, each placed
@@ -908,6 +898,16 @@ loc-budget-allow:
   #     before the `__array_from_iter_n` materialisation it must precede.
   - src/codegen/statements/loops.ts
   - src/codegen/iterator-native.ts
+  # 2026-09-28 — cluster D slice D3 (compiled-CLASS receiver for
+  # `Promise.{all,race,allSettled,any}.call(C, iterable)`). The mechanism —
+  # Construct(C, «executor») through the native construct driver, the step-wise
+  # drive with IteratorClose, and the four element/finish bodies — is the NEW
+  # leaf `src/codegen/promise-class-receiver-drive.ts`. `call-namespace-static.ts`
+  # +4: one import and the one dispatch line (plus its comment) in the `.call`
+  # aggregator arm, which has to sit after D1's function-constructor arm and
+  # before the `env::Promise_<method>` host-import fall-through it replaces.
+  # `promise-combinators.ts` +0 (an `export` on `ensureSettledAnyCombinators`,
+  # whose AggregateError builder the `any` finish reuses). Path already listed.
 func-budget-allow:
   # 2026-09-28 — cluster D slice D4: `compileHostInstanceOf` +2 (the standalone
   # Promise-subclass `instanceof` arm — its body is `tryEmitPromiseSubclassInstanceOf`
@@ -1054,9 +1054,6 @@ func-budget-allow:
   # dispatch line described under the LOC grant (dynamic-iterable all/race →
   # `emitStandalonePromiseCombinatorDrive`, with the legacy drain as fallback).
   # The key is already listed below.
-  # 2026-09-28 — cluster D slice D3: `compileNamespaceStaticCall` +3, the one
-  # class-receiver dispatch line described under the LOC grant
-  # (`tryEmitClassReceiverCombinatorCall`). Key already listed below.
   # 2026-09-23 — cluster G, slice G2: `compileForOfAssignDestructuring` +4, the
   # four one-line `emitHoleBoundaryBeforeDefault` calls. Each has to follow the
   # specific `array.get` whose value the next line's default test reads; the
@@ -1288,6 +1285,9 @@ func-budget-allow:
   - src/codegen/statements/loops.ts::compileForOfIterator
   - src/codegen/statements/loops.ts::compileForOfArray
   - src/codegen/iterator-native.ts::fillNativeIteratorLateArms
+  # 2026-09-28 — cluster D slice D3: `compileNamespaceStaticCall` +3, the one
+  # class-receiver dispatch line described under the LOC grant
+  # (`tryEmitClassReceiverCombinatorCall`). Key already listed below.
 coercion-sites-allow:
 # 2026-09-26 — lane TA1: `to-locale-string-element.ts` is a NEW file, so its
 # baseline is 0 and every textual mention of a native name counts as growth
@@ -8207,6 +8207,111 @@ base: every one of those rows passes — `compile/pattern-string-invalid{,-u}`,
   (probes `w15`/`w20`); the typed spelling works. The `$NativeRegExp` carrier
   has no `__extern_get` proto-walk arm (Map has none either; Date does).
 
+### 2026-09-27 — Cluster G, slice G4
+
+For-of step-loop protocol, and two non-iterable array-assignment sources.
+Opus 5 High. Base `origin/main` @ `c2601efa89`; branch
+`issue-6651-g4-forof-step-protocol` (not pushed). Engine `quickjs` for every
+verdict. A pristine `git archive` of `src/` was taken before the first edit
+(`.tmp/g4/base/src`), so every base number below was run, not inherited.
+
+| standalone, G manifest (134 rows, sha256 `e68a764a…`), `--isolate`, 24-row chunks, all exits 0 | pass | non-pass |
+| --- | ---: | ---: |
+| before (measured here) | 55 | 79 |
+| after | **59** | 75 |
+
+**+4, 0 lost**: `for-of/{iterator-next-reference, iterator-next-result-type,
+array-key-get-error}` and `for-of/dstr/array-elision-val-symbol`.
+
+#### What changed (three new leaves; god-files carry call sites only)
+
+1. **`forof-iterator-step.ts`** — §7.4.1 stores `next` in the Iterator Record
+   once; §7.4.4 step 3 makes a non-Object `next()` result a TypeError. The
+   shared native `__iterator_next` re-read `next` per step and degraded a falsy
+   result to `done` — a degradation the internal drains (spread, `Array.from`,
+   the flattenable bridge) rely on, so it is not changed. The for-of loop owns
+   its locals, so it now caches the method in a LOCAL:
+   `__forof_next_method(rec)` once after GetIterator, then
+   `__forof_step(rec, next)` per iteration — the OBJ-kind twin of the shared
+   step (same carrier-branched result reads) plus the Object check; every other
+   record kind forwards to `__iterator_next`. Reserve-then-fill: the bodies are
+   minted as forwarders and rebuilt by `fillNativeIteratorLateArms` where the
+   OBJ carrier deps exist. No `$__IterRec` field was added (that type is in
+   every iterating module). **Gate:** only a subject STATICALLY typed as an
+   object / class instance / function / `Iterable`-family type takes it; arrays,
+   strings, Map/Set, typed arrays, generators and `any` keep the shared step, so
+   untyped code — the example/benchmark corpus — keeps its bytes (an ungated
+   first cut changed 5/32 standalone corpus files).
+2. **`forof-array-overlay-read.ts`** — `%ArrayIteratorPrototype%.next` does
+   `Get(array, i)`, so an index accessor must run (and may throw). The direct
+   array loop read the dense backing. Behind the SAME compile-time gate as the
+   typed-lane route (`overlayRouteActive`: a non-data descriptor define, an index
+   delete or an inherited numeric write anywhere in the module), an
+   `externref`-element loop now reads through `__extern_get_idx`. Regexp-match
+   vecs, `arguments` roots and numeric vecs are excluded, as in the typed lane.
+3. **`dstr-non-iterable-guard.ts`** — `__array_from_iter_n` passes a
+   non-drainable source through to the positional readers (#2904), so it cannot
+   decide "not iterable". (a) The for-of assignment-destructuring path throws on
+   a `$Symbol` carrier before the materialisation. (b) `[a] = {x: 1}` throws
+   when `ctx.oracle.wellKnownSymbolMemberOf(rhs, "iterator") === false`. Both
+   are declined when the program could make the value iterable after typing it:
+   `protoIndexDirty` / `dynamicCodeDirty`, and a text gate — for (b) any
+   `iterator` / `setPrototypeOf` / `__proto__` in the file, for (a)
+   `Symbol.prototype` / `setPrototypeOf` / `__proto__`. The text gate for (b) is
+   there because a probe caught the first cut: `var q = {x: 1};
+   q[Symbol.iterator] = f; [a, b] = q` — the checker still types `q` as
+   `{x: number}`, and the ungated check threw where base iterated.
+
+#### Controls — zero pass → non-pass
+
+- **Reach set** (AST scan, `.tmp/g4/scan-reach.mts`): every test262 row whose
+  source or an included harness file has a `ForOfStatement` or an array
+  assignment pattern — 7,490 rows. 5,206 are in the CI standalone baseline
+  (2026-09-27 16:37, 48,735 entries); the other 2,284 are `intl402/**` and
+  `staging/**`, outside the scored standalone corpus.
+- **Harness**: all 34 `test262/harness/*.js` compiled alone, base vs new —
+  byte-identical on host (separate processes) and on standalone except
+  `testIntl.js` (overlay route), which NO scored row includes. A 61-row sample of
+  the 1,926 harness-driven scored rows, compiled assembled: identical.
+- **Fire detection** (instrumented snapshot, standalone): the 3,280 body rows
+  compiled bare (one row, `TypedArray/prototype/subarray/coerced-begin-end-shrink.js`,
+  exhausts the heap on base as well) → 30 exact for-of-step rows and 690
+  overlay/Symbol-guard CANDIDATES (flags ignored); the candidates recompiled
+  assembled with exact counters → 133 overlay, 54 Symbol guard, 0 `[a] = struct`.
+- **Verdicts on all 217 rows whose bytes change**, base vs new, standalone,
+  in-process 200-row chunks, one runner, all chunk exits 0 (`.tmp/g4/ctl-v/`):
+
+| target | before pass | after pass | pass → non-pass | non-pass → pass |
+| --- | ---: | ---: | ---: | ---: |
+| standalone | 151 | 155 | **0** | **4** (the manifest four) |
+
+  No non-pass row changed status kind. Host: every hook is standalone/WASI-only;
+  a 44-row sample of the 217 compiled on host is byte-identical.
+- 32/32 `website/playground/examples/` + `benchmarks/` byte-identical on host
+  and standalone. `equivalence-gate`: 22 failing / 1,720 passing, 22 known, no
+  new. `check:ir-fallbacks` OK.
+- Pins: `tests/issue-6651-g4-forof-step-protocol.test.ts`, 7 cases, **5 RED on
+  base** (file-copy A/B), 7/7 new. 73 related suites (`issue-6651-g*`,
+  for-of / iterator / dstr / 3119 / 3146 / 5131 / 4159 / 2038 / 3100 / 5267 /
+  6484) on new: 66 files green; the failures reproduce identically on base
+  (`issue-4159-4160-prescan-flags` ×13, `issue-3119` non-callable ×1,
+  `issue-43-fexp-obj-dstr` ×1, `issue-dstr-requireobj` ×1,
+  `symbol-async-iterator` ×2) except `issue-3024-packed-array-dstr-normalize`,
+  a 25 s compile timeout under load that passed on re-run.
+- Gates, bare: typecheck, biome (errors), loc/func budgets local and
+  `LOC_GATE_BASE=origin/main` (grants above, dated), coercion-sites,
+  oracle-ratchet, dead-exports, compiler-boundaries inventory (three new leaves
+  classified).
+
+#### Residuals / not attempted
+
+| rows | finding |
+| ---: | --- |
+| 1 | `for-of/map.js` — not fixed. Alias propagation in `array-rebind-element-widening.ts` (`first = second` carries `second`'s write domains; `x = null` as no evidence) widens `first`/`second` to externref elements and passed the probe on HOST, but standalone reads of a widened binding still go through the checker's element type: `(string\|number)[]` reads `true` back as `1` (`«true» vs «1»`), and a `first[0] === 0` probe regressed. Reverted. Needs element reads that honour the widened carrier — #1888 territory, not a slice. |
+| — | An `any`-typed for-of subject keeps the lenient step (the corpus byte-identity gate). A spec-exact OBJ step for it needs a runtime-only switch that costs no bytes when unused. |
+| — | USER-kind records (a closed-struct iterator driven through `__call_next`) are not type-checked per step; only OBJ records are. |
+| — | Pre-existing on base, seen while pinning: `class C { *[Symbol.iterator]() {…} }` iterated at module scope hangs standalone; a class whose `[Symbol.iterator]()` returns an object literal throws; `[a, b] = "xy"` binds wrong values. |
+
 ### 2026-09-28 — Cluster D, slice D3
 
 - **Branch** `worktree-agent-a9876d4a9769a4f10`, worktree
@@ -8402,111 +8507,6 @@ promise whose `constructor` is `C` — first).
 **Gate.** Everything above is `--target standalone` and keyed on a class whose builtin root is
 `Promise`; the gc lane and every module with no such class are byte-identical by construction
 (checked, not assumed — controls below).
-
-### 2026-09-27 — Cluster G, slice G4
-
-For-of step-loop protocol, and two non-iterable array-assignment sources.
-Opus 5 High. Base `origin/main` @ `c2601efa89`; branch
-`issue-6651-g4-forof-step-protocol` (not pushed). Engine `quickjs` for every
-verdict. A pristine `git archive` of `src/` was taken before the first edit
-(`.tmp/g4/base/src`), so every base number below was run, not inherited.
-
-| standalone, G manifest (134 rows, sha256 `e68a764a…`), `--isolate`, 24-row chunks, all exits 0 | pass | non-pass |
-| --- | ---: | ---: |
-| before (measured here) | 55 | 79 |
-| after | **59** | 75 |
-
-**+4, 0 lost**: `for-of/{iterator-next-reference, iterator-next-result-type,
-array-key-get-error}` and `for-of/dstr/array-elision-val-symbol`.
-
-#### What changed (three new leaves; god-files carry call sites only)
-
-1. **`forof-iterator-step.ts`** — §7.4.1 stores `next` in the Iterator Record
-   once; §7.4.4 step 3 makes a non-Object `next()` result a TypeError. The
-   shared native `__iterator_next` re-read `next` per step and degraded a falsy
-   result to `done` — a degradation the internal drains (spread, `Array.from`,
-   the flattenable bridge) rely on, so it is not changed. The for-of loop owns
-   its locals, so it now caches the method in a LOCAL:
-   `__forof_next_method(rec)` once after GetIterator, then
-   `__forof_step(rec, next)` per iteration — the OBJ-kind twin of the shared
-   step (same carrier-branched result reads) plus the Object check; every other
-   record kind forwards to `__iterator_next`. Reserve-then-fill: the bodies are
-   minted as forwarders and rebuilt by `fillNativeIteratorLateArms` where the
-   OBJ carrier deps exist. No `$__IterRec` field was added (that type is in
-   every iterating module). **Gate:** only a subject STATICALLY typed as an
-   object / class instance / function / `Iterable`-family type takes it; arrays,
-   strings, Map/Set, typed arrays, generators and `any` keep the shared step, so
-   untyped code — the example/benchmark corpus — keeps its bytes (an ungated
-   first cut changed 5/32 standalone corpus files).
-2. **`forof-array-overlay-read.ts`** — `%ArrayIteratorPrototype%.next` does
-   `Get(array, i)`, so an index accessor must run (and may throw). The direct
-   array loop read the dense backing. Behind the SAME compile-time gate as the
-   typed-lane route (`overlayRouteActive`: a non-data descriptor define, an index
-   delete or an inherited numeric write anywhere in the module), an
-   `externref`-element loop now reads through `__extern_get_idx`. Regexp-match
-   vecs, `arguments` roots and numeric vecs are excluded, as in the typed lane.
-3. **`dstr-non-iterable-guard.ts`** — `__array_from_iter_n` passes a
-   non-drainable source through to the positional readers (#2904), so it cannot
-   decide "not iterable". (a) The for-of assignment-destructuring path throws on
-   a `$Symbol` carrier before the materialisation. (b) `[a] = {x: 1}` throws
-   when `ctx.oracle.wellKnownSymbolMemberOf(rhs, "iterator") === false`. Both
-   are declined when the program could make the value iterable after typing it:
-   `protoIndexDirty` / `dynamicCodeDirty`, and a text gate — for (b) any
-   `iterator` / `setPrototypeOf` / `__proto__` in the file, for (a)
-   `Symbol.prototype` / `setPrototypeOf` / `__proto__`. The text gate for (b) is
-   there because a probe caught the first cut: `var q = {x: 1};
-   q[Symbol.iterator] = f; [a, b] = q` — the checker still types `q` as
-   `{x: number}`, and the ungated check threw where base iterated.
-
-#### Controls — zero pass → non-pass
-
-- **Reach set** (AST scan, `.tmp/g4/scan-reach.mts`): every test262 row whose
-  source or an included harness file has a `ForOfStatement` or an array
-  assignment pattern — 7,490 rows. 5,206 are in the CI standalone baseline
-  (2026-09-27 16:37, 48,735 entries); the other 2,284 are `intl402/**` and
-  `staging/**`, outside the scored standalone corpus.
-- **Harness**: all 34 `test262/harness/*.js` compiled alone, base vs new —
-  byte-identical on host (separate processes) and on standalone except
-  `testIntl.js` (overlay route), which NO scored row includes. A 61-row sample of
-  the 1,926 harness-driven scored rows, compiled assembled: identical.
-- **Fire detection** (instrumented snapshot, standalone): the 3,280 body rows
-  compiled bare (one row, `TypedArray/prototype/subarray/coerced-begin-end-shrink.js`,
-  exhausts the heap on base as well) → 30 exact for-of-step rows and 690
-  overlay/Symbol-guard CANDIDATES (flags ignored); the candidates recompiled
-  assembled with exact counters → 133 overlay, 54 Symbol guard, 0 `[a] = struct`.
-- **Verdicts on all 217 rows whose bytes change**, base vs new, standalone,
-  in-process 200-row chunks, one runner, all chunk exits 0 (`.tmp/g4/ctl-v/`):
-
-| target | before pass | after pass | pass → non-pass | non-pass → pass |
-| --- | ---: | ---: | ---: | ---: |
-| standalone | 151 | 155 | **0** | **4** (the manifest four) |
-
-  No non-pass row changed status kind. Host: every hook is standalone/WASI-only;
-  a 44-row sample of the 217 compiled on host is byte-identical.
-- 32/32 `website/playground/examples/` + `benchmarks/` byte-identical on host
-  and standalone. `equivalence-gate`: 22 failing / 1,720 passing, 22 known, no
-  new. `check:ir-fallbacks` OK.
-- Pins: `tests/issue-6651-g4-forof-step-protocol.test.ts`, 7 cases, **5 RED on
-  base** (file-copy A/B), 7/7 new. 73 related suites (`issue-6651-g*`,
-  for-of / iterator / dstr / 3119 / 3146 / 5131 / 4159 / 2038 / 3100 / 5267 /
-  6484) on new: 66 files green; the failures reproduce identically on base
-  (`issue-4159-4160-prescan-flags` ×13, `issue-3119` non-callable ×1,
-  `issue-43-fexp-obj-dstr` ×1, `issue-dstr-requireobj` ×1,
-  `symbol-async-iterator` ×2) except `issue-3024-packed-array-dstr-normalize`,
-  a 25 s compile timeout under load that passed on re-run.
-- Gates, bare: typecheck, biome (errors), loc/func budgets local and
-  `LOC_GATE_BASE=origin/main` (grants above, dated), coercion-sites,
-  oracle-ratchet, dead-exports, compiler-boundaries inventory (three new leaves
-  classified).
-
-#### Residuals / not attempted
-
-| rows | finding |
-| ---: | --- |
-| 1 | `for-of/map.js` — not fixed. Alias propagation in `array-rebind-element-widening.ts` (`first = second` carries `second`'s write domains; `x = null` as no evidence) widens `first`/`second` to externref elements and passed the probe on HOST, but standalone reads of a widened binding still go through the checker's element type: `(string\|number)[]` reads `true` back as `1` (`«true» vs «1»`), and a `first[0] === 0` probe regressed. Reverted. Needs element reads that honour the widened carrier — #1888 territory, not a slice. |
-| — | An `any`-typed for-of subject keeps the lenient step (the corpus byte-identity gate). A spec-exact OBJ step for it needs a runtime-only switch that costs no bytes when unused. |
-| — | USER-kind records (a closed-struct iterator driven through `__call_next`) are not type-checked per step; only OBJ records are. |
-| — | Pre-existing on base, seen while pinning: `class C { *[Symbol.iterator]() {…} }` iterated at module scope hangs standalone; a class whose `[Symbol.iterator]()` returns an object literal throws; `[a, b] = "xy"` binds wrong values. |
 
 ## Handoff — 2026-09-21 (round 1 closed, round 2 ready to dispatch)
 
