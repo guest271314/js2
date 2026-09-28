@@ -14824,3 +14824,188 @@ log remains preserved separately from the successful retry. Evidence lives in
 .tmp/boolean-getter/second-validation, second-quality, second-provider and
 second-provider-retry. Normal commit/push hooks and protected main delivery
 remain required; no full Get,712 or migration completion is claimed.
+
+
+## Claimed continuation — prototype-chain native bodies (2026-09-28)
+
+Claim `3518:prototype-chain-native-bodies-delivery-20260928` is held by
+`ttraenkler/codex-prototype-chain-delivery-20260928` on isolated branch
+`codex/3518-prototype-chain-delivery-20260928`, based on published 25f4ec456c.
+Recover and review the existing prototype-chain-bodies draft before writing
+replacement code. Preserve its original failures and all older worktrees.
+Root owns integration and validation; the draft audit is read-only until its
+exact source/test scope and current-main composition are established.
+
+The current public consumer still refuses unmaterialized ordinary callable
+providers. Native object lookup owns hash/key equality/find/lookup/has only;
+it is not a public Get implementation, and status2 is not an absent property.
+Native prototype requirements are source provenance only. Default creation
+still requires its real implicit-prototype companion. The continuation must
+preserve these honest refusals until the actual required owners are complete.
+
+The original unmodified getter/Number fixture remains the full integration
+target (SHA256 c0550b99175c0eb61afa7d5d110a287f3fe90e9fc8e581c6d58a19fe0a971ba9,
+expected result712): valueOf getter once, returned function once, toString
+not invoked. Pure body extraction is a prerequisite, not proof of this target.
+Complete public Get/Has must preserve lookup cursor versus original receiver,
+real prototype fallback, and no getter invocation by Has. Constructors/member
+providers, dependency graph reservation/fill, Number-owned Get demands and
+canonical physical ABI wiring remain required. Keep legacy operational and
+retain its comparison behavior; do not retire or change defaults.
+
+
+The draft audit confirms six reusable files are still at their frozen hashes:
+legacy prototype adapter, new pure prototype-chain body builder, its exact
+extraction receipt/helper, and full preservation/execution suites. The current
+25f adapter matches the draft donor byte for byte. Port those six files exactly;
+merge only this issue, the existing boundary test's native entry, and the policy
+row/floor. Keep all 1,657 current policy rows, add the one new native leaf and
+raise native floor82 to83 while retaining backend floor37.
+
+An open-PR overlap check found only the older Deno checkpoint PR5784: its
+adapter change adds fillErrorPrototypeArms at the start of fillObjectProtoSingleton.
+Keep that future join visible; do not incorporate or overwrite the separate
+Deno work. The body extraction must leave that function's implementation
+outside its four authorized extraction spans.
+
+The original draft measured 27/27 preservation and349/349 boundary checks;
+its first six execution failures were missing global fills in the test owner.
+The corrected fixture passed6/6 and retains original failed bytes. Its legacy
+cohort remains29/42 with two failures and11 skips: missing QuickJS artifact,
+unexpected success of an it.fails prototype-call case, and missing test262
+harness. Its prepared quality runner never ran; its legacy runner's hardcoded
+TS7 field is not evidence. Preserve all original logs and measure this new base.
+
+Current validation plan: TS7 plus complete preservation/execution/boundary
+suites. Supply verified pinned test262 harness and authenticated QuickJS
+artifact for the unchanged four legacy suites. Compare unexpected it.fails
+success against exact published parent before considering an assertion repair;
+never count missing prerequisites or skipped rows as passing. Required quality
+gates and full normal hooks remain mandatory before publication. This stage
+supplies real reusable chain-body construction, not a finished public Get path.
+
+Exact-parent control on 25f4ec456c1c609629e046ab0f920dcbc8adee9a reproduced
+the stale expected-failure marker in the original prototype-call test: its
+unchanged assertion returns 1, so Vitest reports "Expect test to fail". The
+selected control retained 2,211 unchanged inputs (19 other rows were filtered,
+not validated). Preserve the original test and terminal record; change only
+this case from it.fails to it and correct its stale comment. The assertion and
+source program remain unchanged. This is a pre-existing test expectation repair,
+not a behavior improvement credited to the extraction.
+
+Current-base validation: TS7 passed with 2,265 unchanged inputs. The first
+complete three-suite run passed 381/382: all 27 preservation and six Wasm
+execution cases passed; one boundary assertion expected the newly appended
+chain owner before the existing seeder owner. Preserve the original failure
+in .tmp/prototype-validation-first. Correct only the assertion ordering to
+retain the historical policy order; the targeted rerun passed 1/1 with 348
+other boundary rows filtered, not retested. No production bytes changed after
+the full run. Quality checks and prerequisite-backed legacy validation are
+still outstanding, so this increment is not ready for publication.
+
+Legacy dependency validation now uses all 44 pinned harness files and a
+new canary-verified QuickJS adapter built from the frozen compiler sources.
+The initial corrected-environment run passed34/35 across three suites; an
+incorrect short filename omitted the class suite, so that run is not four-suite
+evidence. The actual class-suite filename was then run separately; retain
+its terminal/result record in .tmp/prototype-class-check. The inherited-in
+residual unexpectedly passes on both candidate and exact25f parent with
+byte-identical harness inputs; both failure records remain preserved.
+
+Ownership audit found claims held by ttraenkler/dev-4643 and
+ttraenkler/claude-es5-standalone for the affected historical test issues.
+Leave the 4643 test untouched. Withdraw this session's local 4637 marker repair
+from deliverable files until ownership is reconciled, preserving its proposed
+bytes and measured20/20 result in local artifacts. No claims were stolen or
+released. Current original-suite expectations therefore retain two proven
+pre-existing failures; do not claim the current legacy suite is green.
+
+The previously omitted class collision suite passed8/8 (no skipped rows),
+with2,267 unchanged inputs. All eight scoped quality gates passed: format,
+lint, LOC, function budget, coercion, oracle, compiler boundary inventory and
+legacy reachability, with2,217 unchanged inputs. Evidence lives under
+.tmp/prototype-class-check and .tmp/prototype-quality. An existing native
+subagent is investigating the two historical claims read-only; do not infer
+abandonment from claim age or take ownership without reconciliation.
+
+
+### Prototype-chain delivery refresh (2026-09-28)
+
+PR6205 is verified delivered at45ce4a8e with102 merge-group conformance shards,
+CI, differential and regression gates passed. Fresh main is3eb7ae5da3951641b97c1af2e9fc27a0c7c41435.
+Integrate it into signed prototype checkpoint4914b413; preserve both complete
+issue append records. The boundary inventory merges automatically and must
+retain every upstream entry plus the extracted prototype-chain module.
+Keep the six implementation/fixture/test files byte-identical to4914; run the
+complete execution, preservation and boundary suites on the integrated tree,
+then the quality gates. Historical4637/4643 tests remain unchanged under their
+existing claims. This is preparation for protected delivery, not main delivery.
+
+Integrated-tree validation passed TS7 and all382/382 rows across the three
+complete execution, preservation and boundary suites, with zero skipped or
+failed rows and2,267 unchanged inputs. All eight scoped quality gates passed
+with2,219 unchanged inputs. The inventory retains all1,659 upstream entries
+byte-for-byte and adds only the prototype-chain runtime module. The six
+implementation/fixture/test files remain byte-identical to4914b413. Evidence:
+.tmp/prototype-main-validation and .tmp/prototype-main-quality. Full commit
+hooks and protected upstream delivery are still required. Existing historical
+legacy-test expectation failures remain explicitly outside this green result.
+
+Prototype PR6237 refresh after metadata delivery: integrate verified main
+1032526d, preserving the full delivered metadata record and this increment's
+record. Main's intervening npm-report refresh changes no compiler inputs.
+Keep all prototype source, fixtures and tests unchanged; run normal commit
+and push gates before updating the existing PR, then verify queue admission
+for the new exact head. No main delivery is claimed for this increment yet.
+
+Prototype PR6237 second integration (2026-09-28): main6b69edbf delivered
+the parallel ES2015 Promise-subclass/RegExp changes. Preserve all of those
+source/test changes and every upstream inventory entry; add only the existing
+prototype runtime entry and its declared module floor. Seven prototype
+implementation/test files remain byte-identical to2da72f87. Revalidate the
+combined tree before updating the existing PR; do not rewrite the ES2015 fixes
+or use the former green head as evidence for this new integration.
+
+The second integrated tree passed TS7 and382/382 scoped tests (zero skipped),
+with2,273 unchanged inputs; all eight scoped quality gates passed. The current
+QuickJS provider rebuilt and passed its execution canaries against2,016 pinned
+source inputs. Six inherited B10 corpus rows were provisioned from repository
+pin b363f29d without overwriting existing corpus files. Full normal hooks and
+protected delivery remain required; this is not a full migration parity claim.
+Evidence: .tmp/prototype-second-validation, .tmp/prototype-second-quality,
+and .tmp/prototype-second-provider.
+
+Boolean PR6240 prototype-main integration (2026-09-28): merge verified
+main35563219 after prototype PR6237 delivery. The only conflict was this
+issue record; preserve the complete previous record and exact incoming
+append. All13 nonshared Boolean source/test files remain byte-identical
+toc39d797c, including the lifecycle repair. All14 nonshared incoming paths
+match delivered main, and the inventory is the exact1,666-row union.
+The publishedc39 CI changed-root stage succeeded; its overall quality job
+was still running the required guard suite at the last observed result.
+Revalidate all439 Boolean/getter, prototype and boundary test rows together,
+the quality gates and normal hooks before updating the existing PR.
+This integration is not delivered until exact-head protected main ancestry
+and content are verified. The legacy compiler stays operational.
+
+The integrated Boolean/prototype tree passed TS7 and439/439 rows across
+six complete suites, zero failures or skips, with2,278 unchanged inputs.
+All eight scoped quality checks passed with2,228 unchanged inputs; the
+source-bound QuickJS adapter rebuilt and passed canaries against2,018
+unchanged source inputs. Preservation witnesses pass6/6, but strict runtime
+closure remains open and retirement is not certified. The full published
+c39 CI quality job also completed successfully:406/406 rows across four
+suites, including all15 getter cases. The getter suite took457.947seconds
+in CI versus237.301seconds locally; no timeout or assertion was relaxed.
+Evidence: .tmp/boolean-getter/prototype-validation, prototype-quality,
+prototype-provider, and second-refresh/quality-repair-evidence.json.
+Normal signed commit/push hooks and protected main delivery remain required.
+
+The first normal commit attempt stopped at the oracle ratchet: its default
+origin merge-base selected stale upstream history (434 changed source files
+and333 root tests), attributing already-delivered checker sites to this PR.
+Both reported files, native-addition.ts and regexp-standalone.ts, are byte
+identical to verified main35563219. Preserve the failure log; retry the same
+normal hooks with their supported LOC_GATE_BASE and CHANGED_ROOT_TESTS_BASE
+set to that verified main commit. No allowance, source, gate, timeout, or
+assertion is changed. Evidence: prototype-main-refresh/commit.log.

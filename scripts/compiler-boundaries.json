@@ -359,9 +359,10 @@
         "src/runtime/wasmgc/values/prototype-layouts.ts",
         "src/runtime/wasmgc/values/prototype-singleton-bodies.ts",
         "src/runtime/wasmgc/values/own-property-bodies.ts",
-        "src/runtime/wasmgc/values/prototype-seeder-bodies.ts"
+        "src/runtime/wasmgc/values/prototype-seeder-bodies.ts",
+        "src/runtime/wasmgc/values/prototype-chain-bodies.ts"
       ],
-      "minModules": 82
+      "minModules": 83
     },
     {
       "id": "standalone-platform",
@@ -14113,6 +14114,11 @@
       "destination": "backend-wasmgc",
       "owner": "3518-coordinator",
       "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."
+    },
+    {
+      "path": "src/runtime/wasmgc/values/prototype-chain-bodies.ts",
+      "state": "clean",
+      "layer": "native-runtime"
     }
   ]
 }
