@@ -48,8 +48,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 10244,
-    "fail": 1442,
+    "pass": 10246,
+    "fail": 1440,
     "ce": 18,
     "skip": 0,
     "total": 11704,
@@ -210,12 +210,12 @@
       },
       {
         "name": "Symbol.match",
-        "pass": 66,
-        "fail": 10,
+        "pass": 68,
+        "fail": 8,
         "ce": 0,
         "skip": 0,
         "total": 76,
-        "pct": 87
+        "pct": 89
       },
       {
         "name": "Symbol.replace",

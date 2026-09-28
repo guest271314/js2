@@ -41,6 +41,7 @@
  * pre-existing loud refusal — when a helper is unavailable.
  */
 import type { ValType } from "../ir/types.js";
+import { ts } from "../ts-api.js";
 import { emitEvolvingNullishReceiverGuard } from "./builtin-prototype-brand.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { ensureLateImport, flushLateImportShifts } from "./shared.js";
@@ -49,6 +50,26 @@ const OWN_PREDICATE_NATIVE: ReadonlyMap<string, string> = new Map([
   ["hasOwnProperty", "__hasOwnProperty"],
   ["propertyIsEnumerable", "__propertyIsEnumerable"],
 ]);
+
+/**
+ * The DIRECT syntactic `….hasOwnProperty.call(X, k)` /
+ * `….propertyIsEnumerable.call(X, k)` keeps its legacy lowering (the #3021
+ * `(X).hasOwnProperty(k)` introspection fold), exactly as #4119 keeps
+ * `Object.prototype.toString.call` on its fold. Before this module wired a
+ * body, the reflective `.call` interception (calls.ts) declined for these
+ * members — the refusal made `ensureStandaloneNativeMethodClosure` yield
+ * nothing — and the fold won. The fold reads the receiver ARGUMENT's static
+ * type and answers a class CONSTRUCTOR from its static surface; the runtime
+ * `__hasOwnProperty` has no class-object arm (#5195 R2-2), so routing the
+ * direct form through this closure answered `true` for
+ * `Object.prototype.hasOwnProperty.call(C, "field")` — 124 standalone
+ * class/elements rows (merge_group run 36285181870). Value-erased spellings
+ * (`var hop = objectProto.hasOwnProperty; hop.call(o, k)` — lodash-es) give
+ * the fold no receiver to read and keep the closure.
+ */
+export function objectOwnPredicateCallKeepsFold(ifaceName: string, member: string, receiver: ts.Expression): boolean {
+  return ifaceName === "Object" && OWN_PREDICATE_NATIVE.has(member) && ts.isPropertyAccessExpression(receiver);
+}
 
 export function emitObjectProtoOwnPredicateBody(
   ctx: CodegenContext,
