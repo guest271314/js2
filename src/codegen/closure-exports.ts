@@ -22,6 +22,7 @@ import {
   buildClosureMethodArgument,
   buildClosureReferenceArgument,
 } from "../runtime/wasmgc/values/closure-argument-bodies.js";
+import { buildVariadicBuiltinMethodCallArm, restoreThisKeepResult } from "./apply-closure-variadic-builtin.js"; // (#6701)
 import { ts } from "../ts-api.js";
 import { STABLE_FUNC_BASE } from "../emit/resolve-layout.js";
 import type { FuncTypeDef, Instr, ValType, WasmExport, WasmFunction } from "../ir/types.js";
@@ -1453,6 +1454,9 @@ export function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number,
     boxNumberIdx,
   };
   body.push(...buildTransferredNativeProtoCallInstrs(ctx, nativeProtoReceiverEntries, arity, npArgs));
+  // (#6701) Math.max/min / String.fromCharCode values take ONE packed-args vec.
+  const restoreThis = restoreThisKeepResult(resultSaveLocal, prevThisLocal, currentThisGlobalIdx);
+  body.push(...buildVariadicBuiltinMethodCallArm(ctx, arity, anyLocal, restoreThis));
 
   const linkedArgsLocal = prevThisLocal + 3;
   let funcrefDispatch: Instr[] =

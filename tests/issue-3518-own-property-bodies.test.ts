@@ -1,5 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { readFileSync } from "node:fs";
+import { beforeArrayMainRefresh } from "./helpers/array-main-refresh-port.js";
 import ts from "typescript";
 import type { Instr } from "../src/wasm/model/instructions.js";
 import { describe, expect, it } from "vitest";
@@ -17,7 +18,8 @@ import {
 } from "./helpers/own-property-extraction.js";
 const read = (p: string) => readFileSync(new URL(`../${p}`, import.meta.url), "utf8");
 const receipt = ownPropertyReceipt(),
-  current = read(receipt.path),
+  rawCurrent = read(receipt.path),
+  current = beforeArrayMainRefresh(receipt.path, rawCurrent),
   donor = applyOwnPropertyExtraction(current, true);
 /** Executes the actual adapter spans with real prologue constructors; records construction, not native authority. */
 function capture(source: string, bits: number) {
@@ -72,11 +74,11 @@ describe("eager own-property donor preservation", () => {
   it.each(Array.from({ length: 16 }, (_, i) => i))(
     "preserves definitions/acquisition order for optional providers %s",
     (bits) => {
-      expect(capture(current, bits)).toStrictEqual(capture(donor, bits));
+      expect(capture(rawCurrent, bits)).toStrictEqual(capture(donor, bits));
     },
   );
   it("reads the bag provider again for the second independently registered predicate", () => {
-    const result = capture(current, 31);
+    const result = capture(rawCurrent, 31);
     expect(result).toStrictEqual(capture(donor, 31));
     expect(JSON.stringify(result.definitions)).toContain('"funcIdx":81');
   });

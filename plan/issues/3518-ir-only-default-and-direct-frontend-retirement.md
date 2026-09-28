@@ -14258,3 +14258,68 @@ or gate was changed for this increment.
 All eight final quality gates pass against exact upstream 5bfc0694, with
 2,197 unchanged inputs. The original three inherited compatibility failures
 remain documented; the additional ABI validation is 51/51 across two runs.
+
+
+### PR6205 refresh over native array-receiver repairs (2026-09-28)
+
+Delivery claim `3518:pr6205-native-resource-delivery` remains held by
+`ttraenkler/codex-ir-delivery-20260927`. Fresh upstream main is
+`bb41a01224b8173818f4e4cde86f1fdf1905d8aa`, following the incoming array-receiver
+repair. Exact published head `90a0219f954857012e70c0ca6c2f3bc5d71397b4` passed
+its PR checks but has not landed; GitHub reports a conflict and no queue entry.
+Auto-merge was disarmed before this refresh.
+
+Implementation plan: preserve all incoming production/tests/benchmark bytes
+except the two explicitly composed adapters. Union the boundary inventory by
+path, retaining existing classifications and both new unmigrated helpers.
+Retain both closure runtime imports and the variadic builtin import; preserve
+the new dispatch arm order and current-this restoration. Preserve object-runtime
+helper extraction together with new variadic scratch reservation and dispatch.
+Record any changed complete-source preservation witnesses as a new exact
+forward/reverse span receipt, retaining old fixtures, hashes and negatives.
+Run the incoming runtime regressions and affected IR source-preservation suites
+serially, then required quality checks and normal hooks. Re-arm the protected
+queue only for the new verified published head; count delivery only after
+upstream main ancestry and content are verified.
+
+
+The exact main refresh preserved all 20 non-shared incoming files byte for
+byte. Only the boundary inventory, closure exports and object-runtime adapter
+compose contributions from both parents. The inventory now has 1,652 entries;
+both new array helpers remain honestly unmigrated. A separate seven-span
+receipt authenticates the three changed adapter files against actual Git
+objects and the live imported variadic helper. Old fixtures remain unchanged.
+
+Current merged TS7 passed; 22 complete suites measured 892/922 passed, with
+30 failures, no pending rows and 2,236 unchanged pinned inputs. One newly
+written wrong-direction negative expected the wrong diagnostic: the old
+closure import still exists uniquely but moved from offset 1097 to 1220.
+Its exact offset-rejection assertion was corrected, retaining the positive
+round trip and all other negative controls. The complete new receipt suite
+then passed 73/73 with 2,218 unchanged inputs. These are composed results,
+not a new all-green 922-row run. All incoming runtime regressions passed.
+
+The other 29 failures are pre-existing in the unchanged 100-row native closure
+resource suite. An isolated exact-parent
+`90a0219f954857012e70c0ca6c2f3bc5d71397b4` control passed 71/100 and reproduced
+all 29 failures. All 100 statuses and full failure messages match after
+normalizing only the two worktree prefixes; all 2,198 control inputs stayed
+unchanged. No assertion, fixture or gate was weakened to hide these failures.
+
+Deferred preservation follow-up: upstream
+`e765c7fb29449ffefa99784b78db766c8555c936` added the Object.create comment and
+metadata row in `src/codegen/builtin-fn-meta.ts`. The file is byte-identical
+on 90a, 5bfc, bb41 and the merged tree, blob
+`a898c6e57391ad2f6aee3bd694462eab721e4808`. The original donor inverse expects
+a later return at line 308, now 310. Add a separate authenticated historical
+inverse/replay for this exact two-line addition before that original donor
+inverse, preserving its fixture digest and all 100 tests. Do not put it into
+the unrelated array-main receipt or interpret it as a runtime regression.
+
+All eight current quality gates pass with 2,217 unchanged inputs. Commands
+ran serially at observed nice 10 with a single 4 GB test worker. The
+reachability gate remains preservation-only and does not certify retirement.
+Reports and original failures remain under `.tmp/ir6205-refresh/array-*`;
+exact-parent control evidence is recorded in
+`array-main/closure-parent-control.json`. Main was reread as exact bb41 before
+commit. Required CI, queue admission and verified main delivery remain ahead.
