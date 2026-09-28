@@ -14258,3 +14258,250 @@ or gate was changed for this increment.
 All eight final quality gates pass against exact upstream 5bfc0694, with
 2,197 unchanged inputs. The original three inherited compatibility failures
 remain documented; the additional ABI validation is 51/51 across two runs.
+
+### Frozen Boolean/getter draft delivery — implementation plan (2026-09-28)
+
+The upstream slice `3518:boolean-getter-native-resource-delivery-20260928`
+is owned by `ttraenkler/codex-boolean-getter-delivery-20260928`. Root acquired
+and reread that claim and delegated this existing increment to B. Work is
+isolated in `codex/3518-boolean-getter-delivery-20260928`, based on exact
+published `90a0219f954857012e70c0ca6c2f3bc5d71397b4`; it does not change the
+published PR6205 parent or its delivery claim. Dependent publication waits for
+that parent to land.
+
+Port the existing 16-file frozen draft from
+`codex/3518-getter-native-resources-20260927` on
+`637a810dc268bb7aa516aaffd08c0f72379d7c43`. Verify and copy the 13 nonshared
+files byte for byte from `freeze-fifth.json`; all seven existing production
+donors remain identical at the published parent, and all six new paths are
+absent. The only composition is additive: retain this issue's complete parent
+prefix and append the draft history; union the Boolean frontend classification
+and primitive-boundary backend entry into the current policy; combine the
+boundary test's actual dependency closure and expected suffix with current
+prototype layout/seeder entries. Raise only the current backend floor from
+37 to 38 for the new backend entry. Retain native-runtime floor 82, every
+previous classification, signed digest, activation record, allowed edge,
+negative fixture and source receipt.
+
+The implementation remains the already measured Boolean return producer,
+authenticated native Boolean provider/resource binding, and issued getter
+invocation dependency join. The existing 4,347-character `nativeNumberBinding`
+declaration/body is relocated unchanged apart from its export. The explicit
+Boolean return proof grants only canonical boxing from the selected original
+body; omitted or foreign selection and non-Boolean returns retain the legacy
+path. No new runtime admission, public ordinary Get, prototype completion,
+arbitrary-any unary-plus conversion or legacy retirement is authorized. The
+original 712 target and dynamic ToNumber fixture remain open obligations.
+
+Prior donor evidence is scoped to its original parent: TS7 and 57/57 focused
+rows passed with 2,187 unchanged inputs; compatibility measured 690/697 with
+2,200 unchanged inputs. Four legacy claim failures were reproduced on exact
+637a, while three boundary-fixture corrections in the fifth snapshot remain
+unmeasured. Preserve those records and do not present the port as validated.
+Root owns serial current-parent validation: TS7, the complete Boolean-return
+30, public-Boolean 12, getter-resource 15 and current semantic-boundary 349
+suites (406 proposed rows), followed by required gates and normal hooks.
+This port performs only source/metadata preparation and light checks, with no
+heavy tests, commits, pushes, PR changes or queue actions.
+
+The following donor notes are preserved verbatim as historical implementation and
+validation records; their earlier pending actions do not expand the plan above.
+
+### Genuine getter and Boolean physical resource join — implementation plan (2026-09-27)
+
+R owns the isolated `codex/3518-getter-native-resources-20260927` tree on signed
+base `637a810dc268bb7aa516aaffd08c0f72379d7c43`. Preserve the prior getter
+checkpoint and every existing test. The next join changes native-string-values,
+native-invocation-abi, program-physical-plan, program-consumer, and narrow
+additive Boolean declaration/inventory helpers in native-booleans. A new
+backend/program/native-boolean-abi leaf owns canonical Boolean provider and
+logical/physical signature reconciliation. Add new getter-resource and Boolean
+consumer regressions, with only additive policy/boundary metadata. Prototype,
+seeder, ordinary-object storage/descriptor and public Get owners remain separate.
+
+Derive and retain actual issued source/getter invocation requirements before
+selecting native string/value resources. Genuine getter uses require the same
+value/scanner owner and invocation error literals even when there is no source
+call/apply operation. Revalidation must retain exact program/projection/source
+and keyed result proof authority; no invented source call or arbitrary Boolean
+needs flag may grant resources. Existing no-demand and numeric/string behavior
+must stay intact. The old number-boundary aggregate already owns the canonical
+primitive types, undefined global and scanner; reuse that single owner rather
+than allocating another Boolean type or lifted function population.
+
+Select Boolean BOX only from actual admitted getter dispatch entries or native
+Boolean intrinsic attachments. A native extraction needs the exact selected
+Get/result producer proof; a raw or data-only extraction with no current proof
+remains a located acceptance gap. Validate complete canonical manifest provider,
+policy, attachment and logical Boolean brand separately from its physical i32
+carrier. Reserve declared Boolean functions and true/false globals before the
+one ledger freeze, pass the identical value plan/pack/dependency object into C2,
+fill the owners before invocation bodies, and assert completion afterward.
+Keep interned and allocating resource recipes explicit; choose the actual
+consumer's mode in its frozen recipe, never from a truthy provider flag.
+
+Measure original and decoded genuine numeric/Boolean/capturing getter resource
+selection with zero source-call uses and the actual selected C1 associations.
+Exercise derived resources through actual C2 method0 bodies. Add supported real
+Boolean source programs through acceptance, emission and native execution,
+using a separate source Number reader where needed to observe returned boxed
+values. Preserve source/decoded proof, provider, policy, foreign/copied/stale
+owner and missing-BOX negatives before allocation. Assert that unresolved
+ordinary create/descriptor/Get/prototype providers still prevent acceptance;
+resource selection alone never certifies public Get or the original 712 target.
+
+No legacy retirement/default flip, allowance increase, fake Get, source-call
+fabrication or prototype carve-out is part of this change. Record initial
+failures and frozen input pins, then run focused TS7/runtime checks and required
+gates/normal signed hooks before creating an unpushed checkpoint.
+
+The physical planner must remain within its existing structural limits. Move the existing `nativeNumberBinding` and its exact validation contract to the new `native-primitive-boundary-abi.ts` leaf alongside Boolean binding; retain the old native string ABI diagnostics and predicate order. Extract the physical planner's existing intrinsic-materialization predicate to a private helper without changing admitted providers. No budget allowance or baseline change is part of this work.
+
+
+### Boolean return producer follow-up and preserved first measurement (2026-09-27)
+
+The first frozen native-resource run (handle62554) passed TS7 and executed
+23 rows: all15 genuine getter-resource cases passed, while all8 public Boolean
+consumer cases stopped before runtime at the explicit `any` result annotation
+(`unsupported type in Phase 1 (box)`). There were zero skipped/pending rows or
+unhandled errors, and all2,185 inputs stayed unchanged. The original12-file
+snapshot, exact unary-plus source, reporter rows and terminal receipt remain
+in `.tmp/getter-native-resources-20260927/first-source-snapshot/` and
+`validation-first/`. This is not public Boolean execution evidence.
+
+The authorized producer repair owns only the branded-Boolean return arm in
+`from-ast.ts`, two source-planner calls in `program-source.ts`, and a new
+frontend Boolean-return helper. Keep the general primitive annotation parser
+and `any` parameters closed. A synchronous explicit `any` result is only a
+candidate when its own return expressions are checker Boolean-like and its
+source control flow has no possible implicit return. Nested function returns
+belong to their own owners. After real lowering, audit all normal return
+terminators and nested early returns: each actual returned reference must
+trace to canonical `js.boolean.box` over a Boolean-branded IR input. Trace
+representation aliases, value joins and block arguments; unproved mutable
+reference slots or control-flow exits stay unsupported. Assertions alone
+never grant a Boolean carrier. The existing non-Boolean scalar return refusal
+remains intact. Add paired local/join/early-return positives and missing,
+mixed, nested-only, cast, unbranded integer and unsupported-parameter negatives.
+
+The exact original `read(value: any): number { return +value; }` program remains
+a recorded full-goal gap: arbitrary dynamic ToNumber is not provided by a
+permissive numeric unbox or a TypeScript return annotation. The bounded public
+execution milestone uses the actual box-only source, Node Boolean results,
+and an explicitly labelled emitted Boolean classifier/payload observer, with
+real Number-box negatives. This does not claim public Get/prototype completion
+or close the original712 target. Heavy tests wait for the next assigned lane;
+B owns the released lane while this producer repair proceeds code-only.
+
+The retained dynamic unary-plus gap is semantic, not just an annotation parser
+restriction: `runtime/wasmgc/values/number-bodies.ts` `buildUnboxNumberBody`
+handles null, i31, native Number/Boolean/string carriers, then generic NaN.
+It does not supply Symbol/BigInt TypeErrors or observable object ToPrimitive.
+Consequently this change never routes arbitrary `any` unary plus through that
+payload reader. The new frontend audit is inventoried as a mixed source/IR
+helper, without raising a clean-layer floor or changing allowed edges.
+
+Compatibility inspection found the unchanged `issue-2790.test.ts` explicitly
+requires the legacy Boolean-to-any escape to demote. The new semantic return
+selection therefore carries the exact original declaration into lowering and
+binds only its current builder. Omitted or foreign declarations retain the
+legacy refusal; lifted/nested bodies cannot borrow the main builder's selection,
+even when they share a terminal owner. Preserve issue2790 unchanged in the
+compatibility cohort, alongside direct omission/foreign/nested negative controls.
+The actual return audit still runs before source preparation publishes the body.
+
+The second frozen run (87466) stopped at TS7 before launching tests: the new
+source-stage audit incorrectly read `asyncRuntime`, a prepared-function-only
+field. Its full2,187 input pins remained unchanged. Remove only that invalid
+read; preserve the source async/generator refusal and core asyncPlan check.
+The third run (15009) passed TS7 and executed all54 rows with zero pending,
+skipped or unhandled errors and2,187 unchanged inputs: getter resources15/15,
+source return contracts27/30, and public Boolean consumer3/9 (45/54 total).
+Three policy/codec test rows used the wrong manifest path after their logical
+Boolean/result assertions passed; correct the path to prepared.manifest.
+The other six failures exposed the physical mapper rejecting the canonical
+BOX signature's plain i32 parameter. Retain every failure and snapshot.
+
+Map that physical i32 only after authenticating the complete canonical
+provider, provider map, intrinsic signature and attachment. Keep the logical
+Boolean source proof and unbox result brand unchanged. Add an explicit
+plain-i32 canonical BOX positive plus forged branded-i32 and f64 provider
+signature negatives before reservation. These new controls do not reinterpret
+raw integers as source Boolean authority. The next complete focused cohort is
+57 rows; runtime success remains unmeasured until that run's actual terminal.
+
+
+### Genuine Boolean execution and compatibility attribution (2026-09-27)
+
+The fourth frozen run (11620) passed TS7 and all 57 rows: 30 Boolean return
+contracts, 12 public Boolean consumer checks and 15 genuine getter-resource
+checks. It had no skipped/pending rows or unhandled errors; all 2,187 pinned
+inputs stayed unchanged. Original/decoded and both string-storage variants
+execute the public Boolean box-only source with no imports. The separately
+labelled emitted classifier/payload observer distinguishes real Boolean boxes
+from native Number boxes 0/1. Full public Get/prototype execution, the original
+712 program and arbitrary-any ToNumber remain open; this is a bounded resource
+join with the legacy path still operational.
+
+The complete 14-file compatibility run (25854) passed TS7 and executed 697 rows:
+690 passed and7 failed, with no skipped/pending rows or unhandled errors and
+all 2,200 pins unchanged. The initial human summary incorrectly claimed 694/697
+and legacy issue2790 8/8; reading every JSON row corrected it to 690/697 and4/8.
+Preserve that correction and the original reports. Twelve unaffected suites
+passed 340/340; the boundary suite passed 346/349 and the unchanged legacy suite
+passed 4/8. The retained snapshot covers 30 owned/test/source files under
+`.tmp/getter-native-resources-20260927/compatibility-source-snapshot/`.
+
+An isolated exact-parent 637a810dc268bb7aa516aaffd08c0f72379d7c43 control (50277)
+then executed the complete unchanged 8-row legacy issue2790 suite: 4 passed and
+4 failed. All 8 statuses and first error lines match the candidate; all full
+failure stacks match after normalizing only the two exact worktree prefixes.
+The Boolean-any, array-length-any, f64-any and sibling-brand rows stop at the
+same IR-claimed-false assertions on both versions. Test bytes match exactly,
+all 2,177 parent inputs stayed unchanged and neither run had unhandled errors.
+These four failures are reproduced on the unchanged parent and remain failed;
+no expectation, selector, compiler path or timeout is changed to conceal them.
+
+The three new boundary failures are test-fixture composition errors. Correct
+only the additive backend entry ordering and copy the actual transitive
+requirements/ABI dependency graph into the positive fixture: 9 ir-program
+modules and 2 backend modules. Independent syntax-node census expands the
+current fixture from 123 modules/506 edges to 134 modules/612 edges (340 type-only,
+272 runtime): the 11 new modules contribute 100 edges and existing owners gain 6.
+Keep every archival digest, old activation record, allowed edge and negative
+fixture intact. The formatter negative must reach its original forbidden-edge
+assertion after the complete closure positive passes. This correction is not
+validated until the full 349-row boundary suite and required gates execute.
+
+
+### Boolean/getter delivery validation on published parent (2026-09-28)
+
+The isolated delivery branch `codex/3518-boolean-getter-delivery-20260928`
+uses exact published parent `90a0219f954857012e70c0ca6c2f3bc5d71397b4`.
+The upstream `issue-assignments` record for
+`3518:boolean-getter-native-resource-delivery-20260928` was reread and remains
+held by `ttraenkler/codex-boolean-getter-delivery-20260928`.
+
+Current-parent TS7 passed. All four complete suites passed 406/406 rows:
+Boolean return contracts 30/30, public Boolean consumer 12/12, genuine getter
+resource joins 15/15 and semantic-provider boundaries 349/349. No rows were
+skipped or pending, and all 2,205 pinned inputs remained unchanged. This
+validates the additive boundary fixture repair described above; it does not
+turn the archived broader compatibility failures into passes.
+
+All eight scoped quality checks passed with 2,204 unchanged inputs: formatting,
+lint, LOC/function budgets, coercion vocabulary, oracle ratchet, compiler
+boundary inventory and legacy reference preservation. The preservation gate
+still reports an open graph and does not certify retirement. The sandbox
+refused process reprioritization, so these recorded commands ran at observed
+nice 0 despite requesting nice 10; the tests used a single 4 GB fork.
+Reports are retained in `.tmp/boolean-getter/validation/` and
+`.tmp/boolean-getter/quality/` in the delivery worktree.
+
+Public ordinary Get, its genuine default-prototype companion, and the full
+Number conversion provider remain open. The original 712 fixture remains
+byte-identical, SHA256
+`c0550b99175c0eb61afa7d5d110a287f3fe90e9fc8e581c6d58a19fe0a971ba9`.
+Neither numeric payload unboxing nor empty prototype seeds substitutes for
+those semantics. Legacy compilation remains operational. Publication of this
+dependent increment waits for verified parent delivery to upstream main.
