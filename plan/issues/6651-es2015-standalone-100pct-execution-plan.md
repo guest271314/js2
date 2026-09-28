@@ -169,6 +169,23 @@ assignee: "ttraenkler/fable-es2015-plan"
 #     `$__ta_ctor`, which the Int8Array `$Object` carrier is not). The first cut
 #     inlined the arm here and cost +68 / +65; extracting it left these 8.
 loc-budget-allow:
+  # 2026-09-28 — cluster D, slice D7 (receipt under `## Cluster status`).
+  #   - `src/codegen/async-scheduler.ts` +5 (NEW entry): the import, the two
+  #     comment lines and the one-line hand-off at the top of
+  #     `emitStandalonePromiseFinally` (it re-enters itself for the native arm,
+  #     so no function split), and the `intrinsic` parameter of
+  #     `emitStandalonePromiseThen` that keeps %Promise.prototype.then% itself
+  #     from re-dispatching to an own `then` (it recursed without bound on
+  #     `p.then = function () { return Promise.prototype.then.apply(this, arguments) }`).
+  #     The `Get(promise, "then")` + generic Invoke, thenFinally / catchFinally
+  #     and the value thunks live in the NEW leaf `promise-finally-invoke.ts`.
+  #   - `src/codegen/array-object-proto.ts` +1 (path already listed below,
+  #     restated per the stranded-grant rule): the comment naming the
+  #     `intrinsic` argument at the reflective `then` member body.
+  #   - `src/codegen/expressions/calls.ts` +1 (path already listed below): the
+  #     import of `isReflectivePromiseMember`, which admits the DIRECT spelling
+  #     `Promise.prototype.finally.call(x, …)` to the member closure.
+  - src/codegen/async-scheduler.ts
   # 2026-09-28 — cluster A, slice A7 (receipt under `## Cluster status`). Both
   # paths already listed below; restated per the stranded-grant rule. The write
   # semantics live in `expressions/identifier-assignment.ts`
@@ -9849,6 +9866,105 @@ side removes it (0 spurious moves).
   `var r = Custom.resolve.bind(Custom)(1)` is stored as a number (`.tmp/d6/p/r5.js`). A JS
   expando-inference question, not this lowering; no test262 row found hitting it.
 - The remaining 22 manifest fails are unchanged and belong to D2b/D3/D4/D5's residual tables.
+
+### 2026-09-28 — Cluster D, slice D7
+
+Target: D5 residual 2 — `Promise.prototype.finally` (§27.2.5.3, ES2018; its rows sit in the D
+candidate set, not the ES2015 manifest) never performed step 7, `Invoke(promise, "then",
+«thenFinally, catchFinally»)`.
+
+#### Measured first — three defects, not one
+
+Probes on base (`.tmp/d7/p/f1…f9`, `r1`): (1) `emitStandalonePromiseFinally` subscribed to the
+`$Promise` reaction list directly and never read `then` — an own `p.then`, a replaced
+`Promise.prototype.then`, a poisoned or non-callable `then` were all unobservable; (2) the DIRECT
+reflective spelling `Promise.prototype.finally.call(x, …)` — the one almost every row uses — was
+not routed anywhere (`tryEmitNativeProtoReflectiveCall` enumerated only `then`/`catch`, because
+the finally body `ref.cast` its receiver), so the call did nothing: no `then` call, no TypeError,
+`undefined` back; (3) `{resolved,rejected}-observable-then-calls` died with `Maximum call stack
+size exceeded` before reaching `finally` at all: the test262 idiom `p.then = function () { return
+Promise.prototype.then.apply(this, arguments) }` recursed because the INTRINSIC `then` body
+(`emitPromiseProtoMemberBody`) went through `emitStandalonePromiseThen`'s own-`then` override
+branch, which re-dispatched to `p.then`. D5's other residual (a dynamic `id(p).then(f)` under a
+replaced `Promise.prototype.then`) reaches no row of the candidate set outside `finally/` — the
+five rows that replace `Promise.prototype.then` are all `finally` rows — so it was not taken.
+
+#### What landed
+
+NEW leaf `src/codegen/promise-finally-invoke.ts`:
+
+| piece | what |
+| --- | --- |
+| `tryEmitObservablePromiseFinally` (hand-off at the top of `emitStandalonePromiseFinally`) | evaluates receiver and handler once, performs `Get(promise, "then")` through `__extern_get` (D5's arm answers an own bag entry, a D4 subclass chain, or `%Promise.prototype%.then`), then: receiver is a `$Promise` AND the read is the intrinsic `then` singleton (`ref.eq`) → the pre-D7 native lowering, by re-entering `emitStandalonePromiseFinally` (a per-`fctx` re-entry guard makes the nested call emit the old body); otherwise the generic arm |
+| `__promise_finally_invoke(promise, then, onFinally)` | IsCallable(`then`) or TypeError; callable `onFinally` → two fresh builtin function objects thenFinally / catchFinally (`length` 1, `name` "", no [[Construct]] — the builtin-fn-meta carrier the combinators' resolve-element functions use); `Call(then, promise, «tF, cF»)`, whose result `finally` returns |
+| `__promise_finally_handler` / `__promise_finally_thunk` | §27.2.5.3.1/.2: `Call(onFinally)`, `PromiseResolve(%Promise%, result)`, `Invoke(promise, "then", «valueThunk»)`; the thunk (`length` 0, `name` "") returns the value or throws the reason |
+| `isReflectivePromiseMember` (`calls.ts`, +1 import) | admits `finally` to the direct reflective route in exactly the modules where the hand-off applies (standalone, non-wasi, native promise carrier) |
+| `emitStandalonePromiseThen(…, intrinsic)` (`async-scheduler.ts`) | the reflective `then` member body passes `true` and skips the own-`then` override branch: %Promise.prototype.then% itself never re-dispatches |
+
+No new host import, `src/runtime.ts` untouched, `$Promise` unchanged; wasi keeps its zero-import
+unconditional lowering (pinned). Species is NOT performed: `C` is `%Promise%` (below).
+
+#### Receipt
+
+- **Branch** `issue-6651-d7-promise-finally-then` (worktree `agent-a104a5ba50691407f`), based on
+  `origin/main` @ `8fe10eab6b` + D6 (`c8ababaf70`, merged in — not on main at the start; main has
+  since absorbed it as `38f959a0b3`, tree-identical to this base). Engine
+  `JS2WASM_EVAL_ENGINE=quickjs` (artifact `073742801ba7`, adapter `968ec1c076d74cea` from the base
+  tree; the branch tree's adapter `fef1c153c66bdd0f` is byte-identical), `--standalone --isolate`,
+  24-row chunks, one runner at a time. Before-state measured on the unedited tree (`.tmp/base/src`
+  copied before the first edit). One harness lesson: the adapter key hashes `src/`, so ADDING a
+  file under `src/` while a base run is in flight makes every eval-dependent row of the remaining
+  chunks fail "quickjs provider is not built" — the first base pass was contaminated that way from
+  chunk 5 on and was re-run.
+- **Rows** — D manifest (101) ⊂ candidate set = D6's 357 ∪ all 29 `built-ins/Promise/prototype/finally/`
+  rows (368, `.tmp/d7/all.txt`):
+
+  | | pass | fail | compile_error |
+  | --- | ---: | ---: | ---: |
+  | manifest before (`.tmp/d7/base-c-*.log`) | 79 | 22 | 0 |
+  | manifest after (`.tmp/d7/new-c-*.log`) | 79 | 22 | 0 |
+  | candidate set before | 98 | 159 | 111 |
+  | candidate set after | **106** | 151 | 111 |
+
+  **+8, 0 pass→non-pass**, all under `finally/`: `invokes-then-with-{function,non-function}`,
+  `this-value-{proxy,then-not-callable,then-poisoned,then-throws,thenable}`,
+  `resolved-observable-then-calls`. Four non-pass rows change message only (residuals below).
+  The ES2015 manifest does not move.
+
+#### Controls
+
+| control | result |
+| --- | --- |
+| reach — every test262 row (built-ins, language, annexB) whose runner-assembled source names `Promise` or `finally` (`.tmp/d7/reach-all.txt`, 3,461 rows), compiled standalone on the branch (`.tmp/d7/bytes.mts`, runner's original-harness assembly and options) and flagged when the binary carries `__promise_finally_invoke` or a `__proto_method_<Promise>_then` body — the only two places this slice emits anything | **609 rows reachable** (the intrinsic `then` body exists in every module that mints it — mostly `asyncHelpers.js` includers — and the finally runtime rides with it where `Promise.prototype` is seeded); 2,852 not |
+| byte differential, base vs branch, ONE process per side | fired rows (93-row subset, both targets, both variants, same order per side): **gc 132/132 identical**, standalone 132/132 moved; the 943 rows that compile to a CE: **943/943 identical CE**; a 127-row sample of unfired rows: 119 identical, 8 moved — re-compiled in fresh same-order processes, **8/8 identical** (the D6 harness note: well-known-symbol member names depend on how much the process compiled before, so different row ORDERS alone move bytes) |
+| verdicts on every reachable row outside the candidate set (440 rows, branch; `.tmp/d7/vnew-v-*.log`) | 124 pass / 69 fail / 247 CE. The 69 fails re-run on base (`.tmp/d7/fbase-f-*.log`): **69/69 fail on base too**, 2 message-only changes (a function index in a Wasm validation message). The 247 CEs are all `standalone target emitted host imports` naming features this slice does not touch (`AsyncDisposableStack_*`, `SharedArrayBuffer_new`, `__array_from_async`, `__timer_set_timeout`, async-generator buffers, `__js_array_*`); the slice adds no import. **0 pass→non-pass** |
+| 17 playground + benchmark programs × {gc, standalone} (`.tmp/d7/pgbytes1.mts`, one process per side) | **34/34 identical** |
+| pin suite `tests/issue-6651-d7-promise-finally-invoke.test.ts` (9) | 9/9 green; on base (the suite compiled against `.tmp/base/src`) **7 red** — the two controls (ordinary pass-through / override; wasi keeps no generic arm) are green on both by design |
+| D-family and `finally` pins, one vitest process per file (27 files: the D7 suite, `issue-2903-finally`, `issue-2903`, `issue-2623-p7-finally-bridge`, `issue-2861`, `issue-2867-s2-value-escape-inference`, `issue-855`, and D6's 20) | all green except `promise-combinators` (2), `issue-2671-promise-capability` (1) and `issue-855`'s one unhandled `__call_fn_2` rejection (13/13 tests pass) — each identical on base (`.tmp/d7/pin-base-*.log`) |
+| gates | `check-loc-budget`, `check-func-budget` (both also with `LOC_GATE_BASE` = origin/main `38f959a0b3`), `check-coercion-sites`, `check:oracle-ratchet`, `check:dead-exports`, `typecheck`, `biome lint --diagnostic-level=error`, `check:host-import-policy`, `check-compiler-boundaries --mode inventory --base origin/main` (`inventoryValid: true`, the new leaf classified), `check:ir-fallbacks` (OK), `scripts/equivalence-gate.mjs` (22 failing / 1,720 passing / 22 known — no new). Grant: dated D7 note at the head of `loc-budget-allow` (`async-scheduler.ts` +5, new entry; `array-object-proto.ts` +1 and `expressions/calls.ts` +1 restated) |
+
+#### Residuals (measured, not taken)
+
+- `SpeciesConstructor(promise, %Promise%)` is not performed; `C` is always `%Promise%`. That
+  leaves `species-constructor`, `subclass-{resolve,reject}-count` (unchanged: they keep the native
+  arm, their `then` is intrinsic) and `{resolved,rejected}-observable-then-calls-PromiseResolve`
+  (now 2 of the 5 expected `then` calls instead of 0; not diagnosed further — the missing species
+  is the obvious candidate, since `PromiseResolve(MyPromise, mp2)` must return `mp2`). The generic arm is the place to add it: Get `constructor`, then
+  `@@species`, and a `Construct(C, executor)` capability for a non-`%Promise%` `C`.
+- `species-constructor-throws` (`finally.call({constructor: 0})`) now throws from the generic arm
+  (the literal has no callable `then`), but `assert.throws` reads `thrown.constructor` and reports
+  "got a undefined" — the harness's `thrown.constructor` read resolves against the `{constructor:
+  0}` literal's shape; a plain-JS probe of the same throw (`.tmp/d7/p/s2.js`, `s3.js`) sees a
+  TypeError. Not a `finally` question.
+- `rejected-observable-then-calls` now runs (no recursion) and fails with 4 of 5 expected
+  entries. Not diagnosed; the unverified lead is that the NATIVE arm's thenFinally (taken whenever
+  `then` is intrinsic) settles through `__finally_after`'s thenable job rather than performing
+  `Invoke(promise, "then", «thrower»)` on `onFinally`'s result, which changes when and how often a
+  user `then` on that result is called.
+- D5's dynamic-call residual (`id(p).then(f)` under a replaced `Promise.prototype.then`) is still
+  open; it reaches no candidate row outside `finally/`.
+
+## Handoff — 2026-09-21 (round 1 closed, round 2 ready to dispatch)
 
 ## Handoff — 2026-09-21 (round 1 closed, round 2 ready to dispatch)
 
