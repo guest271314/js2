@@ -105,6 +105,7 @@ import { emitBuiltinConstructorIdentity } from "./builtin-static-globals.js";
 import { ensureStandaloneBuiltinStaticMethodClosure } from "./builtin-value-read.js";
 import { reserveCarrierBagVisibility } from "./carrier-bag-visibility.js";
 import { buildTargetTaggedTry } from "../ir/try-table.js";
+import { promiseProtoThenMayBeReplaced } from "./promise-dynamic-member-read.js"; // (#6651 D5)
 import {
   buildPromiseSettleClosureInstrs,
   ensureAsyncDriveRuntime,
@@ -1563,6 +1564,7 @@ export function emitObservableCombinatorElement(
     buildAllResolveClosure: (elemCapsLocal) => buildObservableAllResolveClosureInstrs(ctx, observable, elemCapsLocal),
   },
 ): void {
+  const protoThenReplaceable = promiseProtoThenMayBeReplaced(ctx, fctx);
   const inputLocal = allocLocal(fctx, `__comb_observable_input_${fctx.locals.length}`, EXTERNREF);
   const resolveArgsLocal = allocLocal(fctx, `__comb_observable_resolve_args_${fctx.locals.length}`, EXTERNREF);
   const thenArgsLocal = allocLocal(fctx, `__comb_observable_then_args_${fctx.locals.length}`, EXTERNREF);
@@ -1622,6 +1624,8 @@ export function emitObservableCombinatorElement(
     { op: "call", funcIdx: carrier.subscribeFuncIdx },
   ];
   const buildNativeInvoke = (): Instr[] => {
+    // (#6651 D5) A replaceable `%Promise.prototype%.then` must be Got, not bypassed.
+    if (protoThenReplaceable) return buildNonNativeInvoke();
     const carrierBagHasIdx = ctx.funcMap.get("__carrier_bag_has");
     if (carrierBagHasIdx === undefined) return buildLegacySubscribe();
     return [

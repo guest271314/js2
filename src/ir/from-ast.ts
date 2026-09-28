@@ -888,6 +888,8 @@ export interface AstToIrOptions {
    * accepts bare `return;` and fall-through tails.
    */
   readonly returnTypeOverride?: IrType | null;
+  /** Exact source candidate; caller audits every lowered return. Omission preserves legacy lowering. */
+  readonly booleanReturnBoundary?: ts.FunctionDeclaration;
   /**
    * Map from callee function name to that callee's IR types (param +
    * return). Consulted when lowering a CallExpression whose callee is a
@@ -1357,6 +1359,7 @@ export function lowerFunctionAstToIr(
   );
   const cx: LowerCtx = {
     builder,
+    booleanReturnBuilder: options.booleanReturnBoundary === fn ? builder : undefined,
     scope,
     funcName: name,
     ownerUnitId: options.ownerUnitId,
@@ -2377,6 +2380,8 @@ interface NestedCapture {
 
 interface LowerCtx {
   readonly builder: IrFunctionBuilder;
+  /** Builder identity prevents a main-body proof leaking into lifted/nested bodies. */
+  readonly booleanReturnBuilder?: IrFunctionBuilder;
   readonly stringNumericCoercion?: AstToIrOptions["stringNumericCoercion"];
   readonly numericThrow?: AstToIrOptions["numericThrow"];
   readonly logicalVectorTypes?: AstToIrOptions["logicalVectorTypes"];
@@ -10168,22 +10173,15 @@ function coerceReturnValue(value: IrValueId, cx: LowerCtx, sourceExpression?: ts
   if (actual.kind === "val" && actual.val.kind === "externref") {
     return value;
   }
-  // Native scalar → externref needs a box helper the IR lacks; defer the whole
-  // function to legacy. (#2785) Legacy's box is now TYPE-AWARE — `coerceType(i32
-  // → externref)` picks `__box_boolean` / `__box_symbol` / `__box_number` from
-  // the value's brand — so this demote is type-correct for a `boolean`/`symbol`
-  // scalar too, not only a number. The IR still has no box primitive of its own;
-  // it inherits the type-aware box for free via demote-to-legacy.
+  // Preserve the Boolean brand at this escape edge through the canonical
+  // semantic boundary; other scalar carriers retain their existing refusal.
   const actualVal = asVal(actual);
-  // #2782 (hybrid Row 5) — the no-box NUMBER escape edge. An unboxed `f64`
-  // number returned into an `any` (externref) result is the canonical "number
-  // local / value sinks to an `any` sink" case: the IR keeps numbers unboxed
-  // (no runtime tag), so handing one to the dynamic `any` result without an
-  // explicit box would lose its identity. The IR has no box primitive, so the
-  // SAFE lowering is to demote to legacy (which boxes via `__box_number`). This
-  // is the reachable, claimable counterpart to the `lowerVarDecl` declaration
-  // gate (`proveUnboxedNumberLocal`): together they keep the value unboxed only
-  // while it is provably a pure number AND box it at the proven escape edge.
+  if (cx.booleanReturnBuilder === cx.builder && actualVal?.kind === "i32" && actualVal.boolean === true) {
+    return cx.builder.emitIntrinsic("js.boolean.box", [value]);
+  }
+  // #2782 (hybrid Row 5): an unboxed Number still requires its separate
+  // escape proof. Retain the existing legacy fallback, which boxes through
+  // __box_number; Boolean return certification grants no numeric boundary.
   if (actualVal && actualVal.kind === "f64") {
     demoteToLegacy(
       "return-type-legacy-coupling",

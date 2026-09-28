@@ -144,6 +144,38 @@ export function nodeContainsYield(root: ts.Node): boolean {
 }
 
 /**
+ * (#6651 A5) True when a native inner generator answers a FORWARDED `.throw()`
+ * / `.return()` the way the D2 close (`emitDelegateCloseForward`) models it:
+ * the inner runs its finalizers and then completes (return) or re-throws
+ * (throw). D2 drives the inner once and DISCARDS the result, so an inner that
+ * instead keeps running would be answered silently wrong — §27.5.3.7 7.b/7.c
+ * re-yield a not-done inner result and let a done `.throw()` result complete
+ * the `yield*` NORMALLY. Measured with a `catch` around the inner's yield: the
+ * outer re-threw where the spec yields the catch's value. Such an inner is:
+ * a `catch` whose try block holds a yield (the throw is caught), a `finally`
+ * around a yield that itself yields or returns (it suspends / overrides the
+ * completion), or a nested `yield*` (its own delegate may be either).
+ */
+export function isCloseTransparentGenerator(body: ts.Node): boolean {
+  let transparent = true;
+  const visit = (node: ts.Node): void => {
+    if (!transparent || isFunctionLikeScope(node)) return;
+    if (ts.isYieldExpression(node) && node.asteriskToken) transparent = false;
+    if (ts.isTryStatement(node)) {
+      const caught = !!node.catchClause && nodeContainsYield(node.tryBlock);
+      const suspendsInFinally =
+        !!node.finallyBlock &&
+        (nodeContainsYield(node.tryBlock) || (!!node.catchClause && nodeContainsYield(node.catchClause.block))) &&
+        (nodeContainsYield(node.finallyBlock) || statementContainsReturn(node.finallyBlock));
+      if (caught || suspendsInFinally) transparent = false;
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(body, visit);
+  return transparent;
+}
+
+/**
  * (#2920) A spilled destructured-param local must round-trip through a state
  * struct field, so its ValType needs a struct-construction default. Scalars and
  * nullable refs qualify; a non-null `ref` is widened to `ref_null` (matching the

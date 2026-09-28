@@ -19463,6 +19463,42 @@
           "standalone": {}
         }
       }
+    },
+    {
+      "generatedAt": "2026-09-28T09:59:02.791Z",
+      "sourceRevision": "dd6c16e73e63c7a499e338884c1e0d19c594113a",
+      "optimizationLevels": {
+        "js-host": 4,
+        "js-host-native": 4,
+        "standalone": 4
+      },
+      "packages": {
+        "lit": {
+          "jsHostNative": {},
+          "jsHost": {
+            "dynamic": 0.008812173289468737
+          },
+          "standalone": {}
+        }
+      }
+    },
+    {
+      "generatedAt": "2026-09-28T11:22:14.077Z",
+      "sourceRevision": "e16ace7ca09da0e5150e0be34b27e7891a37afe8",
+      "optimizationLevels": {
+        "js-host": 4,
+        "js-host-native": 4,
+        "standalone": 4
+      },
+      "packages": {
+        "lit": {
+          "jsHostNative": {},
+          "jsHost": {
+            "dynamic": 0.009874713428764094
+          },
+          "standalone": {}
+        }
+      }
     }
   ]
 }

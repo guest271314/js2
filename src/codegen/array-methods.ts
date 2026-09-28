@@ -55,6 +55,7 @@ import {
 import {
   emitTaDynSpeciesCreate,
   pushElemSizeForKind,
+  pushTaDynViewInBoundsLen,
   emitTaDynViewToVec,
   emitTaDynViewValidate,
   emitTaDynViewWriteF64Vec,
@@ -1640,10 +1641,18 @@ function emitDynViewSpeciesMethodTwoArm(
     { op: "ref.cast", typeIdx: dynIdx },
     { op: "local.set", index: dvLocal },
   );
-  emitTaDynViewValidate(ctx, fctx, dvLocal);
-  const f64VecIdx = emitTaDynViewToVec(ctx, fctx, dvLocal);
-  const matLocal = allocLocal(fctx, `__dvs_mat_${fctx.locals.length}`, { kind: "ref", typeIdx: f64VecIdx });
-  fctx.body.push({ op: "local.set", index: matLocal });
+  // `%TypedArray%.prototype.subarray` does not use ValidateTypedArray: a
+  // detached/out-of-bounds source contributes a zero source length, then its
+  // begin/end conversions remain observable before species construction. The
+  // other producer methods do validate and materialize their source first.
+  let f64VecIdx: number | undefined;
+  let matLocal: number | undefined;
+  if (methodName !== "subarray") {
+    emitTaDynViewValidate(ctx, fctx, dvLocal);
+    f64VecIdx = emitTaDynViewToVec(ctx, fctx, dvLocal);
+    matLocal = allocLocal(fctx, `__dvs_mat_${fctx.locals.length}`, { kind: "ref", typeIdx: f64VecIdx });
+    fctx.body.push({ op: "local.set", index: matLocal });
+  }
 
   const boxNumIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
   if (boxNumIdx === undefined) return abandon();
@@ -1709,6 +1718,7 @@ function emitDynViewSpeciesMethodTwoArm(
 
   let outputSpecies: number | undefined;
   if (methodName === "map") {
+    if (f64VecIdx === undefined || matLocal === undefined) return abandon();
     const sourceLen = allocLocal(fctx, `__dvs_map_len_${fctx.locals.length}`, { kind: "i32" });
     fctx.body.push(
       { op: "local.get", index: matLocal },
@@ -1729,6 +1739,7 @@ function emitDynViewSpeciesMethodTwoArm(
     if (!mapped) return abandon();
     copySpeciesResult(outputSpecies, mapped, sourceLen);
   } else if (methodName === "filter") {
+    if (matLocal === undefined) return abandon();
     const savedBind = fctx.localMap.get(name);
     fctx.localMap.set(name, matLocal);
     const r = compileMaterializedMethod();
@@ -1745,6 +1756,7 @@ function emitDynViewSpeciesMethodTwoArm(
     if (outputSpecies === undefined) return abandon();
     copySpeciesResult(outputSpecies, filtered, filtered.lenLocal);
   } else if (methodName === "slice") {
+    if (matLocal === undefined) return abandon();
     const savedBind = fctx.localMap.get(name);
     fctx.localMap.set(name, matLocal);
     const r = compileMaterializedMethod();
@@ -1761,22 +1773,39 @@ function emitDynViewSpeciesMethodTwoArm(
     if (outputSpecies === undefined) return abandon();
     copySpeciesResult(outputSpecies, sliced, sliced.lenLocal);
   } else {
-    // subarray: the method does not materialize/copy. Compute the normalized
-    // element window, then pass the backing buffer and byte tuple to species.
+    // subarray: snapshot source length without ValidateTypedArray or a
+    // materialized vec. §23.2.3.30 then observes begin, computes the byte
+    // offset, and only then observes end.
+    const kind = allocLocal(fctx, `__dvs_sub_kind_${fctx.locals.length}`, { kind: "i32" });
+    const elemSize = allocLocal(fctx, `__dvs_sub_es_${fctx.locals.length}`, { kind: "i32" });
     const sourceLen = allocLocal(fctx, `__dvs_sub_len_${fctx.locals.length}`, { kind: "i32" });
     fctx.body.push(
-      { op: "local.get", index: matLocal },
-      { op: "struct.get", typeIdx: f64VecIdx, fieldIdx: 0 },
-      { op: "local.set", index: sourceLen },
+      { op: "local.get", index: dvLocal },
+      { op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 },
+      { op: "local.set", index: kind },
     );
+    pushElemSizeForKind(fctx, kind);
+    fctx.body.push({ op: "local.set", index: elemSize });
+    pushTaDynViewInBoundsLen(ctx, fctx, dvLocal, elemSize);
+    fctx.body.push({ op: "local.set", index: sourceLen });
     const begin = allocLocal(fctx, `__dvs_sub_begin_${fctx.locals.length}`, { kind: "i32" });
-    const end = allocLocal(fctx, `__dvs_sub_end_${fctx.locals.length}`, { kind: "i32" });
     if (callExpr.arguments.length >= 1) {
       compileExpression(ctx, fctx, callExpr.arguments[0]!, { kind: "f64" });
       fctx.body.push({ op: "i32.trunc_sat_f64_s" });
     } else fctx.body.push({ op: "i32.const", value: 0 });
     fctx.body.push({ op: "local.set", index: begin });
     emitClampIndex(fctx, begin, sourceLen);
+    const byteOffset = allocLocal(fctx, `__dvs_sub_off_${fctx.locals.length}`, { kind: "i32" });
+    fctx.body.push(
+      { op: "local.get", index: dvLocal },
+      { op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 },
+      { op: "local.get", index: begin },
+      { op: "local.get", index: elemSize },
+      { op: "i32.mul" },
+      { op: "i32.add" },
+      { op: "local.set", index: byteOffset },
+    );
+    const end = allocLocal(fctx, `__dvs_sub_end_${fctx.locals.length}`, { kind: "i32" });
     const endArg = callExpr.arguments.length >= 2 ? callExpr.arguments[1]! : undefined;
     const endUndefined = endArg !== undefined && ts.isIdentifier(endArg) && endArg.text === "undefined";
     if (endArg !== undefined && !endUndefined) {
@@ -1794,25 +1823,6 @@ function emitDynViewSpeciesMethodTwoArm(
       { op: "local.set", index: subLen },
     );
     emitClampNonNeg(fctx, subLen);
-    const kind = allocLocal(fctx, `__dvs_sub_kind_${fctx.locals.length}`, { kind: "i32" });
-    const elemSize = allocLocal(fctx, `__dvs_sub_es_${fctx.locals.length}`, { kind: "i32" });
-    const byteOffset = allocLocal(fctx, `__dvs_sub_off_${fctx.locals.length}`, { kind: "i32" });
-    fctx.body.push(
-      { op: "local.get", index: dvLocal },
-      { op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 },
-      { op: "local.set", index: kind },
-    );
-    pushElemSizeForKind(fctx, kind);
-    fctx.body.push(
-      { op: "local.set", index: elemSize },
-      { op: "local.get", index: dvLocal },
-      { op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 },
-      { op: "local.get", index: begin },
-      { op: "local.get", index: elemSize },
-      { op: "i32.mul" },
-      { op: "i32.add" },
-      { op: "local.set", index: byteOffset },
-    );
     const bufferArg = allocLocal(fctx, `__dvs_sub_buffer_${fctx.locals.length}`, { kind: "externref" });
     fctx.body.push(
       { op: "local.get", index: dvLocal },
