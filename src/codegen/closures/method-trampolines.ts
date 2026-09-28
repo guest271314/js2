@@ -531,7 +531,8 @@ export function emitObjectMethodAsClosure(
     typeIdx: allocTypeIdx !== undefined && metaSlot ? allocTypeIdx : allocationStructTypeIdx,
   });
 
-  return { kind: "ref", typeIdx: structTypeIdx };
+  // (#6651 A8) A generator METHOD's value carries its own `prototype` (§15.5.4).
+  return initializeNativeGeneratorFunctionValue(ctx, fctx, memberDecl, { kind: "ref", typeIdx: structTypeIdx });
 }
 
 /**

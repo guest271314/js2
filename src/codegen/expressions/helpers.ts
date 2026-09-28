@@ -20,6 +20,7 @@ import { stringConstantExternrefInstrs } from "../native-strings.js";
 import { addStringConstantGlobal } from "../registry/imports.js";
 import { coerceType, compileExpression, valTypesMatch } from "../shared.js";
 import { ensureLateImport, flushLateImportShifts } from "./late-imports.js";
+import { isStrictContext } from "../helpers/is-strict-function.js";
 export { tryCompileCallableStaticField } from "./static-callable-field.js";
 
 // (#3191 — bloat S1) The JS-error-throw lowering was hoisted into the
@@ -104,6 +105,18 @@ export function isConstIdentifierAssignmentTarget(
     if (
       (ts.isClassDeclaration(declaration) || ts.isClassExpression(declaration)) &&
       writeIsInsideOwnClassBody(declaration, id)
+    ) {
+      return true;
+    }
+    // (#6651 A8) A named function expression's own name is the same kind of
+    // binding (§15.2.5 CreateImmutableBinding): a STRICT write — simple,
+    // compound, update or destructuring, from the body or a nested closure —
+    // throws a TypeError (§9.1.1.1.5 step 5). A sloppy write is ignored, so it
+    // does not take this arm. The name resolves here only inside the function.
+    if (
+      ts.isFunctionExpression(declaration) &&
+      declaration.name?.text === id.text &&
+      isStrictContext(id, ctx.inferModuleStrictArguments)
     ) {
       return true;
     }
