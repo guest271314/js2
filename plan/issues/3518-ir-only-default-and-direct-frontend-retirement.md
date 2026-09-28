@@ -14884,3 +14884,45 @@ after its main-conflict repair. Preserve the complete Get record and prior
 415/415 validation evidence. Authenticate the before/after input comparison;
 no production source or script changes are permitted in this refresh. Normal
 commit hooks will validate the final combined tree before publication.
+
+Prototype PR6237 second integration (2026-09-28): main6b69edbf delivered
+the parallel ES2015 Promise-subclass/RegExp changes. Preserve all of those
+source/test changes and every upstream inventory entry; add only the existing
+prototype runtime entry and its declared module floor. Seven prototype
+implementation/test files remain byte-identical to2da72f87. Revalidate the
+combined tree before updating the existing PR; do not rewrite the ES2015 fixes
+or use the former green head as evidence for this new integration.
+
+The second integrated tree passed TS7 and382/382 scoped tests (zero skipped),
+with2,273 unchanged inputs; all eight scoped quality gates passed. The current
+QuickJS provider rebuilt and passed its execution canaries against2,016 pinned
+source inputs. Six inherited B10 corpus rows were provisioned from repository
+pin b363f29d without overwriting existing corpus files. Full normal hooks and
+protected delivery remain required; this is not a full migration parity claim.
+Evidence: .tmp/prototype-second-validation, .tmp/prototype-second-quality,
+and .tmp/prototype-second-provider.
+
+Get PR6242 conflict refresh (2026-09-28): integrate published prototype
+heada3332a61, preserving its current ES2015 main integration and both issue
+records. Keep the existing ready PR on hold until prototype delivery is
+verified on main. Current Get head450f2d3c had no normal compiler CI runs
+and conflicted with main; refresh this existing delivery so CI can validate it.
+The Get owner,66-row regression suite and boundary test remain byte-identical.
+Revalidate TS7 plus the complete415-row Get/boundary suites and all quality
+gates, then normal hooks before publishing the exact refreshed head.
+Status/value ownership still does not implement full public Get or712 parity.
+
+The current Get integration passed TS7 and415/415 tests, zero skipped or
+failed, with2,269 unchanged inputs. All eight scoped quality gates passed
+with2,224 unchanged inputs. The current QuickJS adapter rebuilt and passed
+its execution canaries against2,017 unchanged source inputs. Evidence is in
+.tmp/public-object-get-current-validation, -current-quality and -current-provider.
+
+Prototype PR6237 is now verified delivered on main at
+355632194772f32e5411e8b0c611c616a5321789, with publish head a3332a61 an
+ancestor and all nine delivered files byte-identical. Its actual merge group
+passed20/20 js-host and82/82 standalone conformance shards, the regression
+gate, CI and differential checks. The prototype delivery claim is completed
+on the authoritative issue-assignments branch. This satisfies the Get delivery
+predecessor only; Get itself still needs signed normal hooks, publication,
+required CI and protected queue delivery before its claim can complete.
