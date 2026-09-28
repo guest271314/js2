@@ -103,6 +103,11 @@ emits a throw of its own.
 
 ## Resolution
 
+Regression tests: `tests/issue-6725-standalone-nested-require.test.ts` (the
+lite-renderer case and the jest-shaped repro), plus the updated export-surface
+expectations in `tests/issue-4035-host-bridge-policy.test.ts` and
+`tests/issue-3520-vec-support-callable-abi.test.ts`.
+
 - Compiler-synthesized throws render: a null-guard read now reports
   `TypeError: Cannot access property on null or undefined at 1:46` (was the
   opaque label); jest's lane showed `ReferenceError: require is not defined`
