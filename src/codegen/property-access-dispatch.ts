@@ -227,6 +227,7 @@ import { isInlineTaggedTemplateParameter } from "./tagged-template-parameter.js"
 import { linkBrandRoleOf } from "./shape-brand.js";
 import { emitDynamicTemplateRawRead, isDynamicTemplateRawRead } from "./template-raw-dynamic.js";
 import { emitLinkedStaticMemberRead, linkedStaticParentHeritage } from "./standalone-linked-static-inheritance.js"; // (#6644) §15.7.14 step 6 across the link
+import { tryEmitPromiseSubclassCellRead } from "./promise-subclass-cell-read.js";
 
 /**
  * Sentinel returned by every dispatch helper to mean "this guard band did not
@@ -2311,6 +2312,8 @@ function emitClassStaticMemberRead(
   // statics still shadow because the own lookup runs first.
   const globalIdx = ctx.staticProps.get(fullName) ?? resolveInheritedStaticProp(ctx, resolvedClass, propName);
   if (globalIdx !== undefined) {
+    const inheritedCell = tryEmitPromiseSubclassCellRead(ctx, fctx, resolvedClass, propName, globalIdx); // (#6651 D6)
+    if (inheritedCell !== undefined) return inheritedCell;
     fctx.body.push({ op: "global.get", index: globalIdx });
     const globalDef = ctx.mod.globals[localGlobalIdx(ctx, globalIdx)];
     return globalDef?.type ?? { kind: "f64" };
