@@ -163,11 +163,18 @@ Lane `npx tsx scripts/generate-npm-compat-report.mjs --only lodash-es
 | step 1 only (measured) | `runtime-error` | `RuntimeError: dereferencing a null pointer`, phase `checksum` |
 | after | `measured` | checksum 54 = 54, 0 imports, ratio 0.036 (wasm 255 µs vs node 7.7 µs per op), compile 863 s |
 
-Next blocker — CI's full refresh runs this lane in a child with a 120 s
-budget (`standaloneLaneInChild`) that the local `--only` run does not apply,
-verbatim: `standalone-dynamic lane exceeded the 120000ms harness budget
-(compile-budget)` — the full `package/lodash.js` graph compiles in ~14 min
-standalone.
+The table is measured on the pre-merge base (`c2601efa89` + the #6175 branch).
+After merging main `37b11b2891` the lane stops EARLIER, at module init,
+verbatim `TypeError: Cannot access property on null or undefined at 10:22`
+(phase `module-init`) — and main's own `calls-closures.ts` (without this
+change) fails identically, so that is drift on main, filed as
+[#6720](6720-standalone-lodash-es-module-init-null-property-regression.md).
+
+Next blockers, in order: #6720 (module-init, on main); then CI's full refresh
+runs this lane in a child with a 120 s budget (`standaloneLaneInChild`) that
+the local `--only` run does not apply, verbatim: `standalone-dynamic lane
+exceeded the 120000ms harness budget (compile-budget)` — the full
+`package/lodash.js` graph compiles in 5–14 min standalone.
 
 Regression tests (`tests/issue-6704-callable-property-optional-param.test.ts`,
 `tests/issue-6704-callable-property-apply-fallback.test.ts`): parent 0/4,
