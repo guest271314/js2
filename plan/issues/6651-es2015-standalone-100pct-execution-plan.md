@@ -17283,3 +17283,114 @@ frontmatter; `tryLengthAndNameReads` itself is net **+0**.
   both are priced in place so the next lane does not re-derive them.
 - The branch carries the VR1 predecessor commit (`772ddd4421`) as a merge, because
   target A was defined against it. Nothing else was taken from it.
+
+## 2026-09-28 — Dynamic TypedArray `subarray` detached-ordering lane
+
+### Scope and ownership
+
+This isolated lane owns only the identifier-receiver dynamic-view species arm in
+`src/codegen/array-methods.ts`, a dedicated focused regression, and this record.
+It does **not** change closed-symbol literal lookup, the dynamic MOP, providers,
+the IR migration, or the held #5145 `copyWithin` work.
+
+### Current evidence and diagnosis
+
+The fresh current-head four-row receipt `20260928-114844` on source
+`86dbc35c4ed772f2f100ec95dbe86ce86e9eee84` records two passing custom-species
+controls and these two independent non-passes:
+
+| rows | current first failure | classification |
+| --- | --- | --- |
+| `subarray/detached-buffer.js` | observable `ToInteger(begin)` / `Float64Array` construction | dynamic-view ordering gap |
+| `subarray/byteoffset-with-detached-buffer.js` | detached-buffer `TypeError` | source-supported closed `@@species` literal-lookup hypothesis; separate remaining mechanism pending runtime A/B |
+
+`emitDynViewSpeciesMethodTwoArm` currently runs
+`emitTaDynViewValidate` and materializes a vector before dispatching its
+`subarray` branch. That is wrong for `%TypedArray%.prototype.subarray`: unlike
+ordinary TypedArray methods, subarray does not use the ValidateTypedArray
+throwing prelude. It must snapshot the source length as zero for an already
+out-of-bounds/detached source, then perform `ToIntegerOrInfinity(begin)`, form
+the byte offset, perform `ToIntegerOrInfinity(end)`, and only then run the
+existing species construction/returned-view validation. The ordering matters
+because both conversions can be observable and can detach the source.
+
+`pushTaDynViewInBoundsLen` is the existing correct source-length primitive:
+it reports zero for an out-of-bounds fixed view and the live length for a
+length-tracking view. `pushTaDynViewEffectiveLen` is deliberately unsuitable,
+because its fixed-view behavior retains the stored length after shrink.
+
+### Planned narrow implementation
+
+1. Import only `pushTaDynViewInBoundsLen` into `array-methods.ts`.
+2. Keep `slice`, `map`, and `filter` on their existing validation/materialize
+   path. In the `subarray` arm alone, avoid both calls; obtain element size and
+   snapshot the in-bounds source length before compiling `begin`.
+3. Preserve the current conversion, clamping, and
+   `emitTaDynSpeciesCreate` result-validation sequence, but **move**
+   `beginByteOffset` between `begin` and `end` as required by the algorithm.
+   Do not reuse a post-conversion live length or revalidate the source.
+4. Add focused standalone controls independently measuring: pre-detached and
+   mid-`begin` detachment/coercion behavior, begin-offset-end observation
+   order where it is observable, the existing custom-species result path, and
+   an ordinary attached subarray control. Argument-expression evaluation and
+   later `ToIntegerOrInfinity` coercion are distinct; the controls must not
+   overclaim one from the other. The closed-literal `@@species` byteoffset row
+   remains a separately documented non-pass, not a claimed gain.
+
+### Overlap audit before implementation
+
+Current source is byte-identical to `upstream/main` at `86dbc35` (the local
+`c713478` parent tip is documentation-only). Open #6651 PRs #6248 and #6245
+modify the shared plan but not `array-methods.ts` or `dataview-native.ts`;
+#4449 is already landed. Remote IR/TypeScript PR #5753 touches neither target
+file. The only open source PR touching `array-methods.ts`, #5748, changes only
+boolean-result metadata near lines 3994 and 8779--8894, disjoint from this
+lane's import and dynamic-subarray area. A later rebase may need an
+append-only plan-record reconciliation, but no source-level conflict is known.
+
+### Validation status
+
+The candidate was measured on compiler base
+`86dbc35c4ed772f2f100ec95dbe86ce86e9eee84`, with
+`src/codegen/array-methods.ts` SHA-256
+`cf21327214c0cc30f5863331424d71bf969e48f3dce8f9a6f9af9605cec8d54e` and its
+scoped diff SHA-256
+`19088d5d2dd84b2f8ec89220050d216d4bf773077e4e2bf51991f00b6319f2dc`.
+
+The maintained standalone runner used Node 24, one fork, a 4 GiB heap, auto
+semantic providers, the immutable QuickJS artifact
+`quickjs-artifact-2e2d7736713beeda` (`libquickjs.wasm` SHA-256
+`e9f8d30bc347dbc56f31b3389f7696eb6dedc9f05ea729781fc412f09a3e6b17`), and a
+fresh compiler-keyed QuickJS adapter. The adapter was a cache miss and was
+built plus canary-verified as key `244c81abc2a5004e` for bundle
+`a9540b315d6d2891`.
+
+The matched four-original manifest completed as run `20260928-122422`: **3
+pass / 1 fail**, with four verdicts and four registrations. Its JSONL SHA-256
+is `d3bee17997ffda8cf96efbc77ff96488257a8c110202c1f4712266884399997d` and its
+one-of-one completion manifest SHA-256 is
+`e2e44303f5ba1e530f8a178f33fb43d8d0c2f6789c0ea7be6fac01f2d7c2022f`.
+`subarray/detached-buffer.js` now passes; both custom-species controls still
+pass. `subarray/byteoffset-with-detached-buffer.js` remains **included** in
+the matched goal/cohort and is the counted failure (a source-supported
+closed-literal `@@species` lookup hypothesis, pending runtime A/B), not an
+excluded row or a claimed gain.
+
+The focused direct Node 24 Vitest receipt then passed **5 / 5** in 52.44 s:
+pre-detached begin/end coercion before the constructor throw, source-length
+snapshot across begin detachment, byte-offset formation before end detachment,
+ordinary attached-view aliasing, and map/filter/slice preservation. An adapted
+Node oracle had separately confirmed all five expected result values before
+compiler measurement; the focused compiler receipt is the evidence above.
+
+Two prelaunch attempts are retained as infrastructure observations, not
+conformance evidence: `pnpm run` attempted its managed dependency status
+install and stopped with an EPERM before the runner; the direct runner under
+the initial sandbox validated the manifest but could not write its timestamped
+snapshot. The approved direct-wrapper invocation produced the receipt above;
+the symlinked dependency target was verified intact after the aborted pnpm
+attempt.
+
+No quality gates, hook, commit, or publication is claimed yet. The heavy lease
+has returned to the shared diagnostic lane; request it before the remaining
+normal validation steps.
