@@ -8508,6 +8508,81 @@ promise whose `constructor` is `C` — first).
 `Promise`; the gc lane and every module with no such class are byte-identical by construction
 (checked, not assumed — controls below).
 
+#### Receipt
+
+- **Branch** `issue-6651-d4-promise-subclass` (worktree `agent-a25501ba6e0af9e9c`), based on
+  `origin/main` @ `af9de0c1c2` + D3 (`135875abea`, merged in), the slice commit `fcefaa1123`, then
+  `git merge origin/main` twice (@ `f73a4bcd7d`, then @ `422dbf01a0` where D3 itself landed — the
+  second merge moved no `src/`/`tests/`/`scripts/` byte, checked with `git diff`). Every control
+  below was run on the pre-merge tree AND re-run on the merged tree; the two agree row for row.
+  Engine `JS2WASM_EVAL_ENGINE=quickjs` (artifact `073742801ba7`, adapter `d4799bda84cfed0d`),
+  `--standalone --isolate`, 24-row chunks, one runner at a time. Before-states are file-copy A/B:
+  `.tmp/base/` (pre-edit copy) on the pre-merge tree, and on the merged tree the merged files with
+  the slice's own patch reversed (`.tmp/d4/mkbase.sh`) — measured, not inherited from D3.
+
+- **Manifest** `plan/agent-context/6651/D-promise-combinators.txt` (101 rows):
+
+  | | pass | fail | compile_error |
+  | --- | ---: | ---: | ---: |
+  | before (`.tmp/d4/base-chunk-*`, merged: `Mbase-chunk-*`) | 71 | 24 | 6 |
+  | after (`.tmp/d4/new-chunk-*`, merged: `Mnew-chunk-*`) | **75** | 26 | **0** |
+
+  **+4, 0 pass→non-pass, 0 message changes on the 24 rows non-pass in both.** The four are
+  `{all,race,resolve,reject}/ctx-ctor.js`. The other two target rows moved CE → fail (below).
+
+#### What landed
+
+| site | change |
+| --- | --- |
+| `expressions/promise-subclass.ts` `emitPromiseSubclassValueRead` (+ both `identifiers.ts` value-read arms) | host-free: emit nothing (the class-object singleton is read instead) and mark the module |
+| `standalone-class-construct.ts` `collectCandidates` | Promise-rooted classes become construct candidates in a marked module |
+| `class-bodies.ts` | the implicit `constructor(...args){super(...args)}` of `class X extends Promise {}` builds the carrier from `args[0]` (direct heritage `Promise` only); both super arms call the link |
+| NEW `promise-subclass-proto-link.ts` | `emitPromiseSubclassProtoLink` (bag `$proto` = `X.prototype`, runtime-guarded by `ref.test $Promise`), `__promise_proto_instanceof` + `tryEmitPromiseSubclassInstanceOf`, `promiseSubclassResolveFallbackInstrs` |
+| `identifiers.ts` `compileHostInstanceOf` | the standalone Promise-subclass `instanceof` arm, ahead of the host-only twin |
+| NEW `promise-class-receiver-settle.ts` | `Promise.{resolve,reject}.call(C, x)` for a compiled class `C` (Promise subclass or not), with PromiseResolve's step-1 passthrough; a binding that shadows a global value name (`const parseInt = class …`) declines — the value read resolves those to the global |
+| `promise-class-receiver-drive.ts` (D3) | receiver admission widens to Promise subclasses (host-free, same shadow guard); for them GetPromiseResolve falls back to `Get(%Promise%, "resolve")` when `Get(C, "resolve")` is `undefined` (the class object has no link to `%Promise%`), so `Promise.all.call(SubPromise, [])` fulfils with `[]` instead of rejecting |
+
+No new host import; no change to the `$Promise` struct.
+
+#### Controls
+
+| control | result |
+| --- | --- |
+| manifest, 101 rows | 71 → **75**, 0 pass→non-pass, 0 message changes; merged tree identical |
+| byte differential, compile-only through the runner's original-harness assembly (`.tmp/d4/promise-bytes.mts`): the 151 test262 files that spell `extends Promise` or `Promise.{resolve,reject,all,race,allSettled,any}.call(` (171 variants), base vs branch, pre-merge and merged | **gc 171/171 identical**; standalone moves **30 variants of 26 rows**, all 26 run base vs branch below |
+| verdicts on the 26 byte-moved rows (`.tmp/d4/moved-rows.txt`) | base 3 pass / 8 fail / 15 CE → branch **11 pass / 15 fail / 0 CE**; **0 pass→non-pass**, no message change on the 8 fail-on-both. The +8 pass include 4 off-manifest rows: `{allSettled,any}/ctx-ctor.js` and `prototype/finally/subclass-species-constructor-{resolve,reject}-count.js` |
+| corpus: 17 playground + benchmark programs and D2/D2b's 11 shape programs × {gc, standalone} (`.tmp/d4/bytes.mts`) | **56/56 identical**, pre-merge and merged |
+| pin suite `tests/issue-6651-d4-promise-subclass.test.ts` (12) | 12/12 green; on base **10 red** — the two controls (gc lane keeps the host constructor; a module with no Promise subclass never names the helper) are green on both by design |
+| D-family pins + every test file that spells `extends Promise`, one vitest process each | all green except `promise-combinators` (2) and `issue-2671-promise-capability` (1), which fail with the same test names on base — D3's pre-existing three. `issue-3518-host-async-imports` (2) likewise fails identically on base |
+| three pins updated because they asserted the OLD route | D3's "a Promise-subclass receiver is not admitted" control, `deno-safe-promise-combinators` "keeps … on the constructor-aware route" (asserted the `env::Promise_all` import) and `issue-3390` "fall-through … still routes to host" — each now asserts the host-free answer (the Deno one also runs it: the result is `instanceof SafePromise`) |
+| gates | `check-loc-budget`, `check-func-budget` (also with `LOC_GATE_BASE` = origin/main @ `f73a4bcd7d` and @ `422dbf01a0`), `check-coercion-sites`, `check:oracle-ratchet`, `check:dead-exports`, `check-compiler-boundaries --mode inventory --base origin/main` (`inventoryValid: true`, both new leaves classified), `npm run -s typecheck`, `biome lint --diagnostic-level=error`, `check:ir-fallbacks` (OK), `scripts/equivalence-gate.mjs` (22 failing / 1,720 passing / 22 known — no new). Grants: dated D4 notes at the head of this file's `loc-budget-allow` / `func-budget-allow` |
+
+#### Residuals (not taken)
+
+- **`{all,race}/invoke-resolve-on-promises-every-iteration-of-custom` (2 rows, now fail: "async
+  completion marker not observed")** — two gaps, both wider than Promise, so they are named here
+  rather than patched:
+  1. **Static assignments to a class object are invisible to a dynamic Get.** `Custom.resolve =
+     function (…) {…}` then `__extern_get(Custom, "resolve")` answers `undefined`; the same holds
+     for a plain `class K {}` (`K.foo = f; id(K).foo` → `undefined`, `.tmp/d4/js/c8.js`). The
+     drive therefore never sees the user's `resolve` (and falls back to the — reassigned —
+     `Promise.resolve`, which the row asserts is never called). This is the class-object static
+     expando model, not a Promise question.
+  2. **#5197 R3-7: a native `$Promise` has no readable `then`** (`typeof id(p).then` →
+     `undefined`, `.tmp/d4/js/c5.js`), so D3's `Invoke(nextPromise, "then", …)` does not subscribe
+     when `C.resolve` answers a native promise; the aggregate never settles.
+- `class Y extends X {}` where `X extends Promise` (implicit ctor, user parent): still the
+  identity-only object (the builtin-subclass chain skips the parent's constructor — pre-existing
+  for every builtin parent). `instanceof Y` is false.
+- `Object.getPrototypeOf(promiseSubInstance)` does not read the link (no `__getPrototypeOf` arm
+  for `$Promise`); `Get(C, "resolve")` on a Promise subclass stays `undefined` outside the drive
+  (the class object has no [[Prototype]] = `%Promise%`); the fallback also cannot tell an own
+  `C.resolve = undefined` from an absent one.
+- `super()` with NO argument to `Promise` keeps the identity-only object (spec: TypeError, the
+  executor is not callable).
+- Off-manifest, still CE → fail on the branch: `{allSettled,any}/invoke-resolve-on-*-custom`,
+  `try/ctx-ctor`, `withResolvers/ctx-ctor` (no `.call(C)` arm for `try` / `withResolvers`).
+
 ## Handoff — 2026-09-21 (round 1 closed, round 2 ready to dispatch)
 
 ### What landed
