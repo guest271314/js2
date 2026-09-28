@@ -3067,3 +3067,390 @@ fixture, the non-namespace Proxy self-import exclusion, and preserved dynamic
 imports. Update provenance/version contracts if the repo requires it and
 remeasure actual originals after routing. Source-only until the priority
 #6648 test lease is released; the TypedArray draft stays in its own checkout.
+
+### 2026-09-28: frozen census index 24 and ownership-gated follow-ups
+
+The next serial shard completed at frozen source
+`f924650c6c26237f62b08a362d7003d4d2b1e12d`, not at the current fix candidate.
+The exact manifest remained 11,778 paths and passed physical validation.
+Retained session `92021` terminated with exit 1 after 97.22 seconds:
+**91 registered / 91 verdicts: 86 pass, 5 fail, 0 compile errors, 0 skips**.
+The maintained completeness validator accepted the shard with zero exclusions.
+
+Evidence remains in the isolated `manifest-baseline` worktree:
+
+- JSONL: `benchmarks/results/test262-standalone-es2015-fullscope-128-results-es2015-fullscope-128-f924650-chunk024-a01.jsonl`, SHA-256 `8f1615499403789a07ea772a388cc337fb4d625fc54d20628040e11b8c4c9c98`.
+- Completion: same basename with `.shard-25-of-128.complete.json`, SHA-256 `38461287198e7b2073f80089fba6b20950e7a0f129b59cd901f89758c3b12f32`.
+- Execution ledger: `.tmp/4444/es2015-fullscope-128-execution-ledger.json`.
+
+Re-reading all 25 accepted shard artifacts verified their hashes and unique
+membership in the unchanged manifest: **2,282 measured = 2,138 pass + 122 fail
++ 22 compile errors; 9,496 remain unmeasured**. Next index is 25. These are
+frozen-baseline counts, not post-fix acceptance or evidence of pass-rate gains.
+
+The five original failures remain in scope:
+
+- `language/expressions/object/method-definition/yield-as-yield-operand.js`:
+  first result value is undefined instead of 1; route to #3032's nested-yield
+  machine follow-up, not method metadata. Later assertions are unmeasured.
+- `language/statements/class/subclass/builtin-objects/GeneratorFunction/instance-name.js`:
+  fails the own-name assertion; inspect #5318's builtin-subclass residue and
+  #3371's NewTarget dependency before selecting a repair. This is not
+  NewTarget-only: `generator-function-intrinsic.ts` also explicitly leaves
+  calling/constructing the intrinsic (CreateDynamicFunction) unmodelled.
+  Function-name metadata alone cannot supply the missing created instance.
+- `built-ins/Array/prototype/filter/create-proxy.js`: result prototype differs
+  from the species constructor prototype for a doubly wrapped array. Retain
+  the Proxy ownership hold; do not infer a unique cause from this assertion.
+- `language/computed-property-names/object/accessor/getter-super.js`: folded
+  `object.a` passes before dynamic `object.b` returns `bnull` instead of
+  `b proto m`. Source inspection at `9d3721e2` found the dynamic accessor
+  callback in `literals.ts` omits the final `objLocal` argument to
+  `emitObjectLiteralAccessorFn`, while both static accessor calls supply it.
+  Without that argument the closure cannot capture its home object for
+  `super`. This is source evidence, not an emitted-route or repair measurement.
+  #5318 still has an active claim; user clearance is pending. If cleared,
+  pass the existing local through this callback only, then validate original
+  getter/setter tests, runtime-key evaluation once per declaration, borrowed
+  receivers, and folded-key controls. No IR/closure-layout change is proposed.
+- `built-ins/Iterator/prototype/chunks/next-method-returns-throwing-done.js`:
+  expected abrupt completion is absent. #5147 already plans throwing
+  `done`/`value` protocol fidelity in the shared iterator stepping helpers;
+  do not add a per-test or per-kind exception shortcut.
+
+No listed issue is closed by this handoff, and no held implementation area was
+modified. PR #6231 contains the preceding 24-shard checkpoint; this section is
+the subsequent local handoff pending the next publication checkpoint.
+
+### 2026-09-28: frozen census index 25 accepted
+
+Under the same frozen source and full manifest, retained session `3215`
+terminated with exit 1 after 77.00 seconds. The maintained validator confirmed
+**92 registered / 92 verdicts, zero exclusions: 87 pass, 4 fail, 1 compile
+error, 0 skips**.
+
+- JSONL: `benchmarks/results/test262-standalone-es2015-fullscope-128-results-es2015-fullscope-128-f924650-chunk025-a01.jsonl`, SHA-256 `cf3f98c6e7ee09713856b0a1c7d5b9124f1b2250470b361806325b851c6bf330`.
+- Completion: same basename with `.shard-26-of-128.complete.json`, SHA-256 `8fee8e2a12284931138584cc01a6bb1ef9ea588f1eac4985114c913ec147e0c2`.
+
+All 26 accepted artifact pairs were hash-verified again, with unique identity
+membership checked against the full manifest: **2,374 measured = 2,225 pass +
+126 fail + 23 compile errors; 9,404 unmeasured**. Next index is 26. This remains
+a frozen baseline, not a final post-fix conformance result.
+
+Retain these five non-passing originals without regrouping by error alone:
+`Promise/prototype/then/ctor-throws.js`,
+`class/definition/methods-restricted-properties.js`,
+`class/decorator/syntax/valid/decorator-member-expr-identifier-reference-yield.js`
+(compile error: `yield` rejected as a strict-mode identifier),
+`Function/proto-from-ctor-realm.js`, and
+`Iterator/prototype/chunks/iterator-return-method-throws.js` (TypeError instead
+of Test262Error). Full paths and assertion text are in the retained JSONL;
+no later-assertion or root-cause claim is made by this receipt.
+
+Source-trace correction for the decorator row: the exact diagnostic text is
+emitted by this repository's `checkReservedIdentifiers` in
+`src/compiler/early-errors/module-rules.ts`, which calls `isStrictMode` in
+`predicates.ts`. The latter's ancestor walk treats a class declaration as
+strict without distinguishing the attached decorator expression. Thus older
+plans describing these rows solely as an upstream TypeScript parser limitation
+are insufficient. A read-only follow-up is checking decorator expression
+context, strict/generator/module negative controls, and cached ancestor facts.
+Do not widen the diagnostic allowlist or claim a conformance gain before a
+matched original/control run; decorator execution may present another defect.
+
+### 2026-09-28: frozen census index 26 accepted
+
+Retained session `2255` terminated with exit 1 after 89.36 seconds on the
+unchanged frozen source. Compiler/runtime bundles, the exact manifest, and both
+duration-map hashes were rechecked against the ledger contract. The maintained
+validator accepted **92 registered / 92 verdicts: 89 pass, 3 fail, 0 compile
+errors, 0 skips, zero exclusions**.
+
+- JSONL: `benchmarks/results/test262-standalone-es2015-fullscope-128-results-es2015-fullscope-128-f924650-chunk026-a01.jsonl`, SHA-256 `6cff1cf25d790853aa01dfbbfe76299d4a40357c0d9022840553d0f31c5645da`.
+- Completion: same basename with `.shard-27-of-128.complete.json`, SHA-256 `ea2a8b7649413b71ddc1df673028ee5344a894f864cb76a67e5de830013dfd18`.
+
+Revalidated all 27 accepted artifact pairs and exact unique membership:
+**2,466 measured = 2,314 pass + 129 fail + 23 compile errors; 9,312 remain
+unmeasured**. Next index is 27. The three failures are the original
+`test/language/statements/class/definition/fn-name-accessor-set.js`,
+`test/language/expressions/generators/yield-identifier-non-strict.js`, and
+`test/built-ins/Error/proto-from-ctor-realm.js`. They remain failures in the
+frozen baseline, with no inferred current-source status or pass gain.
+
+The generator row is not a decorator/parser failure: its receipt says
+`reached_test: true`, `strict: no`, and its first `item.done === false` check
+observes true. The unexecuted later checks require first value undefined,
+second `.next(42)` value 43, and call count 1. The legal inner `var yield`
+identifier must not be confused with the outer real suspension in
+`return (function(arg) { ... }(yield))`.
+
+Read-only tracing places this in #2864's documented argument-position yield
+residual, distinct from #3032's nested-yield operand: native generator planning
+handles a return before structural continuation lowering and records the
+outer call as a terminal return without a suspension/sent-value spill.
+`lowerContinuationRoot` has no call-expression root. This is source-supported
+routing, not an executed WAT attribution or a measured fix.
+
+An implementation preflight found no live #3032 claim, but the exact shared
+`generators-native.ts` file is touched by open PRs #6101 (suspended yield work)
+and #5753 (IR closure support), out of 12 open PRs scanned. #2864's issue also
+records an in-progress owner. Keep implementation held for coordination with
+that work; do not replace the suspension with a terminal return, exclude this
+original, or claim the subsequent assertions ran.
+
+### Decorator focused-test instrument correction
+
+The initial #5141 unit baseline exposed a malformed negative control:
+`function* g() { @yield class C {} }` produces TypeScript TS1109 and no
+`yield` Identifier node, so `checkReservedIdentifiers` cannot establish its
+rejection. Preserve this source for a full-compiler negative check rather than
+calling the empty identifier-error set a valid generator result. In particular,
+the compiler tolerates TS1109 in its syntax gate, so parser diagnostics alone
+do not establish compiler rejection. A separate, parse-clean identifier-context
+negative (`function* g() { function yield() {} }`) exercises the intended
+`[Yield]` boundary. Correct the instrument before measuring the proposed
+strict-mode cache fix, and report any independent admission gap separately.
+
+### 2026-09-28 decorator slice: matched authoritative verification
+
+The narrow #5141 direct-class-decorator strict-context candidate now has a
+matched standalone maintained-runner result: **baseline 3 pass / 6 compile
+errors → candidate 9 pass / 0 failures**, with the same nine-path manifest.
+The six originals are the statement/expression class-decorator pairs for
+member, call, and parenthesized `yield` identifier references. The three
+controls (generator identifier rejection, strict generator identifier
+rejection, and ordinary decorator identifier syntax) remain passing.
+
+Both arms use source base `45ce4a8e207742df5ca3888c0a458e8a48ee1655`,
+the candidate changing only the owned strict-context predicate; the baseline
+temporarily restores that predicate. Explicit parent `TZ=UTC`,
+`JS2WASM_TEST262_TEMPORAL=0`, standalone/auto/QuickJS, one fork, and the exact
+manifest match. Manifest SHA-256:
+`75c5c6cbc6311db8c37957ab7bf7cc07d0a3673812ea8704628da28f19e602a3`.
+The maintained completeness validator accepts both arms: 9/9, zero exclusions;
+file-keyed comparison confirms exactly six compile-error-to-pass changes.
+
+Receipts in the `map-size-descriptor/js2` worktree under `benchmarks/results/`:
+
+- Baseline `issue-5141-base-r2-results-5141-base-r2-20260928.jsonl`, SHA-256
+  `9a0ceb6df49328bb96ee623d645c3e65f36ab7fc27c4d1eae96eaedc291a24e3`;
+  completion SHA-256
+  `effa56c6d3b6ebaa85155a05f229a050723ac4aab6a55f7510ae6ebd8055ae6a`.
+- Candidate `issue-5141-candidate-root-results-5141-candidate-root-a02.jsonl`,
+  SHA-256 `7aa6cc72b9454139de1b421cdbe0f8c8d611d961f41ee3b906f8662d9af258c0`;
+  completion SHA-256
+  `c0e8a1cb17e2e29f3fca031f2687906e0e736b02d683c743c2e743d3fd2c8e51`.
+  Session 62420 terminated exit 0 in 19.48 seconds. Artifact hashes were
+  independently rechecked before this handoff update.
+
+Published as ready [PR 6238](https://github.com/loopdive/js2/pull/6238), verified
+fork head `f90c59801b04edf8f13c6798e5c1ec02c3a6b2ee`. Normal commit and push
+gates passed, including focused 5/5, numeric-local parity 18/18, typecheck,
+formatting, lint, budgets, ratchets, and issue integrity. The creation snapshot
+reported mergeable, non-draft, behind main, with CI still running; this is not
+evidence of landing or final CI success. This does not close the broader #5141
+generator issue, establish decorator runtime
+semantics, or change the frozen census totals: those remain 2,466 measured
+paths (2,314 pass, 129 fail, 23 compile errors), with 9,312 unmeasured. Full
+goal completion still requires a complete run on final integrated source.
+
+### 2026-09-28 issue 4016 read-only re-grounding
+
+The protected `codex/4016-resume-20260927` worktree remains at `92afa58c6e`
+with uncommitted diagnostic edits in `string-symbol-protocol.ts`, its #4016
+focused test, and unrelated #6493 notes. No new test or production change was
+made during this audit. The local wrapper-stripping candidate has existing
+same-shape trace/WAT evidence that generic lookup, nullish/callable checks,
+argument-vector construction, and closure application are emitted; its two
+computed `[Symbol.split]` acceptance controls still return zero. This is not
+evidence of a completed fix.
+
+The current source-supported obstruction is the literal's closed-struct
+representation: `compileObjectLiteralForStruct` does not field-install its
+computed method through `matchingProps`, and closed-field lookup does not map
+the boxed Symbol key to internal `@@split`. The passing original-shaped
+control instead starts with open `{}` and dynamically assigns the real Symbol
+key through the existing open-object writer. Do not infer literal-method
+correctness from that different producer shape.
+
+Next step is a read-only ownership/design audit of a producer-only route for
+scope-proven ambient well-known Symbol methods to the existing open-object
+writer. Before implementation, resolve exact file claims and require controls
+for shadowed `Symbol`, iterator closed layout, and `Symbol.toPrimitive`.
+Aliases, returns, parameters, arrays, and field crossings require separate
+type/IR coordination. The host callback-export issue and object-return carrier
+remain separate boundaries; the user's bare `4016` does not clear shared IR
+or runtime ownership. The dirty #6493 Proxy-setter diagnostic grants no such
+clearance either.
+
+The follow-up ownership audit found a concrete collision: #3481 has an active
+assignment covering `literals.ts`/ToPrimitive, while #5149 also discusses
+computed-method routing. #4016's historical assignment is released, not a live
+claim for this producer change. Keep its protected worktree untouched. A later
+implementation requires a fresh isolated claim and coordination with those
+owners; it must not expand the old wrapper-stripping candidate silently.
+
+Both producer selection and the existing boxed-Symbol writer live in
+`literals.ts`; consumers of `objectLiteralForcesHostPath` must remain in
+representation lockstep. The prospective resolver must establish a nonempty
+ambient declaration set, not infer a global from spelling or absent
+declarations. Shadowed/local/parameter/imported `Symbol` must evaluate normally
+without global-id boxing. Prove the relevant String-protocol category from
+the compiler's protocol implementation before broadening beyond split;
+preserve iterator closed layout and the existing ToPrimitive route. Acceptance
+needs receiver/argument/result identity, supplied/omitted split limits,
+single key evaluation, emitted producer/writer/reader evidence, and the
+existing dynamic-assignment control. No focused-only result earns Test262
+credit, and escape-boundary failures require separate type/IR coordination.
+
+### Next candidate under read-only review: Array unscopables
+
+Frozen census shards 15 and 22 respectively fail
+`test/built-ins/Array/prototype/Symbol.unscopables/prop-desc.js` and `value.js`.
+The former reports the missing own property; the latter stops at a
+null/undefined property access. #5268's historical D2 notes describe this
+unfinished slice despite its broader `done` status. These are frozen-source
+observations only: current-main source and fresh-run verification are still
+required before dispatch.
+
+The frozen `value.js` checks ten named entries and their descriptors but does
+**not** assert an exhaustive own-key set. Do not turn that test subset into an
+implementation rule excluding additional semantically required entries. A
+valid plan must also account for identity, null prototype, entry descriptors,
+and the configurable outer property's deletion/redefinition behavior; an
+unconditional synthetic descriptor or immutable read shortcut is insufficient.
+Retain the already-passing unscopables/with and cross-realm originals as
+controls, and add a non-vacuous Array/with lookup control. No implementation
+claim or production edit has been made for this candidate.
+
+### Frozen census index 27 accepted
+
+Session 95152 terminated exit 1 in 94.68 seconds: 93 registered originals,
+82 pass, 8 fail, 3 compile errors, zero skips. The maintained completeness
+validator confirmed 93/93 with zero exclusions. Compiler/runtime, scope and
+duration-map hashes still match the frozen contract; no retry or source edit.
+
+Receipt basename under `benchmarks/results/` is
+`test262-standalone-es2015-fullscope-128-results-es2015-fullscope-128-f924650-chunk027-a01`.
+JSONL SHA-256: `37345bd261c4baed979361a43a717c9e9565b2fc302c0e734bfd737a644dbdbe`.
+Completion suffix `.shard-28-of-128.complete.json`, SHA-256:
+`68a6e282087dba406cea3a7d865789c4f31c8e019b18920b0df3b0f75ec6a130`.
+
+Re-reading all 28 accepted artifact pairs verifies **2,559 unique in-scope
+paths: 2,396 pass, 137 fail, 26 compile errors; 9,219 remain unmeasured**.
+These are frozen-source results, not a current post-fix pass rate. Next index
+is 28. Eleven nonpassing rows need source-level routing; no new repair credit
+is inferred from their error categories.
+
+### Frozen census index 28 accepted
+
+Session 41453 terminated exit 1 in 90.25 seconds: 93 originals, 88 pass,
+5 fail, zero compile errors/skips. Completeness validation passed 93/93 with
+zero exclusions. Receipt basename:
+`test262-standalone-es2015-fullscope-128-results-es2015-fullscope-128-f924650-chunk028-a01`.
+JSONL SHA-256 `15a63b1cf12af291648508dcefbec903507c3c3ac801b19b6011033d53839372`;
+completion `.shard-29-of-128.complete.json` SHA-256
+`43246f0d7ca948dbda6b524acf1e42b135f415c16542b2f1a5e995b08d5540c5`.
+
+All 29 accepted artifact pairs were hash-checked and their identities checked
+against the exact scope with no duplicates: **2,652 measured, 2,484 pass,
+142 fail, 26 compile errors; 9,126 unmeasured**. Next index 29. The five failing
+originals concern generator-method default parameters/arguments, nested Proxy
+descriptor fallback, Symbol registry cross-realm identity, Object.assign to
+an existing accessor on a nonextensible target, and exhausted iterator-window
+return behavior. These descriptions route investigation, not established
+root causes or permission to touch held shared code.
+
+### Frozen census index 29 accepted
+
+Session 10266 terminated exit 1 in 92.78 seconds: 93 originals, 89 pass,
+3 fail, 1 compile error, zero skips. Maintained completeness passed 93/93,
+zero exclusions. Receipt basename:
+`test262-standalone-es2015-fullscope-128-results-es2015-fullscope-128-f924650-chunk029-a01`.
+JSONL SHA-256 `5ffa68b3ee6d5897948dae44ad16ef6ce14460c7555bd64b4205f00fbe256f92`;
+completion `.shard-30-of-128.complete.json` SHA-256
+`f431c315673167d11a37ded96283420ae7de809f70769a1aa0cd70da9c81d993`.
+
+All 30 accepted artifact pairs and exact-scope identities revalidated:
+**2,745 measured: 2,573 pass, 145 fail, 27 compile errors; 9,033 unmeasured**.
+Next index 30. The nonpassing originals are yield continuation object-value
+identity (`iter-value-specified.js`), a computed class accessor name containing
+yield (`accessor-name-inst-computed-yield-expr.js`, compile refusal), RegExp
+unicode accessor cross-realm behavior, and iterator-window result identity.
+These retain their measured failures and require source-level routing; no
+inferred fix or post-integration pass-rate claim.
+
+### Frozen census index 30 accepted
+
+Session 22660 terminated exit 1 in 92.03 seconds: 93 originals, 88 pass,
+5 fail, zero compile errors/skips. Completeness passed 93/93 with zero
+exclusions. Receipt basename:
+`test262-standalone-es2015-fullscope-128-results-es2015-fullscope-128-f924650-chunk030-a01`.
+JSONL SHA-256 `18691bd065c4b28112ae6ff6586e24a780eba9c5d66f703e41a776fea630a096`;
+completion `.shard-31-of-128.complete.json` SHA-256
+`a10c09215fae7d989214b877fcd69ac58f7f6f9fe47ea28b566d416bddf4132b`.
+
+All 31 accepted artifact pairs and exact-scope identities revalidated:
+**2,838 measured: 2,661 pass, 150 fail, 27 compile errors; 8,940 unmeasured**.
+Next index 31. The five failures concern typed-array iterator detachment,
+dynamic non-eval tail calls, Proxy `has` receiver context through a prototype,
+eval completion for a class with RegExp literal flags, and an Error.stack
+setter's throwing Proxy trap. Retain existing #6493 diagnostic ownership for
+the last case; the frozen repeat does not establish a new repair or clear
+shared source. Other cases need source-level attribution before dispatch.
+
+### Shard 27 priority routing refinement
+
+`eval-spread-empty-trailing.js` fails the final `nextCount` check (0 instead
+of 1), not either preceding `x` assertion. Current source supports a missing
+spread-argument iteration path: `eval-inline.ts` compiles/drops extra
+arguments, while the generic `SpreadElement` lowering merely evaluates its
+operand. Runtime-eval extra-argument paths use the same primitive, so
+declining only the inline evaluator is not a semantic repair. Next is a
+fresh #5157 ownership check and a plan for eval argument-list evaluation:
+evaluate once, iterate spreads with correct abrupt completion and ordering,
+then ignore values beyond the first eval argument. This is source-supported
+routing, not a tested fix.
+
+`numeric-property-names.js` is already explicitly owned by active #5318.
+The first descriptor helper dereferences an undefined descriptor for a class
+prototype member; later static/super checks are not reached. Keep it with
+that class reification work rather than starting a competing repair.
+
+The remaining index-27 rows route to existing plans, not new fix claims:
+Promise.allSettled import leakage to #5143; computed class yield and generator
+rest-parameter import leakage to #2864; Proxy ownKeys Symbol transport to
+#5176; Array length coercion/writability to #5145; revoked-Proxy ordinary
+construction to #5140 (not primarily Reflect NewTarget #3371); dynamic
+GeneratorFunction creation to deferred #5141 F2; iterator chunks return-getter
+propagation to #5147 with historical #5267 context; and module generator
+binding to #5157 F with #2864 prerequisites. Later assertions remain
+unmeasured where an earlier assertion stops execution.
+
+### Eval spread implementation dispatch
+
+Freshly fetched upstream main is `1032526dc12302034e558934b60363348e80b8bd`.
+A complete action-tied scan of 14 open PRs found no overlap in
+`expressions/eval-inline.ts` or `expressions/runtime-eval-provider.ts`;
+the parent #5157 has no live claimant. The narrow
+`5157:eval-spread-arguments` claim is now verified upstream for
+`ttraenkler/codex-eval-spread-arguments`. A Terra Max implementation agent owns
+the preserved/reused clean RegExp worktree on the new
+`codex/5157-eval-spread-arguments` branch. The full plan is recorded in #5157
+before implementation. It must first establish a current matched baseline,
+reuse the #5361 `buildSpreadArgList` precedent where appropriate, preserve
+all argument-list semantics, and remain outside generic iterator/IR/runtime
+files without additional coordination. No repair credit yet.
+
+### Intl audit boundary
+
+Within indices 0–29 only, 11 Intl identities were measured: 9 fail, one
+NumberFormat host-import compile error, and one provisional Segmenter
+poison-prototype pass. Nothing is inferred about the other 63 frozen Intl
+identities. Current source materializes user `Intl` only for host targets;
+the namespace/constructor/prototype surface needed by these originals is
+missing in standalone. Descriptor-only constants or constructor stubs would
+not repair option conversion, realm/NewTarget, or deletion behavior. Existing
+#6717 remains the proof-first implementation plan, with host-free provider
+and ownership design still required; no safely independent Intl leaf was
+identified by this audit.
