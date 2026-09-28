@@ -11076,6 +11076,191 @@ only. Out of scope: the project-thread lane's `eval` capability rows
 (`expressions/call`, `eval-code`, `statementList`), the lines #6246 touches,
 and A6/A8's generator regions.
 
+#### A9 record — 2026-09-28: `%GeneratorFunction%` called / constructed in standalone
+
+Branch `claude/es6-6651-a9-generator-function`, WIP PR #6274. Opus 5.5, high
+effort. Engine `JS2WASM_EVAL_ENGINE=quickjs` everywhere, adapter rebuilt per
+tree (`npx tsx scripts/build-quickjs-eval-provider.mjs`), rows run with
+`run-test262-paths.mts --isolate`. Every measurement is on a `git archive` of
+the commit it names, never on the tree being edited. The authoritative pair is
+the merged one: main `f58f09bd3c` (A8 #6254 + #6276, `.tmp/a9/mainb`) against
+branch `ef5748a7a9` (`.tmp/a9/final`). The first target table is the pre-merge
+pair; it stays because it shows the same six rows moving before A8 landed.
+
+**What changed.**
+
+1. *The claim.* `Object.getPrototypeOf(<sync function* expression>).constructor`
+   is `%GeneratorFunction%` by syntax. The runtime-eval inventory
+   (`src/ir/runtime-eval-boundary-plan.ts`) records a call or `new` whose callee
+   is that expression — or a binding initialised by it — as a new
+   `generator-function-constructor` site, so the module takes the same
+   provider-linked, legacy-backend unit a `Function(<dynamic>)` site takes.
+   Codegen (`src/codegen/generator-function-dynamic.ts`) claims only a node the
+   inventory recorded, whose binding is never reassigned (lib's `interface
+   GeneratorFunction` merges with a script `var`, hence
+   `sourceBindingIsSingleAssignment`) and whose initializer precedes the read.
+   A run-time guard compares the callee VALUE with the reified intrinsic
+   (published by the A3 builder into `__native_generator_function`) and throws
+   the TypeError a non-callable callee throws when they differ — the case the
+   static proof cannot see (a hoisted function calling through the binding
+   before its initializer ran). The shorter `(function* () {}).constructor` is
+   not claimed: standalone reifies only the `getPrototypeOf` spelling.
+2. *The work is the realm's.* The provider ABI (`js2wasm:runtime-eval`) is shared
+   by three engines and `__runtime_new_function` has no kind, so it is not
+   widened. The site asks the realm for its own `%GeneratorFunction%` once (an
+   indirect eval of `(function* () {}).constructor`, memoized in a module
+   global) and applies it to the caller's arguments through `__apply_closure`.
+   QuickJS then runs all of CreateDynamicFunction: ToString of each argument in
+   order, the early errors (`yield` in the parameters), `anonymous`, `length`
+   and the source text `toString` reports. Imports: exactly
+   `__runtime_indirect_eval` + `__runtime_apply_interpreted`. `Function(...)`'s
+   own lowering is untouched.
+3. *The value.* Wrapped in the caller-owned carrier like a `Function(...)` value,
+   plus §20.2.1.1.1 step 34's own `prototype` =
+   `OrdinaryObjectCreate(%GeneratorPrototype%)`, {w:T, e:F, c:F}. A binding
+   initialised by a claimed site is a generator for the #5141 `new g()`
+   TypeError arm (§27.3.4).
+4. *The generator objects.* A realm generator object used to cross out as a box
+   with no protocol at all (own string keys only). `qjsPublishGenerator`
+   (`scripts/quickjs-eval-provider.mjs`) gives it own non-enumerable `next` /
+   `return` / `throw` / `@@iterator` holding the realm's pristine methods as
+   markers; calls pass the box as receiver, which crosses back as the retained
+   generator. **The generator state stays in the realm** — nothing on the
+   compiled side models it, so the design question in this slice's brief did
+   not arise.
+5. *Iteration.* `for-of` / spread over any provider-made iterator still ended
+   before its first body: the OBJ and strict-OBJ steps of `__iterator_next` /
+   `__iterator_next_strict` (and the G4 `__forof_step` twin) read `done`/`value`
+   with `__extern_get`, which returns the provider's `$RuntimeEvalValue`
+   carrier. Source-level reads decode it; these runtime reads did not, so `done`
+   was an object — truthy. The six reads now decode in units that import the
+   provider (`js2wasm:runtime-eval`); the decode passes every other value
+   through. (Keying on the callback type, or on
+   `runtimeEvalCallableBoundaryEnabled`, also caught three benchmark drivers
+   that link no provider — `benchmarks/{harness,pako-bench,perf-suite}.ts`,
+   plus `bench-harness.ts` after A8. Each uses `Function` only as a type
+   (`x as Record<string, Function>`, `x as Function`), and a probe with just
+   `(o as Record<string, Function>).run` gets the runtime-eval carrier types,
+   so the inventory appears to count a type-position `Function`; not
+   root-caused further.)
+
+**Rows moved — the target set** (31 rows: 17 `built-ins/GeneratorFunction/*`
+and its 6 `prototype/*`, `GeneratorPrototype/constructor`,
+`Function/prototype/toString/GeneratorFunction`, 5
+`class/subclass/builtin-objects/GeneratorFunction/*`,
+`AsyncGeneratorFunction/is-a-constructor`). Merged pair:
+
+| lane | main `f58f09bd3c` | branch `ef5748a7a9` | gained | lost |
+| --- | ---: | ---: | --- | ---: |
+| standalone | 10 | **16** | `GeneratorFunction/invoked-as-{constructor-no-arguments, function-no-arguments, function-single-argument, function-multiple-arguments}`, `GeneratorFunction/instance-construct-throws`, `Function/prototype/toString/GeneratorFunction` | **0** |
+| host | 7 | 7 | — (every host arm is gated off) | **0** |
+
+Logs `.tmp/a9/tf-{mainb,final}-{sa,host}.log`. Pre-merge, the same six moved
+and nothing was lost: standalone 10 → 16 (`e9d078e36f` → `d99be906c2`,
+`.tmp/a9/{before2,after3}-sa.log`), host 7 → 7 (`5e4e72cf23` → `d4fc2bf011`,
+`.tmp/a9/{before,after}-host.log`).
+
+**Compile-only differential** (merged pair). `.tmp/a9/cdiff.mts` wraps and
+compiles each row exactly as `runTest262File` does and hashes the binary; one
+process per tree. Reach lists (`.tmp/a9/mklist.cjs`): standalone — every row
+whose source or included harness can take a runtime-eval route (`eval`,
+`Function(`, `new Function`, `fnGlobalObject.js` and the other dynamic-code
+harness files), every row the new inventory predicate can see (`constructor`
+with `function*`), every row reifying %GeneratorFunction.prototype%
+(`getPrototypeOf` with `function*`), and every
+`GeneratorFunction`/`GeneratorPrototype`/`AsyncGeneratorFunction` row; host —
+the generator subset of that.
+
+| lane | rows | identical | bytes changed | compile status changed |
+| --- | ---: | ---: | ---: | ---: |
+| standalone | 3,252 | 2,685 | 567 | **0** (the same 340 rows fail to compile on both sides) |
+| host | 430 | 430 | 0 | **0** |
+
+The 567 by cause: 516 rows with dynamic code (point 5 — every unit that
+imports the provider now carries the decoded step reads); 50 rows reifying
+%GeneratorFunction% (the A3 builder's new `global.set`, plus the claimed sites
+of the target rows); 1 `language/comments/hashbang/function-constructor.js`
+(dynamic code through a loop variable, so the text filter missed it; same cause
+as the 516). Before the provider-import gate the pre-merge pair
+(`e9d078e36f` → `d4fc2bf011`) changed 650 rows; every one of today's 567 is
+in that set.
+
+**Runtime verdicts.** Verdict set = the 567 changed rows ∪ 245 eval-linked
+generator rows (the adapter change is invisible to a byte diff: a realm
+generator object now crosses out with a protocol) ∪ 31 reachable rows that
+mention `Proxy` (classification walks the prototype chain with
+`isPrototypeOf`, which runs a realm proxy's `getPrototypeOf` trap) = 820 rows,
+`--isolate`, both trees (`.tmp/a9/v2-{mainb,final}.log`).
+
+_(Verdict run in progress; this paragraph is replaced with the per-row result when both trees finish.)_
+
+**Controls** (branch `ef5748a7a9`):
+
+- `node scripts/equivalence-gate.mjs` — 22 failing / 1,720 passing, all 22
+  are known failures in its baseline; no new regressions.
+- `pnpm run check:ir-fallbacks` — OK; no unintended, post-claim or
+  module-level increase.
+- `node scripts/run-guard-suite.mjs` — 255 / 255.
+- Playground + benchmark bytes — the 32 `.ts` files under
+  `website/playground/examples` and `benchmarks`, host and standalone:
+  64 / 64 identical to main `f58f09bd3c`.
+- Generator suites — _(re-run on both trees in progress.)_
+- A9 pins (`tests/issue-6651-a9-generator-function.test.ts`) — red on main
+  (both linkage cases fail; the behavioural suite fails in `beforeAll`, because
+  the module links no provider), 11 / 11 on the branch. SG1's
+  `PINNED WRONG — calling %GeneratorFunction% does not CreateDynamicFunction`
+  is re-pinned as `BOUNDARY MOVED`: the call now links exactly the two provider
+  imports.
+- Gates: loc, func, coercion-sites, oracle-ratchet, dead-exports bare, and
+  loc/func again with `LOC_GATE_BASE=origin/main` — green. Typecheck green,
+  `biome lint` and prettier clean, `check-compiler-boundaries --mode inventory`
+  valid (`generator-function-dynamic.ts` registered).
+
+**Left open** — the 15 target rows standalone still fails, by cause:
+
+- `instance-length`, `instance-name`: the function crosses out as the
+  caller-owned carrier. `.length` on it takes the
+  generic length read (0 for `GeneratorFunction('x', '')`, where the realm says
+  1) and `.name` throws `Cannot access property on null or undefined`.
+  `%Function%` reached through the same untyped spelling
+  (`Object.getPrototypeOf(function () {}).constructor`) gives the same two
+  wrong answers today (probed, `.tmp/a9/p2/l{1,2}.js`); the typed
+  `Function("x", "")` answers both correctly. Seeding own
+  `length`/`name` descriptors on the carrier was tried in-branch and backed out:
+  the carrier's hard-coded `delete` / `hasOwnProperty` arms still defeat
+  `verifyProperty`'s configurability check, and changing them changes the
+  `Function` kind, which this slice promised not to do.
+- `instance-prototype`: its own `prototype` is right now (`typeof` passes), but
+  `Object.getPrototypeOf(instance)` is not %GeneratorFunction.prototype% — the
+  carrier's `[[Prototype]]` is not linked.
+- `has-instance`: the first failing assertion is `gDecl instanceof
+  GeneratorFunction` on a compiled `function*` declaration, which A9 does not
+  touch; the same answer as on main.
+- `instance-restricted-properties`: reading `caller` / `arguments` on the
+  carrier does not throw. A8's poison-pill accessors could be reused.
+- `instance-yield-expr-in-param`: the SyntaxError half passes now. The second
+  half runs inside a generator and hits a trap main has without A9:
+  `var GF = Object.getPrototypeOf(function* () {}).constructor; var w =
+  function* () { yield 1; }; w().next();` → `unreachable in
+  __proto_method_…_next` (standalone).
+- `is-a-constructor` (`GeneratorFunction`, `AsyncGeneratorFunction`):
+  `isConstructor` is `Reflect.construct(function () {}, [], f)`, and that
+  rejects `f` as `newTarget`. Here `f` is the realm's function (the harness
+  fetches the intrinsic by evaluating source); main rejects the compiled
+  `Function` the same way (`Function/is-a-constructor` fails identically).
+- `proto-from-ctor-realm`, `proto-from-ctor-realm-prototype`: need a second
+  realm (`$262.createRealm`).
+- the five `class/subclass/builtin-objects/GeneratorFunction/*` rows: `class
+  extends GeneratorFunction` is not claimed, so the subclass constructor never
+  reaches CreateDynamicFunction and `new GFn(…)` is not a function.
+
+Seen on the way, not fixed here: a method call on a realm object (`o.m()`)
+returns the undecoded envelope (generic, predates A9); on a realm generator,
+`it[Symbol.iterator]() === it` answers false (observed, not chased — `for-of`
+and spread do not depend on it); a `%GeneratorFunction%` call with constant
+string arguments could be compiled away the way #2924 does it for `Function`,
+which would reach zero imports.
+
 **Cluster A claimed — 2026-09-28** by session `session_01FEGi3DmyPRPD5dx4kWU8hs`
 (the lane that rebuilt A5). The claim covers generator lowering residuals, in
 this order:
