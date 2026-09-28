@@ -169,6 +169,18 @@ assignee: "ttraenkler/fable-es2015-plan"
 #     `$__ta_ctor`, which the Int8Array `$Object` carrier is not). The first cut
 #     inlined the arm here and cost +68 / +65; extracting it left these 8.
 loc-budget-allow:
+  # 2026-09-28 — cluster A, slice A6 (receipt under the A6 claim).
+  # `src/codegen/generators-native.ts` +86 against `origin/main` @ `8273bc388e` (A5 + A7)
+  # (path already listed below, restated per the stranded-grant rule). The walker
+  # (yield-in-yield-operand, owner tracking, the return case) lives in the leaf
+  # `generator-yield-nested.ts`. What has to stay in the god-file writes
+  # `buildNativeGeneratorPlan`'s own closure state: the refuse-or-lower router the
+  # return arm and arms 1/2 call (it needs `nestedYields`, `fail`, `nestedHost`),
+  # the host's operand-replacement attach + return terminator (`curId`,
+  # `finishState`), the G3b sent-spill helper (`linearHost`,
+  # `continuationSpillName`), and the G3a carrier rule inside
+  # `generatorElemValType`. About half of the growth is the comment recording
+  # why each arm refuses instead of compiling a plain terminator.
   # 2026-09-28 — cluster D, slice D7 (receipt under `## Cluster status`).
   #   - `src/codegen/async-scheduler.ts` +5 (NEW entry): the import, the two
   #     comment lines and the one-line hand-off at the top of
@@ -1030,6 +1042,17 @@ loc-budget-allow:
   # `promise-subclass-cell-read.ts`; the hand-off cannot move, because it is the
   # arm that would otherwise emit the bare `global.get` of the cell.
 func-budget-allow:
+  # 2026-09-28 — cluster A, slice A6: `buildNativeGeneratorPlan` +67 as the gate
+  # measures it against `origin/main` @ `8273bc388e` (path already listed below,
+  # restated per the stranded-grant rule). Every piece reads or writes this
+  # function's closure state, so none can move behind a seam: `lowerNestedOrRefuse`
+  # and `yieldOperandHoldsYield` (called from the return arm and arms 1/2; they
+  # use `nestedYields`, `fail`, `nestedHost`, `stateFinallyDepth`), the widened
+  # `nestedHost` (`attachContinuationReplacements(curId, …)`, a `return`
+  # terminator via `finishState` / `startState`), the three arm hooks, and
+  # `continuationSentSpill` (`linearHost.spill` / `continuationSpillName`) with
+  # the relaxed carrier check it serves. The walker changes are in
+  # `generator-yield-nested.ts`.
   # 2026-09-28 — cluster A, slice A7. `ensureNativeGeneratorResumeFunction` +2:
   # one call line (`bindNamedExpressionOwnName`) and its spacing, placed after
   # the param copy / capture rehydration (so the `__self` local exists) and
@@ -11045,6 +11068,188 @@ owners above.
 Both lanes `git merge origin/main` before opening a slice and record slices
 under `## Cluster status`. This lane has not opened F, H or I since round 1;
 the partition stands as proposed.
+
+#### A6 claimed — 2026-09-28 (nested yield operands)
+
+Claimed by the same session, before any code. Branch
+`claude/es6-6651-a6-nested-yield`, cut from A5's branch at `f8519713cb` on
+purpose: A6 extends `generator-yield-nested.ts`. A5's branch is re-merged if it
+changes; `origin/main` is merged as usual. Every before-measurement uses a
+source-clean `git archive f8519713cb`.
+
+| group | shape | ES2015 rows |
+| --- | --- | ---: |
+| yield-spread | `yield [...yield yield]` — `yield-spread-arr-{single,multiple}` under `{expressions,statements}/class/gen-method{,-static}`, `expressions/generators/{,named-}`, `statements/generators`, `object/method-definition/gen-` | 16 |
+| yield operand | `yield yield 1` — `yield-as-yield-operand` ×4 (incl. `class/definition/methods-gen-`), `yield/rhs-yield`, `GeneratorPrototype/next/return-yield-expr` | 6 |
+| group 2 | `return <expr holding a yield>` (silently miscompiled today) — `yield-identifier-non-strict` ×4 | 4 |
+| group 3 | carrier: G3a `isNumberType` for yield/return operands, G3b #680 continuation under the boxed-any carrier (standalone only, externref linear `sent` spills) — `yield/{in,star-in}-rltn-expr` (+ `yield/rhs-regexp`) | 2 (+1) |
+
+Diagnosis source: the 2026-09-28 triage spec, groups 2 and 3. Out of scope: its
+groups 1, 4 and 5, and the error-swallowing hazard in
+`statements/nested-declarations.ts` (the hoist rollback that discards a
+generator's codegen errors) — a separate issue. G3a is measured on the `dstr/`
+and class generator-method families before it is trusted (the spec's owed
+measurement).
+
+#### A6 receipt — 2026-09-28
+
+PR #6248. Every number below was measured in this session; the artifact each
+came from is named. Two measurement rounds: round 1 before A7 landed (base =
+A5's head `f8519713cb`, after = `3d2e08c00a`), round 2 on top of A5 + A7 as
+asked (base = `origin/main` @ `8273bc388e`, after = the merged A6 head
+`d58abb85b1`). Both base trees are source-clean `git archive` extracts, verified
+blob-for-blob over `src/`, `tests/`, `scripts/` (0 mismatches). Engine QuickJS,
+adapter `d4799bda84cfed0d`.
+
+**What changed, and why.**
+
+- **A yield inside a yield operand** (`yield yield 1`, `yield [...yield]`).
+  §15.5.5 evaluates the operand, then suspends, so the inner yield suspends
+  first and the rest of the operand runs between the two suspensions. The A5
+  walker (`generator-yield-nested.ts`) now walks such an operand first and tags
+  every event with the yields whose operand contains it (`owners`). An event
+  inside the operand of the NEXT yield to suspend is evaluated by that yield's
+  terminator, which is its spec position; the suspending state gets the
+  replacement map its operand reads (earlier yields, captures).
+  `collectYields` is post-order to match.
+- **`return <expr holding a yield>`** (triage group 2). The return arm used to
+  emit a plain `return` terminator: the inner yield compiled as `undefined`, no
+  suspension (`function* g() { return yield 1; }` finished on the first
+  `next()`). It now goes to the walker's new `ReturnStatement` case, whose
+  `finish` terminates the last state with the completion. An IIFE callee
+  (`(function (arg) { … })(yield)`) is replayable: creating a closure is
+  unobservable.
+- **Refuse, never miscompile.** Arms 1 (`yield <op holding a yield>;`), 2
+  (`let x = yield <…>`) and the return arm route to the planner when it can
+  prove the order (direct body, no enclosing try, boxed-any carrier,
+  standalone) and `fail()` otherwise. On the JS host a return-with-yield now
+  falls back to the eager path instead of the native miscompile. Generators
+  with these shapes take the boxed-any carrier (`bodyHasNestedYield`), since
+  the resumed value is the next yielded or returned value.
+- **G3a.** Standalone/WASI: a boolean operand no longer counts as
+  carrier-numeric (`true` came out as the Number 1). Host keeps the old rule, so
+  it stays byte-identical.
+- **G3b.** A #680 continuation now runs under the boxed-any carrier in
+  standalone/WASI. Its `sent` spill is an externref linear spill, typed up
+  front, so the any-carrier resume-binding bail does not apply. Every such plan
+  was a refusal before.
+
+**Per path, targets ∪ A manifest** (224 unique rows; standalone,
+`--isolate`, 4 manifest chunks + the 29-row target list, under the shared lock):
+
+| round | base | after | pass → non-pass |
+| --- | --- | --- | ---: |
+| 1: A5 head `f8519713cb` → `3d2e08c00a` (`.tmp/a6/A-{base,after}.tsv`) | 171 pass / 31 fail / 22 CE | **196** / 7 / 21 | **0** |
+| 2: main `8273bc388e` → `d58abb85b1` (`.tmp/a6/R2-{base,after}.tsv`) | 178 / 33 / 13 | **203** / 9 / 12 | **0** |
+
+Both rounds: 24 fail → pass, 1 CE → pass (`yield/rhs-regexp`, G3b), nothing
+else moves. The A manifest alone (197 rows) is 171 → 173 (round 1) and
+178 → 180 (round 2); 27 of the 29 targets are outside it.
+
+| target group | rows | after |
+| --- | ---: | --- |
+| `yield-spread-arr-{single,multiple}` | 16 | **12 pass**; 4 fail — `{expressions,statements}/class/gen-method/` (below) |
+| `yield-as-yield-operand` ×4, `yield/rhs-yield`, `GeneratorPrototype/next/return-yield-expr` | 6 | 6 pass |
+| `yield-identifier-non-strict` ×4 | 4 | 4 pass |
+| `yield/{in,star-in}-rltn-expr` + `yield/rhs-regexp` | 3 | 3 pass |
+
+**The 4 non-static `class/gen-method/yield-spread-arr-*` rows are not A6's.**
+They call the method UNBOUND (`var gen = C.prototype.gen; gen()`). A probe
+with no nested yield at all (`*gen() { yield [1, 2]; }` called the same way)
+fails identically on BOTH trees (`Cannot access property on null or
+undefined`); the same A6 generator called as `new C().gen()` passes. That is
+the method-receiver model (triage group 5c, here for classes).
+
+**Reach of the byte differential.** A typed scan (`.tmp/a6/reach6.mts`)
+covered every test262 row with a sync generator: 2,817 rows, including the
+`dstr/` and class/object generator-method families. It assembled the harness
+the way the runner does and classified each generator with the checker:
+
+| tag | meaning | rows |
+| --- | --- | ---: |
+| N | nested yield operand / return-with-yield | 58 |
+| C | computed-key yield (A5 walker, changed here) | 19 |
+| G | **G3a changes the carrier** | **4** |
+| E | yield inside a larger expression under a boxed-any carrier (G3b) | 119 |
+
+128 rows in all. **G3a moves exactly 4 carriers, none in `dstr/` or a
+generator-method family**: `in/{,private-field-}rhs-yield-present`,
+`yield/{in,star-in}-rltn-expr`. As an empirical cross-check (the spec's owed
+measurement), a seeded 150-row sample of the `dstr/` sync-generator and
+class/object generator-method rows (`.tmp/a6/g3a-sample.txt`, population
+1,991) went through the byte differential. The only sample row whose bytes
+moved is an N row (`class/gen-method/yield-spread-obj`).
+
+**Compile-only byte differential, round 1** (A5 head → `3d2e08c00a`). The set
+is the 128 reach rows ∪ targets ∪ A manifest ∪ the 150-row sample: 409 rows,
+527 variants per lane (primary + strict rerun, the runner's assembly and
+compile options).
+
+- **Host: 5 rows changed**, every one a host-native generator DECLARATION
+  with a `return <expr holding a yield>`, which now falls back to the eager
+  path instead of the native miscompile. Runner verdicts, host, both trees: all
+  5 non-pass before and after (`return-yield-expr`, `in/rhs-yield-present`,
+  `generators/yield-identifier-non-strict` fail → fail; the two
+  `dynamic-import/assignment-expression/yield-*` rows are an isolate
+  environment error on both trees). 0 pass lost.
+- **Standalone: 55 rows changed.** 29 are in the per-path set above. The other
+  26 went through the runner on both trees: **9 fail → pass** (the
+  `class/elements/gen-private-method{,-static}/yield-spread-arr-*` ×8, ES2022,
+  and `in/rhs-yield-present`), **17 fail → CE**, 0 pass lost. The 17 are
+  `yield-spread-obj` ×10 (ES2018), `yield-identifier-spread-non-strict` ×4,
+  `in/private-field-rhs-yield-present`, and the two `statements/generators`
+  twins. Each was silently wrong before; now it is a loud refusal. Example: in
+  `{ ...yield, y: 1, ...yield yield }` the first sent value's
+  CopyDataProperties must run BEFORE the later yield suspends, and an `op`
+  before a later yield that is not part of that yield's operand is refused.
+
+**Compile-only byte differential, round 2** (main `8273bc388e` →
+`d58abb85b1`, the same 409-row set): NOT YET RUN at the time of this entry —
+queued behind the shared lock. Round 1 above is the byte evidence until it
+lands.
+
+**Other controls.**
+
+- Pin suite `tests/issue-6651-a6-nested-yield-operands.test.ts`, 11 cases,
+  standalone, `imports: []`: **11/11 red on both bases** (A5 head, and main
+  `8273bc388e` via the pin-family run), green after. Ten compile and answer
+  wrong or refuse; the CONTROL (a return-with-yield in a loop body) compiles
+  on base (the miscompile) and refuses with #680 after.
+- Two older pins asserted a refusal A6 removes, and now assert the answer:
+  `issue-2864-yield-in-expression-position`'s nested-yield-operand BOUNDARY
+  case (`[yield ((yield 1) as number)]` → 7; red on the A5 base).
+- Pin families (`issue-6651-a*`, `*generator*`, `*yield*`, `issue-680*`; one
+  vitest per file, 2 GB fork heap), round 2: base 56 files, 23 failing = the
+  11 A6 cases + 12 pre-existing (`issue-2173-yieldstar-generic-iterable` ×9,
+  `issue-2864-standalone-generator-carrier` ×2,
+  `issue-3526-generator-number-box` ×1); after 12 failing, the identical
+  pre-existing set. Round 1 (A5 base) found one more after-only failure, the
+  #2864 BOUNDARY case, converted as above.
+- `website/playground/examples/` + `benchmarks/suites/*.ts` +
+  `benchmarks/*.bench.ts` (19 programs × host/standalone): **38/38
+  byte-identical** in round 1.
+- `pnpm run check:ir-fallbacks`: **OK** (both rounds).
+- Guard suite (`node scripts/run-guard-suite.mjs`: one fork, 512 MB heap).
+  Round 1: 20/20 files on both trees, every file ending at ~500 MB heap used
+  on BOTH. Round 2: it OOMs locally on main `8273bc388e` itself (18 files, then
+  the heap limit) and identically on the A6 head; all 20 files pass one at a
+  time. That is main's heap ceiling, fixed in PR #6261. CI's `quality` on
+  `d58abb85b1` is green.
+- CI on `d58abb85b1`: every required check green (`quality`,
+  `equivalence-gate` with 8/8 shards, `cheap gate`, `merge shard reports`,
+  `check for test262 regressions`, `cla-check`).
+- Gates, bare, before every commit: `typecheck`; biome lint (error level);
+  prettier; loc/func budgets, also with `LOC_GATE_BASE` = each main tip
+  (grants dated in this file's frontmatter: +86 / +67 vs `8273bc388e`);
+  `check-coercion-sites`; `check:oracle-ratchet`; `check:dead-exports`.
+
+**Residuals.**
+
+| rows | shape | what it needs |
+| ---: | --- | --- |
+| 4 | `class/gen-method/yield-spread-arr-*` (unbound instance method call) | the class method receiver model (triage group 5c) |
+| 17 | `yield-spread-obj` ×10 (ES2018), `yield-identifier-spread-non-strict` ×4, `in/private-field-rhs-yield-present`, 2 twins — now CE | an observable op (object spread, private `in`) between two yields that is not part of the later yield's operand; needs capturing the partially built value |
+| — | `yield*` whose operand holds a yield, a yield inside a destructuring default under A4 | not routed through the nested planner; still the old lowering |
 
 ### 2026-09-24 — Cluster I, slice I5: the void-`super` rollback (arrow-lexical family)
 
