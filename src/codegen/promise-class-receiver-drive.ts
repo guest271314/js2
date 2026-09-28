@@ -98,6 +98,7 @@ import { resolvePromiseSubclassName } from "./expressions/promise-subclass.js"; 
 import { noJsHost } from "./js-errors.js";
 import { promiseSubclassResolveFallbackInstrs } from "./promise-subclass-proto-link.js";
 import { shadowsGlobalValueName } from "./promise-class-receiver-settle.js";
+import { demandPromiseDynamicMember } from "./promise-dynamic-member-read.js"; // (#6651 D5)
 
 const EXTERNREF: ValType = { kind: "externref" };
 const I32: ValType = { kind: "i32" };
@@ -941,6 +942,9 @@ export function tryEmitClassReceiverCombinatorCall(
   // `Get(C, "resolve")` is a runtime-key read of the class OBJECT: record the demand so the
   // class's static sidecar is materialised (#5383 S2i).
   recordStandaloneRuntimeKeyClassMemberRead(ctx, ctx.structMap.get(className));
+  // `Invoke(next, "then", …)` reads `then` off whatever `C.resolve` answers — a native promise
+  // included (#6651 D5): demand `%Promise.prototype%.then` so that read finds it.
+  demandPromiseDynamicMember(ctx, "then", fctx);
 
   const local = (name: string, type: ValType): number => allocLocal(fctx, `__pcd_${name}_${fctx.locals.length}`, type);
   const L: DriveLocals = {
