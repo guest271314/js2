@@ -169,6 +169,18 @@ assignee: "ttraenkler/fable-es2015-plan"
 #     `$__ta_ctor`, which the Int8Array `$Object` carrier is not). The first cut
 #     inlined the arm here and cost +68 / +65; extracting it left these 8.
 loc-budget-allow:
+  # 2026-09-28 — cluster A, slice A6 (receipt under the A6 claim).
+  # `src/codegen/generators-native.ts` +86 against `origin/main` @ `1a7982c0d6`
+  # (path already listed below, restated per the stranded-grant rule). The walker
+  # (yield-in-yield-operand, owner tracking, the return case) lives in the leaf
+  # `generator-yield-nested.ts`. What has to stay in the god-file writes
+  # `buildNativeGeneratorPlan`'s own closure state: the refuse-or-lower router the
+  # return arm and arms 1/2 call (it needs `nestedYields`, `fail`, `nestedHost`),
+  # the host's operand-replacement attach + return terminator (`curId`,
+  # `finishState`), the G3b sent-spill helper (`linearHost`,
+  # `continuationSpillName`), and the G3a carrier rule inside
+  # `generatorElemValType`. About half of the growth is the comment recording
+  # why each arm refuses instead of compiling a plain terminator.
   # 2026-09-28 — cluster A, slice A5 (receipt under the A5 record).
   # `src/codegen/generators-native.ts` +85 against `origin/main` (path already
   # listed below, restated per the stranded-grant rule). The target-1 planner
@@ -990,6 +1002,17 @@ loc-budget-allow:
   # `runtime/wasm-struct-host-semantics.ts` beside `normalizeSandboxValue`.
   # (`declarations.ts` is already listed below; `src/runtime.ts` just after.)
 func-budget-allow:
+  # 2026-09-28 — cluster A, slice A6: `buildNativeGeneratorPlan` +67 as the gate
+  # measures it against `origin/main` @ `1a7982c0d6` (path already listed below,
+  # restated per the stranded-grant rule). Every piece reads or writes this
+  # function's closure state, so none can move behind a seam: `lowerNestedOrRefuse`
+  # and `yieldOperandHoldsYield` (called from the return arm and arms 1/2; they
+  # use `nestedYields`, `fail`, `nestedHost`, `stateFinallyDepth`), the widened
+  # `nestedHost` (`attachContinuationReplacements(curId, …)`, a `return`
+  # terminator via `finishState` / `startState`), the three arm hooks, and
+  # `continuationSentSpill` (`linearHost.spill` / `continuationSpillName`) with
+  # the relaxed carrier check it serves. The walker changes are in
+  # `generator-yield-nested.ts`.
   # 2026-09-28 — cluster A, slice A5: `buildNativeGeneratorPlan` +40 as the gate
   # measures it (path already listed below, restated per the stranded-grant
   # rule). Four pieces, each writing this function's own closure state and so
