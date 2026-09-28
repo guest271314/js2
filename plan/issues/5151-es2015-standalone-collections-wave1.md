@@ -80,7 +80,7 @@ run with `npx tsx .tmp/probe-one.mts <abs-path>`).
 | E. Call without `new` must throw | 3 | `Map()` / `Set()` / `WeakMap()` return an object instead of throwing TypeError (probe `no-new.js`). The exact fix already exists for WeakSet: `tryCompileWeakSetCallWithoutNew` (#4732, `src/codegen/expressions/new-builtin-globals.ts:1722`, wired at `calls.ts:6962`) — WeakSet's own undefined-newtarget test passes; the other three names were never added. | `built-ins/Map/undefined-newtarget.js` · `built-ins/Set/set-undefined-newtarget.js` |
 | D. `@@species` read/write fidelity | 2 | Only the gOPD surface models `get [Symbol.species]` (`src/codegen/builtin-static-gopd.ts:371-430` — descriptor correctly shows get:function/set:undefined, probe `species-desc.js`). A direct READ `Map[Symbol.species]` misses that arm and returns undefined, and an ASSIGNMENT lands as an expando and reads back changed — `verifyNotWritable(Map, Symbol.species, …)` sees a successful write (probe `species-write.js`: before!==Map, write visible). The symbol key also stringifies as its internal id ("obj[5]") in the failure message. | `built-ins/Map/Symbol.species/symbol-species.js` · `built-ins/Set/Symbol.species/symbol-species.js` |
 | F. `size` accessor reflection through propertyHelper | 2 | Direct `gOPD(Map.prototype, 'size')` works (accessor with get, `array-object-proto.ts:1710`), but propertyHelper holds the receiver in a VARIABLE — `var p = Map.prototype; gOPD(p,'size')` returns undefined (probe `size-verify.js`: TypeError "Cannot convert undefined or null to object") because the gOPD arm resolves only syntactic `Map.prototype` receivers. Additionally `propertyIsEnumerable.call(Map.prototype,'size')` wrongly answers true (probe `size-verify2.js`) — §17 says non-enumerable. | `built-ins/Map/prototype/size/size.js` · `built-ins/Set/prototype/size/size.js` |
-| G. Heterogeneous key/value representation | 1 | `new Map([[4,4],['foo3',3],[sym,2]])` then `map.get(1)` returns NaN instead of the stored string (value coerced through an f64-typed lane); adding a `map.get(sym)` read makes the module INVALID wasm ("call[3] expected type (ref null 6), found anyref", probe `het-get.js`) — `coerceMapKeyToAnyref` (`map-runtime.ts:1424`) / the `__map_get` result lane mishandle symbol keys and mixed value unions. | `built-ins/Map/prototype/set/append-new-values.js` |
+| G. Heterogeneous key/value representation | 1 | `new Map([[4,4],['foo3',3],[sym,2]])` then `map.get(1)` fails the original assertion with NaN instead of the stored string. Current source/WAT shows generic `anyref` storage and read, so an f64-coercion cause is not established. A separate historical `map.get(sym)` probe made an invalid module ("call[3] expected type (ref null 6), found anyref"); that symbol-key path remains distinct from the measured original row. | `built-ins/Map/prototype/set/append-new-values.js` |
 
 ## Implementation Plan
 
@@ -549,19 +549,255 @@ assertion. This is an existing #4491 red control, not evidence about #5151;
 its fixture was not changed. Baseline receipt:
 `/Users/thomas/.codex/worktrees/map-size-baseline/js2/.tmp/5151-neighbor-4491-baseline-20260928T025606Z-58140/full.log`.
 
-### Step G — heterogeneous key/value lanes (1 test + unblocks A4)
+### Step G — mixed Map values (1 measured row; WAT diagnostic gate)
 
-File: `src/codegen/map-runtime.ts` (`coerceMapKeyToAnyref:1424`,
-`compileCollectionElementArg:1548`, the `__map_get` result unwrap in
-`tryCompileNativeMapMethodCall:1597`).
-1. Fix the symbol-key seed emitting an invalid module (probe `het-get.js`:
-   "call[3] expected type (ref null 6), found anyref" — a `$Symbol` ref pushed
-   where `(ref null $AnyValue)`-shaped coercion was expected). Add a symbol
-   arm to `coerceMapKeyToAnyref` mirroring its string/number boxing arms;
-   validate with `/analyze-wat` on the probe.
-2. Fix `map.get(k)` returning through an f64 lane when the map's value union
-   is mixed (string stored, NaN read back): the get result must stay anyref
-   and unbox per dynamic tag, not per the oracle's first-seen element type.
+The exact frozen row is
+`test/built-ins/Map/prototype/set/append-new-values.js`: numeric initial values
+are followed by `map.set(1, 'valid')`, then the original body directly checks
+`assert.sameValue(map.get(1), 'valid')`. The historical observation was `NaN`
+rather than `'valid'`, but that result does not identify an f64-unbox or
+symbol-key root cause by itself.
+
+Source-only recheck at
+`732d9f75e671237c3cdf3abf6ba848bedada9185` finds that
+`tryCompileNativeMapMethodCall` in `src/codegen/map-runtime.ts` returns
+`{ kind: "anyref" }` after native `__map_get`; its caller
+`compileExternMethodCall` in `src/codegen/expressions/extern.ts` returns that
+result unchanged. The prior local `map.get`-unbox prescription is therefore
+withdrawn pending exact emitted-route evidence. This does not rule out a later
+coercion, setter, callback, or comparison boundary.
+
+Before any implementation or focused runtime claim, run the ignored,
+compile-only diagnostic
+`.tmp/5151/mixed-map-original-harness-wat-diagnostic.mts` under an explicit
+compiler lease. It refuses a source/corpus mismatch and requires:
+
+- source head `732d9f75e671237c3cdf3abf6ba848bedada9185` and clean relevant
+  compiler/harness paths;
+- Test262 gitlink `b363f29d3c43c626dc852744ad64a0b48a003693`, the exact raw
+  fixture SHA-256, and a physical `test262/harness` checkout;
+- the maintained `parseMeta` → `assembleOriginalHarness` →
+  `CompilerPool.runTest` → `scripts/test262-worker.mjs::compileSingleSource`
+  route. The driver imports the worker's generated compiler bundle and creates
+  its same default incremental service; it reproduces the literal
+  `originalHarness` compile with `fileName: test.js`, `sourceMapUrl:
+  test.wasm.map`, metadata-derived `scriptGoal` and
+  `inferModuleStrictArguments`, standalone `deferTopLevelInit`, and the
+  wrapper's `hostBridge: always`. `emitWat: true` is the sole intentional
+  compile-option difference.
+
+The capture command must set `TEST262_TARGET=standalone` and
+`TEST262_SEMANTIC_PROVIDERS=auto`, and a normal worker-entry bundle build must
+have completed under the same lease first. The ignored driver refuses a missing
+bundle, records its SHA-256 plus the worker-style bundle hash, and pins the
+entry/worker/pool/caller source hashes. It intentionally does **not** recreate
+an IPC fork with prior shard history, invoke worker `restoreBuiltins`, execute a
+body, or write cache/verdict data; the receipt labels those WAT-only
+instrumentation differences rather than claiming a runtime-equivalent result.
+
+The initial v2 capture wrote the full raw and assembled sources plus WAT and
+hashes for three separately labelled bodies: (1) byte-identical direct
+original, (2) one immediate local binding between `map.get(1)` and the same
+assertion, and (3) a same-harness all-string-value control that preserves the
+original number/string/Symbol key shape. It did not instantiate Wasm or execute
+a Test262 body, so its receipt is WAT provenance rather than a pass/fail
+result. Compare the resulting `__map_get` call and direct/local consumer paths
+before proposing any production seam. A source-evidenced ownership and
+clearance check remains required for every implementation surface.
+
+#### Compile-only WAT receipt (not a runtime verdict)
+
+The leased capture completed on the pinned source/corpus pair above with exit
+0. Its receipt is
+`.tmp/5151/wat-732d9f75-a01/receipt.json` (SHA-256
+`25452893d0955efeed6a1143f860fe16c2ae348c562b83ed0a66378c36c4b263`), and
+records the worker-entry compiler-bundle SHA-256
+`b0b5619d73931cd747ee3aa84fbd803cc07b95b2b3524241cb24d0c4af3de259`.
+The byte-identical direct-original assembly has SHA-256
+`06ce075cab920261f4bbdddf6b1997d43f19ad730f4bd36b9a87b382fa126204`, emitted
+WAT SHA-256
+`40b67db55921f94f01126e4f2552a6b93afc92f872b7920d2e4d40c078177476`, and
+Wasm SHA-256
+`7c90657c81111466b3862d1900c0893400e18421026750a3f4aa2489bb6ec8e2`.
+The local-binding and homogeneous-value variants were also emitted and are
+fully hashed in that receipt. All three compiles carried the worker's
+`$DONOTEVALUATE` IR-fallback warning; none instantiated or executed a module.
+
+The direct-original WAT rules out the previously presumed immediate
+numeric-unbox seam, but no more. In the direct body, `__map_set` receives the
+literal `"valid"` as its generic `anyref` value argument. The following
+`__map_get` (WAT call index 550; definition `$__map_get`) returns `anyref`,
+which flows through `extern.convert_any` directly into the assertion helper
+`__call_m_sameValue_2` (call index 558). There is no intervening call to
+`$__unbox_number` (call index 64). The all-string-value control has the same
+direct `__map_get` to `sameValue` shape.
+
+By contrast, the local-binding diagnostic deliberately emits
+`extern.convert_any`, then `$__unbox_number`, then stores into its f64-typed
+local/global. A stored string consequently takes string-to-number semantics
+there; that is a property of the added binding, not evidence about the
+unchanged original. Accordingly, this receipt withdraws the proposed direct
+`map.get` unbox repair, does not establish a setter/storage/comparison/runtime
+cause, and does not count as a passing or failing Test262 result. The next
+gate is the separately leased maintained exact-manifest runtime execution of
+the unchanged row with its selected Map set/get controls; interpret only its
+complete callback-validated receipt before naming another implementation seam.
+
+#### Current unchanged original plus controls (terminal baseline receipt)
+
+That maintained runtime gate has now completed on the same source head and
+corpus. Its four-path exact manifest has SHA-256
+`119ae17ea77b1abe3941c4172b3c470c39f350089d00972e609ccf95a23215c2` and
+contains the unchanged original plus the preselected passing controls
+`Map/prototype/get/returns-value-different-key-types.js`,
+`Map/prototype/set/replaces-a-value-returns-map.js`, and
+`Map/prototype/set/this-not-object-throw.js`. The normal compiler/runtime-entry
+build and QuickJS provider build plus `--require-cache` verification completed
+in session 71304; compiler bundle SHA-256 is
+`b0b5619d73931cd747ee3aa84fbd803cc07b95b2b3524241cb24d0c4af3de259`, runtime
+bundle SHA-256 is
+`fe6723fca3afd44501d6f54e60d2038f4f27deb1c6edadc9b542606acfde5fc4`, and the
+verified adapter key is `a47f3210f9595e00` (adapter SHA-256
+`8b96338e50a0c5a471c2b374f5ea8e1c9737caada447ee4f1020fdf9945a9ffb`).
+
+The direct maintained `tests/test262-chunk-dynamic.test.ts` original-harness
+run used standalone/auto/QuickJS under Node 24.19.0 with one fork/worker and
+4096 MiB. Session 63749 terminated exit 1 after 18.19 s: the unchanged
+`append-new-values.js` row still reports `SameValue(NaN, "valid")`, while all
+three selected controls passed (3 pass, 1 fail, zero compile errors/skips).
+The callback-complete JSONL is
+`benchmarks/results/issue5151-map-current-original-controls-results-5151-current-732d9f-a01.jsonl`
+(SHA-256
+`646d4336970e8bc373d2d2e4e8d457689139e5588f1933b5b86d2f1ae45ccf3e`); its
+matching one-of-one completion manifest has SHA-256
+`96d3e878fbf6b5f546588305764c3c1d863ce91d20a1dcc1421da8bc9e24860e`.
+The completeness validator exited 0 with four verdicts for four registered
+expected paths and zero exclusions. This is a current baseline reproduction,
+not a candidate-fix result or a whole-suite measurement.
+
+#### Static Map-to-assertion trace and next discriminator (source/WAT only)
+
+The current WAT capture does **not** locate a static string-to-number boundary.
+`src/codegen/map-runtime.ts` stores the `set` value as the generic `anyref`
+argument both in the update arm (`struct.set` at lines 817–835) and the insert
+arm (`struct.new` at lines 878–891); `__map_get` reads that same `F_VALUE`
+field as `anyref` (lines 721–772). The direct original's only final lookup is
+WAT `call 550` at lines 130361–130368, followed by `extern.convert_any` and
+`__call_m_sameValue_2`—not `__unbox_number`.
+
+The assertion call adaptation is also visible rather than inferred. Module
+initialization registers `assert.sameValue` closure 59 with declared arity 3
+(WAT lines 129635–129652). Therefore `__call_m_sameValue_2`'s two-argument
+fast arm is ineligible (its arity check is lines 124430–124452) and it sends
+the two direct values through `__extern_method_call` (call 241). That helper
+reaches `__apply_closure` (call 186), preserves the two argument-vector entries
+as `externref`, pads only the omitted third `message` argument, and selects
+`__call_fn_method_3` (call 652). Its ref-344 arm passes receiver, actual,
+expected, and message directly to closure 59 (WAT lines 142988–143025).
+Closure 59 forwards actual/expected to `_isSameValue`; closure 58 only calls
+`__unbox_number` after **both** operands pass the numeric tests (WAT lines
+125649–125661). This proves the emitted static route contains no visible
+coercion from the stored string through the assertion comparison. It does not
+attribute the observed runtime `NaN` to WasmGC, the provider, or another
+runtime component.
+
+#### Direct-expression discriminator (terminal; diagnostic-only)
+
+The Node 24.19.0 original-harness oracle passed all six full assemblies
+(receipt `.tmp/5151/node-oracle-732d9f75-a01/receipt.json`, SHA-256
+`a5362feead024ede533da0fa07e57dd0691225f8b451b121cacb4b3d38d8c696`). A
+fresh compile-only capture then completed with exit 0 at
+`.tmp/5151/wat-732d9f75-a02/receipt.json` (SHA-256
+`c4b5a5722db61e0821bc50815edaf7e96df52f8cbb18973abf0fa1c2c72c4c1e`). It
+retains actual Wasm binaries as well as WAT, contains no imported functions,
+and records the byte-identical original plus direct `typeof` and direct strict
+equality variants. The original has one `$__map_get` call; each modified body
+has two.
+
+The paired maintained `CompilerPool` run completed with exit 0 at
+`.tmp/5151/runtime-direct-732d9f75-a02/receipt.json` (SHA-256
+`30ebc6b3d76c7777ba9f0020ffda57519b65785fe7689b2660ae4e4c83b3f671`) under
+the same pinned source/corpus, standalone/auto, Node 24.19.0, one worker, and
+4096 MiB. Its artifact, baseline, and WAT-to-executed-binary parity gates are
+all null. The executed binary SHA-256 matches the paired capture for all three
+direct bodies: original `7c90657c81111466b3862d1900c0893400e18421026750a3f4aa2489bb6ec8e2`,
+`typeof` `512e68cfb9d5205e0d8dca5ba866ce599d67a82b05370b9df15c695647f15864`,
+and strict-equality `f824679430095cccff160e78e1f33669bf61cbcdc65c17a7a6ddf55b9d6b81df`.
+Thus this diagnostic rules out a debug-WAT versus executed-bytecode mismatch
+for these bodies.
+
+The unchanged original still fails `SameValue(NaN, "valid")`; all three
+unchanged Map controls pass. The `typeof` variant reaches the real runtime
+`$__typeof_string` check (WAT function index 77) without throwing its added
+guard, then separately fails the retained original assertion. This establishes
+only that the guard's own `map.get(1)` result is string-tagged; it does not
+prove the string contents or the result of the later assertion's distinct
+lookup. The strict-equality variant is not a value discriminator: its WAT is
+`call $__map_get; drop; i32.const 1; if (throw)`, so the compiler folds
+`map.get(1) !== "valid"` to true while preserving the call side effect. Source
+review locates that fold in
+`src/codegen/binary-ops-typed-dispatch.ts`: native `Map.get` reports bare
+`anyref` (`map-runtime.ts:1725-1735`), while the string literal is a native
+`ref`; the one-ref/one-primitive strict-equality fallback drops both and emits
+the constant at lines 393-398. This is the separate direct-Map-get equality
+gap already described by ready issue #3585, **“Standalone: `m.get(k) === lit`
+false in direct call-result position (true via a local); an any-keyed Map
+poisons even typed Maps module-wide”**. It is not evidence for the original
+storage/read failure and authorizes no production change.
+
+#### Borrowed-character-code diagnostic: rejected gate, no runtime verdict
+
+The next bounded diagnostic adds
+`String.prototype.charCodeAt.call(map.get(1), 0)` before the unchanged original
+assertion, plus a known-literal borrowed-call control. No corpus or compiler
+source was changed. Node 24.19.0 passed all eight original-harness assemblies
+in `.tmp/5151/node-charcode-732d9f75-a01/receipt.json`; build/cache/reference
+session 14296 terminated successfully with the same compiler bundle and
+verified QuickJS adapter as above.
+
+Compile capture session 72606 terminated with exit 1 at the diagnostic's
+own validation gate: the literal control added one `__any_to_string` call
+(61 versus the assumed 60), contrary to the predicted inline route. Preserve
+the captures at `.tmp/5151/wat-charcode-732d9f75-a01`; do not interpret this as
+a Test262 failure or a Map value observation. No paired runtime run occurred.
+
+Inspection of the actual WAT explains why the prediction is invalid: both
+variants materialize the reflected `charCodeAt` closure (`ref.func 560`) and
+invoke it through `call_ref 187`. The direct variant supplies `__map_get`
+followed by `extern.convert_any`; the literal supplies the native string
+converted to externref. The reflected method body
+`$__proto_method_-1073741804_charCodeAt` contains the runtime receiver
+conversion and unsigned code-unit read. A global helper-call count is not a
+substitute for verifying that caller-to-closure route. Correct the diagnostic
+against this captured route, keep fresh output directories and binary parity,
+and only then execute it under the shared lease. Even a passing 0x76 check
+would establish only one code unit from a separate lookup, not full-string
+equality or the later original assertion's lookup identity.
+
+The corrected reflective-route gate subsequently completed in capture session
+57867 (exit 0), followed by runtime session 61367 (exit 0). Receipts:
+
+- Node eight-assembly oracle:
+  `.tmp/5151/node-charcode-732d9f75-a01/receipt.json`, SHA256
+  `dca0e0be6b3ad1717c477b7a0abdbbc48d0f157a4fd6d10bd88ec6dd0f8d449b`.
+- Corrected WAT capture:
+  `.tmp/5151/wat-charcode-732d9f75-a02/receipt.json`, SHA256
+  `0ba43fe43b7eaee8fc23a3afbcd281a394a064d390a03d8280c27fa1772f1fd9`.
+- Paired runtime diagnostic:
+  `.tmp/5151/runtime-charcode-732d9f75-a01/receipt.json`, SHA256
+  `33802688f08f06a64d595f022b43944d9496aaeaa1e06b8351a1c0391fe0546e`.
+
+The runtime baseline, artifact, and captured/executed-binary parity gates are
+all null (no gate failure). Both added character-code assertions complete
+without throwing, then each retained original assertion fails with the same
+`NaN` versus `"valid"` message. The direct character-code binary SHA256 is
+`35ee7f90bf1306a2904cff5a3dc7c3cd7d0b4fec5a631c2386e21a074aac1dee`.
+All three unchanged Map controls still pass. Diagnostic exit 0 means the
+instrument's gates passed, not that the failing original or all eight bodies
+passed. The observed prefix check supports code unit 0 being 0x76 through the
+borrowed conversion route; it does not establish the remaining code units or
+identify the cause of the original assertion failure. No production fix has
+been made in this lane.
 
 ### Step H — proto-from-ctor-realm (4 tests, LAST)
 
