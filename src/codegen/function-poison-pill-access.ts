@@ -63,6 +63,11 @@ function hasRestrictedProperties(
   receiver: ts.Expression,
 ): boolean {
   if (ts.isArrowFunction(sourceFunction)) return arrowValueStillCarriesRestrictedAccessors(receiver);
+  // (#6651 A8) A generator function is never a legacy sloppy function either:
+  // it has no own `caller`/`arguments` and inherits the %ThrowTypeError%
+  // accessors (§10.2.4), whatever the surrounding strictness. Those accessors
+  // are configurable, so the same custodial-use proof as the arrow arm applies.
+  if (isGeneratorFunctionLike(sourceFunction)) return arrowValueStillCarriesRestrictedAccessors(receiver);
   return isStrictFunction(sourceFunction, ctx.inferModuleStrictArguments);
 }
 
@@ -104,9 +109,17 @@ function hasRestrictedProperties(
  */
 function arrowValueStillCarriesRestrictedAccessors(receiver: ts.Expression): boolean {
   const expr = skipTransparentExpressions(receiver);
-  if (ts.isArrowFunction(expr)) return true;
+  if (ts.isArrowFunction(expr) || (ts.isFunctionExpression(expr) && expr.asteriskToken !== undefined)) return true;
   if (!ts.isIdentifier(expr)) return false;
   return identifierOnlyUsedCustodially(expr.getSourceFile(), expr.text);
+}
+
+/** A sync or async generator declaration / expression / method. */
+function isGeneratorFunctionLike(fn: ts.FunctionLikeDeclaration): boolean {
+  return (
+    (ts.isFunctionDeclaration(fn) || ts.isFunctionExpression(fn) || ts.isMethodDeclaration(fn)) &&
+    fn.asteriskToken !== undefined
+  );
 }
 
 /** Every `name` reference in `file` is a member-access receiver or a direct callee. */
@@ -129,6 +142,7 @@ function isCustodialIdentifierUse(node: ts.Identifier): boolean {
   const parent = node.parent as ts.Node | undefined;
   if (parent === undefined) return false;
   if (ts.isVariableDeclaration(parent) && parent.name === node) return true;
+  if (ts.isFunctionDeclaration(parent) && parent.name === node) return true; // (#6651 A8) `function* g(){}`
   if ((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) && parent.expression === node) {
     return true;
   }

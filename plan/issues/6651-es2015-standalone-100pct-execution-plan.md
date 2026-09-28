@@ -169,6 +169,12 @@ assignee: "ttraenkler/fable-es2015-plan"
 #     `$__ta_ctor`, which the Int8Array `$Object` carrier is not). The first cut
 #     inlined the arm here and cost +68 / +65; extracting it left these 8.
 loc-budget-allow:
+  # 2026-09-28 — cluster A, slice A8. `src/codegen/declarations.ts` +1 (path
+  # already listed below, restated per the stranded-grant rule): the import of
+  # `isGeneratorDeclarationPrototypeWrite`. The keep itself rides the existing
+  # #2660 S2 `F.prototype = …` keep line (one `||`); the predicate lives in
+  # `generators-factory-prototype.ts`, beside the initializer whose own
+  # `prototype` the kept write reaches.
   # 2026-09-28 — cluster A, slice A5 (receipt under the A5 record).
   # `src/codegen/generators-native.ts` +85 against `origin/main` (path already
   # listed below, restated per the stranded-grant rule). The target-1 planner

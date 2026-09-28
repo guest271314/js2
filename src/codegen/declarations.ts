@@ -166,6 +166,7 @@ import {
 } from "./registry/types.js";
 import { isArrayProtoIteratorAssignTarget } from "./expressions/proto-override.js";
 import { isFnctorPrototypeAssignTarget } from "./expressions/fnctor-prototype.js";
+import { isGeneratorDeclarationPrototypeWrite } from "./generators-factory-prototype.js"; // (#6651 A8)
 import {
   isStandaloneIntrinsicPromiseResolveWriteTarget,
   shouldKeepBuiltinReceiverWrite,
@@ -4358,7 +4359,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         // interception and the host lane's `_getOrVivifyFnPrototype` path use
         // the same source-level assignment; dropping it only in the host lane
         // leaves `new F().method()` with an empty prototype.
-        if (isFnctorPrototypeAssignTarget(ctx, expr.left)) {
+        if (isFnctorPrototypeAssignTarget(ctx, expr.left) || isGeneratorDeclarationPrototypeWrite(ctx, expr.left)) {
           ctx.moduleInitStatements.push(stmt);
           continue;
         }
