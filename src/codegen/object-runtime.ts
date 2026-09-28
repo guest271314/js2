@@ -55,6 +55,7 @@
  * runtime — it emits `struct.get`/`struct.set` directly and never calls
  * `ensureLateImport` for these names.
  */
+import { buildVariadicBuiltinApplyArm } from "./apply-closure-variadic-builtin.js"; // (#6701)
 import {
   createArgumentVectorArrayType,
   createArgumentVectorType,
@@ -7597,6 +7598,7 @@ export function fillApplyClosure(ctx: CodegenContext): void {
   locals.push({ name: "result", type: { kind: "externref" } });
 
   const variadicNativeApply = reserveVariadicNativeApplyState(ctx, locals);
+  const variadicBuiltinArm = buildVariadicBuiltinApplyArm(ctx, locals, 3, argcGlobalIdx);
 
   // (#3673) Read the in-module $ObjVec argument carrier directly, avoiding a
   // dynamic `__extern_get_idx` per argument. Non-$ObjVec args keep the generic
@@ -7791,6 +7793,7 @@ export function fillApplyClosure(ctx: CodegenContext): void {
     { op: "local.tee", index: 3 },
     { op: "global.set", index: argcGlobalIdx },
     ...buildVariadicNativeApplyDispatch(ctx, variadicNativeApply, objVecTypeIdx, objVecArrTypeIdx),
+    ...variadicBuiltinArm, // (#6701) Math.max/min, String.fromCharCode values
     ...widen,
     // A compiled closure above the module's TOP dispatcher arity must fail
     // loudly rather than falling through to the undefined sentinel (#1058).
