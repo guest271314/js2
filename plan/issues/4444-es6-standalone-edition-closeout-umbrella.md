@@ -4875,3 +4875,1059 @@ that original. Baseline JSON SHA-256:
 `26e04f1de2e3ea8ec27d96877c3e576040f75f433b10d6bc5666f29f00c9f863`;
 candidate JSON SHA-256:
 `b15943959d0a3d026ad7bd0f08aa48729b111ad7605e965974e79b3077473c6c`.
+
+### Function hasInstance descriptor: reuse existing ownership
+
+Frozen index 47 is now complete and accepted. Its Symbol.hasInstance/prop-desc
+failure occurs in the original propertyHelper's captured generic descriptor
+function: the descriptor read precedes a nullish dereference of enumerable.
+The generic native-prototype descriptor route rejects non-string keys; the
+intrinsic symbol member is not installed in the ordinary companion table.
+Direct member value lookup passed earlier in the same original and must not
+be replaced with another independently minted function value.
+
+Read-only audit found the existing clean historical 4739 worktree and its
+unlanded implementation commit, plus active 4265 ownership of the Function
+prototype residuals. The proposed repair is the existing singleton-backed,
+non-writable/non-enumerable/non-configurable descriptor paired with matching
+own-property semantics, not a static-call-only special case. Acceptance needs
+captured and direct descriptor reads, singleton identity, ownness, unrelated
+symbol misses and non-enumerability. No new implementation lane was started:
+resolve the existing ownership and rebase/reduce the historical fix first.
+This is source-supported routing, not a newly measured candidate result.
+
+### Reflective slice baseline on fresh upstream source
+
+The maintained nine-original baseline on e16ace7ca09da0e5150e0be34b27e7891a37afe8
+completed as run `20260928-135607`: seven pass, two fail, zero exclusions.
+Root independently validated nine registered verdicts and inspected the rows.
+Both invalid-receiver originals fail because TypeError is not thrown; all
+seven default/conversion/species controls pass. Compiler prefix:
+`61fdfd0148acaf21`; fresh verified adapter: `dbd62e121f32d12e`.
+Results SHA-256:
+`4acf7f9d58cbce1b0504a4df44a39828a910f4c1b8bf885ae10d98c7ff8f6a79`;
+completion SHA-256:
+`d5f3194057a029af54fad6a11a10092522e80749148b5137c77b5b24d286caee`.
+Issue 6729 now has a measured current-source baseline; no candidate result yet.
+While its isolated implementation proceeds, frozen census index 48 runs as
+`es2015-fullscope-128-f924650-chunk048-a01` (session 90743). Do not accept its
+aggregate before terminal receipt validation.
+
+### Frozen census index 48: complete, six non-passing originals retained
+
+Session 90743 terminated after 247.14 seconds: 86 pass, 4 fail, 2 compile
+errors, zero skips out of 92. Independent completeness validation confirmed
+92 registered verdicts and zero exclusions. The maintained runner performed
+one built-in poison-error retry; no manual rerun was performed. Results hash:
+`e34240e33b70f2352a19f951d48be3b218c97a5e80566d532213584822f93260`;
+completion hash:
+`01b10625958abef8cf3cc0435e822efe25c8ca90722c10e69ebadbe4a077b036`.
+
+Retained failures: ArrayBuffer/newtarget-prototype-is-not-object,
+Array/of/does-not-use-prototype-properties,
+Proxy/deleteProperty/trap-is-undefined-not-strict, and
+intl402/Collator/prototype/toStringTag/toString-changed-tag. Compile errors:
+object/method-definition/generator-prop-name-yield-expr (stack overflow) and
+class/decorator/syntax/valid/decorator-parenthesized-expr-identifier-reference-yield
+(strict-mode reserved identifier). Neither proposal nor Intl paths are removed.
+
+All 49 receipt pairs and exact-scope unique identities revalidated: 4,509
+measured = 4,229 pass + 242 fail + 38 compile errors; 7,269 remain unmeasured.
+Next frozen index is 49. These remain frozen-source measurements, not a
+current integrated pass-rate claim. The test slot moves to the literal-source
+Script diagnostic while the isolated reflective slice implementation proceeds.
+
+### Literal Script-var trace: reproduced failure, no location recovered
+
+The original-source trace log reports two passing diagnostic assertions (the
+expected failure observation and positive marker), with 24 unselected tests.
+Root inspected the JSON/log and verified report SHA-256:
+`c2c90d2e5339d7ca91315141cabe75caf566945c1715d3c083d104513e3f270e`.
+Canonical and source-map-enriched text are both
+`TypeError (null/undefined access)`; the frame list is empty. This reproduces
+the failure but does not locate it or establish provider causality. The
+expected-failure assertion is temporary diagnostic instrumentation, not a
+passing conformance regression. The next useful distinction is the original
+verifyProperty function boundary and its ownness/value/enumerability/write/
+delete operations versus the successful top-level descriptor classifier.
+Do not infer a synchronization repair from the absence of frames.
+
+### ArrayBuffer constructor fallback: virtual-prototype design boundary
+
+Read-only routing of index 48's newtarget-prototype-is-not-object failure
+finds that Reflect.construct creates the raw ArrayBuffer carrier and leaves
+it unchanged for a primitive newTarget.prototype. Generic getPrototypeOf then
+observes the opaque carrier's null prototype. Allocation is not established
+as the fault. A blanket byte-vector-to-ArrayBuffer-prototype mapping is unsafe:
+the host DataView path shares that carrier, and its existing view sidecar is
+not a stable brand. Historical unlanded issue 5325 explicitly declined this
+ambiguous carrier. A sound repair needs stable branding or proven provenance,
+with shared prototype ownership resolved first. No implementation was made;
+issue 6729 remains confined to reflective slice behavior.
+
+### Frozen census index 49: complete receipt and unchanged scope
+
+Session 77935 terminated after 225.12 seconds with 87 pass, 4 fail, 1 compile
+error and zero skips out of 92. Completeness independently confirms all 92
+registered verdicts, zero exclusions. Results SHA-256:
+`02cbbde710afef3ea408500efec59562f5fe889b79b2e12042a50c778df9f121`;
+completion SHA-256:
+`42f66e2999da1a9ac82c56d504ee5fdff89e4bb52b7830c3c2c3b98ae16019d1`.
+
+The four failures concern TypedArray prototype-chain Set receiver identity,
+strict tagged-template call receiver, Symbol subclass super construction, and
+primitive Symbol prototype property reads. The class escaped-new method row
+has an invalid-Wasm local type compile error. All remain in scope.
+
+All 50 receipt-pair hashes and exact manifest identities were revalidated:
+4,601 measured = 4,316 pass + 246 fail + 39 compile errors; 7,177 remain
+unmeasured. Next frozen index is 50. This is not integrated current-source
+acceptance. The shared heavy slot moved to the Script prefix/marker diagnostic;
+the slice candidate's focused fixture remains under construction.
+
+### Script prefix diagnostic: passing, lowering-sensitive lead only
+
+Session 63219 terminated with exit zero after 67.37 seconds. Both the literal
+prefix ending after the first verifyProperty call and the positive marker
+passed; 25 unrelated tests were unselected. Report SHA-256:
+`f97160dc08d0a47d652337a06d41419760e5a61879d25a5d4747ef258f53bddf`.
+Root inspected the terminal log and hash. Removing later source can change
+whole-program lowering, so this does not prove the first call passes inside
+the full original. Compare generated call/parameter representation before
+attributing the full failure to later operations. No original acceptance row
+was removed. The test slot transferred to issue 6729 candidate validation;
+its surplus-argument expected-success control remains enabled, not it.fails.
+
+### Reflective slice first focused attempt: harness-invalid, no semantic credit
+
+The implementation owner reports session 59863 exited one after 41.51 seconds:
+all six focused cases failed in the harness before reading their run result.
+The harness incorrectly destructured WebAssembly.instantiate(compiledModule)
+as an object containing instance; that overload returns the Instance itself.
+The failed terminal attempt is preserved, not counted as six compiler
+regressions or candidate verdicts. Correct the harness without changing the
+production candidate, then record the revised fixture separately. Additional
+brand controls must cover Symbol, TypedArray and DataView receivers; expected
+success remains the assertion for every semantic control.
+
+### Reflective slice corrected focused run: five passes, one real residual
+
+The owner reports corrected session 1340 terminated with five of six focused
+controls passing. These cover eleven wrong receivers, erased and unannotated
+direct/value-held calls, copied bytes/default end values, later species
+identity/bytes, and species-induced detachment. The normal surplus-argument
+assertion fails with zero observed evaluations instead of one. This remains
+a real failure in protected generic call marshalling, not an expected-failure
+pass or exclusion. The production candidate is held unchanged for the
+maintained nine-original comparison. No completed-fix claim is made yet.
+
+### Reflective slice maintained comparison launch provenance
+
+Wrapper attempt `20260928-141631` was denied permission to write its normal
+manifest receipt before compilation; it provides no semantic verdict. The
+owner retained it and launched elevated attempt `20260928-141657`, session
+24493, without changing source or tests. Root independently rechecked source
+SHA-256 `014985fb80558b7cd77615730c055c05b1ee3feccf009cfa52ef73df5e4076db`
+and focused fixture SHA-256
+`b129fc566135224926ade7ab30495e3f3e4cd010278de5cf075cd6d51a461b49`.
+The same nine-original manifest is used; no candidate verdict is accepted
+before terminal completeness validation. Narrow shared-call ownership
+clearance for the surplus-argument residual has been requested, not assumed.
+
+### Reflective slice maintained candidate: nine of nine pass
+
+Session 24493 terminated with exit zero. Root independently validated nine
+registered verdicts, zero exclusions and all nine passing rows for run
+`20260928-141657`. Against the unchanged nine-row baseline's seven passes,
+both invalid-receiver originals now pass; the seven controls remain passing.
+Results SHA-256:
+`d2e36fdb16177a4fe5b10bf5e9f268ec0c361df57f4301582a981a6d228fd6d2`;
+completion SHA-256:
+`fd697bf1dcda13e5ddf429f300422db8bfcef584664e33e5695cdf5c21ce268a`.
+This establishes the bounded two-original improvement, not full conformance
+or PR readiness: the focused surplus-argument control remains failing and
+shared-call clearance is pending. Heavy validation transfers to the Script
+full/prefix generated-code comparison; issue 6729 retains the exact receipts.
+
+### Script generated-code pair retained for attribution
+
+Session 42851 terminated with exit zero after 67.35 seconds: the positive
+marker passed, the full original retained its expected diagnostic failure,
+and the literal prefix passed. These three diagnostic assertions do not
+represent three Test262 conformance passes. Fresh snapshots are retained in
+`/private/tmp/issue-6724-wat-bV6MPb`; root independently checked both WAT hashes.
+Full assembly 033b43cb has WAT SHA-256
+`36b60381506879112779b0d68961bcdfe3ed02fa020871ebe20f2e928afdc2ca`;
+prefix assembly d36b55f8 has WAT SHA-256
+`9b3f0242ed97f2ab91a36763d1e5159da3e2827f4d91ebea2956ec3c077e66cf`.
+The owner is comparing mapped functions, call carriers and projected globals;
+identical eval Script text alone does not imply identical provider inputs.
+No source repair is inferred yet. The heavy slot is offered to issue 6729's
+normal checkpoint validation; its red surplus-argument control requires draft
+status if the unfinished checkpoint is published.
+
+### Generic surplus arguments: preserve evaluation before coercion
+
+Root read the proposed calls.ts seam: fixed arguments are compiled with their
+ABI type and may be coerced immediately, before the existing normalize-only
+surplus loop. Simply extending that loop must not be described as generally
+sound without auditing those coercions. Slice's externref slots defer builtin
+coercion, but numeric/string slots may have observable conversion behavior.
+The follow-up plan therefore needs earlier object-conversion versus later
+extra-expression ordering, abrupt extra-expression propagation, and variadic
+no-double-evaluation controls. Protected calls.ts remains unchanged pending
+clearance. Frozen census index 50 is running as session 25491 while this
+ownership-aware implementation plan is refined.
+
+### Frozen census index 50 completed; checkpoint gates resumed
+
+Session 25491 terminated with exit 1 after 265.67 seconds: **84 pass, 8 fail,
+0 compile errors, 0 skips / 92**. Independent completeness validation confirms
+92 registered and settled verdicts with zero exclusions. JSONL SHA256:
+`661b2cd631e0b30c813bd761833f2866521e1df32b4ff293e6993442b4712151`;
+completion SHA256:
+`4552f4a9adc9c484b36f19a617b2ef49dd78463a8301944ad9493d575fa84d67`.
+All 51 accepted receipt pairs were hash-checked and their identities checked
+against the exact manifest without duplicates: **4,693 measured = 4,400 pass,
+254 fail, 39 compile errors; 7,085 remain unmeasured**. This is frozen-source
+evidence, not integrated current-source conformance. Next census index is 51.
+
+The heavy validation slot transferred to the ArrayBuffer slice checkpoint
+owner. Its normal precommit passed formatting/lint staging but stopped at the
+dataview-native LOC ceiling (+241). No commit or PR is claimed yet. Any
+allowance must have substantive repository-policy justification; simply
+making the gate green is insufficient. The retained red surplus-argument
+control still makes this unfinished checkpoint draft-only.
+
+The Script-global diagnostic comparison found identical chunk_0 and initial
+Script-call setup; mapped global-push differences are corresponding index
+renumberings. It does not locate the full-source failure: first-verifier
+lowering versus later descriptor/extensibility operations remains unresolved.
+Further tracing is paused while the owner performs the requested issue 4016
+read-only ownership/state check. The protected split worktree remains intact.
+
+### Issue 4016: correct the custom-split residual classification
+
+Root read the accepted frozen census JSONL rows, rather than extrapolating from
+the protected computed-literal fixture. Five of the seven named custom-split
+originals already pass under the maintained runner at frozen source f924650:
+`cstm-split-get-err.js` (index 50), `cstm-split-on-bigint-primitive.js`
+(index 7), `cstm-split-is-null.js` (index 18),
+`cstm-split-on-string-primitive.js` (index 20), and
+`cstm-split-invocation.js` (index 44), all under
+`test/built-ins/String/prototype/split/`. The boolean- and number-primitive
+originals have no rows in the first 51 accepted shards. Thus this named set
+has **5 measured passes, 0 measured failures, 2 not yet measured**, not seven
+established residuals. These are frozen-source results, not fresh current-main
+verification. The two failing computed-literal focused controls exercise a
+different producer shape and do not contradict those original-file passes.
+
+The next bounded read-only check concerns whether the September 20
+`registry/imports.ts` cached-global-index obstruction still exists on the
+current upstream-based source. Historical handoff text alone cannot establish
+that the blocker remains. This does not authorize edits to protected files.
+
+### Issue 4016 integration resumes after landed dependency repair
+
+The cached undefined-global-index obstruction is repaired by commit
+`534f80fa3398147e08f94e51b65fcf6d0a57c1a1` (issue 6715):
+`fixupModuleGlobalIndices` now shifts `ctx.undefinedGlobalIdx` alongside the
+existing symbol caches. Root inspected that commit and the resulting source
+in this upstream-based worktree. The protected older 4016 checkout does not
+contain the fix; its historical failure cannot establish a current blocker.
+Consumer integration is still unverified. A Terra agent is preparing a fresh
+isolated plain split-coercion integration, limited to the four historical
+owned string modules, corrected fixture, manifest and issue handoff. It must
+use the shared coercion engine, respect normal gates, and measure matched
+baseline/candidate originals. Computed-literal Symbol.split routing remains
+separate and held; no IR, literals.ts or imports.ts edits are authorized.
+
+ArrayBuffer slice checkpoint `722245b45e89a3e12d9d7628c2ebb9fecd834bf7`
+is locally committed and its worktree is clean. Normal precommit passed with
+the documented size allowance; the permitted slow-tier skip was used. No
+pre-push gate or publication ran: the safety reviewer rejected the push
+before process creation and explicitly required renewed user approval.
+Approval was requested; no retry or alternate publishing route was attempted.
+Its red surplus-argument control still requires draft status when published.
+
+Frozen census index 51 is live as root session 98854, with 92 registered tests
+and one worker. It is not yet accepted into the completed census ledger.
+
+Index 51 receipt-location correction: the launch accidentally set the unused
+`TEST262_RUN_TIMESTAMP` instead of the maintained runner's `RUN_TIMESTAMP`.
+The live run therefore uses auto-generated timestamp `20260928123846` and
+JSONL `benchmarks/results/test262-standalone-es2015-fullscope-128-results-20260928123846.jsonl`.
+The explicit chunk index, total, exact scope and frozen compiler are unchanged.
+Do not restart or rename receipts to conceal this provenance difference;
+validate the actual completion receipt and index after session 98854 ends.
+
+Index 51 subsequently completed: session 98854 exit 1, 219.53 seconds,
+**84 pass, 7 fail, 1 compile error / 92**, zero skips/exclusions. The maintained
+validator confirms all 92 registered callbacks settled. Actual JSONL SHA256
+is `3e233b58ba3c7602a0be8b1cf32ec712a32327f2b2eb26cdf18c79be380bba8d`;
+completion SHA256 is
+`b1072dcb24395ea2484ad81b4b39b916365f985402f5cd2bcbe6ffe9a127cee1`.
+All 52 receipt-pair hashes and exact-scope identities were rechecked:
+**4,785 measured = 4,484 pass, 261 fail, 40 compile errors; 6,993 unmeasured**.
+Frozen-source census only; next index 52. Heavy slot released, with issue 4016
+integration next in priority when its matched controls are ready.
+
+The new issue 4016 worktree is
+`/Users/thomas/.codex/worktrees/4016-split-coercion/js2`, branch
+`codex/4016-split-coercion`, based on upstream
+`e5e69140ea74f9f143639ddfa41b94312895f3b0`. Its dated implementation plan was
+written before source adaptation; it consumes issue 6715 without editing the
+protected import-index machinery.
+
+### Census index 52 accepted; split conversion review and revoked-proxy attribution
+
+Session 21226 finished in 204.85 seconds, exit 1: **88 pass, 3 fail,
+1 compile error / 92**, no skips/exclusions. Completeness validation passed.
+JSONL SHA256 `4185551adcb06da94528a6cd4db280cbfa5aebf148b85776ff88b0449c4dd37a`;
+completion SHA256 `5e4bd009d4e971074d24e4fce1e1df1f64695d5f1da9379a49191c904c55fb37`.
+All 53 receipt pairs and unique exact-scope identities were rechecked:
+**4,877 measured = 4,572 pass, 264 fail, 41 compile errors; 6,901 unmeasured**.
+Next census index is 53. This remains frozen-source, not integrated evidence.
+
+The independent 4016 review found that the current reflective split's
+saturating i64 conversion followed by i32 wrapping is not exact ToUint32 for
+large finite values (2^63 and 2^64 must reduce to zero). The implementer was
+directed to reuse the existing canonical integer-conversion emitter without
+editing IR, and cover nonfinite values, signed zero, negative wrapping and
+large finite magnitudes. Runtime Symbol rejection must occur after ToPrimitive
+with number hint; generic number unboxing alone maps unknown boxes to NaN.
+All supplied argument expressions must be staged before builtin conversions.
+
+The census-50 revoked-proxy filter failure was attributed by read-only audit
+to existing issue 6506: reflective filter calls __extern_length and bypasses
+the direct ArraySpeciesCreate path. The prior revoked-bit guard was reverted
+after competing prologue insertions caused broad TypedArray regressions.
+This requires an ordering-safe shared-runtime repair, not a filter-local
+special case. No new implementation or current passing evidence is claimed;
+fresh ownership checks are required before editing that shared seam.
+
+### Split reflective padding boundary verified in current source
+
+Root inspected calls.ts on the new 4016 base: canonical omitted-argument
+padding is brand/member-specific (ArrayBuffer, String.normalize and Array.slice).
+String.split still receives null padding for omitted external-reference slots.
+Thus the new helper cannot distinguish an omitted limit from explicit null by
+value alone. Removing the null default without changing that ABI would break
+omitted limits; keeping it does not fix explicit-null semantics. The owner
+must retain an ordinary expected-success null-versus-omitted regression and
+record this protected calls.ts dependency, not declare complete correctness
+from the independent numeric-conversion repair. Existing calls.ts clearance
+request remains unanswered; no edits to that file were authorized.
+
+Frozen census index 53 is running as session 57359 (92 registered tests).
+
+Index 53 completed, session 57359 exit 1 after 209.00 seconds: **88 pass,
+4 fail / 92**, zero compile errors/skips/exclusions. Completeness validation
+passed; JSONL SHA256
+`642949bc07174a0c0bf1bd8904d50388fad6fd43f1d9da40c6bf1e14a59ce950`,
+completion SHA256
+`042505ac08afc4daef6c99df5e214f5eb338c5546669a46ff9259b9b389f6c18`.
+All 54 accepted receipt pairs and unique exact-scope identities were verified:
+**4,969 measured = 4,660 pass, 268 fail, 41 compile errors; 6,809 unmeasured**.
+Next census index is 54; frozen-source results are not current integration proof.
+
+The fresh 6506 ownership audit found a reserved issue ID but no live assignee.
+No open PR changes object-runtime-proxy.ts or ta-dyn-mop.ts; PRs 5753 and 5784
+do change index.ts/object-runtime.ts, though their inspected hunks do not edit
+the extern-length finalizer. Proposed repair: an idempotent late revoked-Proxy
+guard filler in object-runtime-proxy.ts, invoked after fillTaDynViewMopArms at
+both finalization sites. This avoids corrupting the early length preamble and
+does not require object-runtime.ts/ta-dyn-mop.ts edits. Explicit clearance for
+the two index.ts sites was requested before implementation; no such edits yet.
+
+### Census index 54 completed
+
+Session 70856 terminated with exit 1 after 264.71 seconds: **86 pass, 6 fail
+/ 92**, zero compile errors/skips/exclusions. Maintained completeness validation
+passed. JSONL SHA256
+`e48e9c8810d92ad2c3beae1703882d3b6789a37710215bff786de95d395aa6df`;
+completion SHA256
+`16a851b4ca2440d5337fa725bbd011accb129ad0e41908a84ee7e6aeb419cff0`.
+All 55 receipt pairs and exact-scope identities were checked without duplicates:
+**5,061 measured = 4,746 pass, 274 fail, 41 compile errors; 6,717 unmeasured**.
+Next census index is 55. These remain frozen-source results, not evidence of
+full integrated current-source conformance. The heavy test slot is free with
+4016's matched comparison next in priority once its controls are ready.
+
+### Issue 4016 focused oracle verified before compiler measurement
+
+Root independently parsed the seven new S2 test source literals with the
+TypeScript AST, transpiled away annotations, and executed them under Node 24.
+Observed results match all seven expectations: operand/coercion order
+1234672; direct nullish receiver 1; direct omitted/null limits 20;
+post-ToPrimitive Symbol rejection 1; exact numeric limit matrix 4095;
+ordinary borrowed call 2; borrowed explicit-null limit 0. A seven-case count
+floor was enforced. These are reference-runtime results only, not compiler
+passes, and the last ordinary assertion must remain red if the protected
+reflective ABI still conflates omitted and null.
+
+The heavy slot is explicitly transferred to the 4016 owner for an initial
+focused candidate run and same-fixture baseline at e5e691, followed by the
+maintained exact-manifest pair. No competing root census is running.
+
+Root's subsequent source review confirmed two corrections before measurement:
+staging now distinguishes a true void/undefined value from a compiler error
+using the error count and oracle fact; failed operands propagate failure
+instead of becoming missing arguments. Receiver-override calls decline the
+new direct-member staging path, preserving their separate argument/member
+evaluation protocol. These are inspected source changes, not runtime proof.
+The candidate's dependency and Test262 test/harness links resolve; root is
+awaiting the owner's actual launch handle rather than assuming a run exists.
+
+### First issue 4016 candidate focused run completed
+
+Owner session 93916 terminated with exit 1: **23 pass, 4 fail / 27** across
+the full focused file. Reported failures: Symbol-producing ToPrimitive returns
+0 instead of the expected catch marker 1; borrowed explicit-null limit returns
+2 instead of 0; two historical refusal assertions now compile successfully.
+No matched baseline has completed yet, so none is attributed as a new regression
+or gain. Keep the identical fixture for baseline before replacing stale
+assertions with behavioral checks. The seven new S2 cases account for five
+passes and two failures; this is not maintained-Test262 conformance credit.
+
+Root read current candidate hashes after the run: fixture
+`60f77ad05675edbb7f9e05dfd8625bb382cb2069457597a2b5a6cd8518a8cc98`;
+string-search-value
+`054ae584d04d89468c4267a036ca37416bb195dc5b9e8c4b79b5656ccc51dc52`;
+string-split-coercion
+`fbd78d093a4ccb54fff1d83771d895868c4099bcffcfdf0757e6a74d7c2d8f2f`;
+string-proto-split
+`e07feedea41fbda4a436e5e243be5af0c265adbdf3dfd4ee2740f183b5c3116a`;
+string-ops
+`eeda7f24a53a1710db0138bdce81983d77300b78eaf162270b5b8e00f70b726d`.
+The requested tee destination was denied; preserve the unified terminal output
+and record that limitation rather than inventing a durable raw-log receipt.
+The owner retains the heavy slot for the same-fixture baseline at e5e691.
+
+The matched baseline has now completed: owner session 10687, Vitest
+**21 pass, 6 fail / 27**, 40.61 seconds, same fixture SHA256 as above and
+clean compiler source at e5e691. The shell tee pipeline returned 0 despite
+Vitest's failures; this is not a passing test command. Root independently read
+the six failure records and complete count in
+`/private/tmp/js2-4016-s2-baseline.7Qp5xv/focused-baseline-e5e69140.log`, SHA256
+`3e02baf0385c4e6331f83e9617643b9c0c59139c07def75f0bf3907638b65c4a`.
+Compared with candidate 23/27, exactly two focused controls improve:
+ordering 127362 to expected 1234672, and the numeric-limit matrix's borrowed
+2^64 case from -1 to expected 4095. No baseline passing assertion is lost.
+All four candidate failures also fail on baseline: Symbol control 0, borrowed
+null 2, and the two historical refusal assertions. This establishes focused
+attribution only, not an authoritative Test262 gain.
+
+Next diagnostic, without modifying production source: always return Symbol
+from the conversion method and encode invocation count, received hint and
+separator conversion on success/throw. This distinguishes a missing method
+call, wrong hint, duplicate conversion and missed Symbol rejection. The
+expected conforming encoding is 2110. Keep this separate from the preserved
+27-case comparison and from normal semantic acceptance controls.
+
+The unconditional-Symbol diagnostic completed in owner session 10507, exit 1,
+66.06 seconds: **24 pass, 3 fail / 27**. The diagnostic's expected 2110 passed;
+remaining failures were borrowed null and the two stale refusal assertions.
+Root inspected the complete log at
+`/private/tmp/js2-4016-s2-symbol-candidate.ot4ZIa/focused-symbol-diagnostic-candidate-e5e69140.log`,
+SHA256 `fc925976a47565463a48603afaba95006306c368edee783a6f546f1c48f96649`.
+This proves correct conversion/throw for the modified unconditional producer,
+not the original conditional Symbol-or-number return shape. It cannot exclude
+a conditional-result carrier or hint defect. The next diagnostic must keep
+the original conditional return while encoding its hint/call counts; do not
+credit this changed fixture as fixing the original failing control.
+
+The conditional-shape diagnostic completed in session 6886, exit 1,
+72.41 seconds, **23 pass, 4 fail / 27**. Root read the actual result **1111**
+versus expected 2110: one conversion-method invocation with the correct
+number hint, then separator conversion and no throw. This rules out a skipped
+method and wrong hint for this instrumented conditional shape, and points to
+the conditional Symbol-or-number result representation rather than proving a
+new split-guard defect. Exact emitted carrier remains to be established.
+Receipt:
+`/private/tmp/js2-4016-s2-conditional-symbol.A5GklH/focused-conditional-symbol-candidate-e5e69140.log`,
+SHA256 `a4153f33a85340e1b0d84a64d58884fc16a408da31f1f6e8e7aa5b33c4a4f8a4`.
+Restore the original acceptance control, retain both diagnostic receipts,
+and proceed to the matched maintained-original pair before further expansion.
+
+Root verified baseline/candidate split corpora: both resolve to the preserved
+b363 corpus, contain the same 120 JavaScript originals, and have identical
+path/content aggregate SHA256
+`b852c03e60ab8bd3f822e70efab158c92ea390144f94a5437a6aaf1fb492e8ce`.
+Exactly **12 of these 120** intersect the frozen ES2015 manifest. The complete
+120-method regression comparison must not be reported as 120 ES2015 goal
+tests. Aggregate hash framing is sorted relative path, NUL, raw file content,
+NUL for each original.
+
+The read-only conditional audit identifies a source-supported hypothesis for
+1111: misc.ts brands a Symbol-producing i32 arm, then its numeric i32/f64 join
+chooses f64 and ordinary conversion turns the Symbol handle into a number.
+Unconditional Symbol bypasses that mixed join. Correct repair belongs in
+conditional carrier selection with branch laziness preserved, not in split's
+numeric provider or generic i32 conversion. Emitted-WAT proof is still absent.
+Issue 745 has a live representation overlap; no edits are authorized there.
+Keep 4016's failing Symbol control visible while measuring its owned changes.
+
+### Maintained 120-original split comparison launched by root
+
+After preparation had not launched a run, root took runner ownership with the
+agent confirming no live process. Baseline session 89812, run
+`20260928-151732`, uses clean source e5e691 in the managed baseline checkout
+(only the identical focused fixture is locally modified). The maintained
+wrapper validated and snapshotted all 120 paths; exact-manifest SHA256 is
+`7089e147c1c442307cf580f4bb93727da2ffb16843fc27ca9b8ebe13f17e539c`.
+Fresh compiler/runtime builds completed; the fresh QuickJS adapter
+`eb48bbd1f2417d25` (compiler bundle prefix `3ee1eb9214d6ec11`) passed its
+canary, 615702 bytes, using preserved artifact e9f8d30bc347. Standalone target,
+automatic providers, one worker, explicit 4GB heap caps, proposal inclusion,
+no history publication. No candidate run or final baseline verdict is claimed
+yet; candidate source is frozen and root holds the only heavy lease.
+
+Baseline session 89812 is terminal: **119 pass, 1 fail / 120**, zero compile
+errors/skips/exclusions, 311.53 seconds of Vitest. The wrapper exits 0 despite
+the failed verdict; completeness, not shell status, is the relevant receipt.
+Root reran completeness against the exact manifest snapshot. JSONL SHA256
+`be0fefc707c21ea285f477793b8b8daa2a1278ebfa99848960f462adbc258510`;
+completion SHA256
+`aac91e51ccc27c196f6f9911b1c9fd1e35f231c4b1851a88b13dcd15d9797950`.
+Only `separator-undef-limit-zero.js` fails: 2**32 yields length 1 instead of 0.
+It is outside the frozen ES2015 manifest; root verified all **12/12** members
+of that scope pass on this baseline. Do not count a potential flip here as an
+ES2015 gain.
+
+Matched candidate session 84783, run `20260928-152339`, is live on the frozen
+candidate source. It independently rebuilt compiler/runtime and fresh adapter
+`c4054004f5bc7729` (bundle prefix `584394f8d030c671`), 615702 bytes, canary
+passed, same immutable runtime artifact and 120-path manifest SHA. Candidate
+results are not complete yet.
+
+### Completed split comparison and remaining acceptance gaps
+
+Candidate session 84783 subsequently terminated: **120 pass / 120**, zero
+failures, compile errors, skips, or exclusions. Root independently compared
+both JSONL files with the exact manifest: 120 unique paths in each arm,
+exactly one failure-to-pass transition, and no lost passes. The sole flip is
+`separator-undef-limit-zero.js`, outside the frozen ES2015 scope. Both arms
+pass all **12/12** frozen-scope members; this is **zero additional ES2015
+passes**, not completion of the edition goal.
+
+Candidate JSONL SHA256:
+`ff4711af417ec8b66756ac31f5c506e03f3cfc164eb60e3dccc335b0c49f903e`.
+Completion SHA256:
+`7894e3e1644a8dc5249a7deb34f9f2570071e02a6e02c6251de8921f999d77db`.
+The completion receipt registers, records, and settles all 120 callbacks.
+All four production-source hashes and the original focused-fixture hash
+remain identical to the frozen candidate. The focused fixture remains
+**23 pass / 27**: two obsolete refusal assertions and two genuine pre-existing
+failures (conditional Symbol identity and borrowed explicit-null limit).
+The implementation owner is replacing only the obsolete assertions with
+Node-checked behavioral expectations; the genuine failures remain ordinary
+assertions. Heavy-run ownership has transferred to that owner. Protected
+conditional representation and generic call argument handling remain held;
+the implementation is not yet merge-ready.
+
+Root also ran the maintained coercion-site gate against explicit base
+`e5e69140ea74f9f143639ddfa41b94312895f3b0`: **PASS**, no net vocabulary growth
+across four changed codegen files. Inspection confirms the gate includes
+untracked source files, including the new helper. No allowance was added.
+This resolves the historical coercion-site blocker for this candidate, not
+the remaining semantic controls or the other normal repository gates.
+
+The exact-base LOC gate subsequently **failed**: `string-ops.ts` grows from
+4381 to 4392 counted lines (+11). No allowance was added. The owner will assess
+moving driver responsibilities into the owned subsystem after the current
+focused run terminates, without hiding semantic changes as formatting.
+The behavioral replacement fixture is running as owner session 97015 with
+receipt `/private/tmp/js2-4016-focused-runtime-protocol.CWtngD/focused-runtime-protocol-candidate-e5e69140.log`;
+fixture SHA256 `476fd2e65ab20b7685603173a16c6ae38b795bf728aa7256f64bc5700229f4bb`.
+The previous 23/27 count does not describe this revised fixture.
+
+Session 97015 is now terminal: **24 pass, 3 fail / 27**, 60.20 seconds.
+Root read the terminal receipt and verified SHA256
+`592f1ced98821bc7389c4ca048f7f0092d944c5782a50efc5e8d1ee681033094`.
+Dynamic JSON.parse separator behavior passes. Replacing the other obsolete
+refusal with a runtime assertion exposes the held computed-literal `@@split`
+gap: actual length 1, Node length 2. Conditional-Symbol remains 0 versus 1;
+borrowed null remains 2 versus 0. All three are ordinary failing assertions,
+not skipped or expected failures. This fixture revision is not a matched
+baseline/candidate conformance gain. A single conditional-emission diagnostic
+is authorized next under the owner's exclusive heavy lease; no protected
+production changes are authorized.
+
+The named conditional diagnostic produced a failing single-test receipt
+(26 name-filtered tests, not a full fixture run) and a WAT artifact under
+`/private/tmp/js2-4016-conditional-symbol-wat.jjkGHE/`. Root inspected it:
+the function filter emitted only exported `f`, not the conditional producer.
+`f` registers a closure through `ref.func 304`; no numeric-conversion
+instruction appears in the filtered body. This does **not** disprove the
+source hypothesis, but is insufficient emitted proof. The owner must identify
+and include the producer function before drawing that conclusion.
+WAT SHA256 `5604c47581c21a397284e73ca2d87fb9824ce1e3b17d947068ba8eb06ca13b8c`;
+log SHA256 `b1a97475ceb0800522a0af14b30d35cb120f764b9ede6b2398cca2b87532fa5e`.
+
+Root narrowed the next capture using the retained type dump: type 137 is
+`__closure_2_struct`, with captures `primitiveCalls` and a Symbol-branded i32
+`symbol`. The literal emitter routes this method through `compileArrowAsClosure`,
+whose naming rule is `__closure_${closureId}`. The next dump should include
+`__closure_2` and verify the actual conditional body, rather than repeat the
+insufficient `f` filter. Clearance has been requested for the specific shared
+call-padding and conditional-carrier areas; no such edits have been made.
+
+### Conditional Symbol loss confirmed in emitted code
+
+The corrected one-test capture is terminal (the expected assertion fails),
+under `/private/tmp/js2-4016-conditional-symbol-wat-closure.bEbfGh/`.
+Root independently inspected `conditional-symbol-closure.types.wat`:
+`__closure_2` loads the captured Symbol into local 4, then emits an
+`if (result f64)` whose true arm is `local.get 4; f64.convert_i32_s` and
+false arm is `f64.const 0` (lines 1076–1084). The retained type dump brands
+the captured field as Symbol. This confirms loss at the conditional numeric
+join, before the split helper receives the value; it is no longer only a
+source-supported hypothesis. WAT SHA256:
+`7cc2b445fca6e1d41d5ccb44b994063044ab025473f287d743a28eeca81a7c16`.
+
+The separate borrowed-null audit requires a coordinated repair, not just a
+split-body predicate change: split-only missing-slot canonical undefined in
+`emitReflectiveNativeProtoClosureCall`; exact undefined versus nullish
+predicates in `string-proto-split.ts`; and transferred String split routing
+in `char-at-transfer.ts` for bound/dynamic-apply invocation. Static apply
+shares the literal argument-flattening path. Proposed tests cover omitted,
+written undefined, and null for both separator and limit through direct,
+call, apply, and bind (including bound-plus-call argument merging). These
+routes remain unmeasured as a matrix, and shared-file clearance is pending.
+No generic call rewrite or IR edit is authorized by this audit.
+
+### Frozen ES2015 census index 55 completed
+
+Root session 85503 terminated in 209.86 seconds: **82 pass, 10 fail / 92**,
+zero compile errors/skips/exclusions. Maintained completeness validates all
+92 registered verdicts. Frozen HEAD, compiler/runtime/adapter hashes, corpus
+revision, partition inputs and physical 11778-path manifest were rechecked.
+Run `es2015-fullscope-128-f924650-chunk055-a01`; JSONL SHA256
+`a14746b1e21c8e0e108a3c313c731342f1f8732c510ca66a8df0cdadd3c3164e`;
+completion SHA256
+`dc15f985c8f9c1916962670aa9d81dc135cdd16b2409d86e02de805aaad8fd17`.
+All previous receipt hashes and combined exact-scope identities were checked:
+**56 shards, 5153 unique paths = 4828 pass, 284 fail, 41 compile errors**;
+**6625 paths remain unmeasured**. This remains frozen-baseline evidence,
+not an integrated current-source result. Next index is 56. Heavy ownership
+returned to the split implementation agent for post-refactor regression tests.
+
+### Split structural refactor validation
+
+The owned refactor moves the unchanged first-argument string predicate and
+direct raw-receiver staging into `string-search-value.ts`, restoring the
+driver's receiver emitter and preserving override/host legacy routing.
+Root reviewed the extracted predicate against the previous replace/replaceAll
+and split checks. Owner reports LOC and coercion gates pass with no allowance;
+the driver is now 4365 lines versus base 4381 (16 fewer), rather than 11 more.
+Focused session 44690 terminated: **24 pass, 3 fail / 27**, the same three
+held controls as before, no new failing test names. Root verified the complete
+37.50-second receipt at
+`/private/tmp/js2-4016-focused-refactor.Vuq4n8/focused-refactor.log`, SHA256
+`d82de5ac6b855be14088c2669345d2d711fd3c4ac35a71a0d00181350333dfe4`.
+The wrapper encountered a read-only shell variable after Vitest settled;
+the complete test verdicts are retained, not inferred from wrapper success.
+The earlier maintained 120/120 belongs to pre-refactor source; a fresh run
+and remaining normal gates are still required before publication.
+
+Typechecking subsequently found that the new staged-value union's non-undefined
+variant lacked a discriminant. The owner added `kind: "value"` to that
+variant and its constructor; runtime verification of this latest source is
+still pending. Root independently reran exact-base LOC, coercion-site, and
+oracle ratchets on this source: all pass, net +371 lines across four source
+files and zero net direct-checker growth. No allowance was added. The latest
+typecheck rerun is owned by the implementation agent; an empty log is not
+treated as a passing result.
+
+Owner subsequently confirmed typecheck rerun session 94996 terminated with
+exit 0 (successful TypeScript emits no text); lint also passed. Numeric-local
+IR parity session 13963 is next under the same exclusive lease. Root ran the
+working-tree issue integrity check independently: exit 0, 4644 issues indexed,
+zero issue-file updates required. Index-refresh suggestions were not applied.
+After normal gates, the candidate must run the same maintained 120-original
+manifest again with freshly built artifacts, since the last conformance
+receipt predates the structural and discriminant fixes.
+
+Numeric-local IR parity completed **18/18 passing** in 56.47 seconds. Root
+read the terminal summary and hashed
+`/private/tmp/js2-4016-refactor-numeric-ir.pLm4fx/numeric-ir.log`:
+`e76b74e74613fa3528593ca0214a17c77ec3282681f54863f9ded8560587e220`.
+This validates that focused parity gate only; no IR source was changed.
+The implementation owner retains the heavy lease for the fresh maintained
+split cohort. Separate read-only Promise callback-prototype and DataView
+constructor-identity audits target failures from frozen census index 55;
+neither has an authorized source patch yet.
+
+### Current-source split maintained rerun accepted
+
+Owner session 69080 is terminal, run `20260928-155919`: **120/120 pass**.
+Root independently ran maintained completeness with the exact manifest and
+compared every row to baseline `20260928-151732`: 120 unique identities,
+zero exclusions, exactly one fail-to-pass (`separator-undef-limit-zero.js`),
+no lost passes. This flip is outside frozen ES2015; both sides retain all
+**12/12** passing frozen-scope members, so no ES2015 gain is claimed here.
+The fresh compiler bundle key is `42b88500d5eeef53`; adapter
+`cd87701c9295e667` was built on a cache miss and passed its canary.
+
+JSONL SHA256 `08bba82fcb73105377dd0931ae92dc5c6ce6ecdb460182c1aae2162f873eab45`;
+completion SHA256 `381b37f795d24f049783a7632b2a010c833caf59ed5ca89f01dff2cdcf749553`.
+Root rehashed current production files against pre-run provenance:
+search-value `511d8dbf1cd4bc7f417133e4d24b639f7c541c346c84c4082b081e928518d380`,
+string-ops `882e60581698604871d06cff9642b1719df3c0ea8edcddf549bc35337e1a9831`,
+split-proto `e07feedea41fbda4a436e5e243be5af0c265adbdf3dfd4ee2740f183b5c3116a`,
+helper `fbd78d093a4ccb54fff1d83771d895868c4099bcffcfdf0757e6a74d7c2d8f2f`.
+All match. The three ordinary focused red controls remain open and protected;
+120 method originals are not the full issue acceptance or the edition goal.
+No next heavy process has started. Local checkpoint preparation is requested;
+publication remains held for fresh authorization after the prior rejection.
+
+### Frozen census index 56 accepted
+
+Root session 6003 terminated in 246.41 seconds: **86 pass, 5 fail,
+1 compile error / 92**, no skips or exclusions. Maintained completeness
+confirms all 92 registered verdicts. Run
+`es2015-fullscope-128-f924650-chunk056-a01`; JSONL SHA256
+`c4071d57c476f02c3620b3e189db81f5d37853358472555e8db66addf93cdcd3`;
+completion SHA256
+`4f00ae76c7400a79d027d339bea3cc546d1c350b9364afc9f60628f1d0449558`.
+Root checked prior receipt hashes and all combined exact-scope identities:
+**57 shards, 5245 paths = 4914 pass, 289 fail, 42 compile errors**;
+**6533 remain unmeasured**. Next index is 57. This is frozen-baseline
+coverage, not integrated current-source conformance.
+
+Failures cover for-of destructuring grammar, detached TypedArray locale
+conversion, object-method super identity, generator spread, Promise then
+length, and PluralRules tag mutation. Error messages are symptoms, not
+proven root-cause buckets. The heavy lease transfers to the split owner for
+normal local checkpoint hooks; external publication remains unauthorized
+after the outstanding approval request.
+
+Split checkpoint committed locally as
+`568d249ee5481bb64dbbcc06b06d62c9d1cd9f34`, exactly seven owned files. Root
+verified the commit attribution (Thomas author, Codex co-author, actual Terra
+model) and clean worktree. Normal precommit formatting/lint, LOC and function
+budgets passed; only the explicitly allowed slow tier was skipped. No push
+was attempted. This preserves the measured implementation, not a merge-ready
+resolution of the three remaining controls. The heavy lease now belongs to
+the Promise diagnostic owner for its two-path current-main baseline.
+
+Promise diagnostic setup is isolated at
+`/Users/thomas/.codex/worktrees/promise-prototype/js2`, branch
+`codex/5197-promise-callback-prototype`, upstream base
+`38f959a0b3ee0b50edc96662d3aef933f0c795fb`. Only its issue plan, exact
+two-path manifest, and diagnostic fixture are edited; no production patch.
+Root AST-extracted all four fixture source constants, transpiled only their
+TypeScript syntax, and executed them independently under Node 24.19: **4/4
+return the expected zero**, with a checked floor of four. These are oracle
+results, not compiler passes. The fixture tests those four cases in two lanes.
+Owner's maintained baseline session 15376 is live, exact manifest SHA256
+`bc7e0dc371cb7dfd8423b6c36d531d1ae5b7efe61d06a7bf89152f7f71dc327b`,
+fresh compiler bundle `d903233de289cde1` and fresh adapter `f1417f66c4a1900a`.
+No final verdict is claimed yet.
+
+Session 15376 then terminated exit 2 before any test executed: dynamic shard
+indices were omitted, so the selected file skipped and no completion receipt
+was written (run `20260928-161339`). This is incomplete runner setup, not a
+Promise verdict. The owner is correcting only `TEST262_CHUNK_INDEX=0` and
+`TEST262_CHUNK_TOTAL=1`, preserving the failed attempt and using a new run ID.
+The corrected launch is authorized; no semantic retry or source change is
+involved.
+
+Corrected Promise baseline session 42401 is terminal, run
+`20260928-141520`: **1 pass, 1 fail / 2**, zero exclusions. Root independently
+ran completeness against the exact two-path manifest and inspected both rows:
+`Promise/all/resolve-element-function-prototype.js` still fails null versus
+Function.prototype; `Promise/resolve-function-prototype.js` passes. Thus the
+target remains a current-source failure at base 38f959a; the control rules out
+a universal failure of the tested settle-callback prototype route, not every
+other possible routing defect. JSONL SHA256
+`62059e8fb71bd2c41cd588691a89a7acbe73882730009c4bbbbf57d3c2e4c240`;
+completion SHA256
+`5800a86dbebc902aedde4a9265d2278cbab5286b2fa3351931cd64b30c32b1cb`.
+The wrapper's exit 0 is not a semantic pass. The owner retains the heavy lease
+for focused controls and emitted-path diagnosis before selecting a patch.
+
+The focused Promise classifier session 8568 terminated **6 pass, 2 fail / 8**
+in 50.33 seconds. All four reduced standalone cases pass, including the
+exported-function version of the failing original; two host custom-combinator
+cases fail (undefined callback / typeof mismatch). Root had flagged that
+wrapping module statements in an exported function changes the variable and
+initialization context. This discrepancy must be preserved: the reduced
+fixture is not a reproduction and cannot justify a general prototype patch.
+Next diagnosis must inspect the actual Test262 module-init/global-variable
+emission and ensure the saved artifact belongs to the target, not a later
+control or provider build. No production edit is authorized from these
+reduced results.
+
+### 2026-09-28 frozen census index 57 — complete
+
+Session 53751 terminated with exit 1 after 196.49 seconds: **88 pass,
+4 fail, 0 compile errors, 0 skips / 92**. Maintained completeness validation
+confirmed 92 registered and settled verdicts with zero exclusions. Source,
+manifest, compiler/runtime bundles and provider remain pinned to the existing
+frozen census contract; no semantic retry or source change was made.
+
+- Run: `es2015-fullscope-128-f924650-chunk057-a01`.
+- JSONL SHA256: `2a2871593b2c19baaedd2099058debf3a08571f3077d3fba0fbd78edf1026524`.
+- Completion SHA256: `7dc7b36b22a2dca92f2f6d350e9f2370e6cbe9b0e695344c09702328d04ccbfb`.
+- All 58 accepted receipt pairs were hash-verified and all 5,337 identities
+  checked for uniqueness and exact-manifest membership: **5,002 pass,
+  293 fail, 42 compile errors; 6,441 unmeasured**. Next index is 58.
+
+The four failures are `language/expressions/call/eval-spread-empty-leading.js`
+(local versus zero), `language/expressions/super/call-bind-this-value-twice.js`
+(undefined versus object), `built-ins/Proxy/defineProperty/call-parameters.js`
+(undefined-to-object TypeError), and
+`intl402/PluralRules/prototype/toStringTag/toString-removed-tag.js`
+(nullish property access). All paths have the `test/` prefix. These are
+frozen-source observations, not current-source attribution or integrated
+conformance proof.
+
+Follow-up attribution for index57: the eval-spread owner matched
+`eval-spread-empty-leading.js` to the unmerged #5157 / PR #6246 fix at
+`4d35876`. The frozen implementation treats the syntactic spread operand as
+eval's source and drops the later string, rather than expanding the empty
+iterator and selecting `"x = 0;"` as the first argument. The candidate's
+`eval-argument-list.ts` performs that expansion before evaluation and global
+seeding. Its preserved complete 7/7 run `20260928-112151` includes this exact
+row (JSONL SHA256
+`53893a482da9d106029a21ef8eafda0e78cef245df4c7fd7b1defe38eb9e2701`).
+This is attribution to an existing unmerged fix, not a new upstream pass or
+a reason to duplicate implementation. Integrated validation is still needed.
+
+### 2026-09-28 frozen census index 58 — complete
+
+Session 24949 ended with exit 1 after 224.52 seconds: **86 pass, 6 fail,
+0 compile errors, 0 skips / 92**. Maintained completeness confirmed all 92
+registered verdicts, zero exclusions. Same pinned source and bundles, no retry.
+
+- Run: `es2015-fullscope-128-f924650-chunk058-a01`.
+- JSONL SHA256: `66972ba5f67f3111df58a33bba6e89e87a853c208805d0959a8673fbacb3338c`.
+- Completion SHA256: `df9c3b722dae66e0a1ea2a1362a9f3f215b5e87f0e0f9ac22a380f8ab68dbc36`.
+- All 59 receipt pairs hash-verified, all 5,429 identities unique and in exact
+  scope: **5,088 pass, 299 fail, 42 compile errors; 6,349 unmeasured**.
+  Next index is 59. This is frozen baseline evidence, not current conformance.
+
+Failures (all relative to `test/`):
+
+- `language/expressions/tagged-template/template-object-frozen-strict.js`:
+  missing TypeError.
+- `language/expressions/arrow-function/lexical-new.target.js`: zero versus one.
+- `language/statements/class/definition/getters-restricted-ids.js`: getter value
+  one versus three.
+- `built-ins/Object/assign/Target-String.js`: boxed versus primitive mismatch.
+- `built-ins/Function/prototype/bind/instance-construct-newtarget-boundtarget-bound.js`:
+  undefined versus expected function.
+- `language/module-code/namespace/internals/super-access-to-tdz-binding.js`:
+  WebAssembly.Exception.
+
+These signatures are observations, not independently established causes;
+check current source and existing issue ownership before assigning repairs.
+
+### 2026-09-28 frozen census index 59 — complete
+
+Session 87617 ended with exit 1 after 177.83 seconds: **85 pass, 6 fail,
+1 compile error, 0 skips / 92**. Maintained completeness confirmed 92
+registered verdicts, zero exclusions; same pinned inputs, no semantic retry.
+
+- Run: `es2015-fullscope-128-f924650-chunk059-a01`.
+- JSONL SHA256: `352c2898ccd011c30b48524426ea2719687bf81f10b4287312ffb6e00315d607`.
+- Completion SHA256: `1516e37d8d2bfc1a173e99deb6728b2d6991ceeea6c31d893f5a0e8d31067d9e`.
+- All 60 receipt pairs verified and all 5,521 identities unique/in-scope:
+  **5,173 pass, 305 fail, 43 compile errors; 6,257 unmeasured**. Next index60.
+  This is frozen-source evidence, not integrated current conformance.
+
+Nonpassing paths below are relative to `test/`; signatures are observations,
+not independently established causes:
+
+- `built-ins/TypedArray/prototype/map/return-new-typedarray-from-empty-length.js`:
+  returned instance assertion.
+- `language/expressions/call/eval-spread.js`: local versus one.
+- `language/expressions/generators/scope-name-var-open-strict.js`: standalone
+  generator host imports (compile error).
+- `built-ins/Object/getOwnPropertySymbols/proxy-invariant-duplicate-string-entry.js`:
+  missing TypeError.
+- `built-ins/Array/prototype/flat/target-array-with-non-configurable-property.js`:
+  missing TypeError.
+- `built-ins/Array/prototype/concat/Array.prototype.concat_spreadable-reg-exp.js`:
+  array contents mismatch.
+- `intl402/DisplayNames/options-fallback-toString-abrupt-throws.js`:
+  missing abrupt completion.
+
+### 2026-09-28 frozen census index 60 and PR shepherd check
+
+Session29460 terminated exit1 after243.57s: **86 pass, 5 fail, 1 compile
+error, 0 skips /92**. Maintained completeness:92 registered/settled,zero
+exclusions. Run `es2015-fullscope-128-f924650-chunk060-a01`, unchanged pinned
+source/bundles, no retry.
+
+- JSONL SHA256: `533c85bb32a650279c1641e3c71098ad1ab1205045d9a69d088afede747c7033`.
+- Completion SHA256: `faaeae7fe3cef70fa9cfdf79762406ee2b7f18c22be60fd7dda3ec897e4b4d06`.
+- All61 receipt pairs and5,613 unique exact-scope identities verified:
+  **5,259 pass,310 fail,44 compile errors;6,165 unmeasured**. Next index61.
+  Frozen baseline only, not integrated current-source conformance.
+
+Failures relative to `test/`: `language/expressions/call/eval-realm-indirect.js`
+and `built-ins/Proxy/apply/arguments-realm.js` (nullish property access);
+`language/statements/with/set-mutable-binding-binding-deleted-in-get-unscopables.js`
+(getter not called); `built-ins/Object/assign/Target-Boolean.js` (SameValue);
+`built-ins/Function/internals/Construct/derived-return-val.js` (ReferenceError
+instead of TypeError). Compile error:
+`language/expressions/class/decorator/syntax/valid/decorator-member-expr-identifier-reference-yield.js`
+(strict reserved identifier). These are observations, not cause attribution.
+
+One-time action-linked remote review confirmed PR6250 (TypedArray subarray)
+**MERGED**, head `010107c75ce8a46f60cae226af49ad568258fc0a`. PR6246 (eval
+spread), head `4d35876fb17380df7ebe57b2a4f4a3b60bfd5485`, remains OPEN/draft,
+mergeable but behind, with failed quality job108869335772 in run36404337060.
+GraphQL returned zero unresolved review threads, no further page. Its owner
+is diagnosing the actual quality log; no publication or readiness change
+is claimed, and the unfinished generic controls remain explicit.
+
+### 2026-09-28 Promise diagnostic provenance corrected
+
+The earlier full-WAT capture is not authoritative for the failing runner:
+it used direct source compilation, a physical filename, and omitted
+`scriptGoal`, whereas the worker uses its generated bundle and persistent
+Language Service with `fileName: "test.js"` and `scriptGoal: true`. The literal
+assembly hashes match, but that does not establish equal generated code.
+
+Exact worker diagnostic session7532 terminated exit0 with **target1F/control1P**
+using the same CompilerPool worker/options and QuickJS artifact/adapter.
+The target still reports null versus Function.prototype; target Wasm SHA256
+`83f027a729c14148c8cf28d1b7e897cfaea21dfcc0fd39d84837f492e2e8fdb6`,
+control Wasm SHA256
+`79200c10e8b30992d784dda9b5356942e58b1b7d4ea27debcab114c463adde8e`.
+Both binaries and full provenance are preserved under the Promise worktree's
+`.tmp/5197-exact-worker-workerpair1/`, with `receipt.json`. Root inspected the
+recorded options and target result. This diagnostic is not new maintained
+conformance accounting; it establishes which binary must now be inspected.
+No production patch follows from the earlier apparently-correct WAT.
+
+PR6246's quality failure is now corrected locally by classifying the new
+eval helper in the compiler inventory. The existing inventory gate passes
+with no errors; no gate was weakened and no runtime code changed. Normal
+local commit hooks are the next checkpoint; publication remains unclaimed.
+
+The metadata checkpoint is now saved locally as
+`e2eb05c6330f05a27f4e602181977cce6369fddf` on
+`codex/5157-eval-spread-arguments`: exactly the compiler inventory and #5157
+MD (28 insertions). Normal fast precommit hooks, formatting and budget gates
+passed; only the authorized slow tier was skipped. Root independently verified
+Thomas author identity, Codex/Terra/Validation trailers, exact file scope and
+clean worktree. No push occurred; PR6246's remote head remains unmodified by
+this checkpoint, and its unresolved semantic controls still prevent readiness.
+
+### 2026-09-28 frozen census index 61 — complete
+
+Session14856 terminated exit1 after184.22s: **85 pass,6 fail,1 compile error,
+0 skips /92**. Maintained completeness:92 registered/settled,zero exclusions.
+Run `es2015-fullscope-128-f924650-chunk061-a01`, pinned inputs unchanged.
+
+- JSONL SHA256: `15118ffe5ba5e368925076c97390832e8325e6a032b654d7323b446ddd8fd2f2`.
+- Completion SHA256: `69ab52cdab231b0c1d8b09ab88ffe6893356af39d312e5d36115a1eb4eb282d5`.
+- All62 receipt pairs and5,705 unique exact-scope identities verified:
+  **5,344 pass,316 fail,45 compile errors;6,073 unmeasured**. Next index62.
+  Frozen baseline only, not integrated current-source conformance.
+
+Nonpassing paths relative to `test/`:
+
+- `built-ins/Proxy/setPrototypeOf/trap-is-null-target-is-proxy.js`:
+  object versus null.
+- `language/statements/class/definition/fn-name-gen-method.js`:
+  generator host imports (compile error).
+- `built-ins/Promise/prototype/then/deferred-is-resolved-value.js`:
+  then-result identity mismatch.
+- `built-ins/Promise/all/resolve-thenable.js`: async resolved-value assertion.
+- `built-ins/Object/entries/symbols-omitted.js`: Symbol identity mismatch.
+- `built-ins/Object/prototype/toString/symbol-tag-override-primitives.js`:
+  Boolean tag versus overridden tag.
+- `intl402/DateTimeFormat/prototype/toStringTag/toStringTag.js`:
+  nullish property access.
+
+These signatures are observations, not established common causes. No
+semantic retries, exclusions, source changes, or provider changes were made.
+
+Read-only current-source attribution for Object.assign Target-String and
+Target-Boolean: both frozen failures occur at `result.valueOf()`, after the
+object-type assertion. At `38f959a`, primitive target boxing and unchanged
+return of `__assign_tgt` are present. The exact primitive/intersection result
+types are not classified by the oracle as wrappers; existing wrapper producer
+recognition accepts Object()/new Object() but not Object.assign. The valueOf
+fallback therefore returns receiver identity. This is source-supported
+attribution, not a fresh current-run proof. A bounded future plan would prove
+ambient Object.assign primitive-target provenance (including safe aliases)
+and reuse dynamic valueOf, with primitive-intersection casts and shadowed
+Object.assign as negatives. Do not globally reinterpret intersection types.
+Implementation remains held: the fresh upstream ledger has active #4201
+ownership (`ttraenkler/W20`) on that seam despite the local MD's done status;
+no matching open PR was found. No competing edits were made.
+
+### 2026-09-28 frozen census index 62 — complete
+
+Session58909 terminated exit1 after194.81s: **87 pass,5 fail,0 compile errors,
+0 skips /92**. Maintained completeness:92 registered/settled,zero exclusions.
+Run `es2015-fullscope-128-f924650-chunk062-a01`, same pinned inputs, no retry.
+
+- JSONL SHA256: `79e336a9a7e11c376213fda891fad5bcdba5b48e3f671a8c7add6c0af1024fcb`.
+- Completion SHA256: `a3d64bbf8a7b60de5cd33c7d195d5126fc10c3c9e03109f83a53432bcd7861d1`.
+- All63 receipt pairs and5,797 unique exact-scope identities verified:
+  **5,431 pass,321 fail,45 compile errors;5,981 unmeasured**. Next index63.
+  Frozen baseline only, not integrated current-source conformance.
+
+Failures relative to `test/`: Promise prototype catch
+`built-ins/Promise/prototype/catch/this-value-obj-coercible.js` (not callable);
+`language/expressions/yield/rhs-yield.js` (undefined versus one);
+`built-ins/Object/proto-from-ctor-realm.js`,
+`built-ins/Function/internals/Construct/derived-this-uninitialized-realm.js`,
+and `intl402/DateTimeFormat/prototype/toStringTag/toString-removed-tag.js`
+(nullish access). These are observed signatures, not common-cause proof.
+
+### 2026-09-28 frozen census index 63 — half-scope measured
+
+Session40761 terminated exit1 after223.23s: **86 pass,6 fail,0 compile errors,
+0 skips /92**. Maintained completeness:92 registered/settled,zero exclusions.
+Run `es2015-fullscope-128-f924650-chunk063-a01`, unchanged pinned inputs.
+
+- JSONL SHA256: `38025e3f699462a51824a4aec51400b4aa2c1b6007bd962186c6cdece1b09dfd`.
+- Completion SHA256: `bc32a61822f44442e43ac5048b22c069e8148cb720fb2ff9cc5a1644e1328402`.
+- All64 receipt pairs and5,889 unique exact-scope identities verified:
+  **5,517 pass,327 fail,45 compile errors;5,889 unmeasured**. Next index64.
+  Half of the frozen scope has been measured, not proven conformant.
+
+Failures relative to `test/`:
+
+- `built-ins/Object/freeze/proxy-with-defineProperty-handler.js`: nullish access.
+- `language/expressions/generators/yield-as-yield-operand.js`: undefined versus one.
+- `built-ins/Proxy/defineProperty/trap-is-missing-target-is-proxy.js`:
+  undefined versus four.
+- `built-ins/Symbol/prototype/Symbol.toPrimitive/redefined-symbol-wrapper-ordinary-toprimitive.js`:
+  read-only-property TypeError.
+- `language/types/reference/get-value-prop-base-primitive-realm.js`: nullish access.
+- `intl402/DisplayNames/proto-from-ctor-realm.js`: nullish access.
+
+These are observed signatures, not cause attribution. No retries/exclusions
+or changes to the frozen compiler/provider were made.
+
+### 2026-09-28 exact Promise binary observation — sidecar hypothesis rejected
+
+Binary-only probe session11473 terminated exit0. The original target and a
+clone with ten added diagnostic exports both throw the same null-versus-
+Function.prototype assertion. All non-export sections of the clone are
+byte-identical to the captured original; no text reassembly or compiler pass
+was used. Original SHA256 remains
+`83f027a729c14148c8cf28d1b7e897cfaea21dfcc0fd39d84837f492e2e8fdb6`;
+clone SHA256 is
+`12d29ad58535d337ad4b2d750022b83b88cab891abbab904422b2dd9e247f525`.
+Receipt: Promise worktree
+`.tmp/5197-exact-binary-exportprobe1/receipt-exportsection.json`.
+
+Post-failure observation: dynamic-lexicals sidecar absent; exported module
+global32 is noncallable, has null prototype, and `__extern_is_undefined`
+returns1. Its host-JavaScript typeof is object, which is consistent with the
+compiler's opaque GC undefined carrier rather than contrary evidence.
+Root inspected the receipt. The sidecar cannot explain this failure; next
+trace must establish why the callback was not stored or whether it was reset.
+No production source patch is justified yet. Earlier missing-flags and
+text-reassembly failures are preserved as setup-only, not semantic results.
