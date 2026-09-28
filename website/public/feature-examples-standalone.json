@@ -574,7 +574,7 @@
     {
       "name": "Objects",
       "testCategories": ["language/expressions/object", "built-ins/Object"],
-      "passCount": 4377,
+      "passCount": 4384,
       "totalCount": 4581,
       "editionSpread": [
         {
@@ -584,7 +584,7 @@
         },
         {
           "edition": "ES2015",
-          "pass": 678,
+          "pass": 683,
           "total": 752
         },
         {
@@ -639,7 +639,7 @@
         },
         {
           "edition": "Unclassified (untagged)",
-          "pass": 361,
+          "pass": 363,
           "total": 397
         }
       ]
@@ -753,7 +753,7 @@
     {
       "name": "JSON",
       "testCategories": ["built-ins/JSON"],
-      "passCount": 112,
+      "passCount": 118,
       "totalCount": 165,
       "editionSpread": [
         {
@@ -783,7 +783,7 @@
         },
         {
           "edition": "Unclassified (untagged)",
-          "pass": 27,
+          "pass": 33,
           "total": 60
         }
       ]
@@ -1001,7 +1001,7 @@
     {
       "name": "Arrow functions",
       "testCategories": ["language/expressions/arrow-function", "language/expressions/async-arrow-function"],
-      "passCount": 432,
+      "passCount": 434,
       "totalCount": 440
     },
     {
@@ -1031,7 +1031,7 @@
     {
       "name": "Computed property names",
       "testCategories": ["language/computed-property-names"],
-      "passCount": 118,
+      "passCount": 124,
       "totalCount": 133
     },
     {
@@ -1049,7 +1049,7 @@
         "built-ins/GeneratorFunction",
         "built-ins/GeneratorPrototype"
       ],
-      "passCount": 2377,
+      "passCount": 2394,
       "totalCount": 2486
     },
     {
@@ -1061,7 +1061,7 @@
         "language/expressions/new",
         "language/expressions/new.target"
       ],
-      "passCount": 385,
+      "passCount": 399,
       "totalCount": 461
     },
     {
@@ -1092,13 +1092,13 @@
         "built-ins/DataView",
         "built-ins/Uint8Array"
       ],
-      "passCount": 1059,
+      "passCount": 1060,
       "totalCount": 1106
     },
     {
       "name": "Modules (import / export)",
       "testCategories": ["language/module-code", "language/import", "language/export"],
-      "passCount": 418,
+      "passCount": 422,
       "totalCount": 731,
       "editionSpread": [
         {
@@ -1108,7 +1108,7 @@
         },
         {
           "edition": "ES2020",
-          "pass": 16,
+          "pass": 17,
           "total": 31
         },
         {
@@ -1143,7 +1143,7 @@
         },
         {
           "edition": "Unclassified (untagged)",
-          "pass": 152,
+          "pass": 155,
           "total": 225
         }
       ]
@@ -1168,7 +1168,7 @@
         "language/expressions/async-function",
         "language/statements/async-function"
       ],
-      "passCount": 318,
+      "passCount": 321,
       "totalCount": 348
     },
     {
@@ -1240,7 +1240,7 @@
     {
       "name": "BigInt",
       "testCategories": ["built-ins/BigInt"],
-      "passCount": 629,
+      "passCount": 630,
       "totalCount": 1048
     },
     {
