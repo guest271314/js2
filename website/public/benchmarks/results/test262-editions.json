@@ -48,8 +48,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 10246,
-    "fail": 1440,
+    "pass": 10252,
+    "fail": 1434,
     "ce": 18,
     "skip": 0,
     "total": 11704,
@@ -66,8 +66,8 @@
       },
       {
         "name": "generators",
-        "pass": 2178,
-        "fail": 308,
+        "pass": 2182,
+        "fail": 304,
         "ce": 0,
         "skip": 0,
         "total": 2486,
@@ -808,8 +808,8 @@
   },
   {
     "edition": "ES2017",
-    "pass": 572,
-    "fail": 117,
+    "pass": 575,
+    "fail": 114,
     "ce": 1,
     "skip": 0,
     "total": 690,
@@ -817,12 +817,12 @@
     "features": [
       {
         "name": "async-functions",
-        "pass": 325,
-        "fail": 23,
+        "pass": 328,
+        "fail": 20,
         "ce": 0,
         "skip": 0,
         "total": 348,
-        "pct": 93
+        "pct": 94
       },
       {
         "name": "SharedArrayBuffer",
@@ -1507,8 +1507,8 @@
   },
   {
     "edition": "ES2020",
-    "pass": 1395,
-    "fail": 611,
+    "pass": 1396,
+    "fail": 610,
     "ce": 11,
     "skip": 18,
     "total": 2035,
@@ -1723,12 +1723,12 @@
       },
       {
         "name": "export-star-as-namespace-from-module",
-        "pass": 11,
-        "fail": 8,
+        "pass": 12,
+        "fail": 7,
         "ce": 0,
         "skip": 0,
         "total": 19,
-        "pct": 58
+        "pct": 63
       },
       {
         "name": "arbitrary-module-namespace-names",
@@ -4304,8 +4304,8 @@
   },
   {
     "edition": "Unclassified (untagged)",
-    "pass": 4498,
-    "fail": 809,
+    "pass": 4507,
+    "fail": 800,
     "ce": 138,
     "skip": 0,
     "total": 5445,
