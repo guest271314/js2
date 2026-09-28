@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 
 import { ts } from "../ts-api.js";
+import { sourceBooleanAnyResult, assertSourceBooleanAnyReturns } from "../frontend/boolean-return-boundary.js";
 import { preparedIrProgramCallableResults } from "./program-callable-contract.js";
 import { prepareSourceClosureInvocations } from "./source-closure-invocation.js";
 import type { TypedIrProgramInput } from "./program/input-contracts.js";
@@ -645,7 +646,9 @@ function prepareSourceFunctionSignatures(
                 returnNode.typeName.text === "Promise"
               ? { kind: "val", val: { kind: "externref" } }
               : returnNode
-                ? (checkerCallable(checker, returnNode, unit.displayName) ?? typeNodeToIr(returnNode, unit.displayName))
+                ? (sourceBooleanAnyResult(checker, declaration) ??
+                  checkerCallable(checker, returnNode, unit.displayName) ??
+                  typeNodeToIr(returnNode, unit.displayName))
                 : (checkerInferredCallableResult(checker, declaration, unit.displayName) ??
                   (propagated ? lowerTypeToIrType(propagated.returnType) : null));
     bodyResults.set(unit.id, result);
@@ -910,6 +913,7 @@ export function prepareIrProgramSources(
       );
       const signature = signatures.get(unit.id);
       const lowered = lowerFunctionAstToIr(declaration, {
+        booleanReturnBoundary: sourceBooleanAnyResult(input.checker, declaration) ? declaration : undefined,
         ownerUnitId: unit.id,
         funcName: unit.displayName,
         exported: exportedUnits.has(unit.id),
@@ -943,6 +947,7 @@ export function prepareIrProgramSources(
             ? "number"
             : undefined,
       });
+      assertSourceBooleanAnyReturns(input.checker, declaration, lowered.main);
       if (certifiedDelays.has(unit.id) && (lowered.lifted.length !== 0 || lowered.liftedUnitProvenance.length !== 0))
         throw new PreparedIrProgramInvariantError(
           "invalid-prepared-data",
