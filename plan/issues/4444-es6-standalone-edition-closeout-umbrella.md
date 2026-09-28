@@ -3395,7 +3395,7 @@ All 31 accepted artifact pairs and exact-scope identities revalidated:
 Next index 31. The five failures concern typed-array iterator detachment,
 dynamic non-eval tail calls, Proxy `has` receiver context through a prototype,
 eval completion for a class with RegExp literal flags, and an Error.stack
-setter's throwing Proxy trap. Retain existing #6493 diagnostic ownership for
+setter's throwing Proxy trap. Retain existing #6493 diagnostic context/reservation for
 the last case; the frozen repeat does not establish a new repair or clear
 shared source. Other cases need source-level attribution before dispatch.
 
