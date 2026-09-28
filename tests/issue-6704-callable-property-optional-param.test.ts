@@ -6,9 +6,8 @@
 // site a native-string argument; the dispatch ladder had no ref → externref
 // crossing on the no-host lanes, so the callee's funcref was never admitted
 // and the call threw (lodash-es `__pkgNs.words(input)` → null → trap).
-// The other two #6704 mechanisms live in
-// issue-6704-callable-property-apply-fallback.test.ts (its runtime-eval row,
-// like #6684's, needs CI's 1024 MB fork heap: VITEST_FORK_MAX_OLD_SPACE_SIZE).
+// The other #6704 mechanisms: issue-6704-callable-property-apply-fallback.test.ts
+// (`Function`-typed field) and issue-6704-callable-property-non-wrapper-value.test.ts.
 
 import { describe, expect, it } from "vitest";
 

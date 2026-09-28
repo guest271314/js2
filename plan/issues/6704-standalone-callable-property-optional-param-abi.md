@@ -177,7 +177,12 @@ exceeded the 120000ms harness budget (compile-budget)` — the full
 `package/lodash.js` graph compiles in 5–14 min standalone.
 
 Regression tests (`tests/issue-6704-callable-property-optional-param.test.ts`,
-`tests/issue-6704-callable-property-apply-fallback.test.ts`): parent 0/4,
+`tests/issue-6704-callable-property-apply-fallback.test.ts`,
+`tests/issue-6704-callable-property-non-wrapper-value.test.ts` — the last uses
+a bound function, the same non-wrapper shape as the runtime-eval-scope value
+with a far lighter compile, so every file fits the 512 MB default fork heap;
+main's own `calls-closures.ts` traps on it with `dereferencing a null
+pointer`): parent 0/4,
 fix 4/4. The missing-string row also discriminates the sentinel mapping
 (plain `extern.convert_any` answers 304, i.e. `"null"`; the fix answers 309).
 
