@@ -761,13 +761,16 @@ jobs:
   # required once the suite is clean.
   # Measured 2026-08-15 on the 4-core dev box: ~45 s of vitest for the first
   # pinned file; #3521's six tests/ir pins add 44.8 s (measured 2026-09-02,
-  # same flags), so a typical PR (pinned + 1-2 touched files) stays far under
-  # the cap.
+  # same flags). Full native resource suites now also exercise source preparation,
+  # so the job budget includes setup, pinned tests, and every selected file.
   issue-tests:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Run 36424443886 exhausted 20 minutes after boundary349 passed;
+    # Get66 also passed the separate required changed-root check. Keep callback
+    # limits unchanged and allow the complete serial cohort to finish.
+    timeout-minutes: 40
     env:
       # The pinned suite's single fork peaks above vitest.config.ts's 512 MB
       # default heap on main itself (OOM ~20 s in, before any assertion),
@@ -801,6 +804,8 @@ jobs:
       - name: Run issue tests this PR touched (advisory)
         continue-on-error: true
         env:
+          # Match changed-root-tests.sh for real runtime-provider graphs (#3518).
+          VITEST_FORK_MAX_OLD_SPACE_SIZE: "4096"
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
         run: |
@@ -815,8 +820,11 @@ jobs:
           fi
           cat /tmp/issue-tests-changed.txt
           mapfile -t FILES < /tmp/issue-tests-changed.txt
+          # Reclaim each file's compiler graph before starting the next one.
+          # One worker at a time; preserve the exact selected file population.
           pnpm exec vitest run "${FILES[@]}" \
-            --pool=forks --poolOptions.forks.singleFork=true --no-file-parallelism
+            --pool=forks --poolOptions.forks.singleFork=false \
+            --poolOptions.forks.maxForks=1 --no-file-parallelism
 
   # #2139 — Execute the linear-backend (linear-memory lowering), C-ABI, and
   # SIMD test suites in CI. These 20 files (tests/linear-*.test.ts,

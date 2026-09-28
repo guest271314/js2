@@ -286,8 +286,31 @@ export function promiseSubclassResolveFallbackInstrs(
 ): Instr[] | null {
   const isUndefinedIdx = ensureExternIsUndefinedImport(ctx);
   flushLateImportShifts(ctx, fctx);
+  if (isUndefinedIdx === undefined) return null;
+  const getResolve = promiseIntrinsicGetInstrs(ctx, fctx, "resolve");
+  if (getResolve === null) return null;
+  return [
+    { op: "local.get", index: resolveLocal },
+    {
+      op: "call",
+      funcIdx: ctx.funcMap.get("__extern_is_undefined") ?? isUndefinedIdx,
+    },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [...getResolve, { op: "local.set", index: resolveLocal }],
+    },
+  ];
+}
+
+/**
+ * `Get(%Promise%, key)` — the LIVE property of the intrinsic constructor carrier, so a
+ * reassigned `Promise.<key>` is honoured. Requires `__extern_get` to be registered already;
+ * `null` when it is not. Stack: `[] → [externref]`.
+ */
+export function promiseIntrinsicGetInstrs(ctx: CodegenContext, fctx: FunctionContext, key: string): Instr[] | null {
   const externGetIdx = ctx.funcMap.get("__extern_get");
-  if (isUndefinedIdx === undefined || externGetIdx === undefined) return null;
+  if (externGetIdx === undefined) return null;
   const saved = pushBody(fctx);
   let promiseCtor: Instr[];
   try {
@@ -301,23 +324,8 @@ export function promiseSubclassResolveFallbackInstrs(
   flushLateImportShifts(ctx, fctx);
   ctx.liveBodies.delete(promiseCtor);
   return [
-    { op: "local.get", index: resolveLocal },
-    {
-      op: "call",
-      funcIdx: ctx.funcMap.get("__extern_is_undefined") ?? isUndefinedIdx,
-    },
-    {
-      op: "if",
-      blockType: { kind: "empty" },
-      then: [
-        ...promiseCtor,
-        ...stringConstantExternrefInstrs(ctx, "resolve"),
-        {
-          op: "call",
-          funcIdx: ctx.funcMap.get("__extern_get") ?? externGetIdx,
-        },
-        { op: "local.set", index: resolveLocal },
-      ],
-    },
+    ...promiseCtor,
+    ...stringConstantExternrefInstrs(ctx, key),
+    { op: "call", funcIdx: ctx.funcMap.get("__extern_get") ?? externGetIdx },
   ];
 }

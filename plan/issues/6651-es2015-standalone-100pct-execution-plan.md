@@ -1017,6 +1017,13 @@ loc-budget-allow:
   # compiled code can rebind its globals. The mechanism lives in
   # `runtime/wasm-struct-host-semantics.ts` beside `normalizeSandboxValue`.
   # (`declarations.ts` is already listed below; `src/runtime.ts` just after.)
+  # 2026-09-28 — cluster D, slice D6 (receipt under `## Cluster status`).
+  # `src/codegen/property-access-dispatch.ts` +3 (path already listed below,
+  # restated per the stranded-grant rule): one import and the two-line hand-off
+  # at the top of `emitClassStaticMemberRead`'s cell arm. The mechanism (the
+  # `cell ?? Get(%Promise%, p)` read) lives in the NEW leaf
+  # `promise-subclass-cell-read.ts`; the hand-off cannot move, because it is the
+  # arm that would otherwise emit the bare `global.get` of the cell.
 func-budget-allow:
   # 2026-09-28 — cluster A, slice A6: `buildNativeGeneratorPlan` +67 as the gate
   # measures it against `origin/main` @ `8273bc388e` (path already listed below,
@@ -9756,6 +9763,115 @@ all exit 0.
   before and after): host now fails earlier, at
   `Object.getPrototypeOf(Array.prototype.groups)` — an `Array.prototype`
   expando that does not read back on host.
+
+### 2026-09-28 — Cluster D, slice D6
+
+Target: the five rows `built-ins/Promise/{all,allSettled,any,race}/invoke-resolve-on-promises-every-iteration-of-custom.js`
+and `any/invoke-resolve-on-values-every-iteration-of-custom.js`, which on main + C-expando + D5
+failed standalone with `TypeError: Promise combinator element then is not a function`.
+
+#### Diagnosis — the value was a bound `null`, not a closed promise
+
+The rows do
+
+    class Custom extends Promise {}
+    let boundCustomResolve = Custom.resolve.bind(Custom);   // (1) read BEFORE the write
+    Custom.resolve = function (...args) { cresolveCallCount += 1; return boundCustomResolve(...args); };
+
+The module-scope write gives `Custom` a C-expando cell (`__static_Custom_resolve`, an externref
+global), and **every typed `Custom.resolve` read lowers to `global.get` of that cell — including
+read (1), which runs before the write, while the cell is still `null`.** So `boundCustomResolve`
+wrapped `null` (probe `.tmp/d6/p/r1.js`: `Custom.resolve === Promise.resolve` false, `typeof
+boundCustomResolve(1)` not "object"; WAT shows the bind target is `global.get <cell>`). C-expando
+made the drive call the user's `Custom.resolve`; that returned whatever `bound-null(x)` gives,
+never a promise, and D3's `Invoke(nextPromise, "then", …)` found no callable `then`. D5's `then`
+read was never reached on a real promise. With no cell (no write, `.tmp/d6/p/r2.js`) the same
+bind produces a thenable — the defect is only the pre-write cell read.
+
+Spec: `Custom` has no own `resolve` until the write, so OrdinaryGet (§10.1.8.1) continues at its
+[[Prototype]], which for `class Custom extends Promise` is `%Promise%` (§15.7.14 step 5.b).
+
+#### What landed
+
+NEW leaf `src/codegen/promise-subclass-cell-read.ts` (`tryEmitPromiseSubclassCellRead`), called
+from ONE place — the cell arm of `emitClassStaticMemberRead` (`property-access-dispatch.ts`, +3:
+import and a two-line hand-off before the bare `global.get`). It emits
+`cell == null ? Get(%Promise%, p) : cell`; the `Get` is D4's live-property read
+(`__extern_get(<Promise carrier>, p)`), factored out of `promiseSubclassResolveFallbackInstrs`
+as `promiseIntrinsicGetInstrs` so both share one emission (D4's drive bytes unchanged — checked
+below), so a reassigned `Promise.p` is honoured. `class-object-expando.ts` gains the query
+`isClassObjectExpandoCell` (+5).
+
+Gate: `--target standalone`, a recorded C-expando cell, and a class whose builtin root is
+`Promise` with DIRECT heritage (a class whose parent is a user class has that class object as its
+[[Prototype]], so it keeps its read). No new host import, no struct change, `src/runtime.ts`
+untouched. The QuickJS adapter compiled from the branch tree is byte-identical to the base-tree
+build (`0fe97d70133c`).
+
+#### Receipt
+
+- **Branch** `issue-6651-d6-promise-custom-resolve` (worktree `agent-a1f74719cbaae299f`), based
+  on `origin/main` @ `86dbc35c4e` + #6245 (`75139dbba4`, merged in: not on main). Engine
+  `JS2WASM_EVAL_ENGINE=quickjs` (artifact `073742801ba7`, adapter key `d4799bda84cfed0d`, built
+  in this worktree from the base tree), `--standalone --isolate`, 24-row chunks, one runner at a
+  time. Before-state is file-copy A/B from `.tmp/base/src` (copied before the first edit) —
+  measured, not inherited from D5/C-expando.
+- **Rows** — D manifest (101) ⊂ candidate set = D5's 357 (`.tmp/d6/cand.txt`: the non-pass
+  `built-ins/Promise` rows of the standalone baseline ∪ the manifest; the 5 targets included):
+
+  | | pass | fail | compile_error |
+  | --- | ---: | ---: | ---: |
+  | manifest before (`.tmp/d6/base-c-*.log`) | 77 | 24 | 0 |
+  | manifest after (`.tmp/d6/new-c-*.log`) | **79** | 22 | 0 |
+  | candidate set before | 82 | 164 | 111 |
+  | candidate set after | **87** | 159 | 111 |
+
+  **+5, 0 pass→non-pass, 0 status or message changes on the 270 rows non-pass in both.** The
+  five are exactly the targets (two on the manifest: `{all,race}/…-promises-…`).
+
+#### Controls
+
+| control | result |
+| --- | --- |
+| compile-only byte differential, runner's original-harness assembly and compile options, base and branch each in its OWN process (`.tmp/d6/bytes1.mts`), over every test262 file spelling `extends Promise` or `Promise.{all,race,allSettled,any,resolve,reject}.call(` (151 rows, 171 variants per target) — the only rows that can reach either the new arm (a Promise-rooted class cell) or the refactored D4 fallback (the class-receiver drive) | **gc 171/171 identical**; standalone moves **exactly the 5 target variants** |
+| verdicts on the byte-moved rows | the 5 targets, fail → pass |
+| 17 playground + benchmark programs × {gc, standalone} (`.tmp/d6/pgbytes1.mts`, one process per side) | **34/34 identical** |
+| pin suite `tests/issue-6651-d6-promise-subclass-cell-read.test.ts` (8) | 8/8 green; on base (file-copy revert) **7 red** — the plain-class control is green on both by design; the WAT control's positive half (the standalone Promise-subclass read carries the guard) is the red one of the two controls |
+| D-family pins, one vitest process per file (20 files: D3, D4, D5, D6, C-expando, call-root, `promise-combinator-drive`, `promise-custom-combinator`, `issue-5197-*` ×4, `issue-2671-promise-executor`, `issue-3390`, `issue-4682`, `deno-safe-promise-*` ×2, `promise-expando-standalone`, `promise-combinators`, `issue-2671-promise-capability`) | all green except `promise-combinators` (2) and `issue-2671-promise-capability` (1) — the SAME test names fail on base (`.tmp/d6/pin-base-*.log`), D3/D4/D5's pre-existing three |
+| gates | `check-loc-budget`, `check-func-budget` (both also with `LOC_GATE_BASE` = origin/main `86dbc35c4e`), `check-coercion-sites`, `check:oracle-ratchet`, `check:dead-exports`, `typecheck`, `biome lint --diagnostic-level=error`, `check:host-import-policy`, `check-compiler-boundaries --mode inventory --base origin/main` (`inventoryValid: true`, the new leaf classified), `check:ir-fallbacks` (OK), `scripts/equivalence-gate.mjs` (22 failing / 1,720 passing / 22 known — no new). Grant: dated D6 note at the head of `loc-budget-allow` (`property-access-dispatch.ts` +3) |
+
+#### Post-merge re-verification
+
+Slice commit `4d9a7fdddb`; then `origin/main` @ `e5e69140ea` merged in (it had absorbed #6245 and
+A5; the only conflict was the head of `loc-budget-allow`, both notes kept). The merged tree differs
+from `e5e69140ea` in exactly this slice's 7 files. Against the merged tree minus the slice's `src`
+patch (`.tmp/mbase/src`): QuickJS adapter rebuilt from both trees, identical (`0fe97d70133c`); D
+manifest + the 5 targets (104 rows) **77 → 82 pass, the same 5 flips, 0 pass→non-pass, 0 message
+changes**; byte differential over the 151 reach rows — gc 171/171 identical, standalone moves the
+same 5 variants; playground + benchmarks 34/34; pin 7/8 red on the merged base, 8/8 green after;
+the 20 D-family pin files with the same three pre-existing failures; equivalence gate 22 / 1,720 /
+22 known; `check:ir-fallbacks` OK; every gate above re-run bare (`LOC_GATE_BASE=e5e69140ea`), all
+exit 0.
+
+A harness note for the next byte differential: comparing base and branch in ONE process (as
+`.tmp/cx/bytes.mts` did) moved 36 gc/standalone variants of 10 unrelated rows here — the TS
+checker is shared between the two imported compiler trees, so well-known-symbol member names
+(`__@iterator@58` vs `@529`) depend on how much the other tree compiled first. One process per
+side removes it (0 spurious moves).
+
+#### Residuals (measured, not taken)
+
+- The dynamic `Get(Custom, "resolve")` before the write (`id(Custom).resolve`, `.tmp/d6/p/q4.js`)
+  is still `undefined`: C-expando's `__extern_get` arm falls through on a null cell, and the class
+  object has no [[Prototype]] link to `%Promise%` (D4 residual). The drive's own fallback covers
+  the combinator case; a general link would also serve `Object.getPrototypeOf(Custom)`.
+- The cell's null-means-absent convention (C-expando's bounded divergence) now reads a written
+  JS `null` as the inherited `Promise.p` on this path — the same ambiguity, one more observer.
+- A JS source whose replacement has a fixed return type (`Custom.resolve = function () { return 5 }`)
+  makes TS infer `Custom.resolve: () => number` for the typed read BEFORE the write too, so
+  `var r = Custom.resolve.bind(Custom)(1)` is stored as a number (`.tmp/d6/p/r5.js`). A JS
+  expando-inference question, not this lowering; no test262 row found hitting it.
+- The remaining 22 manifest fails are unchanged and belong to D2b/D3/D4/D5's residual tables.
 
 ## Handoff — 2026-09-21 (round 1 closed, round 2 ready to dispatch)
 

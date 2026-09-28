@@ -106,6 +106,11 @@ export function recordClassObjectExpandoCell(ctx: CodegenContext, className: str
   names.add(propName);
 }
 
+/** Whether `className.propName` is a recorded module-scope assignment cell. */
+export function isClassObjectExpandoCell(ctx: CodegenContext, className: string, propName: string): boolean {
+  return cellsByCtx.get(ctx)?.get(className)?.has(propName) === true;
+}
+
 interface ExpandoCell {
   staticGlobalIdx: number;
   classObjectGlobalIdx: number;
