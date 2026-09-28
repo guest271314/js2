@@ -701,6 +701,9 @@ function fixupModuleGlobalIndices(ctx: CodegenContext, threshold: number, delta:
     }
   }
 
+  if (ctx.undefinedGlobalIdx !== undefined && ctx.undefinedGlobalIdx >= threshold) {
+    ctx.undefinedGlobalIdx += delta;
+  }
   if (ctx.symbolCounterGlobalIdx >= threshold) {
     ctx.symbolCounterGlobalIdx += delta;
   }
