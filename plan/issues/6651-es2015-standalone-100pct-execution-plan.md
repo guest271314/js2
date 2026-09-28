@@ -169,6 +169,22 @@ assignee: "ttraenkler/fable-es2015-plan"
 #     `$__ta_ctor`, which the Int8Array `$Object` carrier is not). The first cut
 #     inlined the arm here and cost +68 / +65; extracting it left these 8.
 loc-budget-allow:
+  # 2026-09-28 — cluster D slice D5 (#5197 R3-7, a native promise has no
+  # readable `then`; receipt under `## Cluster status`). The mechanism lives in
+  # the NEW leaf `promise-dynamic-member-read.ts` (the `__extern_get` `$Promise`
+  # arm, the demand gate, the `p.then.length` spec length). What cannot move is
+  # where each read is decided:
+  #   - `expressions.ts` +2: one import and the one-line source hook in the
+  #     property/element-access arm of `compileExpression` — the single point
+  #     both `p.then` and `p["then"]` pass through in VALUE position;
+  #   - `index.ts` +3: one import and the finalize call in each of
+  #     `generateModule` / `generateMultiModule`, beside the #6678 Date twin (the
+  #     arm must be unshifted before the proto-cache arm that stays the prefix);
+  #   - `promise-combinators.ts` +4: one import and the D2 observable element's
+  #     "a replaceable `%Promise.prototype%.then` must be Got" branch;
+  #   - `property-access-dispatch.ts` +3: one import and the `?? promiseProto…`
+  #     spec-length fallback beside the `%Function.prototype%` one.
+  - src/codegen/expressions.ts
   # 2026-09-28 — cluster D slice D4 (`class X extends Promise` in standalone,
   # #5197 G9; receipt under `## Cluster status`). The mechanisms live in two NEW
   # leaves: `promise-subclass-proto-link.ts` (the `$bag.$proto` link, the
@@ -909,6 +925,12 @@ loc-budget-allow:
   # `promise-combinators.ts` +0 (an `export` on `ensureSettledAnyCombinators`,
   # whose AggregateError builder the `any` finish reuses). Path already listed.
 func-budget-allow:
+  # 2026-09-28 — cluster D slice D5: `compileExpressionInner` +1 (the one-line
+  # `notePromiseDynamicMemberRead` source hook — see the LOC grant) and
+  # `tryLengthAndNameReads` +1 (the `?? promiseProtoMemberSpecLength(…)` spec-length
+  # fallback; the statement only wraps onto a second line). Bodies are in the new leaf.
+  - src/codegen/expressions.ts::compileExpressionInner
+  - src/codegen/property-access-dispatch.ts::tryLengthAndNameReads
   # 2026-09-28 — cluster D slice D4: `compileHostInstanceOf` +2 (the standalone
   # Promise-subclass `instanceof` arm — its body is `tryEmitPromiseSubclassInstanceOf`
   # in the new leaf), `compileSuperCall` +1 (the bag-link call after the explicit
