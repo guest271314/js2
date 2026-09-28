@@ -10082,6 +10082,28 @@ Both lanes `git merge origin/main` before opening a slice and record slices
 under `## Cluster status`. This lane has not opened F, H or I since round 1;
 the partition stands as proposed.
 
+#### A6 claimed — 2026-09-28 (nested yield operands)
+
+Claimed by the same session, before any code. Branch
+`claude/es6-6651-a6-nested-yield`, cut from A5's branch at `f8519713cb` on
+purpose: A6 extends `generator-yield-nested.ts`. A5's branch is re-merged if it
+changes; `origin/main` is merged as usual. Every before-measurement uses a
+source-clean `git archive f8519713cb`.
+
+| group | shape | ES2015 rows |
+| --- | --- | ---: |
+| yield-spread | `yield [...yield yield]` — `yield-spread-arr-{single,multiple}` under `{expressions,statements}/class/gen-method{,-static}`, `expressions/generators/{,named-}`, `statements/generators`, `object/method-definition/gen-` | 16 |
+| yield operand | `yield yield 1` — `yield-as-yield-operand` ×4 (incl. `class/definition/methods-gen-`), `yield/rhs-yield`, `GeneratorPrototype/next/return-yield-expr` | 6 |
+| group 2 | `return <expr holding a yield>` (silently miscompiled today) — `yield-identifier-non-strict` ×4 | 4 |
+| group 3 | carrier: G3a `isNumberType` for yield/return operands, G3b #680 continuation under the boxed-any carrier (standalone only, externref linear `sent` spills) — `yield/{in,star-in}-rltn-expr` (+ `yield/rhs-regexp`) | 2 (+1) |
+
+Diagnosis source: the 2026-09-28 triage spec, groups 2 and 3. Out of scope: its
+groups 1, 4 and 5, and the error-swallowing hazard in
+`statements/nested-declarations.ts` (the hoist rollback that discards a
+generator's codegen errors) — a separate issue. G3a is measured on the `dstr/`
+and class generator-method families before it is trusted (the spec's owed
+measurement).
+
 ### 2026-09-24 — Cluster I, slice I5: the void-`super` rollback (arrow-lexical family)
 
 - **Branch** `issue-6651-i5-arrow-lexical`, base `claude/project-thread-yhj9pp`
