@@ -938,6 +938,17 @@ loc-budget-allow:
   #   - `src/codegen/regexp-standalone.ts` +4: the import and the §22.2.6.17
   #     hand-off ahead of brand recovery in `emitRegExpProtoMemberBody` (the
   #     member body is chosen there and nowhere else).
+  # 2026-09-28 — cluster C, class-object expando cells (receipt under
+  # `## Cluster status`). `src/codegen/index.ts` +4 (path already listed below,
+  # restated per the stranded-grant rule): one import, one
+  # `recordClassObjectExpandoCell` line in `registerModuleClassStaticAssignments`
+  # (the ONLY place that knows a `__static_C_p` global came from a module-scope
+  # assignment rather than a declared static field), and one finalize call at
+  # each entry point (`generateModule` / `generateMultiModule`), directly after
+  # `fillClassObjectNameArms` — the arms must be prepended after every competing
+  # `__extern_get` prefix, and must run at both entry points or a multi-module
+  # compile keeps the old answer. The mechanism is the NEW leaf
+  # `src/codegen/class-object-expando.ts`.
 func-budget-allow:
   # 2026-09-26 — lane SC1: `buildNativeGeneratorPlan` +15 as the gate measures it
   # (path already listed below, restated per the stranded-grant rule), of which 9
@@ -1323,6 +1334,10 @@ func-budget-allow:
   # `compileModuleInitBody`, the one codegen point every source file reaches with
   # a `FunctionContext` (mechanism in the new leaf `regexp-untyped-receiver.ts`).
   - src/codegen/declarations.ts::compileDeclarations
+  # 2026-09-28 — cluster C, class-object expando cells: `generateModule` +1 and
+  # `generateMultiModule` +1 — the one `fillClassObjectExpandoArms(ctx)` finalize
+  # call at each entry point, beside `fillClassObjectNameArms` (both entries
+  # already listed below). Mechanism: `src/codegen/class-object-expando.ts`.
 coercion-sites-allow:
 # 2026-09-26 — lane TA1: `to-locale-string-element.ts` is a NEW file, so its
 # baseline is 0 and every textual mention of a native name counts as growth
@@ -8482,6 +8497,275 @@ drive already takes any constructible `C`.
   species reads, realm, `Object.prototype.toString` tag, executor/resolve-element
   `[[Prototype]]`, `exception-after-resolve-*`, `regular-subclassing`, `iter-arg-is-string`).
 
+
+### 2026-09-28 — Cluster D, slice D4
+
+Target: the 6 manifest rows where a class extends `Promise` (#5197 G9) —
+`{all,race,resolve,reject}/ctx-ctor` and `{all,race}/invoke-resolve-on-promises-every-iteration-of-custom`.
+
+#### Design
+
+**Measured first, because D3's three sites were partly stale.** On this branch's base
+(D3 merged): the class OBJECT already exists standalone (`class-bodies.ts` stopped skipping
+`__class_<Name>` in #5191 — D3's site 1 note is stale on that half), and explicit
+`super(executor)` to `Promise` already builds a real `$Promise` through the executor bridge
+(`emitStandalonePromiseFromExecutorValue`, the Deno `SafePromise` arm) and then installs
+`constructor` as an own property of the carrier's `$bag` (#5383 S2m) — so D3's site 2 holds
+only for the IMPLICIT constructor (`class Custom extends Promise {}`), and
+`instance.constructor === C` already answers through a dynamic receiver. What was really
+missing (probes `.tmp/d4/js/c1..c7`):
+
+1. the value read (`identifiers.ts` ×2) emitted `env::__promise_subclass_ctor` with no
+   host-free gate — every row failed to compile on that alone;
+2. the native construct dispatcher (`standalone-class-construct.ts`) excludes every
+   builtin-parent class, so `Construct(C, «executor»)` threw "not a constructor";
+3. nothing on a `$Promise` says which class built it, so a dynamic `v instanceof C` was false;
+4. `Promise.{resolve,reject}.call(C)` has no arm for a CLASS `C` (only D1's function arm);
+5. D3's receiver admission excluded Promise-rooted classes.
+
+**Representation — no struct change.** A Promise-subclass instance IS the native `$Promise`
+carrier (so settle / `then` / the combinator drives take it unchanged); its [[Prototype]] is
+recorded the way #2917 records it for the `extends Array` vec carrier: the carrier's intrinsic
+`$bag` (#4241) is an `$Object` whose `$proto` field no bag consumer reads (every bag read is
+own-only, #4563), so construction stores `C.prototype` there. `$Promise` itself — and therefore
+every promise allocation in every module — is untouched. Rejected alternatives: a proto field on
+`$Promise` (moves every module that allocates a promise); a `$Promise` subtype struct (every
+`ref.test $Promise` consumer would still accept it, but `struct.new` sites, the final-type
+marking and the settle bodies' casts would all need auditing for a 6-row slice).
+
+**`super(executor)`** (§27.2.3.1 via §10.1.13 OrdinaryCreateFromConstructor): the existing
+explicit arm already does steps 3-11 (allocate pending, CreateResolvingFunctions, call the
+executor, reject on abrupt completion); D4 adds the same arm for the implicit constructor
+(`class X extends Promise {}` → `constructor(...args) { super(...args) }`, direct heritage
+`Promise` only) and, on both, the bag link after S2m's `constructor` install.
+
+**`instanceof` / `.constructor`.** `.constructor` is S2m's own `constructor` (unchanged).
+`v instanceof C` for a Promise-subclass identifier `C`, standalone, becomes
+`__promise_proto_instanceof(v, C.prototype)`: OrdinaryHasInstance steps 4-6 over the bag link
+(or an `$Object`'s own `$proto`), `ref.eq` until null — so `Y extends X extends Promise` needs
+no per-class list.
+
+**[[Construct]].** A standalone value read of a Promise subclass marks the module; the class
+construct dispatcher then admits Promise-rooted classes (their `<C>_new` returns the carrier).
+Every module that performs such a read failed to compile before D4, so no previously-compiling
+module's dispatcher moves.
+
+**`Promise.{resolve,reject}.call(C, x)`** for a compiled class `C`: NewPromiseCapability(C)
+through D3's construct call, then `Call(capability.[[Resolve]] / [[Reject]], undefined, «x»)`,
+return `capability.[[Promise]]` (§27.2.4.6 / .7; PromiseResolve's step 1 fast path — `x` a
+promise whose `constructor` is `C` — first).
+
+**Gate.** Everything above is `--target standalone` and keyed on a class whose builtin root is
+`Promise`; the gc lane and every module with no such class are byte-identical by construction
+(checked, not assumed — controls below).
+
+#### Receipt
+
+- **Branch** `issue-6651-d4-promise-subclass` (worktree `agent-a25501ba6e0af9e9c`), based on
+  `origin/main` @ `af9de0c1c2` + D3 (`135875abea`, merged in), the slice commit `fcefaa1123`, then
+  `git merge origin/main` twice (@ `f73a4bcd7d`, then @ `422dbf01a0` where D3 itself landed — the
+  second merge moved no `src/`/`tests/`/`scripts/` byte, checked with `git diff`). Every control
+  below was run on the pre-merge tree AND re-run on the merged tree; the two agree row for row.
+  Engine `JS2WASM_EVAL_ENGINE=quickjs` (artifact `073742801ba7`, adapter `d4799bda84cfed0d`),
+  `--standalone --isolate`, 24-row chunks, one runner at a time. Before-states are file-copy A/B:
+  `.tmp/base/` (pre-edit copy) on the pre-merge tree, and on the merged tree the merged files with
+  the slice's own patch reversed (`.tmp/d4/mkbase.sh`) — measured, not inherited from D3.
+
+- **Manifest** `plan/agent-context/6651/D-promise-combinators.txt` (101 rows):
+
+  | | pass | fail | compile_error |
+  | --- | ---: | ---: | ---: |
+  | before (`.tmp/d4/base-chunk-*`, merged: `Mbase-chunk-*`) | 71 | 24 | 6 |
+  | after (`.tmp/d4/new-chunk-*`, merged: `Mnew-chunk-*`) | **75** | 26 | **0** |
+
+  **+4, 0 pass→non-pass, 0 message changes on the 24 rows non-pass in both.** The four are
+  `{all,race,resolve,reject}/ctx-ctor.js`. The other two target rows moved CE → fail (below).
+
+#### What landed
+
+| site | change |
+| --- | --- |
+| `expressions/promise-subclass.ts` `emitPromiseSubclassValueRead` (+ both `identifiers.ts` value-read arms) | host-free: emit nothing (the class-object singleton is read instead) and mark the module |
+| `standalone-class-construct.ts` `collectCandidates` | Promise-rooted classes become construct candidates in a marked module |
+| `class-bodies.ts` | the implicit `constructor(...args){super(...args)}` of `class X extends Promise {}` builds the carrier from `args[0]` (direct heritage `Promise` only); both super arms call the link |
+| NEW `promise-subclass-proto-link.ts` | `emitPromiseSubclassProtoLink` (bag `$proto` = `X.prototype`, runtime-guarded by `ref.test $Promise`), `__promise_proto_instanceof` + `tryEmitPromiseSubclassInstanceOf`, `promiseSubclassResolveFallbackInstrs` |
+| `identifiers.ts` `compileHostInstanceOf` | the standalone Promise-subclass `instanceof` arm, ahead of the host-only twin |
+| NEW `promise-class-receiver-settle.ts` | `Promise.{resolve,reject}.call(C, x)` for a compiled class `C` (Promise subclass or not), with PromiseResolve's step-1 passthrough; a binding that shadows a global value name (`const parseInt = class …`) declines — the value read resolves those to the global |
+| `promise-class-receiver-drive.ts` (D3) | receiver admission widens to Promise subclasses (host-free, same shadow guard); for them GetPromiseResolve falls back to `Get(%Promise%, "resolve")` when `Get(C, "resolve")` is `undefined` (the class object has no link to `%Promise%`), so `Promise.all.call(SubPromise, [])` fulfils with `[]` instead of rejecting |
+
+No new host import; no change to the `$Promise` struct.
+
+#### Controls
+
+| control | result |
+| --- | --- |
+| manifest, 101 rows | 71 → **75**, 0 pass→non-pass, 0 message changes; merged tree identical |
+| byte differential, compile-only through the runner's original-harness assembly (`.tmp/d4/promise-bytes.mts`): the 151 test262 files that spell `extends Promise` or `Promise.{resolve,reject,all,race,allSettled,any}.call(` (171 variants), base vs branch, pre-merge and merged | **gc 171/171 identical**; standalone moves **30 variants of 26 rows**, all 26 run base vs branch below |
+| verdicts on the 26 byte-moved rows (`.tmp/d4/moved-rows.txt`) | base 3 pass / 8 fail / 15 CE → branch **11 pass / 15 fail / 0 CE**; **0 pass→non-pass**, no message change on the 8 fail-on-both. The +8 pass include 4 off-manifest rows: `{allSettled,any}/ctx-ctor.js` and `prototype/finally/subclass-species-constructor-{resolve,reject}-count.js` |
+| corpus: 17 playground + benchmark programs and D2/D2b's 11 shape programs × {gc, standalone} (`.tmp/d4/bytes.mts`) | **56/56 identical**, pre-merge and merged |
+| pin suite `tests/issue-6651-d4-promise-subclass.test.ts` (12) | 12/12 green; on base **10 red** — the two controls (gc lane keeps the host constructor; a module with no Promise subclass never names the helper) are green on both by design |
+| D-family pins + every test file that spells `extends Promise`, one vitest process each | all green except `promise-combinators` (2) and `issue-2671-promise-capability` (1), which fail with the same test names on base — D3's pre-existing three. `issue-3518-host-async-imports` (2) likewise fails identically on base |
+| three pins updated because they asserted the OLD route | D3's "a Promise-subclass receiver is not admitted" control, `deno-safe-promise-combinators` "keeps … on the constructor-aware route" (asserted the `env::Promise_all` import) and `issue-3390` "fall-through … still routes to host" — each now asserts the host-free answer (the Deno one also runs it: the result is `instanceof SafePromise`) |
+| gates | `check-loc-budget`, `check-func-budget` (also with `LOC_GATE_BASE` = origin/main @ `f73a4bcd7d` and @ `422dbf01a0`), `check-coercion-sites`, `check:oracle-ratchet`, `check:dead-exports`, `check-compiler-boundaries --mode inventory --base origin/main` (`inventoryValid: true`, both new leaves classified), `npm run -s typecheck`, `biome lint --diagnostic-level=error`, `check:ir-fallbacks` (OK), `scripts/equivalence-gate.mjs` (22 failing / 1,720 passing / 22 known — no new). Grants: dated D4 notes at the head of this file's `loc-budget-allow` / `func-budget-allow` |
+
+#### Residuals (not taken)
+
+- **`{all,race}/invoke-resolve-on-promises-every-iteration-of-custom` (2 rows, now fail: "async
+  completion marker not observed")** — two gaps, both wider than Promise, so they are named here
+  rather than patched:
+  1. **Static assignments to a class object are invisible to a dynamic Get.** `Custom.resolve =
+     function (…) {…}` then `__extern_get(Custom, "resolve")` answers `undefined`; the same holds
+     for a plain `class K {}` (`K.foo = f; id(K).foo` → `undefined`, `.tmp/d4/js/c8.js`). The
+     drive therefore never sees the user's `resolve` (and falls back to the — reassigned —
+     `Promise.resolve`, which the row asserts is never called). This is the class-object static
+     expando model, not a Promise question.
+  2. **#5197 R3-7: a native `$Promise` has no readable `then`** (`typeof id(p).then` →
+     `undefined`, `.tmp/d4/js/c5.js`), so D3's `Invoke(nextPromise, "then", …)` does not subscribe
+     when `C.resolve` answers a native promise; the aggregate never settles.
+- `class Y extends X {}` where `X extends Promise` (implicit ctor, user parent): still the
+  identity-only object (the builtin-subclass chain skips the parent's constructor — pre-existing
+  for every builtin parent). `instanceof Y` is false.
+- `Object.getPrototypeOf(promiseSubInstance)` does not read the link (no `__getPrototypeOf` arm
+  for `$Promise`); `Get(C, "resolve")` on a Promise subclass stays `undefined` outside the drive
+  (the class object has no [[Prototype]] = `%Promise%`); the fallback also cannot tell an own
+  `C.resolve = undefined` from an absent one.
+- `super()` with NO argument to `Promise` keeps the identity-only object (spec: TypeError, the
+  executor is not callable).
+- Off-manifest, still CE → fail on the branch: `{allSettled,any}/invoke-resolve-on-*-custom`,
+  `try/ctx-ctor`, `withResolvers/ctx-ctor` (no `.call(C)` arm for `try` / `withResolvers`).
+
+### 2026-09-28 — Cluster C, class-object expando properties
+
+Target: D4's residual 1 — a property ASSIGNED onto a class object is invisible to a dynamic
+read (`class K {}; K.foo = f; id(K).foo` → `undefined`), and the reverse (a dynamic write is
+invisible to the typed read).
+
+#### How many rows hit it — measured, and it is small
+
+A TypeScript-AST scan of the whole corpus (`.tmp/cx/scan.mts`: every file declaring a class,
+then every `C.p = v` whose `C` is one of them) finds **89** files, 7 of them ES2015. Only the
+**module-scope** form is the defect (a write inside a function body already goes to the class
+object's #4194 bag and the dynamic read finds it); that narrows the corpus to **15** files, and
+the compile-only byte differential below proves only **7** of those can move at all (the rest
+assign to static SETTERS, which never get a cell). In ES2015 that is exactly **3** rows: D4's
+two `{all,race}/invoke-resolve-on-promises-every-iteration-of-custom.js` and
+`statements/class/definition/accessors.js` (whose first failure is an unrelated gOPD on a static
+ACCESSOR). The brief's "probably many cluster C and I rows" does not hold: none of the other 175
+C-manifest rows compiles to different bytes.
+
+#### Design — the module-scope global stays the ONE store; the dynamic MOP learns to find it
+
+Root cause: `registerModuleClassStaticAssignments` (`index.ts`) gives every module-scope
+`C.p = v` on an unreassigned class declaration its own mutable externref global
+`__static_C_p`, and every TYPED access (`C.p`, and `this.p` inside a static member) lowers to it.
+Nothing on the dynamic side (`__extern_get`/`__extern_set`/`in`/hasOwn/gOPD/delete/the
+method-call native) has that name → slot map, so it looks in the class object's bag and sidecar.
+
+Two alternatives were measured first (`.tmp/exp/` copy of `src`, probes `.tmp/cx/j*.js`):
+
+- **drop the global, let every access use the bag** (the path an in-function write already
+  takes). One store, bag reflection already wired — rejected: it turns every typed read and call of
+  such a property into a dynamic lookup, and the pattern is hot in real code (jsbi, linked into the
+  standalone Temporal provider, keeps `JSBI.__imul`, `JSBI.__kMaxLength`,
+  `JSBI.__kBitConversionDouble`, … exactly this way); and it made the typed read of an
+  `extends Error` class object TRAP (illegal cast — the own-field arm of
+  `property-access-dispatch.ts` types the class identifier as its instance), which the global
+  lowering never reaches;
+- **mirror into both** — two sources of truth for one mutable slot, the hazard
+  `class-static-sidecar.ts` already refuses for static fields.
+
+So the global stays, and the NEW leaf `src/codegen/class-object-expando.ts` prepends one
+identity-guarded arm per cell to each native MOP helper at finalize (with
+`fillClassObjectNameArms`, after every competing `__extern_get` prefix):
+`receiver === C's class-object singleton && key === "p"` →
+
+| helper | on a hit |
+| --- | --- |
+| `__extern_get` | the global, when it holds a value (null = absent → falls through, so a read before the module-scope write answers `undefined`) |
+| `__extern_set` | stores into the global; #4504 result channel = success |
+| `__extern_has`, `__hasOwnProperty`, `__object_hasOwn`, `__propertyIsEnumerable` | 1 when it holds a value |
+| `__getOwnPropertyDescriptor` | `{value, writable: true, enumerable: true, configurable: true}` |
+| `__extern_method_call` | `Call(value, receiver, args)` via `__apply_closure` (the class-object STRUCT receiver otherwise took the non-`$Object` arm and threw "not a function" — `id(K).foo()` threw on base even for an in-function write) |
+| `__delete_property` | clears the global, answers true |
+
+The cells are recorded by `registerModuleClassStaticAssignments` (one call) and resolved
+against the LIVE `staticProps` / `classObjectGlobals` maps at fill time. Typed code is
+unchanged; no value is ever held twice; no struct, no value representation and no host import
+changes. Gate: standalone, and only modules with at least one recorded cell.
+
+#### Receipt
+
+Branch `issue-6651-c-class-expando` (worktree `agent-a5ea6382612747520`), based on `origin/main`
+@ `6b4cc2bbd6` + D4 (`2d6b4fe383`, merged in: `fcefaa1123` was not on main). Engine
+`JS2WASM_EVAL_ENGINE=quickjs`, `--standalone --isolate`, 24-row chunks, one runner at a time.
+Before-state is file-copy A/B from `.tmp/base/src` (a full `src` snapshot taken before the first
+edit) — measured on this base, not inherited from D4. Slice commit `c5f3778e29`; then
+`git merge origin/main` @ `42513771de` (B9, #5151, #6721 — no conflict in `src/`, the plan body
+took both sections). On the merged tree, against the merged tree minus this patch
+(`.tmp/mbase/src`): the byte differential moves the SAME 9 variants of the same 7 rows (gc 0),
+those 7 rows give the same verdicts and messages as pre-merge, playground/benchmarks 34/34,
+the pin suite 9/9, typecheck, every gate and the equivalence gate (22 / 1,720 / 22 known)
+re-ran green.
+
+| row set | before | after |
+| --- | --- | --- |
+| C manifest (177 rows, sha256 `785dd45d78a609ec`; `.tmp/cx/{base,new}/C.part-*.log`) | 59 pass / 113 fail / 5 CE | 59 / 113 / 5 |
+| + the 4 ES2015 grep rows off the manifest | 2 pass / 2 fail | 2 / 2 |
+| + the 4 byte-moved rows of other editions (`{allSettled,any}/invoke-resolve-on-*-custom`, `staging/sm/class/staticMethods.js`) | 3 fail / 1 skip | 3 / 1 skip |
+
+**+0 pass, 0 pass→non-pass, 0 status changes on 189 row-runs.** Five rows change their failure
+message, all in the one expected direction — the five Promise `invoke-resolve-on-*-custom` rows
+move from `async completion marker not observed` (the drive never saw the user's `C.resolve`) to
+`TypeError: Promise combinator element then is not a function`: the user's `Custom.resolve` now
+RUNS, returns a native `$Promise`, and the drive then fails D4's residual 2 (#5197 R3-7, a native
+`$Promise` has no readable `then` through `__extern_get`). That residual is now the ONLY blocker
+of those rows; the cluster-D4 lane confirmed it is unowned.
+
+#### Controls
+
+| control | result |
+| --- | --- |
+| compile-only byte differential through the runner's original-harness assembly and compile options (`.tmp/cx/bytes.mts`), base (`.tmp/base/src`) vs branch, on the C manifest ∪ every grep row (263 rows, 297 variants per target) | **gc 297/297 identical**; standalone moves **9 variants of 7 rows** — exactly the 7 with a registered module-scope cell (the 5 Promise rows, `accessors.js`, `staticMethods.js`); every other row, including the 8 grep rows whose writes target static SETTERS, is byte-identical |
+| verdicts on the 7 byte-moved rows | 0 pass→non-pass; 0 status changes (table above) |
+| 17 playground + benchmark programs × {gc, standalone} (`.tmp/cx/pgbytes.mts`) | **34/34 identical** |
+| jsbi 4.3.0 (the Temporal provider's dependency — 12 module-scope `JSBI.x = …` cells), standalone smoke (`.tmp/cx/jsbi-ab.mts`) | arithmetic identical to base and to node; the two dynamic reads (`typeof id(JSBI).__imul`, `id(JSBI).__kMaxLength`) now match node (base: `undefined`); binary +6.5 KB (9 helpers × 12 cells) |
+| pin suite `tests/issue-6651-c-class-expando-mop.test.ts` (9) | 9/9 green; on base **8 red** — every behaviour case, plus the gate control's positive half (a module WITH a cell contains the arm); the typed-access control is green on both by design |
+| C-family pins + D3/D4 + 21 class-object / builtin-subclass / jsbi / Temporal-provider suites (29 files, one vitest process each) | green except 4 files with one failure each (`issue-5373-array-subclass-tostring`, `issue-5383-standalone-temporal-provider` S2i "named static method call on a DYNAMIC class-value receiver", `issue-5195-es2015-class-r2` 9K, `issue-5195-r3-review` F1) — the SAME test names fail on base |
+| gates | `check-loc-budget`, `check-func-budget` (also with `LOC_GATE_BASE` = origin/main), `check-coercion-sites`, `check:oracle-ratchet`, `check:dead-exports`, `typecheck`, `biome lint --diagnostic-level=error`, `check:ir-fallbacks` (OK), `scripts/equivalence-gate.mjs` (22 failing / 1,720 passing / 22 known — no new), `check-compiler-boundaries --mode inventory` (new leaf classified). Grants: dated notes at the head of this file's `loc-budget-allow` / `func-budget-allow` |
+
+#### Residuals (measured, not taken)
+
+- **#5197 R3-7 (unowned)** — `Get($Promise, "then")` is `undefined`; the only remaining blocker
+  of the five `invoke-resolve-on-*-custom` rows (site: `buildElementStep` in
+  `promise-class-receiver-drive.ts` exempts a native `$Promise` from the §7.3.20 check, then
+  applies the undefined `then`).
+- **A cell whose name is also an INSTANCE field of the same class** (`class K { constructor() {
+  this.bar = 1 } }; K.bar = 5`): the per-name member dispatchers `__get_member_bar` /
+  `__set_member_bar` (and their #4157 call-site inline copies) `ref.test $K` and answer from the
+  class object's own struct slot — the class object and its instances share `$K` (#3976) — so
+  `id(K).bar` reads that slot, not the cell. `.tmp/cx/j17.js`. Needs an identity arm in those
+  dispatchers plus a decline in `member-get-inline-ic.ts`'s planner; no test262 row hits it.
+- **Reflection written against the class IDENTIFIER** is folded at compile time from declared
+  members and never reaches the helpers: `K.hasOwnProperty("p")`,
+  `Object.getOwnPropertyDescriptor(K, "p")` (the literal-key fold in `call-builtin-static.ts`
+  returns `undefined` for any non-struct, non-intrinsic name), `Object.keys(K)`. Through an
+  untyped value all of these now answer. Own-KEY enumeration (`Object.keys`/for-in/gOPN) of the
+  class object does not list cells on either path.
+- **Typed `P.resolve(…)` on a Promise subclass with an own `P.resolve` cell** still calls the
+  intrinsic `Promise.resolve` (`call-namespace-static.ts`'s `isPromiseSubclassReceiver` arm wins
+  before the cell); the typed READ `P.resolve` and every dynamic path see the cell.
+- **Inherited cells** — `class D extends K {}; K.foo = 1; id(D).foo` is `undefined` (typed
+  `D.foo` walks the parent; the dynamic arms are own-only).
+- `K.p = null` reads back `undefined` through the dynamic MOP (a null cell is "absent"; the typed
+  read already returned the raw null for both).
+- Pre-existing, unchanged, found while probing: a write to an `extends Error` class object from
+  INSIDE a function (`function s() { E.code = 5 }`) makes the later typed read `E.code` trap
+  (illegal cast in the Error own-field read arm, which types the class identifier as its
+  instance); a NAMED class-expression binding (`let D = class Named {}; D.foo = 6`) loses the
+  write for both typed and dynamic reads; a top-level `f(o).p = v` expression statement (receiver
+  rooted in a CALL) is dropped by the module-init keep list in `declarations.ts`
+  (`.tmp/cx/j7.js`: 4 of 6 shapes wrong) — likely worth a slice of its own.
+
 ### 2026-09-28 — Cluster B, slice B9: a replaced `RegExp.prototype[Symbol.match|search]` is observable
 
 - **Branch** `issue-6651-b9-regexp-symbol-members` (local, not pushed), base
@@ -8988,6 +9272,7 @@ building it.
   parameter, a property, or a computed `eval` string is not demanded; only
   literal keys are demand shapes (once a member is demanded, a runtime-keyed
   `r[k]` read of it is answered too).
+
 
 ## Handoff — 2026-09-21 (round 1 closed, round 2 ready to dispatch)
 
