@@ -14427,6 +14427,24 @@ The upstream assignment was reread before staging and remains held by
 `ttraenkler/codex-ir-delivery-20260927`. Publication and protected queue
 validation still follow; no main delivery or retirement is claimed here.
 
+### Exact upstream refresh: RegExp and collection main, 2026-09-28
+
+PR6205 left the protected queue and became conflicting. Fresh upstream main
+was011e1278f531676b3e255558dc67c06396c21072, verified by GraphQL and fetch;
+merge it into exact published head25f4ec456c1c609629e046ab0f920dcbc8adee9a.
+The sole conflict was compiler-boundaries.json: retain all1,657 existing
+IR entries and add the two upstream unmigrated RegExp files, total1,659.
+All11 incoming source/test files outside policy match upstream byte-for-byte.
+
+TS7 passed. The initial four-suite run passed358/361 with three missing-corpus
+skips, not passes. Restore those exact three test262 files from pinned
+b363f29d3c43c626dc852744ad64a0b48a003693, authenticate their Git blobs, and
+rerun their complete suite:3/3 passed without skips. The original358 results
+retain unchanged source/test inputs. Eight quality gates passed with2,214
+unchanged inputs. Evidence: .tmp/ir6205-refresh/regexp-main-runtime,
+regexp-main-quality, and regexp-corpus. No legacy retirement or default
+change. Main delivery and merge-group conformance remain unverified.
+
 
 ## Claimed continuation — prototype-chain native bodies (2026-09-28)
 
@@ -14529,3 +14547,26 @@ legacy reachability, with2,217 unchanged inputs. Evidence lives under
 .tmp/prototype-class-check and .tmp/prototype-quality. An existing native
 subagent is investigating the two historical claims read-only; do not infer
 abandonment from claim age or take ownership without reconciliation.
+
+
+### Prototype-chain delivery refresh (2026-09-28)
+
+PR6205 is verified delivered at45ce4a8e with102 merge-group conformance shards,
+CI, differential and regression gates passed. Fresh main is3eb7ae5da3951641b97c1af2e9fc27a0c7c41435.
+Integrate it into signed prototype checkpoint4914b413; preserve both complete
+issue append records. The boundary inventory merges automatically and must
+retain every upstream entry plus the extracted prototype-chain module.
+Keep the six implementation/fixture/test files byte-identical to4914; run the
+complete execution, preservation and boundary suites on the integrated tree,
+then the quality gates. Historical4637/4643 tests remain unchanged under their
+existing claims. This is preparation for protected delivery, not main delivery.
+
+Integrated-tree validation passed TS7 and all382/382 rows across the three
+complete execution, preservation and boundary suites, with zero skipped or
+failed rows and2,267 unchanged inputs. All eight scoped quality gates passed
+with2,219 unchanged inputs. The inventory retains all1,659 upstream entries
+byte-for-byte and adds only the prototype-chain runtime module. The six
+implementation/fixture/test files remain byte-identical to4914b413. Evidence:
+.tmp/prototype-main-validation and .tmp/prototype-main-quality. Full commit
+hooks and protected upstream delivery are still required. Existing historical
+legacy-test expectation failures remain explicitly outside this green result.
