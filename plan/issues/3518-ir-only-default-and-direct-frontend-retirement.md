@@ -14399,3 +14399,30 @@ argument/result bridges). Complete and sign this validated Promise merge,
 then inspect and preserve those incoming compiler fixes and tests before
 publishing the existing PR. The remote PR head is still 90a and auto-merge is
 disabled. Neither local refresh has been delivered to main.
+
+
+The Promise merge is signed as eb555c6020d67d98ff9874f7a52476eacd84b671,
+with parents d7de1281 and exact upstream 422dbf01. Normal full hooks passed
+428/428 across five complete suites; all code/test validation pins remained
+unchanged. The next upstream merge at exact 6b4cc2bb touches eleven paths.
+All ten non-policy files match upstream byte for byte; the sole conflict is
+the policy registry, resolved by retaining all 1,653 existing rows and adding
+four honestly unmigrated standalone ABI modules (1,657 total). Existing IR
+source receipts and their dependency paths are not changed by this delta.
+
+Validate the three incoming callable-property suites, existing optional-slot,
+deferred-dispatch, extern-result and stored-member regressions, plus typecheck
+and required quality gates. Preserve existing original failures and legacy
+compilation. Publish only the fully checked integrated head to existing PR6205.
+
+
+The exact 6b4cc2bb integration passes TS7 and 25/25 assertions across all
+seven planned complete suites, with 2,220 unchanged inputs and no skipped
+rows. All eight scoped quality gates pass with 2,215 unchanged inputs.
+The policy inventory passes at 1,657 rows; reachability remains explicitly
+preservation-only. All ten upstream non-policy files remain byte-identical.
+Checks ran serially at observed nice 10 with one 4 GB fork. Evidence is in
+`.tmp/ir6205-refresh/callable-runtime`, `callable-quality`, and `callable-main`.
+The upstream assignment was reread before staging and remains held by
+`ttraenkler/codex-ir-delivery-20260927`. Publication and protected queue
+validation still follow; no main delivery or retirement is claimed here.
