@@ -108,8 +108,8 @@ export function recordCallableOwner(callable: Function, owner: CallbackState | u
 const sandboxIntrinsics = new WeakMap<object, Map<string, unknown>>();
 
 /** Record `sandbox`'s function-valued bindings once, before any compiled code writes to it. */
-export function snapshotSandboxIntrinsics(sandbox: Record<string, any>): void {
-  if (sandboxIntrinsics.has(sandbox)) return;
+export function snapshotSandboxIntrinsics<T extends Record<string, any> | undefined>(sandbox: T): T {
+  if (!sandbox || sandboxIntrinsics.has(sandbox)) return sandbox;
   const intrinsics = new Map<string, unknown>();
   for (const name of Object.getOwnPropertyNames(sandbox)) {
     const descriptor = Object.getOwnPropertyDescriptor(sandbox, name);
@@ -118,6 +118,7 @@ export function snapshotSandboxIntrinsics(sandbox: Record<string, any>): void {
     }
   }
   sandboxIntrinsics.set(sandbox, intrinsics);
+  return sandbox;
 }
 
 /** Preserve cross-module facades and normalize values returning to their owning module. */

@@ -19591,7 +19591,6 @@ export function buildImports(
   startImportCounting?: () => void;
   takeImportCounts?: () => Record<string, number>;
 } {
-  if (options?.globalSandbox) wsh.snapshotSandboxIntrinsics(options.globalSandbox); // (#6651) realm intrinsics
   // (#1933) Per-instance state for stateful imports. Created FIRST so the
   // RegExp-accessor install below (and every `resolveImport` call) can thread
   // it. Everything here was previously module-level and bled across / retained
@@ -19612,7 +19611,7 @@ export function buildImports(
     // (#6492 r17) Compiled code reads `Promise` through the sandbox, so a
     // polyfilled static has to be installed there or its receiver can never be
     // the object the test wrote to.
-    globalSandbox: options?.globalSandbox,
+    globalSandbox: wsh.snapshotSandboxIntrinsics(options?.globalSandbox), // (#6651) record realm intrinsics first
     mirrorThenable: _mirrorPolyfillThenable,
   });
 
