@@ -42,15 +42,16 @@ import {
   classifyError,
   classifyTestScope,
   createTestSandbox,
+  discoverTest262TestFiles,
   extractWasmExceptionMessage,
-  findTestFiles,
+  getTest262ExactManifestFile,
   isModuleGoal,
   isScriptGoal,
   matchesPathFilter,
   parseMeta,
   shouldSkip,
   standaloneHostImportError,
-  TEST_CATEGORIES,
+  test262FixtureRelativePath,
   type Test262Scope,
 } from "./test262-runner.js";
 import { assembleOriginalHarness, assembleNativeHarness, assembleLinkedHarness } from "./test262-original-harness.js";
@@ -80,8 +81,8 @@ async function getBuildImports() {
 /** Provenance prefix for this lane's runtime-eval tier announcement (#2928 E7). */
 const RUNTIME_EVAL_PROVIDER_LABEL = "test262-fixture";
 
-function resolveFixtureGraph(source: string, testFilePath: string) {
-  return discoverFixtureGraph(relative(join(TEST262_ROOT, "test"), testFilePath), source);
+function resolveFixtureGraph(source: string, testRelativePath: string) {
+  return discoverFixtureGraph(testRelativePath, source);
 }
 
 // ── Slow-test priority map ─────────────────────────────────────────
@@ -577,21 +578,18 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
   // when the official-only scope is active so their early return is explicit in
   // the shard manifest instead of being indistinguishable from a lost callback.
   const includeProposals = process.env.TEST262_INCLUDE_PROPOSALS === "1";
+  const exactManifestFile = getTest262ExactManifestFile();
   const allTests: Test262ChunkTest[] = [];
-  for (const category of TEST_CATEGORIES) {
-    for (const filePath of findTestFiles(category)) {
-      // Discover all candidates; official-scope exclusion is recorded by the
-      // callback after metadata classification below.
-      const relPath = relative(TEST262_ROOT, filePath);
-      if (!matchesPathFilter(relPath)) continue;
-      allTests.push({
-        category,
-        durationMs: durationOf(relPath),
-        filePath,
-        ordinal: allTests.length,
-        relPath,
-      });
-    }
+  for (const { category, filePath, relPath } of discoverTest262TestFiles({ exactManifestFile })) {
+    // Discover all candidates; official-scope exclusion is recorded by the
+    // callback after metadata classification below.
+    allTests.push({
+      category,
+      durationMs: durationOf(relPath),
+      filePath,
+      ordinal: allTests.length,
+      relPath,
+    });
   }
 
   const chunk = assignBalancedChunk(allTests, chunkIndex, totalChunks);
@@ -623,14 +621,15 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
   // source of truth and how to refresh.
   myTests.sort((a, b) => b.durationMs - a.durationMs || a.ordinal - b.ordinal);
 
-  const byCategory = new Map<string, string[]>();
-  for (const { category, filePath } of myTests) {
+  const byCategory = new Map<string, Test262ChunkTest[]>();
+  for (const test of myTests) {
+    const { category } = test;
     let arr = byCategory.get(category);
     if (!arr) {
       arr = [];
       byCategory.set(category, arr);
     }
-    arr.push(filePath);
+    arr.push(test);
   }
 
   beforeAll(() => {
@@ -723,15 +722,13 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
     }
   });
 
-  for (const [category, files] of byCategory) {
+  for (const [category, tests] of byCategory) {
     // describe.concurrent lets vitest run it() blocks within this describe up
     // to `maxConcurrency` at a time (set in vitest.config.ts). Without it,
     // vitest runs tests sequentially within a describe, starving the
     // CompilerPool of work and stretching runs from ~15 min to 150+ min.
     describe.concurrent(`test262: ${category}`, () => {
-      for (const filePath of files) {
-        const relPath = relative(TEST262_ROOT, filePath);
-
+      for (const { filePath, relPath } of tests) {
         it(
           relPath,
           trackCallback(async () => {
@@ -740,11 +737,16 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
             // (no compile, no record, no execution). Empty / unset filter
             // (the default) is a no-op. See `matchesPathFilter` in
             // test262-runner.ts for the matching semantics.
-            if (!matchesPathFilter(relPath)) return;
+            if (!exactManifestFile && !matchesPathFilter(relPath)) return;
 
             const source = readFileSync(filePath, "utf-8");
             const meta = parseMeta(source);
-            const scopeInfo = classifyTestScope(source, meta, filePath);
+            // Exact discovery intentionally realpaths each file to enforce
+            // containment. Keep its canonical manifest identity for policy
+            // rules, since a symlinked corpus root may erase `test262/` from
+            // the physical pathname. Legacy discovery keeps its raw path.
+            const policyRelPath = exactManifestFile ? relPath : undefined;
+            const scopeInfo = classifyTestScope(source, meta, filePath, policyRelPath);
 
             // Don't record non-official tests in the official-only scope;
             // retain the scope-specific identity so the manifest proves why
@@ -756,7 +758,7 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
             }
 
             if (!meta.negative) {
-              const filter = shouldSkip(source, meta, filePath);
+              const filter = shouldSkip(source, meta, filePath, policyRelPath);
               if (filter.skip) {
                 recordResult(relPath, category, "skip", filter.reason, undefined, scopeInfo);
                 return;
@@ -818,7 +820,8 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
             let lineAdjustOffset = harnessAssembly.primary.bodyLineOffset;
 
             // Multi-file compilation for FIXTURE imports (handled in-process)
-            const fixtureGraph = resolveFixtureGraph(source, filePath);
+            const testRelativePath = test262FixtureRelativePath(filePath, relPath, exactManifestFile);
+            const fixtureGraph = resolveFixtureGraph(source, testRelativePath);
             // Test262's module-namespace cases intentionally self-import the
             // entry (`import * as ns from './<own-file>.js'`). The single-file
             // worker has no module record for that edge: preprocessing leaves
@@ -830,8 +833,7 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
             // rewrite; ordinary relative imports and every non-self
             // single-source test retain their existing path.
             const isModuleNamespaceTest = relPath.startsWith("test/language/module-code/namespace/");
-            const selfModuleImport =
-              isModuleNamespaceTest && hasSelfModuleImport(relative(join(TEST262_ROOT, "test"), filePath), source);
+            const selfModuleImport = isModuleNamespaceTest && hasSelfModuleImport(testRelativePath, source);
             // #3509 — Dynamic fixture metadata alone does not mean this test
             // executes import(). Compiler capability validation rejects eager
             // #3494 cases while allowing an uncalled ordinary closure to reach
