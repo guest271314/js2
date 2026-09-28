@@ -1,7 +1,7 @@
 {
   "generated": "2026-09-28",
   "threshold": 1500,
-  "totalCeiling": 964391,
+  "totalCeiling": 964666,
   "files": {
     "src/codegen-linear/index.ts": 5791,
     "src/codegen-linear/runtime.ts": 4444,
@@ -47,7 +47,7 @@
     "src/codegen/generators-native-consumer.ts": 1898,
     "src/codegen/generators-native.ts": 6870,
     "src/codegen/generic-struct-factory.ts": 1865,
-    "src/codegen/index.ts": 15195,
+    "src/codegen/index.ts": 15197,
     "src/codegen/ir-prepared-free-functions.ts": 2332,
     "src/codegen/iterator-native.ts": 6111,
     "src/codegen/json-codec-native.ts": 4580,
@@ -76,7 +76,7 @@
     "src/codegen/statements/loops.ts": 4483,
     "src/codegen/statements/nested-declarations.ts": 4543,
     "src/codegen/statements/variables.ts": 2650,
-    "src/codegen/string-ops.ts": 4381,
+    "src/codegen/string-ops.ts": 4400,
     "src/codegen/ta-dyn-mop.ts": 1755,
     "src/codegen/type-coercion.ts": 5275,
     "src/codegen/typed-this.ts": 2276,
