@@ -10609,6 +10609,17 @@ Both lanes `git merge origin/main` before opening a slice and record slices
 under `## Cluster status`. This lane has not opened F, H or I since round 1;
 the partition stands as proposed.
 
+**A8 — claimed 2026-09-28**, branch `claude/es6-6651-a8-gen-residuals` (WIP PR
+opened before code). The remaining small generator residuals: 5b
+(`g.prototype = v` on a generator function), 5d (own `prototype` on generator
+METHODS), 5c (receiver of an extracted object-literal method; also moves the
+non-generator `name-invoke-fn-*` twins of cluster C — refused and recorded if it
+is not local), generator-function restricted properties (`caller`/`arguments`
+via `%ThrowTypeError%`), strict compound/update/destructuring writes to a named
+fn-expr's own name (the A7 leftover), and optionally A5's target 3. Stays out of
+A6's regions (#6248): `generator-yield-nested.ts`, `generatorElemValType`, the
+#680 continuation arms and `lowerStatements`' return arm.
+
 ### 2026-09-24 — Cluster I, slice I5: the void-`super` rollback (arrow-lexical family)
 
 - **Branch** `issue-6651-i5-arrow-lexical`, base `claude/project-thread-yhj9pp`
