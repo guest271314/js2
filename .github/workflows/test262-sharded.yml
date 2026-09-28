@@ -40,6 +40,7 @@ on:
       - "scripts/build-quickjs-eval-provider.mjs"
       - "scripts/quickjs-eval-provider.mjs"
       - "scripts/runtime-eval-provider.mjs"
+      - "scripts/compiler-inputs-hash.mjs"
       - "scripts/quickjs-artifact/**"
       - "scripts/generate-editions.ts"
       # Part of the merge_group gating logic (it decides which manifest

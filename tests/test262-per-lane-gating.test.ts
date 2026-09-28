@@ -141,6 +141,7 @@ describe("test262 per-lane gating — the `detect` step", () => {
     "scripts/build-quickjs-eval-provider.mjs",
     "scripts/quickjs-eval-provider.mjs",
     "scripts/runtime-eval-provider.mjs",
+    "scripts/compiler-inputs-hash.mjs",
     "scripts/quickjs-artifact/build.sh",
   ])("classifies standalone eval-provider path %s as standalone-only", (path) => {
     expect(runDetect(path)).toEqual({
