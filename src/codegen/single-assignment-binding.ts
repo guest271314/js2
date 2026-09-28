@@ -206,6 +206,55 @@ export function bindingHasWriteBefore(ctx: CodegenContext, id: ts.Identifier, be
   return false;
 }
 
+/**
+ * (#6651 A7) The compile-time key of an object-literal METHOD's computed name
+ * `[expr]`, or `undefined`. A literal whose computed keys all fold is routed to
+ * the open-object path because they fold (`_hasRuntimeComputedKey`), so its
+ * method arm must fold them too — skipping them dropped the method
+ * (`var k = 'm'; ({ [k]() {} })` had no own `m`). A well-known `Symbol.x` key
+ * keeps its existing route. `fold` is literals.ts's `resolveComputedKeyExpression`
+ * (passed in: this module sits below literals.ts), and it folds a `var`/`let`
+ * through its INITIALIZER, so a key reading a rebound binding is refused.
+ */
+export function foldedComputedMethodKey(
+  ctx: CodegenContext,
+  name: ts.PropertyName,
+  fold: (ctx: CodegenContext, expr: ts.Expression) => string | undefined,
+): string | undefined {
+  if (!ts.isComputedPropertyName(name)) return undefined;
+  const key = name.expression;
+  if (ts.isPropertyAccessExpression(key) && ts.isIdentifier(key.expression) && key.expression.text === "Symbol") {
+    return undefined;
+  }
+  return expressionReadsOnlySingleAssignmentBindings(ctx, key) ? fold(ctx, key) : undefined;
+}
+
+/**
+ * Does every `var`/`let` binding that `expr` reads keep its initializer's
+ * value? `const` bindings cannot be rebound; other identifiers (functions,
+ * enums, globals) are not folded through an initializer.
+ */
+function expressionReadsOnlySingleAssignmentBindings(ctx: CodegenContext, expr: ts.Expression): boolean {
+  let sound = true;
+  const visit = (node: ts.Node): void => {
+    if (!sound) return;
+    if (ts.isIdentifier(node)) {
+      const decl = ctx.oracle.variableDeclarationOf(node);
+      const isConst = decl !== undefined && (decl.parent.flags & ts.NodeFlags.Const) !== 0;
+      if (decl !== undefined && !isConst && !bindingIsSingleAssignment(ctx, node)) sound = false;
+      return;
+    }
+    // `o.name` — only the receiver is a binding read.
+    if (ts.isPropertyAccessExpression(node)) {
+      visit(node.expression);
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(expr);
+  return sound;
+}
+
 function isInsideFunction(node: ts.Node): boolean {
   for (let parent = node.parent; parent !== undefined; parent = parent.parent) {
     if (ts.isFunctionLike(parent)) return true;

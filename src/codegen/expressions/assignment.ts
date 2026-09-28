@@ -147,6 +147,7 @@ import {
   emitResolvedIdentifierWriteFromStack,
   resolveModuleAwareIdentifierWriteTarget,
   tryConstSet,
+  tryFunctionExpressionOwnNameWrite,
 } from "./identifier-assignment.js";
 import { currentSourceModuleGlobalIndex, identifierHasOnlyAmbientDeclarations } from "./identifier-module-storage.js";
 import { tryCompileStandaloneDetachedWrite } from "../dataview-native.js"; // (#3173) $DETACHBUFFER marker write
@@ -457,13 +458,10 @@ export function compileAssignment(ctx: CodegenContext, fctx: FunctionContext, ex
       fctx.body.push({ op: "unreachable" });
       return { kind: "f64" }; // unreachable, but the expression stack needs a type
     }
-    // Named function expression name binding is read-only — assignments are
-    // silently ignored in sloppy mode (the RHS is still evaluated for side effects)
-    if (fctx.readOnlyBindings?.has(name)) {
-      const rhsType = compileExpression(ctx, fctx, expr.right);
-      // The assignment is a no-op, but the expression evaluates to the RHS value
-      return rhsType;
-    }
+    // A named function expression's own name is an immutable binding — ignored
+    // in sloppy code, a TypeError in strict code (#6651 A7).
+    const ownNameWrite = tryFunctionExpressionOwnNameWrite(ctx, fctx, expr.left, expr.right);
+    if (ownNameWrite !== undefined) return ownNameWrite;
     const localIdx = fctx.localMap.get(name);
     if (localIdx !== undefined) {
       // (#2897) Reassigning the materialized `arguments` binding. In non-strict
