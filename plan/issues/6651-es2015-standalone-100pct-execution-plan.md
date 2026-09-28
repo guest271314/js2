@@ -454,6 +454,16 @@ loc-budget-allow:
   # +5, the one dispatch line (and its comment) at the dynamic-argument exit,
   # which has to sit where `__combinator_to_vec` would otherwise be chosen.
   # Both paths are already listed below (D2 / F2).
+  # 2026-09-28 — cluster D slice D3 (compiled-CLASS receiver for
+  # `Promise.{all,race,allSettled,any}.call(C, iterable)`). The mechanism —
+  # Construct(C, «executor») through the native construct driver, the step-wise
+  # drive with IteratorClose, and the four element/finish bodies — is the NEW
+  # leaf `src/codegen/promise-class-receiver-drive.ts`. `call-namespace-static.ts`
+  # +4: one import and the one dispatch line (plus its comment) in the `.call`
+  # aggregator arm, which has to sit after D1's function-constructor arm and
+  # before the `env::Promise_<method>` host-import fall-through it replaces.
+  # `promise-combinators.ts` +0 (an `export` on `ensureSettledAnyCombinators`,
+  # whose AggregateError builder the `any` finish reuses). Path already listed.
   # 2026-09-23 — cluster G slice G2: `statements/for-of-destructuring.ts` +22 —
   # the `emitHoleBoundaryBeforeDefault` helper (a 1-line body under a comment
   # naming the #2001 invariant it enforces) and its four call sites, each placed
@@ -1016,6 +1026,9 @@ func-budget-allow:
   # dispatch line described under the LOC grant (dynamic-iterable all/race →
   # `emitStandalonePromiseCombinatorDrive`, with the legacy drain as fallback).
   # The key is already listed below.
+  # 2026-09-28 — cluster D slice D3: `compileNamespaceStaticCall` +3, the one
+  # class-receiver dispatch line described under the LOC grant
+  # (`tryEmitClassReceiverCombinatorCall`). Key already listed below.
   # 2026-09-23 — cluster G, slice G2: `compileForOfAssignDestructuring` +4, the
   # four one-line `emitHoleBoundaryBeforeDefault` calls. Each has to follow the
   # specific `array.get` whose value the next line's default test reads; the
