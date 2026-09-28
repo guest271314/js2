@@ -10897,6 +10897,22 @@ partitioned by lane:
 | this lane (shipped #6023/#6024/#6027/#6028) | **B**, **C**, **D**, **E** (E4 in flight), **G** |
 | cluster **A** | neither lane until explicitly claimed here first |
 
+**A9 — claimed 2026-09-28** (cluster A, same session as the claim below;
+recorded at its own anchor so it cannot collide with the A7/A8 paragraphs),
+branch `claude/es6-6651-a9-generator-function` (WIP PR opened before code).
+Scope: `%GeneratorFunction%` in standalone — calling/constructing it
+(CreateDynamicFunction through the runtime-eval provider: a **generator kind**
+beside the existing `Function(...)` kind, whose semantics stay unchanged), the
+intrinsic's `IsConstructor` / `instanceof` rows, `class extends
+GeneratorFunction`, and `Function.prototype.toString` on a dynamic generator
+(~20 ES2015 rows in `built-ins/GeneratorFunction/**`,
+`Function/prototype/toString/GeneratorFunction.js`,
+`class/subclass/builtin-objects/GeneratorFunction/*`). This lifts the
+"dynamic `GeneratorFunction` stays unclaimed" exclusion below for this slice
+only. Out of scope: the project-thread lane's `eval` capability rows
+(`expressions/call`, `eval-code`, `statementList`), the lines #6246 touches,
+and A6/A8's generator regions.
+
 **Cluster A claimed — 2026-09-28** by session `session_01FEGi3DmyPRPD5dx4kWU8hs`
 (the lane that rebuilt A5). The claim covers generator lowering residuals, in
 this order:
