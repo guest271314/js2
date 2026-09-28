@@ -105,6 +105,7 @@ import {
   fnExprBodyReferencesThis,
   bodyReferencesOwnName,
   isFunctionLikeScope,
+  isCloseTransparentGenerator,
 } from "./generators-native-ast-scan.js";
 
 import { ensureNativeDelegatedResultHelpers, nativeGeneratorExecutingCheck } from "./generators-delegation-runtime.js";
@@ -661,6 +662,8 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   // (#6651 A5) Statements holding a yield nested in a computed key / call
   // argument / member target (`generator-yield-nested.ts`). Same gate shape as A4.
   const nestedYields = elemIsAny && noJsHostTarget(ctx) && bodyHasComputedKeyYield(decl.body);
+  // (#6651 A5) Inner-generator bodies by delegation name, for the for-of chain's close-transparency gate.
+  const delegationInnerBodies = new Map<string, ts.Block>();
 
   // Reserve the state id for the in-progress state.
   let curId = reserveState();
@@ -1281,6 +1284,10 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
         return fail();
       }
       if (delegationUnwind) {
+        // The D2 close discards the inner's answer; admit only an inner for which
+        // that is exact (the legacy replay-only chain keeps its historical scope).
+        const innerBody = delegationInnerBodies.get(innerName);
+        if (!innerBody || !isCloseTransparentGenerator(innerBody)) return fail();
         curAbrupt = undefined;
         curUnwind = [...unwind].reverse();
       }
@@ -1360,6 +1367,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     // string delegation is a follow-up; for now bail to the host path.
     const innerElem = generatorElemValType(ctx, innerDecl);
     if (innerElem === null || innerElem.kind !== "f64") return undefined;
+    delegationInnerBodies.set(callee.text, innerDecl.body); // (#6651 A5) close-transparency gate
     return callee.text;
   }
 
@@ -2384,9 +2392,9 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
    *  - `return` anywhere in the body: the plain `return` terminator completes
    *    without walking the unwind chain, so the iterator would never be closed
    *    (§14.7.5.7 step 6);
-   *  - `yield*` in the body: the delegation terminator rebuilds its abrupt
-   *    context from `replay` entries ONLY, which would silently DROP this
-   *    loop's `iter-close` entry;
+   *  - (#6651 A5: no longer a bail) `yield*` in the body — the native-gen and
+   *    protocol-iterable delegation states walk this loop's `iter-close` entry;
+   *    the vec kind still refuses a non-replay chain;
    *  - `break` / `continue` (shared `loopBodyHasUnsupportedJump`).
    */
   function lowerForOf(stmt: ts.ForOfStatement, unwind: readonly UnwindEntry[]): boolean {
@@ -4780,6 +4788,113 @@ function emitTrampoline(
 }
 
 /**
+ * (#2864 D2) Delegation abrupt forwarding — iterator close through `yield*`
+ * (§27.5.3.7 steps 7.b/7.c). A `.return(v)` / `.throw(e)` on the OUTER while
+ * suspended in a native-gen yield-star state must forward the abrupt to the
+ * INNER first (drive its resume once with the SAME mode + payloads) so the
+ * inner's `finally` blocks run, then continue the outer's own abrupt path
+ * (its finalizers + completion) exactly as before. Gated on the state's
+ * terminator being a native-gen delegation AND the slot being non-null
+ * (mid-delegation) — byte-inert for non-delegating generators, and inert at
+ * runtime for an abrupt resume at the plain-yield suspension that precedes
+ * the delegation (slot still null). A mode-2 inner re-throws after its
+ * finalizers (F2), and a `finally` that itself throws surfaces a NEW error —
+ * both are caught here, stored as the outer's error, and upgrade the outer
+ * to the throw path (a return completion whose close throws becomes a throw
+ * completion, per spec).
+ *
+ * (#6651 A5) Extracted verbatim from the legacy `abruptResume` branch of
+ * `compileState` so the `unwind` branch (a native-gen `yield*` inside a
+ * native-lowered for-of body, whose chain carries the loop's `iter-close`)
+ * forwards the abrupt completion to the inner BEFORE walking the chain.
+ * Emits into `fctx.body`; the caller has pointed it at the abrupt body.
+ */
+function emitDelegateCloseForward(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  info: NativeGeneratorInfo,
+  state: NativeGeneratorState,
+  selfLocal: number,
+  getCaughtExnIdx: number | undefined,
+): void {
+  if (state.terminator.kind === "yield-star" && state.terminator.delegationKind === "native-gen") {
+    const closeSlot = info.delegationSlots?.[state.terminator.siteIndex];
+    const closeInner = closeSlot ? ctx.nativeGenerators.get(closeSlot.innerName) : undefined;
+    if (closeSlot && closeInner) {
+      const closeResumeIdx = ensureNativeGeneratorResumeFunction(ctx, closeInner);
+      const closeDelegLocal = allocLocal(fctx, `__gen_close_deleg_${fctx.locals.length}`, {
+        kind: "ref",
+        typeIdx: closeInner.stateTypeIdx,
+      });
+      const closeErrLocal = allocLocal(fctx, `__gen_close_err_${fctx.locals.length}`, { kind: "externref" });
+      // The inner is f64-gated (delegation admission), so its `abrupt` field is
+      // f64: copy the outer's `.return(v)` value when the outer's carrier is
+      // also f64; a boxed-any outer's externref abrupt has no unbox seam here —
+      // deliver undefined (the value is unobservable: the inner result is
+      // discarded and the outer completes with its OWN abrupt field).
+      const closeAbruptPayload: Instr[] =
+        genCarrierFieldType(info.elemValType).kind === "f64"
+          ? [
+              { op: "local.get", index: selfLocal },
+              { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: info.abruptFieldIdx },
+            ]
+          : [{ op: "f64.const", value: NaN }];
+      const closeCatch: Instr[] = [
+        { op: "local.set", index: closeErrLocal },
+        { op: "local.get", index: selfLocal },
+        { op: "local.get", index: closeErrLocal },
+        { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: ERROR_FIELD },
+        ...setModeInstrs(info, selfLocal, MODE_THROW),
+      ];
+      fctx.body.push(
+        { op: "local.get", index: selfLocal },
+        { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: closeSlot.fieldIdx },
+        { op: "ref.is_null" },
+        { op: "i32.eqz" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: selfLocal },
+            { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: closeSlot.fieldIdx },
+            { op: "ref.as_non_null" },
+            { op: "local.set", index: closeDelegLocal },
+            // inner.mode = outer.mode; inner.abrupt = payload; inner.error = outer.error
+            { op: "local.get", index: closeDelegLocal },
+            { op: "local.get", index: selfLocal },
+            { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: info.modeFieldIdx },
+            { op: "struct.set", typeIdx: closeInner.stateTypeIdx, fieldIdx: closeInner.modeFieldIdx },
+            { op: "local.get", index: closeDelegLocal },
+            ...closeAbruptPayload,
+            { op: "struct.set", typeIdx: closeInner.stateTypeIdx, fieldIdx: closeInner.abruptFieldIdx },
+            { op: "local.get", index: closeDelegLocal },
+            { op: "local.get", index: selfLocal },
+            { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: ERROR_FIELD },
+            { op: "struct.set", typeIdx: closeInner.stateTypeIdx, fieldIdx: ERROR_FIELD },
+            // Drive the inner ONCE (result discarded); catch its mode-2
+            // re-throw / a finally-thrown replacement error. Foreign JS
+            // exceptions (host mode) recover via __get_caught_exception when
+            // the resume emitter acquired it (#3050 wrap parity).
+            buildTargetTaggedTry(
+              ctx,
+              { kind: "empty" },
+              [{ op: "local.get", index: closeDelegLocal }, { op: "call", funcIdx: closeResumeIdx }, { op: "drop" }],
+              [{ tagIdx: ensureExnTag(ctx), body: closeCatch }],
+              getCaughtExnIdx !== undefined ? [{ op: "call", funcIdx: getCaughtExnIdx }, ...closeCatch] : undefined,
+            ),
+            // Close complete — clear the slot.
+            { op: "local.get", index: selfLocal },
+            { op: "ref.null", typeIdx: closeInner.stateTypeIdx },
+            { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: closeSlot.fieldIdx },
+          ],
+          else: [],
+        },
+      );
+    }
+  }
+}
+
+/**
  * Compile one state's prelude + terminator into an Instr[] for its dispatch
  * arm. Branch depths are passed in (the arm sits `level` ifs deep inside the
  * trampoline loop).
@@ -4837,6 +4952,11 @@ function compileState(
     const abruptBody: Instr[] = [];
     const savedAbrupt = fctx.body;
     fctx.body = abruptBody;
+    // (#6651 A5) A native-gen `yield*` whose chain carries a for-of `iter-close`
+    // lands here, not in the legacy branch: close the inner FIRST (a close that
+    // throws upgrades `mode` to throw, which the walk then reads). No-op for any
+    // other terminator — every state that reached this branch before A5.
+    emitDelegateCloseForward(ctx, fctx, info, state, selfLocal, getCaughtExnIdx);
     emitUnwindWalk(ctx, fctx, info, state.unwind, {
       selfLocal,
       resultLocal,
@@ -4855,95 +4975,8 @@ function compileState(
     const abruptBody: Instr[] = [];
     const savedAbrupt = fctx.body;
     fctx.body = abruptBody;
-    // (#2864 D2) Delegation abrupt forwarding — iterator close through `yield*`
-    // (§27.5.3.7 steps 7.b/7.c). A `.return(v)` / `.throw(e)` on the OUTER while
-    // suspended in a native-gen yield-star state must forward the abrupt to the
-    // INNER first (drive its resume once with the SAME mode + payloads) so the
-    // inner's `finally` blocks run, then continue the outer's own abrupt path
-    // (its finalizers + completion) exactly as before. Gated on the state's
-    // terminator being a native-gen delegation AND the slot being non-null
-    // (mid-delegation) — byte-inert for non-delegating generators, and inert at
-    // runtime for an abrupt resume at the plain-yield suspension that precedes
-    // the delegation (slot still null). A mode-2 inner re-throws after its
-    // finalizers (F2), and a `finally` that itself throws surfaces a NEW error —
-    // both are caught here, stored as the outer's error, and upgrade the outer
-    // to the throw path (a return completion whose close throws becomes a throw
-    // completion, per spec).
-    if (state.terminator.kind === "yield-star" && state.terminator.delegationKind === "native-gen") {
-      const closeSlot = info.delegationSlots?.[state.terminator.siteIndex];
-      const closeInner = closeSlot ? ctx.nativeGenerators.get(closeSlot.innerName) : undefined;
-      if (closeSlot && closeInner) {
-        const closeResumeIdx = ensureNativeGeneratorResumeFunction(ctx, closeInner);
-        const closeDelegLocal = allocLocal(fctx, `__gen_close_deleg_${fctx.locals.length}`, {
-          kind: "ref",
-          typeIdx: closeInner.stateTypeIdx,
-        });
-        const closeErrLocal = allocLocal(fctx, `__gen_close_err_${fctx.locals.length}`, { kind: "externref" });
-        // The inner is f64-gated (delegation admission), so its `abrupt` field is
-        // f64: copy the outer's `.return(v)` value when the outer's carrier is
-        // also f64; a boxed-any outer's externref abrupt has no unbox seam here —
-        // deliver undefined (the value is unobservable: the inner result is
-        // discarded and the outer completes with its OWN abrupt field).
-        const closeAbruptPayload: Instr[] =
-          genCarrierFieldType(info.elemValType).kind === "f64"
-            ? [
-                { op: "local.get", index: selfLocal },
-                { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: info.abruptFieldIdx },
-              ]
-            : [{ op: "f64.const", value: NaN }];
-        const closeCatch: Instr[] = [
-          { op: "local.set", index: closeErrLocal },
-          { op: "local.get", index: selfLocal },
-          { op: "local.get", index: closeErrLocal },
-          { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: ERROR_FIELD },
-          ...setModeInstrs(info, selfLocal, MODE_THROW),
-        ];
-        abruptBody.push(
-          { op: "local.get", index: selfLocal },
-          { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: closeSlot.fieldIdx },
-          { op: "ref.is_null" },
-          { op: "i32.eqz" },
-          {
-            op: "if",
-            blockType: { kind: "empty" },
-            then: [
-              { op: "local.get", index: selfLocal },
-              { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: closeSlot.fieldIdx },
-              { op: "ref.as_non_null" },
-              { op: "local.set", index: closeDelegLocal },
-              // inner.mode = outer.mode; inner.abrupt = payload; inner.error = outer.error
-              { op: "local.get", index: closeDelegLocal },
-              { op: "local.get", index: selfLocal },
-              { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: info.modeFieldIdx },
-              { op: "struct.set", typeIdx: closeInner.stateTypeIdx, fieldIdx: closeInner.modeFieldIdx },
-              { op: "local.get", index: closeDelegLocal },
-              ...closeAbruptPayload,
-              { op: "struct.set", typeIdx: closeInner.stateTypeIdx, fieldIdx: closeInner.abruptFieldIdx },
-              { op: "local.get", index: closeDelegLocal },
-              { op: "local.get", index: selfLocal },
-              { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: ERROR_FIELD },
-              { op: "struct.set", typeIdx: closeInner.stateTypeIdx, fieldIdx: ERROR_FIELD },
-              // Drive the inner ONCE (result discarded); catch its mode-2
-              // re-throw / a finally-thrown replacement error. Foreign JS
-              // exceptions (host mode) recover via __get_caught_exception when
-              // the resume emitter acquired it (#3050 wrap parity).
-              buildTargetTaggedTry(
-                ctx,
-                { kind: "empty" },
-                [{ op: "local.get", index: closeDelegLocal }, { op: "call", funcIdx: closeResumeIdx }, { op: "drop" }],
-                [{ tagIdx: ensureExnTag(ctx), body: closeCatch }],
-                getCaughtExnIdx !== undefined ? [{ op: "call", funcIdx: getCaughtExnIdx }, ...closeCatch] : undefined,
-              ),
-              // Close complete — clear the slot.
-              { op: "local.get", index: selfLocal },
-              { op: "ref.null", typeIdx: closeInner.stateTypeIdx },
-              { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: closeSlot.fieldIdx },
-            ],
-            else: [],
-          },
-        );
-      }
-    }
+    // (#2864 D2) Delegation abrupt forwarding (see `emitDelegateCloseForward`).
+    emitDelegateCloseForward(ctx, fctx, info, state, selfLocal, getCaughtExnIdx);
     for (const finalizer of state.abruptResume.finalizers) {
       for (const stmt of finalizer) compileStatement(ctx, fctx, stmt);
     }
@@ -5554,6 +5587,20 @@ function compileState(
           out.push(
             { op: "local.get", index: selfLocal },
             { op: "ref.null.extern" },
+            { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: slot.fieldIdx },
+          );
+      }
+      // (#6651 A5) Likewise a native-gen delegation slot: an inner that threw is
+      // complete, and a stale slot would make the NEXT `yield* inner()` (a later
+      // for-of iteration) resume it instead of constructing a fresh inner.
+      // Byte-inert before A5 — no native-gen yield-star state had a throw route.
+      if (term.kind === "yield-star" && term.delegationKind === "native-gen") {
+        const slot = info.delegationSlots?.[term.siteIndex];
+        const inner = slot ? ctx.nativeGenerators.get(slot.innerName) : undefined;
+        if (slot && inner)
+          out.push(
+            { op: "local.get", index: selfLocal },
+            { op: "ref.null", typeIdx: inner.stateTypeIdx },
             { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: slot.fieldIdx },
           );
       }

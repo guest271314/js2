@@ -169,6 +169,17 @@ assignee: "ttraenkler/fable-es2015-plan"
 #     `$__ta_ctor`, which the Int8Array `$Object` carrier is not). The first cut
 #     inlined the arm here and cost +68 / +65; extracting it left these 8.
 loc-budget-allow:
+  # 2026-09-28 — cluster A, slice A5 (receipt under the A5 record).
+  # `src/codegen/generators-native.ts` +85 against `origin/main` (path already
+  # listed below, restated per the stranded-grant rule). The target-1 planner
+  # (~690 LOC) lives in the NEW leaf `generator-yield-nested.ts` and the
+  # close-transparency predicate in `generators-native-ast-scan.ts`; what stays
+  # in the god-file is what reads/writes `buildNativeGeneratorPlan`'s own cursor
+  # locals (the `nestedHost` adapter, the arm-2a call, the for-of chain
+  # admission in `emitYield`, the inner-body map) plus two emit seams that have
+  # to sit where the abrupt body / throw route is built. The D2 delegate-close
+  # forwarding moved OUT of `compileState` into `emitDelegateCloseForward`
+  # (net-neutral lines, now called from both abrupt branches).
   # 2026-09-27 — cluster B, slice B8 (receipt under `## Cluster status`). Two
   # god-files, both paths already listed below and restated per the
   # stranded-grant rule. Both mechanisms live in NEW leaves
@@ -893,6 +904,17 @@ loc-budget-allow:
   # `promise-combinators.ts` +0 (an `export` on `ensureSettledAnyCombinators`,
   # whose AggregateError builder the `any` finish reuses). Path already listed.
 func-budget-allow:
+  # 2026-09-28 — cluster A, slice A5: `buildNativeGeneratorPlan` +40 as the gate
+  # measures it (path already listed below, restated per the stranded-grant
+  # rule). Four pieces, each writing this function's own closure state and so
+  # unable to move behind a seam: the `nestedHost` adapter (it wraps
+  # `linearHost.suspend`, `captureContinuationOperand` and pushes onto
+  # `curStatements`), the arm-2a call in `lowerStatements`, the for-of chain
+  # admission in `emitYield` (it sets `curAbrupt` / `curUnwind`), and the
+  # inner-body map `nativeGeneratorDelegationName` fills for the gate. The
+  # planner itself lives in `generator-yield-nested.ts`, the gate predicate in
+  # `generators-native-ast-scan.ts`. `compileState` SHRINKS (the D2 block moved
+  # into `emitDelegateCloseForward`).
   # 2026-09-26 — lane SC1: `buildNativeGeneratorPlan` +15 as the gate measures it
   # (path already listed below, restated per the stranded-grant rule), of which 9
   # are the comment
