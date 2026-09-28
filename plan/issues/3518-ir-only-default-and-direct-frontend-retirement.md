@@ -14446,6 +14446,96 @@ regexp-main-quality, and regexp-corpus. No legacy retirement or default
 change. Main delivery and merge-group conformance remain unverified.
 
 
+## Claimed follow-up — builtin metadata preservation (2026-09-28)
+
+Claim `3518:builtin-metadata-preservation-20260928` is held by
+`ttraenkler/codex-metadata-preservation-20260928` on branch
+`codex/3518-metadata-preservation-20260928`, isolated from armed PR6205.
+This repairs the 29/100 closure preservation failures already reproduced on
+exact parent 90a; it adds no runtime migration scope and does not retire code.
+
+Implementation plan: authenticate the exact two-line Object.create metadata
+addition at e765c7fb29449ffefa99784b78db766c8555c936 against its actual parent
+36f92e89171e7f0735e8ab59a71bd9c8757302d9. Add a dedicated fixture/helper/test,
+then compose its inverse only in the initial metadata reader in
+`tests/helpers/closure-source-composition.ts`, before existing mutations and
+unchanged donor extraction. Require fixed fixture provenance/digest, unique
+nonempty spans, exact UTF-16 offsets, full input/output hashes and reciprocal
+replay. Reject missing/duplicate/tampered/displaced spans, outside edits,
+wrong direction, unknown paths and receipt tampering. No whole-file substitute,
+source fallback, fixture rebaseline or assertion removal is permitted.
+
+Keep the original 100-row native closure suite and both historical fixtures
+byte-identical. Validate the full original suite, full closure composition
+suite and full new receipt suite, then TS7 and scoped quality gates with
+unchanged-input evidence. Preserve the old 71/100 result. Sign with normal hooks;
+publish separately only after verified delivery of its parent PR6205.
+
+
+Also run the unchanged complete Object.create-as-value regression suite from
+main, comparing actual current compiled execution against its Node oracle.
+This independently checks the runtime behavior behind the metadata addition;
+the historical reader view must not suppress the current implementation.
+
+
+Validation on the frozen five-file follow-up passes TS7 and all 156/156
+assertions across four complete suites: unchanged native closure resources
+100/100, unchanged closure composition 27/27, new exact receipt controls
+28/28, and actual Object.create-as-value execution 1/1 against Node.
+There are no failed or skipped rows, and all 2,217 measured inputs stayed
+unchanged. All eight quality gates pass with 2,213 unchanged inputs.
+Runs used observed nice 10 and one 4 GB fork. Root independently verified
+actual Git parents/blobs, both UTF-16 offsets, unique spans, complete hashes
+and reciprocal replay; the four original suite/fixture hashes remain fixed.
+No production source or script changed. Original 71/100 parent evidence is
+retained; these are measured corrected results, not a rebaseline. Reports live
+in `.tmp/metadata-validation` and `.tmp/metadata-quality` in the isolated
+metadata-preservation worktree. Main delivery remains pending and the claim
+stays active until verified publication and merge.
+
+
+### Parent delivery and metadata refresh (2026-09-28)
+
+PR6205 is delivered on upstream main as
+45ce4a8e207742df5ca3888c0a458e8a48ee1655, with exact published head
+cbf0b97309cb9421bfae574b980b8e7103550414 as its second parent. All 102
+merge-group conformance shards, the final regression gate, CI and differential
+tests passed on that exact merge commit. The IR/backend/runtime source paths
+are byte-identical to the published head. Its delivery claim alone is complete;
+the IR migration and this metadata-preservation claim remain open.
+
+Fresh ls-remote verified this exact main before integration into the metadata
+branch. The sole conflict was this issue file: retain the full upstream record
+and the full local follow-up record. No source or regression test was dropped.
+Validate the four complete metadata/closure/Object.create suites again on this
+integrated tree, then commit through normal hooks and publish through the fork.
+The earlier 156/156 evidence belongs to the pre-refresh tree until rerun.
+
+The integrated45ce tree passes TS7 and all156/156 assertions across the four
+complete suites, with no failures/skips and2,219 unchanged inputs. All eight
+quality gates pass with2,215 unchanged inputs. Evidence is retained in
+.tmp/metadata-main-validation and .tmp/metadata-main-quality.
+
+The fresh pre-publication check then found main41be7d9be9240678bf8df71192f853d9d526b73f.
+Its sole additional commit refreshes16 report/baseline/documentation files,
+with no compiler or test changes. Preserve this verified45ce merge, then
+integrate41be and recheck the changed quality baselines before publication.
+
+The signed45ce integration is0ef3e2ed046c2fa3a7308f883e292902bfea76a3.
+Its normal hooks completed, but the inherited B9 corpus suite skipped three
+rows because this worktree lacked harness/corpus inputs. Those were not
+counted as passes. Provisioned all44 harness files and the three exact rows
+from pinned test262 Git objects atb363f29d3c43c626dc852744ad64a0b48a003693;
+all47 files have recorded blob/SHA256 provenance and no existing file was
+overwritten. The subsequent full five-suite run on the41be integration passed
+159/159, zero skipped/failed, with2,267 unchanged inputs; TS7 passed. Eight
+quality gates passed with2,215 unchanged inputs. Source, scripts and workflows
+match41be exactly; the PR remains the original five-file metadata repair.
+Evidence: .tmp/metadata-final-validation, .tmp/metadata-final-quality, and
+.tmp/metadata-pinned-corpus/provenance.json. Publish through the fork and
+protected queue; this follow-up is not delivered until main is verified.
+
+
 ## Claimed continuation — prototype-chain native bodies (2026-09-28)
 
 Claim `3518:prototype-chain-native-bodies-delivery-20260928` is held by
@@ -14570,3 +14660,10 @@ implementation/fixture/test files remain byte-identical to4914b413. Evidence:
 .tmp/prototype-main-validation and .tmp/prototype-main-quality. Full commit
 hooks and protected upstream delivery are still required. Existing historical
 legacy-test expectation failures remain explicitly outside this green result.
+
+Prototype PR6237 refresh after metadata delivery: integrate verified main
+1032526d, preserving the full delivered metadata record and this increment's
+record. Main's intervening npm-report refresh changes no compiler inputs.
+Keep all prototype source, fixtures and tests unchanged; run normal commit
+and push gates before updating the existing PR, then verify queue admission
+for the new exact head. No main delivery is claimed for this increment yet.
