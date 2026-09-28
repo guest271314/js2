@@ -8786,6 +8786,32 @@ first→last on both trees):
   loc/func: all exit 0. The B9 `loc-budget-allow` block was dropped in the merge
   (main had removed it once B9 landed).
 
+#### Interpreter-lane gap (PR #6230 `quality`, 2026-09-28)
+
+CI's changed-root step runs `JS2WASM_EVAL_ENGINE=interpreter` with only the
+REFUSAL runtime-eval provider linked. There `eval-{class,fn}-regexp-literal{,-flags}`
+fail at the `eval(...)` call itself — `TypeError: dynamic code evaluation is not
+supported in this standalone build (no js2wasm:runtime-eval interpreter linked —
+tracking: #2928)` — before any RegExp exists, so no codegen change can make them
+pass on that lane; engine parity here is #2928's (a real eval engine on the
+interpreter lane), not B10's. `eval-block-*` passes on both lanes (`{}/1/;` is
+resolved without a runtime eval). Measured on this branch merged with `origin/main`
+`f874b9bd52`, with the refusal provider built exactly as CI builds it
+(`build:compiler-bundle` + `build-runtime-eval-provider.mjs --refusal-only`):
+all 16 statementList rows → 12 pass / 4 fail with that message
+(`.tmp/b10/s16-interp.log`). The pin is now engine-explicit: on the refusal
+lane each of the four rows is still asserted — `fail` AND the refusal
+message, so any other failure (the pre-B10 `getPrototypeOf` → `null`
+included) keeps it red; on the default (QuickJS) lane all six must pass.
+Measured: interpreter/refusal lane 6/6, default lane 6/6 + inline 3/3.
+
+Local-measurement trap found on the way: a locally built
+`scripts/compiler-bundle.mjs` (gitignored) changes the QuickJS adapter cache
+key the runner looks up (it folds in the bundle hash), so with a bundle present
+and no adapter built for it, the default lane silently loses its eval engine
+and the same four rows fail. Delete the bundle, or rebuild the adapter after
+building it.
+
 #### Recorded narrowings / found while probing
 
 - **The `toString` placeholder stays in every module WITHOUT demand.** The
