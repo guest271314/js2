@@ -14426,3 +14426,51 @@ Checks ran serially at observed nice 10 with one 4 GB fork. Evidence is in
 The upstream assignment was reread before staging and remains held by
 `ttraenkler/codex-ir-delivery-20260927`. Publication and protected queue
 validation still follow; no main delivery or retirement is claimed here.
+
+
+## Claimed follow-up — builtin metadata preservation (2026-09-28)
+
+Claim `3518:builtin-metadata-preservation-20260928` is held by
+`ttraenkler/codex-metadata-preservation-20260928` on branch
+`codex/3518-metadata-preservation-20260928`, isolated from armed PR6205.
+This repairs the 29/100 closure preservation failures already reproduced on
+exact parent 90a; it adds no runtime migration scope and does not retire code.
+
+Implementation plan: authenticate the exact two-line Object.create metadata
+addition at e765c7fb29449ffefa99784b78db766c8555c936 against its actual parent
+36f92e89171e7f0735e8ab59a71bd9c8757302d9. Add a dedicated fixture/helper/test,
+then compose its inverse only in the initial metadata reader in
+`tests/helpers/closure-source-composition.ts`, before existing mutations and
+unchanged donor extraction. Require fixed fixture provenance/digest, unique
+nonempty spans, exact UTF-16 offsets, full input/output hashes and reciprocal
+replay. Reject missing/duplicate/tampered/displaced spans, outside edits,
+wrong direction, unknown paths and receipt tampering. No whole-file substitute,
+source fallback, fixture rebaseline or assertion removal is permitted.
+
+Keep the original 100-row native closure suite and both historical fixtures
+byte-identical. Validate the full original suite, full closure composition
+suite and full new receipt suite, then TS7 and scoped quality gates with
+unchanged-input evidence. Preserve the old 71/100 result. Sign with normal hooks;
+publish separately only after verified delivery of its parent PR6205.
+
+
+Also run the unchanged complete Object.create-as-value regression suite from
+main, comparing actual current compiled execution against its Node oracle.
+This independently checks the runtime behavior behind the metadata addition;
+the historical reader view must not suppress the current implementation.
+
+
+Validation on the frozen five-file follow-up passes TS7 and all 156/156
+assertions across four complete suites: unchanged native closure resources
+100/100, unchanged closure composition 27/27, new exact receipt controls
+28/28, and actual Object.create-as-value execution 1/1 against Node.
+There are no failed or skipped rows, and all 2,217 measured inputs stayed
+unchanged. All eight quality gates pass with 2,213 unchanged inputs.
+Runs used observed nice 10 and one 4 GB fork. Root independently verified
+actual Git parents/blobs, both UTF-16 offsets, unique spans, complete hashes
+and reciprocal replay; the four original suite/fixture hashes remain fixed.
+No production source or script changed. Original 71/100 parent evidence is
+retained; these are measured corrected results, not a rebaseline. Reports live
+in `.tmp/metadata-validation` and `.tmp/metadata-quality` in the isolated
+metadata-preservation worktree. Main delivery remains pending and the claim
+stays active until verified publication and merge.
