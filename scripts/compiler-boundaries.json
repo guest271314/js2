@@ -267,9 +267,10 @@
         "src/backend/wasmgc/resources/native-object-descriptors.ts",
         "src/backend/wasmgc/resources/native-prototype-layouts.ts",
         "src/backend/wasmgc/resources/native-prototype-seeder-bindings.ts",
-        "src/backend/wasmgc/resources/native-object-get.ts"
+        "src/backend/wasmgc/resources/native-object-get.ts",
+        "src/backend/wasmgc/program/native-primitive-boundary-abi.ts"
       ],
-      "minModules": 38
+      "minModules": 39
     },
     {
       "id": "native-runtime",
@@ -3671,6 +3672,14 @@
       "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."
     },
     {
+      "path": "src/codegen/class-object-expando.ts",
+      "state": "unmigrated",
+      "layer": "mixed-needs-split",
+      "destination": "backend-wasmgc",
+      "owner": "3518-coordinator",
+      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."
+    },
+    {
       "path": "src/codegen/class-proto-accessors.ts",
       "state": "unmigrated",
       "layer": "mixed-needs-split",
@@ -4248,6 +4257,14 @@
     },
     {
       "path": "src/codegen/declarations/eval-reachable-object-shape.ts",
+      "state": "unmigrated",
+      "layer": "mixed-needs-split",
+      "destination": "backend-wasmgc",
+      "owner": "3518-coordinator",
+      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."
+    },
+    {
+      "path": "src/codegen/declarations/expression-rooted-assignment-target.ts",
       "state": "unmigrated",
       "layer": "mixed-needs-split",
       "destination": "backend-wasmgc",
@@ -7808,6 +7825,14 @@
     },
     {
       "path": "src/codegen/promise-class-receiver-drive.ts",
+      "state": "unmigrated",
+      "layer": "mixed-needs-split",
+      "destination": "backend-wasmgc",
+      "owner": "3518-coordinator",
+      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."
+    },
+    {
+      "path": "src/codegen/promise-dynamic-member-read.ts",
       "state": "unmigrated",
       "layer": "mixed-needs-split",
       "destination": "backend-wasmgc",
@@ -13445,6 +13470,14 @@
       "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."
     },
     {
+      "path": "src/codegen/generator-yield-nested.ts",
+      "state": "unmigrated",
+      "layer": "mixed-needs-split",
+      "destination": "backend-wasmgc",
+      "owner": "3518-coordinator",
+      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."
+    },
+    {
       "path": "src/codegen/js-default-param-type-guess.ts",
       "state": "unmigrated",
       "layer": "mixed-needs-split",
@@ -14069,6 +14102,19 @@
       "destination": "backend-wasmgc",
       "owner": "3518-coordinator",
       "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."
+    },
+    {
+      "path": "src/frontend/boolean-return-boundary.ts",
+      "state": "unmigrated",
+      "layer": "mixed-needs-split",
+      "destination": "frontend-ts",
+      "owner": "3518-coordinator",
+      "nextBoundary": "Checker-owned Boolean return candidate and actual lowered-return audit; retain source/IR authority separation. Isolate TypeScript and outcome dependencies before certifying the complete frontend boundary."
+    },
+    {
+      "path": "src/backend/wasmgc/program/native-primitive-boundary-abi.ts",
+      "state": "clean",
+      "layer": "backend-wasmgc"
     },
     {
       "path": "src/codegen/promise-class-receiver-settle.ts",

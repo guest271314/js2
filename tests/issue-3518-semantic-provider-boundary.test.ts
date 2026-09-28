@@ -241,6 +241,15 @@ const liveFixtureGroups = {
     "src/ir/program/population.ts",
     "src/ir/program/abi-signatures.ts",
     "src/ir/program/callable-results.ts",
+    "src/ir/program/native-source-closure-requirements.ts",
+    "src/ir/program/native-ref-cell-requirements.ts",
+    "src/ir/program/runtime-abi-identity.ts",
+    "src/ir/program/native-promise-inventory.ts",
+    "src/ir/program/native-object-access-requirements.ts",
+    "src/ir/program/native-object-result-values.ts",
+    "src/ir/program/native-object-result-requirements.ts",
+    "src/ir/program/native-getter-invocation-requirements.ts",
+    "src/ir/program/native-invocation-requirements.ts",
   ],
   "native-runtime": [
     ...groups["native-runtime"],
@@ -254,6 +263,8 @@ const liveFixtureGroups = {
     "src/backend/wasmgc/resources/native-booleans.ts",
     "src/backend/wasmgc/program/native-string-output.ts",
     "src/backend/wasmgc/resources/native-string-output.ts",
+    "src/backend/wasmgc/program/native-invocation-abi.ts",
+    "src/backend/wasmgc/program/native-primitive-boundary-abi.ts",
   ],
 };
 const liveRequired = Object.values(liveFixtureGroups).flat();
@@ -923,6 +934,7 @@ describe("semantic verification and provider ownership boundary", () => {
         );
       if (id === "runtime-contracts")
         additions.push("src/runtime/contracts/builtin-brands.ts", "src/runtime/contracts/collection-kind.ts");
+      if (id === "backend-wasmgc") additions.push("src/backend/wasmgc/program/native-primitive-boundary-abi.ts");
       const signedEntries = additions.length ? layer.entries.slice(0, -additions.length) : layer.entries;
       if (additions.length) expect(layer.entries.slice(-additions.length)).toEqual(additions);
       const receipt = signedLayerComposition[id as keyof typeof signedLayerComposition];
@@ -944,9 +956,9 @@ describe("semantic verification and provider ownership boundary", () => {
     const r = fixture().run();
     expect(r.status, JSON.stringify(r.report.errors)).toBe(0);
     expect(required).toHaveLength(106);
-    expect(liveRequired).toHaveLength(123);
-    expect(new Set(liveRequired).size).toBe(123);
-    expect(r.report.counts.total).toBe(123);
+    expect(liveRequired).toHaveLength(134);
+    expect(new Set(liveRequired).size).toBe(134);
+    expect(r.report.counts.total).toBe(134);
     expect(r.report.errors).toEqual([]);
     for (const field of ["unknownEdges", "unresolvedEdges", "forbiddenEdges", "transitiveViolations"])
       expect(r.report[field]).toEqual([]);
@@ -959,11 +971,15 @@ describe("semantic verification and provider ownership boundary", () => {
     // dependencies. Counts below include import-type nodes and erased named imports.
     // Invocation adds six reachable modules; static reference census includes
     // their complete dependency closure without admitting unrelated owner modules.
+    // The previous 123-module graph had 506 edges (298 type-only / 208 runtime).
+    // The getter/Boolean join adds eleven actual dependencies with 100 edges
+    // (40 type-only / 60 runtime), plus six imports in existing owners
+    // (two type-only / four runtime). Every copied dependency remains real source.
     // Historical parent and published activation records remain unchanged.
     expect({ edges: r.report.resolvedEdgeCount, ...r.report.counts.resolvedEdgesByType }).toEqual({
-      edges: 506,
-      typeOnly: 298,
-      runtime: 208,
+      edges: 612,
+      typeOnly: 340,
+      runtime: 272,
     });
   });
 
