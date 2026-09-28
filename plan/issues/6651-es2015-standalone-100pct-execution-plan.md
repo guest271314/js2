@@ -169,6 +169,22 @@ assignee: "ttraenkler/fable-es2015-plan"
 #     `$__ta_ctor`, which the Int8Array `$Object` carrier is not). The first cut
 #     inlined the arm here and cost +68 / +65; extracting it left these 8.
 loc-budget-allow:
+  # 2026-09-28 — cluster A, slice A7 (receipt under `## Cluster status`). Both
+  # paths already listed below; restated per the stranded-grant rule. The write
+  # semantics live in `expressions/identifier-assignment.ts`
+  # (`tryFunctionExpressionOwnNameWrite`), the shadow scan in
+  # `generators-native-ast-scan.ts`, the computed-key fold in
+  # `single-assignment-binding.ts`; `literals.ts` and `assignment.ts` do not grow.
+  #   - `src/codegen/closures.ts` +12: the import, the parameter-shadow check on
+  #     the named-fn-expr self registration, and the 5-line unregister before
+  #     `hoistVarDeclarations` — it has to sit exactly there, after the
+  #     parameter prologue (which must still see the self binding) and before
+  #     the var/function hoist (which must allocate the body's own slot).
+  #   - `src/codegen/generators-native.ts` +18: the import, the dropped
+  #     `bodyReferencesOwnName` bail (and its doc bullet), the one-line call in
+  #     the resume prelude, and `bindNamedExpressionOwnName` (13 lines) beside
+  #     `ensureNativeGeneratorResumeFunction` — it writes that function's
+  #     `resumeFctx.localMap`, whose `__self` local exists only there.
   # 2026-09-27 — cluster B, slice B8 (receipt under `## Cluster status`). Two
   # god-files, both paths already listed below and restated per the
   # stranded-grant rule. Both mechanisms live in NEW leaves
@@ -907,6 +923,15 @@ loc-budget-allow:
   # string).
   - src/codegen/builtin-value-read.ts
 func-budget-allow:
+  # 2026-09-28 — cluster A, slice A7. `ensureNativeGeneratorResumeFunction` +2:
+  # one call line (`bindNamedExpressionOwnName`) and its spacing, placed after
+  # the param copy / capture rehydration (so the `__self` local exists) and
+  # before the body compiles; the binder itself is a separate 13-line function.
+  # `closures.ts::compileLiftedClosureBody` +11 (path already listed below,
+  # restated per the stranded-grant rule): the parameter-shadow check on the
+  # self registration and the unregister before `hoistVarDeclarations` — the
+  # only point between the parameter prologue and the body hoist.
+  - src/codegen/generators-native.ts::ensureNativeGeneratorResumeFunction
   # 2026-09-26 — lane SC1: `buildNativeGeneratorPlan` +15 as the gate measures it
   # (path already listed below, restated per the stranded-grant rule), of which 9
   # are the comment
