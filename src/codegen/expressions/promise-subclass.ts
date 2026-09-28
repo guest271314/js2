@@ -44,6 +44,8 @@ import { emitLazyClassObjectGet } from "./extern.js";
 import { compileStringLiteral } from "../string-ops.js";
 import { classMemberFuncKey } from "../class-member-keys.js"; // (#2637 B2.1) onhost-ctor funcMap key
 import { emitFuncRefAsClosure } from "../closures.js"; // (#2637 B2.1) materialize $Class_new__onhost as a no-capture closure
+import { noJsHost } from "../js-errors.js";
+import { markPromiseSubclassValueRead } from "../standalone-class-construct.js"; // (#6651 D4)
 
 /**
  * Returns the resolved class name if `name` (a user-visible identifier or
@@ -185,6 +187,19 @@ export function emitPromiseSubclassCtor(ctx: CodegenContext, fctx: FunctionConte
   }
   fctx.body.push({ op: "call", funcIdx });
   return true;
+}
+
+/**
+ * A Promise-subclass identifier read as a VALUE. With a JS host this is the
+ * cached host constructor ({@link emitPromiseSubclassCtor}). Without one
+ * (#6651 D4) nothing is emitted here — the caller falls through to the class's
+ * own class-object singleton — and the module is recorded so the native
+ * construct dispatcher admits the class (NewPromiseCapability(C) constructs it).
+ */
+export function emitPromiseSubclassValueRead(ctx: CodegenContext, fctx: FunctionContext, resolved: string): boolean {
+  if (!noJsHost(ctx)) return emitPromiseSubclassCtor(ctx, fctx, resolved);
+  markPromiseSubclassValueRead(ctx);
+  return false;
 }
 
 /**
