@@ -14323,3 +14323,79 @@ Reports and original failures remain under `.tmp/ir6205-refresh/array-*`;
 exact-parent control evidence is recorded in
 `array-main/closure-parent-control.json`. Main was reread as exact bb41 before
 commit. Required CI, queue admission and verified main delivery remain ahead.
+
+
+The final pre-push remote check stopped publication before any push: main
+advanced to `422dbf01a07b58cceefc64846444485eb549d9a5` with compiled-class
+Promise-combinator receiver support. Refresh plan: retain all five non-policy
+incoming files exactly, retain every prior inventory row plus the new honest
+unmigrated helper, and run typecheck, the complete incoming receiver regression
+suite, related Promise receiver coverage and quality gates before normal
+commit/push hooks. Existing array refresh is signed as
+`d7de1281129ddff8d3a48902a5dcf81eaee7f8d3`; neither refresh is yet delivered.
+
+
+The incoming Promise receiver runtime cohort passes TS7 and 33/33 across
+three complete suites, with 2,207 unchanged inputs. A separate complete
+preservation cohort measured 158/176 passed and 18 failures with the same
+input stability. The public-source child still executed all nineteen rows.
+The newly exported `ensureSettledAnyCombinators` modifier changes the whole
+B1 donor and retained declaration hashes; no body was changed. Preserve
+the failing report in `promise-preservation-before/` and add an authenticated
+one-span export receipt for the exact bb41/d7de-to-422 source change.
+
+Apply that explicit preservation view at the two affected tests' initial
+read boundary, before their existing injected mutation controls, retaining
+the original B1/source-receipt helpers, every historical fixture/hash and
+all assertions. Keep actual imported and child-executed code on current
+source. Add positive replay and precise tamper/missing/duplicate/unowned
+change negatives for the new receipt, then rerun both complete suites and
+required gates. This is a merge-preservation repair, not a runtime workaround
+or authority to strip arbitrary export modifiers.
+
+
+The first export-receipt run passed TS7 but measured 180/200 rows, including
+two new positives that exposed another missing historical layer. After
+removing only the exact export delta, the older Promise source still contains
+twelve declarations added by main's D1/D2/D2b repairs after the B1 extraction.
+Its original B1 inversion produces SHA256
+`de52aaf0d41545412617a52381e3204dd4302fe311fedfbd2e788160ea08f335`,
+not the fixed original donor hash. The pre-export file is byte-identical in
+90a, bb41 and d7de; preserve the run and verify the old suites on exact90a.
+
+Complete the missing preservation chain with a separate authenticated
+earlier-main receipt for the actual post-B1 source through commits
+`82b83e1de5`, `94c00fa7b1` and `3388cd36f4`. Derive exact changed spans and
+whole-source/dependency pins from Git, use reciprocal replay, and compose
+the two explicit reader views before existing mutation injection. Retain
+all historical helpers, fixture hashes and positive/negative assertions.
+Do not delete the newly failing positives or normalize away arbitrary
+declarations/modifiers. Actual compiler imports and child execution continue
+to use current source, whose D1/D2/D3 runtime regressions remain mandatory.
+
+
+The exact published-parent control on 90a measured 158/176 and reproduced
+all 18 original failures with identical full messages after only worktree-prefix
+normalization (2,199 unchanged inputs). The complete authenticated preservation
+chain now passes TS7 and all 416/416 assertions in four complete suites, with
+2,213 unchanged inputs and no skipped rows. This includes the original 176
+assertions, 24 export-receipt controls, 216 earlier-main controls, and the actual
+nineteen current-source child executions. All original helpers, historical
+fixtures and assertions remain unchanged; only explicit initial reader views
+compose the receipts before mutation injection. Root independently verified
+three actual Git parents, 28 unique spans and eight live dependency pins.
+
+The incoming runtime regressions separately pass 33/33 and the complete D2b
+drive suite 10/10. The immutable original instrument gate passes 9/9. All eight
+quality gates pass with 2,212 unchanged inputs. Checks ran serially at observed
+nice 10 with one 4 GB fork. Preservation reachability does not certify retirement.
+The original failing runs and exact-parent comparison remain recorded under
+`.tmp/ir6205-refresh/promise-*`. The separate 29 closure-metadata preservation
+failures remain recorded; this Promise repair does not claim to fix them.
+
+Before publication, a fresh upstream read found main advanced from 422dbf01
+to 6b4cc2bbd6e68f6360df17e3d7984e7f101e9417 (standalone callable-property
+argument/result bridges). Complete and sign this validated Promise merge,
+then inspect and preserve those incoming compiler fixes and tests before
+publishing the existing PR. The remote PR head is still 90a and auto-merge is
+disabled. Neither local refresh has been delivered to main.

@@ -860,7 +860,7 @@ type SettledAnyCombinatorRuntime = CombinatorRuntime &
  * COMBINATOR_FUNC_IDX_KEYS (async-scheduler.ts) for the #2918 late-import
  * lockstep shift.
  */
-function ensureSettledAnyCombinators(ctx: CodegenContext): SettledAnyCombinatorRuntime {
+export function ensureSettledAnyCombinators(ctx: CodegenContext): SettledAnyCombinatorRuntime {
   const ids = ensureCombinatorFunctions(ctx);
   if (ids.allSettledFulfillFuncIdx !== undefined && ids.anyRejectFuncIdx !== undefined) {
     return ids as SettledAnyCombinatorRuntime;

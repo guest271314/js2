@@ -85,6 +85,7 @@ import {
   resolveExternrefVecArg,
 } from "../promise-combinators.js";
 import { isCustomCombinatorMethod, tryEmitCustomCombinatorCall } from "../promise-custom-combinator.js";
+import { tryEmitClassReceiverCombinatorCall } from "../promise-class-receiver-drive.js"; // (#6651 D3)
 import { emitStandalonePromiseCombinatorDrive } from "../promise-combinator-drive.js";
 import type { InnerResult } from "../shared.js";
 import { brandExternMethodResult, coerceType, compileExpression, VOID_RESULT } from "../shared.js";
@@ -3339,6 +3340,9 @@ export function compileNamespaceStaticCall(
       const custom = tryEmitCustomCombinatorCall(ctx, fctx, expr, methodName);
       if (custom !== undefined) return custom;
     }
+    // (#6651 D3) A compiled-CLASS receiver: Construct(C, «executor») + the step-wise drive.
+    const classDriven = tryEmitClassReceiverCombinatorCall(ctx, fctx, expr, methodName);
+    if (classDriven !== undefined) return classDriven;
 
     // (#4682) Bounded NewPromiseCapability arm: an ordinary compiled
     // constructor plus an empty array.  The existing native aggregate path
