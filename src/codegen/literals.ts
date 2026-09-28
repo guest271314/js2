@@ -118,6 +118,7 @@ import {
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2 read chokepoint / S3b stable-regime minting)
 import { registerCountedPushArray } from "./array-indexof-scan.js";
 import { ensureRuntimeEvalCallableWrapHelper } from "./runtime-eval-callable.js";
+import { foldedComputedMethodKey } from "./single-assignment-binding.js"; // (#6651 A7)
 import { emitSymbolOperandCoercionThrow } from "./tonumber-symbol-throw.js"; // (#3481)
 import { getToPrimitiveProvider } from "./coercion-engine.js";
 import { buildThrowJsErrorInstrs } from "./js-errors.js";
@@ -637,10 +638,8 @@ export function compileObjectLiteralAsExternref(
     // and `Object.keys`/`o[k]` missed the method. Mirrors the MethodDeclaration
     // arm in `compileObjectLiteralWithAccessors` (below): compile the method as a
     // closure via `emitObjectLiteralMethodFn` (standalone → host-free closure;
-    // gc/host → `__make_*_callback` bridge) and store it with `__extern_set`. Only
-    // PLAIN identifier/string/numeric names are handled here — computed/symbol
-    // method keys route to the accessor/host path upstream, matching the
-    // data-property arm above (which skips `keyText === undefined`).
+    // gc/host → `__make_*_callback` bridge) and store it with `__extern_set`.
+    // Symbol and runtime-only keys route upstream (`foldedComputedMethodKey`).
     else if (ts.isMethodDeclaration(prop)) {
       let methodName: string | undefined;
       if (ts.isIdentifier(prop.name)) methodName = prop.name.text;
@@ -648,7 +647,8 @@ export function compileObjectLiteralAsExternref(
       // Canonicalize a numeric method key (`{ 0x10() {} }` → "16") to match the
       // data-property arm's `resolvePropertyNameText`, so store and read agree.
       else if (ts.isNumericLiteral(prop.name)) methodName = String(Number(prop.name.text));
-      if (methodName === undefined) continue; // computed/symbol key — handled upstream
+      else methodName = foldedComputedMethodKey(ctx, prop.name, resolveComputedKeyExpression); // (#6651 A7)
+      if (methodName === undefined) continue; // symbol / runtime key — handled upstream
       const setIdx = ensureLateImport(
         ctx,
         "__extern_set",

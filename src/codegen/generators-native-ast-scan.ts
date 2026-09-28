@@ -346,3 +346,49 @@ export function bodyReferencesOwnName(body: ts.Node, name: string): boolean {
   ts.forEachChild(body, visit);
   return found;
 }
+
+/**
+ * (#6651 A7) Where a named function expression's own name is SHADOWED. The
+ * name lives in a scope outside the function's own environment (§15.2.5
+ * funcEnv), so any binding the function itself creates wins:
+ *  - `"params"` — a parameter binds the name: every read in the parameters
+ *    and the body sees that parameter;
+ *  - `"body"` — a VarScopedDeclaration (`var` anywhere outside nested function
+ *    scopes, loop heads included) or a top-level `function`/`class`/`let`/
+ *    `const` binds it: the body sees its own binding, while parameter
+ *    expressions still see the function itself (§10.2.11 steps 27–28 put the
+ *    body's variables in an environment BELOW the parameters);
+ *  - `undefined` — not shadowed at function scope. A block-level lexical
+ *    declaration shadows only its block, which the block-scope machinery
+ *    handles, so it is not counted here.
+ */
+export function namedFunctionOwnNameShadow(fn: ts.FunctionExpression): "params" | "body" | undefined {
+  const name = fn.name?.text;
+  if (name === undefined) return undefined;
+  const binds = (binding: ts.BindingName): boolean =>
+    ts.isIdentifier(binding)
+      ? binding.text === name
+      : binding.elements.some((element) => !ts.isOmittedExpression(element) && binds(element.name));
+  if (fn.parameters.some((param) => binds(param.name))) return "params";
+  for (const stmt of fn.body.statements) {
+    if ((ts.isFunctionDeclaration(stmt) || ts.isClassDeclaration(stmt)) && stmt.name?.text === name) return "body";
+    if (ts.isVariableStatement(stmt) && stmt.declarationList.declarations.some((decl) => binds(decl.name))) {
+      return "body";
+    }
+  }
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found || isFunctionLikeScope(node)) return;
+    if (
+      ts.isVariableDeclarationList(node) &&
+      (node.flags & ts.NodeFlags.BlockScoped) === 0 &&
+      node.declarations.some((decl) => binds(decl.name))
+    ) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(fn.body, visit);
+  return found ? "body" : undefined;
+}

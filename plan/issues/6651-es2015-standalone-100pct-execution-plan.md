@@ -169,6 +169,22 @@ assignee: "ttraenkler/fable-es2015-plan"
 #     `$__ta_ctor`, which the Int8Array `$Object` carrier is not). The first cut
 #     inlined the arm here and cost +68 / +65; extracting it left these 8.
 loc-budget-allow:
+  # 2026-09-28 — cluster A, slice A7 (receipt under `## Cluster status`). Both
+  # paths already listed below; restated per the stranded-grant rule. The write
+  # semantics live in `expressions/identifier-assignment.ts`
+  # (`tryFunctionExpressionOwnNameWrite`), the shadow scan in
+  # `generators-native-ast-scan.ts`, the computed-key fold in
+  # `single-assignment-binding.ts`; `literals.ts` and `assignment.ts` do not grow.
+  #   - `src/codegen/closures.ts` +12: the import, the parameter-shadow check on
+  #     the named-fn-expr self registration, and the 5-line unregister before
+  #     `hoistVarDeclarations` — it has to sit exactly there, after the
+  #     parameter prologue (which must still see the self binding) and before
+  #     the var/function hoist (which must allocate the body's own slot).
+  #   - `src/codegen/generators-native.ts` +18: the import, the dropped
+  #     `bodyReferencesOwnName` bail (and its doc bullet), the one-line call in
+  #     the resume prelude, and `bindNamedExpressionOwnName` (13 lines) beside
+  #     `ensureNativeGeneratorResumeFunction` — it writes that function's
+  #     `resumeFctx.localMap`, whose `__self` local exists only there.
   # 2026-09-28 — cluster A, slice A5 (receipt under the A5 record).
   # `src/codegen/generators-native.ts` +85 against `origin/main` (path already
   # listed below, restated per the stranded-grant rule). The target-1 planner
@@ -990,6 +1006,15 @@ loc-budget-allow:
   # `runtime/wasm-struct-host-semantics.ts` beside `normalizeSandboxValue`.
   # (`declarations.ts` is already listed below; `src/runtime.ts` just after.)
 func-budget-allow:
+  # 2026-09-28 — cluster A, slice A7. `ensureNativeGeneratorResumeFunction` +2:
+  # one call line (`bindNamedExpressionOwnName`) and its spacing, placed after
+  # the param copy / capture rehydration (so the `__self` local exists) and
+  # before the body compiles; the binder itself is a separate 13-line function.
+  # `closures.ts::compileLiftedClosureBody` +11 (path already listed below,
+  # restated per the stranded-grant rule): the parameter-shadow check on the
+  # self registration and the unregister before `hoistVarDeclarations` — the
+  # only point between the parameter prologue and the body hoist.
+  - src/codegen/generators-native.ts::ensureNativeGeneratorResumeFunction
   # 2026-09-28 — cluster A, slice A5: `buildNativeGeneratorPlan` +40 as the gate
   # measures it (path already listed below, restated per the stranded-grant
   # rule). Four pieces, each writing this function's own closure state and so
@@ -9331,6 +9356,177 @@ building it.
   `r[k]` read of it is answered too).
 
 
+### 2026-09-28 — Cluster A (native generator lowering, standalone), slice A7: a named function expression's own name, folded computed method keys, `getPrototypeOf(g)`
+
+- **Branch** `claude/es6-6651-a7-gen-self-binding`, PR #6235 (WIP), base
+  `origin/main` @ `3eb7ae5da3`. Opus 5.5, high effort. Scope: groups 1, 4 and
+  5a of the 2026-09-28 generator triage spec. Groups 2 and 3 wait for #6101
+  (A5); 5b–5d are not in this slice.
+- Every before-state below was measured on a `git archive` of the base
+  (`.tmp/a7/basetree`), same machine, same engine (`JS2WASM_EVAL_ENGINE=quickjs`,
+  `COMPILER_POOL_SIZE=1`, `run-test262-paths.mts --isolate`).
+
+#### What changed
+
+**Group 1 — a named function expression's own name (§15.2.5 / §15.5.4
+`CreateImmutableBinding(name, false)`).**
+
+1. *Native gate.* `isNativeGeneratorExpressionShape` no longer refuses a
+   generator expression whose body names itself. Its stated reason was stale:
+   the frame already carries the closure as its leading `__self` param.
+   `bindNamedExpressionOwnName` maps the name onto that resume-function local,
+   read-only, so `ref().next().value === ref` holds and `yield* s(n - 1)`
+   recurses natively.
+2. *Strict write.* `tryFunctionExpressionOwnNameWrite`
+   (`expressions/identifier-assignment.ts`) replaces the silent no-op in
+   `compileAssignment`. Sloppy code ignores the write and yields the RHS. Strict
+   code evaluates the RHS, then throws a TypeError (§9.1.1.1.5 step 5). This
+   covers plain, generator and async function expressions on both lanes.
+3. *Shadow guard, exact shape.* Before this slice the self binding froze any
+   binding that shadowed it. `(function f() { var f = 1; f = 2; return f; })()`
+   returned **1** on both lanes, where the spec answer is 2. A parameter named
+   `f` returned the closure. The strict throw would have turned these into
+   TypeErrors. The guard has three arms:
+   - A **parameter** binding the name wins everywhere, so the name is never
+     registered (`namedFunctionOwnNameShadow` → `"params"`).
+   - A body `var` (any depth) or a top-level `function`/`class`/`let`/`const`
+     wins in the body only (§10.2.11 steps 27–28). The registration stays in
+     place for the parameter prologue, which still sees the function
+     (`function f(x = f) { var f; }`). It is dropped right before the var hoist
+     (`localMap`, `readOnlyBindings`, `closureMap`), so the hoist allocates the
+     body's own slot. The generator resume prelude does not map the name at all.
+   - A **block-level** `let`/`const`, catch parameter or loop binding shadows only
+     its block. The block-scope machinery already gives it a slot, so the write
+     arm fires only when `ctx.oracle.valueDeclarationOf(id)` is the function
+     expression itself. An unresolvable identifier (inline-compiled eval code)
+     keeps the frame's answer.
+   - Probe matrix (`.tmp/a7/probe.mts`, `.tmp/a7/probe-final-{base,new}.log`):
+     25 shapes × sloppy/strict × both lanes = 100 cells. Base gets 37 right
+     (standalone 14/50, host 23/50); the branch gets 98. The two misses are
+     one generic, pre-existing standalone generator defect, in both modes: a
+     `var` read before its initializer does not read `undefined`. An UNNAMED
+     generator (`function* () { var r = u === undefined; var u; }`) reproduces
+     it identically on base.
+4. `emitIdentifierWriteFromLocal` is unchanged. The strict throw there cannot
+   be reached: `with` is sloppy-only, and a strict direct eval cannot create a
+   caller binding. So it could not be pinned.
+
+**Group 4 — `compileObjectLiteralAsExternref`'s method arm dropped every
+computed key.** Upstream routed the literal to this path *because* its keys fold
+(`_hasRuntimeComputedKey`). `foldedComputedMethodKey`
+(`single-assignment-binding.ts`) now folds them the way the data arm's
+`resolvePropertyNameText` does. `Symbol.x` keys keep their route. A key that
+reads a **rebound** `var`/`let` is refused, because `resolveConstantExpression`
+folds such a binding through its stale initializer. Verified by A/B: with the
+guard removed, `var k = 'a'; k = 'b'; ({ [k]() {} })` creates key `a`.
+
+**Group 5a — `Object.getPrototypeOf(g)`.** `isStaticSyncGeneratorFunctionValue`
+gains an identifier arm. The binding must be single-assignment, its initializer
+must be a sync `function*` expression, and the read must be written after that
+initializer; an earlier read may run before it (`undefined` / TDZ).
+
+#### Rows moved — target set (43 rows: 34 test262 + 9 triage probes), base tree vs branch
+
+| lane | base → branch pass | transitions (test262 rows) | pass → non-pass |
+| --- | --- | --- | ---: |
+| standalone | 12 → 33 | CE→pass 6 (`generators/named-{strict-error,no-strict}-*`), fail→pass 9 (`function/` + `async-function/` `named-strict-error-*` ×6, `prototype-relation-to-function`, `method-definition/{name,generator}-prop-name-yield-id`) | **0** |
+| host | 14 → 30 | fail→pass 11 (`generators/`, `function/`, `async-function/` `named-strict-error-*` ×9, the two `-prop-name-yield-id`) | **0** |
+
+Logs: `.tmp/a7/t-base-{sa,host}.log`, `.tmp/a7/t2-new-{sa,host}.log`; join
+`.tmp/a7/join.mjs`. Unchanged non-pass: `async-generator/named-*` (standalone
+CE `env::__gen_result_value` both sides), both `default-proto` rows (need 5b).
+
+**The host `async-generator/named-strict-error-*` "fail → CE" the triage spec
+reported is a lane mismatch, not an A7 effect.** Run locally (honest
+whole-assembly lane), all three rows are `compile_error` on the **base** too:
+`async shape not supported: … await … inside a try` points at line 471 of the
+assembly. That is the test's own `asyncTest(async () => { try { await … } })`
+callback, which A7 does not touch. The baseline says `fail` because CI's host
+oracle is the **linked-harness** lane (`oracle_lane: linked-harness`). There the
+harness is a separate provider and the body compiles. Compiled through
+`compileHarnessLinkedBody` with the worker's options (`.tmp/a7/linked-ce.mts`),
+all six `async-generator/named-*` rows compile cleanly on base AND branch. A7
+therefore cannot make them CE in CI. Their CI runtime verdict was not measured
+locally.
+
+#### Neighbourhood differential — zero pass → non-pass on both lanes
+
+1. **Scope, 1,014 files, both targets, primary + strict-rerun variants.** It is
+   compiled exactly as `runTest262File` does (original-harness assembly and
+   `runOriginalHarnessVariant`'s options; `.tmp/a7/diffcomp.mts`). The files:
+   - the triage spec's 659-file generator neighbourhood;
+   - the cluster-A manifest;
+   - `language/expressions/{function,async-function,async-generator,class,generators}/named-*`;
+   - all of `language/expressions/object/method-definition/**`;
+   - a whole-corpus AST scan (`.tmp/a7/scan.mjs`, 48,735 files) for every
+     construct A7 can reach: 77 files where a named fn-expr mentions its own
+     name, 21 with an object-literal method under a non-`Symbol.x` computed key,
+     and 2 with `…getPrototypeOf(<id>)` where `<id>` is initialised to a
+     `function*` expression.
+2. **Harness artifact, measured and filtered.** 46 files were flagged in-process
+   (`.tmp/a7/diff-part{1,2}.tsv`). 24 of them are an artifact of loading two
+   compiler copies in ONE process: TypeScript's symbol ids leak into generated
+   names such as `__@toPrimitive@<id>`. In fresh single-compiler processes
+   (`.tmp/a7/sha1.mts`, `.tmp/a7/recheck-part{1,2}.tsv`) they are
+   byte-identical. The triage spec's "CE → CE, byte-level change, WAT
+   identical" rows are the same artifact. That leaves **22 files (37
+   lane-variants) whose output really changes.**
+3. **Runner verdicts** on all 46 flagged files, base tree vs branch, `--isolate`
+   (`.tmp/a7/f-{base,new}-{sa,host}.log`):
+
+| lane | pass (base → branch) | transitions | pass → non-pass |
+| --- | --- | --- | ---: |
+| standalone | 14 → 31 | CE→pass 7, fail→pass 10, **CE→fail 2** | **0** |
+| host | 4 → 16 | fail→pass 12 | **0** |
+
+The one row outside the target families is `language/expressions/call/scope-var-open.js`
+(fail → pass, both lanes): a body `var n` shadowing the fn-expr's name, which
+is the exact-shape shadow guard at work. `generators/scope-name-var-close.js` is
+CE → pass. The two CE → fail rows are `generators/scope-name-var-open-{non-,}strict`.
+They now fail with exactly the message their `expressions/function/` twins
+already fail with on both lanes: a non-inlined closure in the PARAMETERS writes
+the name, the `-var-open` shape the claim excludes.
+
+**Distinct test262 rows gained (targets ∪ flagged):** standalone **+17**
+(6 generator `named-*`, `scope-name-var-close`, 6 `function/` + `async-function/`
+`named-strict-error-*`, `call/scope-var-open`, `prototype-relation-to-function`,
+2 `-prop-name-yield-id`); host **+12**. Against the fresh CI baselines
+(`fetch-baseline-jsonl.mjs --force`, both stamped 28.9.2026 07:57; host
+`linked-harness`, standalone `honest`), there is **no pass → non-pass** row
+either (`.tmp/a7/vsbl.mjs`).
+
+#### Controls
+
+| control | result |
+| --- | --- |
+| pins `tests/issue-6651-a7-gen-self-binding.test.ts` (standalone, `imports` asserted `[]`) | 21/21 green; on the base tree 19 red, 2 GUARD cases green by design |
+| rebound-key guard A/B (guard removed) | the GUARD pin goes red (stale key `a` created) |
+| generator unit suites `tests/{issue-6651-*,generator-*,issue-2864-*}` (85 files, 693 tests) | 688 pass, 5 fail — the same 5 fail on the base tree (`.tmp/a7/suites4-{base,new}.log`) |
+| `node scripts/equivalence-gate.mjs` | 22 failing / 1720 passing, all 22 in the baseline, no new regressions |
+| `pnpm run check:ir-fallbacks` | OK |
+| byte identity, `website/playground/examples/**` + `benchmarks/**` (33 files × gc + standalone) | **66/66 identical** |
+| gates: loc, func, coercion-sites, oracle-ratchet, dead-exports; loc + func with `LOC_GATE_BASE=origin/main`; `npm run -s typecheck`; biome lint (error level); prettier; `check-compiler-boundaries --mode inventory --base origin/main` | all pass |
+| 3-way `git merge-file` of `generators-native.ts` + `generators-native-ast-scan.ts` against #6101's head | 0 conflicts |
+
+#### Left open
+
+- Groups 2 and 3 (wait for #6101), 5b–5d (spec, unverified).
+- Compound, update and destructuring writes to the name (`t++`, `t += 1`,
+  `[t] = [1]`) do not throw in strict code. They compile to valid Wasm and
+  leave the binding intact (probe `.tmp/a7/probe4.mts`, sloppy-correct on both
+  lanes). Neither the triage spec nor this slice routes them through the
+  immutable-binding arm.
+- A non-inlined nested closure that WRITES the name (`-var-open` shape) is
+  outside `readOnlyBindings`, unchanged.
+- The standalone generator `var`-before-initializer read (not `undefined`),
+  generic and pre-existing.
+- `Object.getPrototypeOf(f) === Function.prototype` disagrees between a
+  module-level function and a nested closure in standalone. That is why
+  `g5-expr-ident`'s second assertion still fails.
+- The error-swallowing hazard (`hoistFunctionDeclarations` truncates
+  `ctx.errors`) from the triage spec is unchanged and still deserves its own
+  issue.
+
 ### 2026-09-28 — Cluster D, slice D5
 
 Target: #5197 R3-7 — a native `$Promise` has no readable `then`. A dynamic `p.then` read (through
@@ -10598,6 +10794,15 @@ this order:
    - `yield` as an identifier inside a nested sloppy function (4)
    - `yield … in obj` (2)
    - generator prototype relations (5)
+
+**A7 — claimed 2026-09-28**, branch `claude/es6-6651-a7-gen-self-binding`
+(WIP PR opened before code). Scope, from the 2026-09-28 generator triage spec:
+group 1 (a named generator expression that reassigns its own name: native gate +
+resume prelude, strict-mode TypeError on the immutable binding, shadow guard),
+group 4 (object-literal METHOD whose computed key folds statically), and 5a
+(`Object.getPrototypeOf(g)` for a never-rebound binding to a `function*`
+expression). Groups 2 and 3 wait for #6101 (A5); 5b–5d are not in this slice.
+The A7 record lands under `## Cluster status`.
 
 Each slice opens a WIP PR before any code is written. The claim excludes what
 lanes SG1 and SC1 already diagnosed as substrate work: the rest-parameter bail,
