@@ -169,6 +169,22 @@ assignee: "ttraenkler/fable-es2015-plan"
 #     `$__ta_ctor`, which the Int8Array `$Object` carrier is not). The first cut
 #     inlined the arm here and cost +68 / +65; extracting it left these 8.
 loc-budget-allow:
+  # 2026-09-28 — cluster I, slice I7 (receipt under `## Cluster status`). All
+  # four paths already listed below, restated per the stranded-grant rule. The
+  # mechanism (rest vec → arguments extras, argc clamp) lives in the leaf
+  # `arguments-vector-tail.ts`; what stays is wiring:
+  #   - `src/codegen/statements/nested-declarations.ts` +8: the `formals`
+  #     parameter of `emitArgumentsVecBody`/`emitArgumentsObject`, the
+  #     `prepareRestArgs` call (it must run before the first emitted instruction,
+  #     a late `__box_number` import shifts indices) and the `emitRestArgs` call
+  #     between the extras read and the length sum, which only this body sees.
+  #   - `src/codegen/class-bodies.ts` +3: `ctor.parameters` / `member.parameters`
+  #     passed at three `emitArgumentsObject` sites (constructor, hoisted method,
+  #     host-ctor arm).
+  #   - `src/codegen/expressions/call-tail-dispatch.ts` +3: rest-parameter IIFEs
+  #     join the "cannot inline" list (a two-line comment and one `||` arm).
+  #   - `src/codegen/expressions/call-identifier.ts` +2: `__argc` published at
+  #     the end of the direct-call rest-packing arm (one call, one comment).
   # 2026-09-28 — cluster A, slice A8. `src/codegen/declarations.ts` +1 (path
   # already listed below, restated per the stranded-grant rule): the import of
   # `isGeneratorDeclarationPrototypeWrite`. The keep itself rides the existing
@@ -1048,6 +1064,14 @@ loc-budget-allow:
   # `promise-subclass-cell-read.ts`; the hand-off cannot move, because it is the
   # arm that would otherwise emit the bare `global.get` of the cell.
 func-budget-allow:
+  # 2026-09-28 — cluster I, slice I7: `compileTailDispatch` +3 and
+  # `compileClassBodiesInner` +2 (both already listed below, restated per the
+  # stranded-grant rule), `compileBoundIdentifierCall` +2 (NEW entry). Same
+  # wiring as the slice's `loc-budget-allow` grant: the IIFE admission arm, two
+  # multi-line `emitArgumentsObject` calls gaining their `formals` operand, and
+  # the `__argc` publication in the rest-packing arm, which has to follow the
+  # operand evaluation it sits in.
+  - src/codegen/expressions/call-identifier.ts::compileBoundIdentifierCall
   # 2026-09-28 — cluster A, slice A6: `buildNativeGeneratorPlan` +67 as the gate
   # measures it against `origin/main` @ `8273bc388e` (path already listed below,
   # restated per the stranded-grant rule). Every piece reads or writes this
@@ -9992,6 +10016,78 @@ unconditional lowering (pinned). Species is NOT performed: `C` is `%Promise%` (b
   user `then` on that result is called.
 - D5's dynamic-call residual (`id(p).then(f)` under a replaced `Promise.prototype.then`) is still
   open; it reaches no candidate row outside `finally/`.
+
+### 2026-09-28 — Cluster I, slice I7
+
+**`arguments` and rest parameters in the parameter scope (standalone lane).** Base `f58f09bd`;
+branch `issue-6651-i7-param-arguments`.
+
+#### Before / after (`--standalone --isolate`, QuickJS eval engine)
+
+| rows | base | branch |
+| --- | --- | --- |
+| the 7 dispatched rows | 5 pass / 2 fail | **7 pass** |
+| byte-changed rows, standalone (6) | 3 pass | **5 pass** (+`rest-parameters/arrow-function`, +`rest-parameters/with-new-target`) |
+| byte-changed rows, gc (6) | 2 pass | **3 pass** (+`with-new-target`) |
+| pass → non-pass, either lane | — | **0** |
+
+The five `arguments`-in-parameter-scope rows (`params-dflt-ref-arguments` ×2,
+`arguments-with-arguments-{fn,lex}` ×3) already passed on base: lane A1 (2026-09-24, above) fixed
+them. Only the two rest-parameter rows were still open.
+
+#### Root causes (both lanes)
+
+1. **`arguments` counted the rest ARRAY as one argument.** A direct / method / `new` / `super`
+   call packs the tail into the rest vec and publishes no `__argc`, so the callee's builder read
+   "argc unknown → every formal" and produced `[x, restArray]`. Fix, in the leaf
+   `arguments-vector-tail.ts` (`prepareRestArgs` / `emitRestArgs`), driven by the source
+   `formals` now passed to `emitArgumentsVecBody` / `emitArgumentsObject` from all seven sites:
+   clamp argc to the fixed-formal count, and when the caller published no extras, read the rest
+   vec's elements (boxed to externref) as the extras. A closure call already publishes argc +
+   extras, so it is unaffected. Short direct calls (`f(1)` for `f(x, y, ...a)`) also needed argc,
+   so the direct-call rest-packing arm in `call-identifier.ts` now publishes it after its operands.
+2. **An immediately-invoked function with an identifier rest bound it to ONE argument** (inline
+   IIFE binder) **or to null** (lifted `compileIIFE`, taken for a short call). Such IIFEs now take
+   the closure path, which packs the rest vec (`call-tail-dispatch.ts`). Rest-*pattern* IIFEs
+   (`(...[a = 1]) => a`) keep the historical path on purpose — see residual 3.
+
+#### Controls
+
+- Reach manifest (374 rows): every test262 file whose code (TS AST, not comments) has a rest
+  formal together with an `arguments` read, a rest IIFE, or a rest+default formal (49 rows), plus
+  all of `rest-parameters/` and `arguments-object/`, the `params-dflt*` /
+  `arguments-with-arguments*` rows, and a 20-row Temporal sample (`temporalHelpers.js` is the only
+  harness file with rest formals; none reads `arguments`). Compiled exactly as the runner does
+  (primary + strict rerun), base and branch in separate processes: **6 rows change bytes, on each
+  lane**; the other 368 are byte-identical, the Temporal sample included. (The full 374-row
+  run was on the first cut, which changed 10; narrowing the IIFE rule to identifier rests
+  returned the 4 expression-form `scope-param-rest-elem` rows to base bytes, checked per row, and
+  the `formals` refactor was re-checked on a 71-row subset. One gc row,
+  `arguments-object/S10.6_A5_T2.js`, differed only in the batched subset run — compile-order
+  state within one process; compiled alone it matches base.)
+- Playground examples, `examples/`, `benchmarks/suites/` (32 files × gc/standalone): 64/64
+  byte-identical.
+- `tests/issue-6651-i7-rest-arguments.test.ts`: 9 cases, 7 red on base (2 controls green), 9/9
+  green on the branch. No eval.
+- `node scripts/equivalence-gate.mjs`: 1720 pass, 22 fail = the 22 known failures in the
+  baseline; no new regressions.
+
+#### Residuals (measured, not taken)
+
+- **Virtual dispatch drops rest arguments.** With a subclass present, `b.m(1, 2, 3, 4)` for
+  `m(x, y, ...a)` goes through `emitVirtualMethodDispatchByTag` (`virtual-dispatch.ts`), which
+  evaluates `min(args, formals)` operands and pads the rest slot with `ref.null`: `a` is null and
+  `arguments.length` is 2. Both lanes, base and branch. It needs the arms to pack a rest vec per
+  candidate signature.
+- **Same-named rest methods mis-dispatch.** `o.m(1)` on an object literal whose `m(x, y, ...a)`
+  shares its name with a class method `B.m(x, y, ...a)` calls `B_m` → Wasm validation error
+  (`call[0] expected (ref null $B)`). Pre-existing on both lanes.
+- **Closure-path rest binding patterns read null.** `var g = function (...[a = 1]) {}; g()` throws
+  "Cannot destructure 'null' or 'undefined'" — the rest vec reaches the pattern as null. That is
+  why rest-pattern IIFEs stay on the inline path (which binds wrongly but does not throw). Blocks
+  the eval-dependent `scope-param-rest-elem-var-*` rows (5, both lanes) together with eval.
+- **gc only:** a contextually-typed IIFE rest lowers to a tuple struct whose dynamic `.length`
+  reads NaN (`rest-parameters/rest-index.js`, `arrow-function.js` on gc).
 
 ## Handoff — 2026-09-21 (round 1 closed, round 2 ready to dispatch)
 

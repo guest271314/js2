@@ -303,6 +303,7 @@ function emitDeclarationArgumentsObject(
     0,
     { vecTypeIdx, arrTypeIdx, argsLocalIdx: argsLocal, arrTmpIdx: arrTmp },
     shouldRegisterArgumentsWithHost(ctx, decl.body, fctx.directEvalBindingNames !== undefined),
+    decl.parameters,
   );
 
   // (#4243) §10.6 step 13.a — a non-strict arguments object carries `callee`.
