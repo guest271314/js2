@@ -186,6 +186,21 @@ export function emitGeneratorFunctionPrototypeSingleton(ctx: CodegenContext, fct
   return { kind: "externref" };
 }
 
+/**
+ * (#6651 A8) A top-level `g.prototype = v` (any `g.p = v`) makes the TS binder
+ * add the receiver identifier to `g`'s symbol as an expando declaration, so
+ * `var g = function* () {}; g.prototype = null;` has TWO declarations and read
+ * as rebound (`expressions/generators/default-proto.js`). It writes a property,
+ * not the binding. `__proto__` is the one property write that changes
+ * `[[Prototype]]`, so that receiver still counts.
+ */
+const isExpandoReceiverDeclaration = (d: ts.Declaration): boolean =>
+  ts.isIdentifier(d) &&
+  d.parent !== undefined &&
+  ts.isPropertyAccessExpression(d.parent) &&
+  d.parent.expression === d &&
+  d.parent.name.text !== "__proto__";
+
 const isSyncGeneratorFunctionLike = (node: ts.Node): boolean =>
   (ts.isFunctionExpression(node) || ts.isMethodDeclaration(node)) &&
   node.asteriskToken !== undefined &&
@@ -219,7 +234,9 @@ export function isStaticSyncGeneratorFunctionValue(ctx: CodegenContext, expr: ts
   // A read written BEFORE that initializer may run before it (`undefined`, or
   // a TDZ throw), so it is not claimed.
   if (ts.isIdentifier(e)) {
-    let init = bindingIsSingleAssignment(ctx, e) ? ctx.oracle.variableInitializerOf(e) : undefined;
+    let init = bindingIsSingleAssignment(ctx, e, isExpandoReceiverDeclaration)
+      ? ctx.oracle.variableInitializerOf(e)
+      : undefined;
     if (init !== undefined && (init.getSourceFile() !== e.getSourceFile() || init.end > e.pos)) init = undefined;
     while (init !== undefined && ts.isParenthesizedExpression(init)) init = init.expression;
     return init !== undefined && ts.isFunctionExpression(init) && isSyncGeneratorFunctionLike(init);
