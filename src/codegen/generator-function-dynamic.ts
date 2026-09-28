@@ -52,19 +52,18 @@
 import type { Instr, ValType } from "../ir/types.js";
 import { isStaticGeneratorFunctionConstructorSyntax } from "../ir/runtime-eval-boundary-plan.js";
 import { ts } from "../ts-api.js";
-import { emitGeneratorPrototypeSingleton } from "./array-object-proto.js";
 import { allocLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { emitStandaloneIndirectEvalRuntime, ensureRuntimeEvalCallableCarrier } from "./expressions/eval-inline.js";
 import { emitUndefined } from "./expressions/late-imports.js";
 import { isRuntimeEvalProviderAbsent } from "./expressions/standalone-dynamic-code.js";
-import { emitGeneratorFunctionConstructorSingleton } from "./generator-function-intrinsic.js";
+import { generatorFunctionIntrinsicGlobals } from "./generator-function-intrinsic.js";
 import { buildThrowJsErrorInstrs } from "./js-errors.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { ensureObjectRuntime, ensureObjVecBuilders, reserveApplyClosure } from "./object-runtime.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { emitRuntimeEvalInterpretedCallableAdapter } from "./runtime-eval-callable.js";
-import { coerceType, compileExpression, flushLateImportShifts } from "./shared.js";
+import { coerceType, compileExpression } from "./shared.js";
 import { sourceBindingIsSingleAssignment } from "./single-assignment-binding.js";
 
 const EXTERNREF: ValType = { kind: "externref" };
@@ -138,53 +137,34 @@ export function tryEmitDynamicGeneratorFunction(
   if (!isClaimedSite(ctx, node)) return undefined;
   if (!ensureRuntimeEvalCallableCarrier(ctx, fctx)) return undefined;
   ensureObjectRuntime(ctx);
-
-  // Build the two pieces that can decline BEFORE anything reaches the body, so
-  // a decline leaves the caller's fallback path an untouched body. Both stay in
-  // `liveBodies` until spliced, so late-import index shifts reach them.
-  const intrinsic = emitDetached(ctx, fctx, () => emitGeneratorFunctionConstructorSingleton(ctx, fctx) ?? undefined);
-  const fetch = emitDetached(ctx, fctx, () =>
-    emitStandaloneIndirectEvalRuntime(ctx, fctx, [ts.factory.createStringLiteral(REALM_GENERATOR_FUNCTION_SOURCE)]),
-  );
-  try {
-    if (intrinsic === undefined || fetch === undefined) return undefined;
-    return emitClaimedSite(ctx, fctx, node, intrinsic, fetch);
-  } finally {
-    if (intrinsic) ctx.liveBodies.delete(intrinsic);
-    if (fetch) ctx.liveBodies.delete(fetch);
-  }
-}
-
-/** Emit `emit()` into a fresh body kept in `liveBodies`; `undefined` if it declined. */
-function emitDetached(
-  ctx: CodegenContext,
-  fctx: FunctionContext,
-  emit: () => ValType | undefined,
-): Instr[] | undefined {
-  const part: Instr[] = [];
+  // The one piece that can decline is built first, detached, so a decline
+  // leaves the caller's fallback an untouched body. It stays in `liveBodies`
+  // until spliced, so late-import index shifts reach it.
+  const fetch: Instr[] = [];
   const savedBody = fctx.body;
   ctx.liveBodies.add(savedBody);
-  ctx.liveBodies.add(part);
-  fctx.body = part;
-  let result: ValType | undefined;
+  ctx.liveBodies.add(fetch);
+  fctx.body = fetch;
+  let fetched: ValType | undefined;
   try {
-    result = emit();
+    fetched = emitStandaloneIndirectEvalRuntime(ctx, fctx, [
+      ts.factory.createStringLiteral(REALM_GENERATOR_FUNCTION_SOURCE),
+    ]);
   } finally {
     fctx.body = savedBody;
     ctx.liveBodies.delete(savedBody);
   }
-  if (result === undefined) {
-    ctx.liveBodies.delete(part);
-    return undefined;
+  try {
+    return fetched === undefined ? undefined : emitClaimedSite(ctx, fctx, node, fetch);
+  } finally {
+    ctx.liveBodies.delete(fetch);
   }
-  return part;
 }
 
 function emitClaimedSite(
   ctx: CodegenContext,
   fctx: FunctionContext,
   node: ts.CallExpression | ts.NewExpression,
-  intrinsic: Instr[],
   fetch: Instr[],
 ): ValType {
   // Evaluation order (§13.3.6.1 / §13.3.5.1): the callee, then every argument.
@@ -203,9 +183,9 @@ function emitClaimedSite(
     argLocals.push(local);
   }
 
-  // Guard: the callee must BE `%GeneratorFunction%` (see the module note).
-  const intrinsicLocal = allocLocal(fctx, `__genfn_intrinsic_${fctx.locals.length}`, EXTERNREF);
-  fctx.body.push(...intrinsic, { op: "local.set", index: intrinsicLocal });
+  // Guard: the callee must BE `%GeneratorFunction%` (see the module note). The
+  // intrinsic globals are READ, never built here (`generatorFunctionIntrinsicGlobals`).
+  const intrinsics = generatorFunctionIntrinsicGlobals(ctx);
   const calleeAny = allocLocal(fctx, `__genfn_callee_any_${fctx.locals.length}`, { kind: "anyref" });
   const notCallable = buildThrowJsErrorInstrs(
     ctx,
@@ -224,9 +204,9 @@ function emitClaimedSite(
       then: [
         { op: "local.get", index: calleeAny },
         { op: "ref.cast", typeIdx: EQ_HEAP_TYPE },
-        { op: "local.get", index: intrinsicLocal },
+        { op: "global.get", index: intrinsics.ctor },
         { op: "any.convert_extern" },
-        { op: "ref.cast", typeIdx: EQ_HEAP_TYPE },
+        { op: "ref.cast_null", typeIdx: EQ_HEAP_TYPE },
         { op: "ref.eq" },
       ],
       else: [{ op: "i32.const", value: 0 }],
@@ -262,42 +242,34 @@ function emitClaimedSite(
   emitUndefined(ctx, fctx);
   fctx.body.push({ op: "local.get", index: vecLocal }, { op: "call", funcIdx: applyIdx });
   emitRuntimeEvalInterpretedCallableAdapter(ctx, fctx);
-  seedGeneratorPrototype(ctx, fctx);
+  seedGeneratorPrototype(ctx, fctx, intrinsics.generatorPrototype);
   return EXTERNREF;
 }
 
 /**
  * `F.prototype = OrdinaryObjectCreate(%GeneratorPrototype%)`, {w:T, e:F, c:F}
- * (§20.2.1.1.1 step 34). Consumes F from the stack and leaves it there; a
- * module without the generator-prototype runtime keeps F unseeded.
+ * (§20.2.1.1.1 step 34). Consumes F from the stack and leaves it there. The
+ * prototype singleton is non-null here: the guard above only passes once the
+ * `%GeneratorFunction%` init body — which also builds it — has run.
  */
-function seedGeneratorPrototype(ctx: CodegenContext, fctx: FunctionContext): void {
+function seedGeneratorPrototype(ctx: CodegenContext, fctx: FunctionContext, generatorPrototypeGlobal: number): void {
   const fnLocal = allocLocal(fctx, `__genfn_value_${fctx.locals.length}`, EXTERNREF);
   fctx.body.push({ op: "local.set", index: fnLocal });
-  const protoLocal = allocLocal(fctx, `__genfn_proto_${fctx.locals.length}`, EXTERNREF);
-  if (emitGeneratorPrototypeSingleton(ctx, fctx) === null) {
-    fctx.body.push({ op: "local.get", index: fnLocal });
-    return;
-  }
-  flushLateImportShifts(ctx, fctx);
   const createIdx = ctx.funcMap.get("__object_create");
   const defineIdx = ctx.funcMap.get("__defineProperty_value");
-  if (createIdx === undefined || defineIdx === undefined) {
-    fctx.body.push({ op: "drop" }, { op: "local.get", index: fnLocal });
-    return;
+  if (createIdx !== undefined && defineIdx !== undefined) {
+    addStringConstantGlobal(ctx, "prototype");
+    fctx.body.push(
+      { op: "local.get", index: fnLocal },
+      ...stringConstantExternrefInstrs(ctx, "prototype"),
+      { op: "global.get", index: generatorPrototypeGlobal },
+      { op: "call", funcIdx: createIdx },
+      { op: "f64.const", value: PROTOTYPE_WRITABLE_ONLY },
+      { op: "call", funcIdx: defineIdx },
+      { op: "drop" },
+    );
   }
-  addStringConstantGlobal(ctx, "prototype");
-  fctx.body.push(
-    { op: "call", funcIdx: createIdx },
-    { op: "local.set", index: protoLocal },
-    { op: "local.get", index: fnLocal },
-    ...stringConstantExternrefInstrs(ctx, "prototype"),
-    { op: "local.get", index: protoLocal },
-    { op: "f64.const", value: PROTOTYPE_WRITABLE_ONLY },
-    { op: "call", funcIdx: defineIdx },
-    { op: "drop" },
-    { op: "local.get", index: fnLocal },
-  );
+  fctx.body.push({ op: "local.get", index: fnLocal });
 }
 
 /** The mutable externref global that memoizes the realm's `%GeneratorFunction%`. */

@@ -98,6 +98,7 @@ import { HOLE_F64_BITS, UNDEF_F64_BITS } from "./value-tags.js";
 import { ABRUPT_FIELD, MODE_FIELD } from "./frame-core.js";
 import { walkChildren } from "./walk-instructions.js";
 import { fillForOfIteratorStep } from "./forof-iterator-step.js"; // (#6651 G4)
+import { buildRuntimeEvalValueUnwrap } from "./runtime-eval-boundary.js"; // (#6651 A9)
 
 /** Slice-1 IterRec kind tag for a canonical externref `$Vec`. (#6651 IT3 exports it: `ta-dyn-proto-methods.ts` `struct.new`s a record, and a bare `3` there would desync on a renumber.) */
 export const ITER_KIND_VEC = 3;
@@ -426,6 +427,26 @@ interface ObjCarrierDeps {
   keyInstrs: (name: string) => Instr[];
   /** Fresh instrs pushing the miss/undefined externref (matches `__extern_get`). */
   missInstrs: () => Instr[];
+  /** (#6651 A9) Present in a module linked to the runtime-eval provider: fresh
+   *  instrs decoding a step result's `done`/`value` read (see `readDecoder`). */
+  decodeRead?: (locals: { name: string; type: ValType }[], paramCount: number) => Instr[];
+}
+
+/**
+ * (#6651 A9) A step-result property read, decoded when the module links the
+ * runtime-eval provider. A result object the provider created (a realm
+ * generator's `{value, done}`) is a mirrored `$Object` whose fields hold the
+ * provider's canonical `$RuntimeEvalValue` carrier; source-level reads decode
+ * it (`emitRuntimeEvalSharedValueUnwrap`), but these runtime reads did not, so
+ * `done` read as an object — truthy — and every loop over a realm iterator
+ * ended before its first body. The decode passes any other value through.
+ */
+function readDecoder(
+  deps: { decodeRead?: ObjCarrierDeps["decodeRead"] },
+  locals: { name: string; type: ValType }[] | undefined,
+  paramCount: number,
+): () => Instr[] {
+  return () => (deps.decodeRead !== undefined && locals !== undefined ? deps.decodeRead(locals, paramCount) : []);
 }
 
 /** Build a fresh `$Object`/`$Proxy` carrier test for dynamic property reads. */
@@ -2665,6 +2686,10 @@ export function fillNativeIteratorLateArms(ctx: CodegenContext): void {
         typeofFunctionIdx: ctx.funcMap.get("__typeof_function"),
         keyInstrs: (name: string) => [...nativeStringLiteralInstrs(ctx, name), { op: "extern.convert_any" }],
         missInstrs: () => undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" }],
+        decodeRead:
+          ctx.runtimeEvalInterpretedCallbackTypeIdx === undefined
+            ? undefined
+            : (locals, paramCount) => buildRuntimeEvalValueUnwrap(ctx, locals, paramCount), // (#6651 A9)
       };
       // (#6651 G4) The for-of statement's own OBJ step (cached `next`, §7.4.4).
       fillForOfIteratorStep(ctx, iterRuntimeTypes(ctx), objDeps, (l) => externIsObjectInstrs(ctx, l));
@@ -2977,6 +3002,7 @@ export function fillNativeIteratorLateArms(ctx: CodegenContext): void {
       undefined,
       undefined,
       argumentDeps,
+      iteratorNextFn.locals,
     );
   }
 
@@ -3023,6 +3049,7 @@ export function fillNativeIteratorLateArms(ctx: CodegenContext): void {
         ctx,
         strictMethods,
         argumentDeps,
+        strictIteratorNextFn.locals,
       );
     }
     const strictMaterializeFn = definedFuncAt(ctx, strictRuntime.materializeIdx);
@@ -4820,8 +4847,10 @@ function buildIteratorNextBody(
   strictCtx?: CodegenContext,
   strictMethods?: StrictMethodDispatchDeps,
   argsDeps?: ArgumentsIteratorDeps,
+  locals?: { name: string; type: ValType }[], // (#6651 A9) the target function's, for `readDecoder`
 ): Instr[] {
   const { iterRecTypeIdx, vecTypeIdx, arrTypeIdx } = types;
+  const decode = readDecoder(objDeps ?? {}, locals, 1);
 
   // The ordinary vec-carrier step, computing done(4)/value(5). Keep this as a
   // factory: the arguments guard below needs a separate instruction graph for
@@ -5095,6 +5124,7 @@ function buildIteratorNextBody(
           { op: "local.get", index: 6 },
           ...od.keyInstrs("done"),
           { op: "call", funcIdx: od.externGetIdx },
+          ...decode(),
           { op: "call", funcIdx: od.isTruthyIdx },
           { op: "local.set", index: 4 },
           // value = done ? undefined : __extern_get(res, "value")
@@ -5103,7 +5133,12 @@ function buildIteratorNextBody(
             op: "if",
             blockType: { kind: "val", type: { kind: "externref" } },
             then: od.missInstrs(),
-            else: [{ op: "local.get", index: 6 }, ...od.keyInstrs("value"), { op: "call", funcIdx: od.externGetIdx }],
+            else: [
+              { op: "local.get", index: 6 },
+              ...od.keyInstrs("value"),
+              { op: "call", funcIdx: od.externGetIdx },
+              ...decode(),
+            ],
           },
           { op: "local.set", index: 5 },
         ];
@@ -5257,6 +5292,7 @@ function buildIteratorNextBody(
             { op: "local.get", index: 6 },
             ...od.keyInstrs("done"),
             { op: "call", funcIdx: od.externGetIdx },
+            ...decode(),
             { op: "call", funcIdx: od.isTruthyIdx },
             { op: "local.set", index: 4 },
             { op: "local.get", index: 4 },
@@ -5264,7 +5300,12 @@ function buildIteratorNextBody(
               op: "if",
               blockType: { kind: "val", type: { kind: "externref" } },
               then: od.missInstrs(),
-              else: [{ op: "local.get", index: 6 }, ...od.keyInstrs("value"), { op: "call", funcIdx: od.externGetIdx }],
+              else: [
+                { op: "local.get", index: 6 },
+                ...od.keyInstrs("value"),
+                { op: "call", funcIdx: od.externGetIdx },
+                ...decode(),
+              ],
             },
             { op: "local.set", index: 5 },
           ];

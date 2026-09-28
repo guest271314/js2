@@ -1437,6 +1437,14 @@ func-budget-allow:
   # leaf `src/codegen/generator-function-dynamic.ts`.
   - src/codegen/expressions/calls.ts::compileCallExpression
   - src/codegen/expressions/new-super.ts::compileNewExpression
+  # 2026-09-28 — cluster A, slice A9: `buildIteratorNextBody` +14, all of it the
+  # `...decode()` splice after the four `done`/`value` reads of the OBJ and
+  # strict-OBJ steps (and the one-line `locals` parameter it needs). The four
+  # reads are inline instruction arrays that already exist; the decoder itself
+  # is `readDecoder`, beside `ObjCarrierDeps`. `fillNativeIteratorLateArms` +6
+  # (path already listed below, restated): the `decodeRead` field of the OBJ
+  # deps it builds, and passing each rebuilt function's own `locals`.
+  - src/codegen/iterator-native.ts::buildIteratorNextBody
 coercion-sites-allow:
 # 2026-09-26 — lane TA1: `to-locale-string-element.ts` is a NEW file, so its
 # baseline is 0 and every textual mention of a native name counts as growth

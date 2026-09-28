@@ -280,13 +280,20 @@ export function isStaticSyncGeneratorFunctionValue(ctx: CodegenContext, expr: ts
 }
 
 /**
- * (#6651 A9) Leave `%GeneratorFunction%` itself on the stack — the object
- * `emitGeneratorFunctionPrototypeSingleton` reifies as the prototype's
- * `constructor`, so both share one identity. `null` when the object runtime is
- * unavailable.
+ * (#6651 A9) The lazy globals that hold `%GeneratorFunction%` and
+ * `%GeneratorPrototype%` once `emitGeneratorFunctionPrototypeSingleton`'s init
+ * body has run (it sets both). READ ONLY — reading them emits no builder, which
+ * matters inside a generator body: building the singleton there leaves that
+ * generator's `next` unable to dispatch it (measured on base, independent of
+ * A9: `function* () { Object.getPrototypeOf(function* () {}); yield 1; }` traps
+ * `unreachable` in `%GeneratorPrototype%.next`). A caller holding
+ * `%GeneratorFunction%` proves the init body already ran, so neither is null
+ * then. The generator-prototype key is the one `emitGeneratorPrototypeSingleton`
+ * (`array-object-proto.ts`) registers; whichever side registers first creates it.
  */
-export function emitGeneratorFunctionConstructorSingleton(ctx: CodegenContext, fctx: FunctionContext): ValType | null {
-  if (emitGeneratorFunctionPrototypeSingleton(ctx, fctx) === null) return null;
-  fctx.body.push({ op: "drop" }, { op: "global.get", index: lazyGlobal(ctx, GENERATOR_FUNCTION_GLOBAL) });
-  return { kind: "externref" };
+export function generatorFunctionIntrinsicGlobals(ctx: CodegenContext): { ctor: number; generatorPrototype: number } {
+  return {
+    ctor: lazyGlobal(ctx, GENERATOR_FUNCTION_GLOBAL),
+    generatorPrototype: lazyGlobal(ctx, "__native_generator_prototype_obj"),
+  };
 }
