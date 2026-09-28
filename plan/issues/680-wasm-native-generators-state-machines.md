@@ -1,8 +1,7 @@
 ---
 id: 680
 title: "Wasm-native generators (state machines) with optional JS host fallback"
-status: done
-completed: 2026-09-28
+status: ready
 created: 2026-03-20
 updated: 2026-09-28
 priority: high
@@ -1569,7 +1568,13 @@ Increment, standalone/WASI only (every new arm is gated on `noJsHostTarget`):
    (pre-existing on main — any module with a string generator and a nested
    array destructure of an `any`).
 
-## Resolution (2026-09-28)
+## Resolution — prettier slice (2026-09-28)
+
+The prettier slice is done; **#680 itself stays open** (`status: ready`): the
+Done-status integrity gate (#3474) counted **230 live test262 failures** still
+citing #680 on the baseline, so the umbrella is not complete. The generator
+edges this slice left are itemised in #6731.
+
 
 - Regression test `tests/issue-680-prettier-generator-shapes.test.ts`: **6/6**
   with the fix, **0/6** on parent `2e23e49fb1` (five refused with this issue's
