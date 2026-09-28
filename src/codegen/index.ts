@@ -392,6 +392,7 @@ import {
   unshiftExternGetStringExoticArm,
   unshiftExternGetWrapperCtorArm,
 } from "./object-runtime.js";
+import { fillClassObjectExpandoArms, recordClassObjectExpandoCell } from "./class-object-expando.js"; // (#6651 C)
 import { fillArrayProtoSingleton, fillObjectProtoSingleton } from "./object-runtime-prototype.js"; // (#5270 step 2; #6651 R1)
 import { prependNativeGeneratorResultPrototypeArm } from "./generators-native-protocol.js"; // (#6651 SG1)
 import { fillVecLengthDynamicArms } from "./vec-length-set.js";
@@ -6911,6 +6912,7 @@ export function generateModule(
     // install the identity-guarded standalone view after all competing MOP
     // prefixes have been finalized.
     fillClassObjectNameArms(ctx);
+    fillClassObjectExpandoArms(ctx); // (#6651 C) module-scope `C.p = v` cells, seen by the dynamic MOP
 
     // (#5270 step 2) Fill the reserved `%Object.prototype%` carrier helper —
     // `__getPrototypeOf` bakes a `call` to it for a null-`$proto` ordinary
@@ -10134,6 +10136,7 @@ function registerModuleClassStaticAssignments(ctx: CodegenContext, sourceFiles: 
           init: [{ op: "ref.null.extern" }],
         });
         ctx.staticProps.set(fullName, globalIdx);
+        recordClassObjectExpandoCell(ctx, resolvedClass, propName); // (#6651 C) the dynamic MOP finds this cell
       }
     }
   }
@@ -11658,6 +11661,7 @@ export function generateMultiModule(multiAst: MultiTypedAST, options?: CodegenOp
     // (#4770) Multi-source parity for the dynamic class-constructor `name`
     // property view; see the single-source placement above.
     profilePhase("fill-class-object-name-arms", () => fillClassObjectNameArms(ctx));
+    fillClassObjectExpandoArms(ctx); // (#6651 C) module-scope `C.p = v` cells, seen by the dynamic MOP
 
     // (#5270 step 2) Multi-source parity for the `%Object.prototype%` carrier;
     // see the single-source placement above.
