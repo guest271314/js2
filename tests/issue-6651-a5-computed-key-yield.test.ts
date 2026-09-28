@@ -124,6 +124,19 @@ export function test(): number {
     expect(await run(src)).toBe(600);
   });
 
+  it("a discarded statement-level literal keyed by a yield suspends (formerly a #680 fails-closed pin)", async () => {
+    const src = `function* g(): Generator<undefined, void, unknown> {
+  ({ [yield]: 1 });
+}
+export function test(): number {
+  const it = g();
+  const a = it.next();
+  const b = it.next("k");
+  return (a.done ? 0 : 10) + (b.done ? 1 : 0);
+}`;
+    expect(await run(src)).toBe(11);
+  });
+
   it("a key evaluated before a later key's yield runs once, before that yield", async () => {
     const src = `let calls = 0;
 let seenAtYield = -1;
