@@ -2,13 +2,25 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
-import { GETTER_SOURCE, prepareGetterProgram } from "./helpers/native-getter-invocation-fixture.js";
-import { getterResourceFixture, getterResourceRuntime } from "./helpers/native-getter-resource-fixture.js";
+import {
+  GETTER_SOURCE,
+  prepareGetterProgram,
+  freezeGetterInvocation,
+  fillActualGetterUnits,
+} from "./helpers/native-getter-invocation-fixture.js";
+import {
+  getterResourceFixture,
+  reserveGetterResourceObservers,
+  fillGetterResourceObservers,
+  getterResourceRuntime,
+} from "./helpers/native-getter-resource-fixture.js";
 import {
   planNativeStringValuePhysical,
   reserveNativeStringValueResources,
   nativeStringValueReservationInventory,
+  fillNativeStringValueResources,
 } from "../src/backend/wasmgc/program/native-string-values.js";
+import { fillNativeInvocationResources } from "../src/backend/wasmgc/resources/native-invocation.js";
 import { nativeBooleanAbiBindings } from "../src/backend/wasmgc/program/native-primitive-boundary-abi.js";
 import { collectNativeStringValueDemands } from "../src/ir/program/native-string-value-demands.js";
 import { acceptPreparedIrProgram } from "../src/ir/program-consumer.js";
@@ -40,51 +52,113 @@ beforeAll(() => vi.stubEnv("JS2WASM_IR_GVN", "0"));
 afterEach(() => new Promise<void>((resolve) => setImmediate(resolve)));
 afterAll(() => vi.unstubAllEnvs());
 
+/** Each genuine lifecycle phase retains the existing 35-second bound. */
+function describeSetupStages(stages: readonly { name: string; run: () => void }[], tests: () => void): void {
+  const [stage, ...remaining] = stages;
+  if (!stage) {
+    tests();
+    return;
+  }
+  describe(stage.name, () => {
+    beforeAll(stage.run, 35_000);
+    describeSetupStages(remaining, tests);
+  });
+}
+
 describe("genuine getter demands join native values before reservation", () => {
   for (const decoded of [false, true])
-    for (const row of cases)
-      it(`selects and executes actual ${row.kind} getter dependencies without source calls, decoded=${decoded}`, () => {
-        const f = getterResourceFixture(prepareGetterProgram(row.source, decoded, "./entry.ts", true));
-        expect(f.invocation.uses).toEqual([]);
-        expect(f.invocation.getterUses).toHaveLength(1);
-        expect(f.resourceInput.invocationRequirements).toBe(f.invocation);
-        expect(f.invocation.objectAccess).toBe(f.access);
-        expect(f.resources.number!.values).toBe(f.dependencies.values);
-        expect(f.resources.number!.dependencies).toBe(f.dependencies.valueDependencies);
-        expect(f.resourceInput.plan.mode).toBe("number-boundary");
-        expect(f.resourceInput.plan.literalRequirements.literals.map((item) => item.value)).toEqual(
-          expect.arrayContaining(["", "TypeError", "Value is not callable"]),
-        );
-        const inventory = nativeStringValueReservationInventory(f.tx, f.resources);
-        expect(inventory.map(({ key, space }) => ({ key, space }))).toEqual(
-          f.resourceInput.plan.declarations.map(({ key, space }) => ({ key, space })),
-        );
-        expect(new Set(inventory.map((item) => item.reservation)).size).toBe(inventory.length);
-        if (row.kind === "boolean" || row.kind === "false") {
-          expect(f.resources.number!.booleanBoxes).toBe(f.dependencies.booleanBoxes);
-          expect(f.resourceInput.plan.booleans).toEqual({ boxMode: "interned", unbox: true });
-          const binding = nativeBooleanAbiBindings(f.resourceInput, 0);
-          expect(binding).toHaveLength(1);
-          expect(binding[0]!.reference.binding).toEqual({ kind: "runtime", symbol: "__unbox_boolean" });
-        } else expect(f.resourceInput.plan.booleans).toBeUndefined();
-        const publicAcceptance = acceptPreparedIrProgram(f.program, replayOptions("wasmgc", "standalone"));
-        expect(publicAcceptance.kind).toBe("unsupported");
-        if (publicAcceptance.kind !== "accepted")
-          expect(publicAcceptance.detail).toMatch(/js\.object\.|object|prototype/);
-        expect(f.access.gaps.some((gap) => gap.detail.includes("implicit-prototype companion"))).toBe(true);
-        const runtime = getterResourceRuntime(f),
-          expected = oracle(row.source);
-        const closure = runtime.make(...(row.kind === "number" || row.kind === "callable" ? [7] : []));
-        for (let repeat = 0; repeat < 2; repeat++) {
-          const value = runtime.get(closure);
-          if (row.kind === "number") expect(runtime.number(value)).toBe(expected);
-          else if (row.kind === "callable") expect(runtime.invoke(value)).toBe((expected as () => number)());
-          else {
-            expect(runtime.isBoolean(value)).toBe(1);
-            expect(runtime.booleanValue(value)).toBe(expected ? 1 : 0);
-          }
-        }
-      });
+    for (const row of cases) {
+      let f: ReturnType<typeof getterResourceFixture>;
+      let observers: ReturnType<typeof reserveGetterResourceObservers>;
+      let callables: ReturnType<typeof freezeGetterInvocation>;
+      let runtime: ReturnType<typeof getterResourceRuntime>;
+      describeSetupStages(
+        [
+          {
+            name: `prepared and reserved ${row.kind}, decoded=${decoded}`,
+            run: () => {
+              f = getterResourceFixture(prepareGetterProgram(row.source, decoded, "./entry.ts", true));
+            },
+          },
+          {
+            name: "authenticated reservation inventory and retained public refusal",
+            run: () => {
+              expect(f.invocation.uses).toEqual([]);
+              expect(f.invocation.getterUses).toHaveLength(1);
+              expect(f.resourceInput.invocationRequirements).toBe(f.invocation);
+              expect(f.invocation.objectAccess).toBe(f.access);
+              expect(f.resources.number!.values).toBe(f.dependencies.values);
+              expect(f.resources.number!.dependencies).toBe(f.dependencies.valueDependencies);
+              expect(f.resourceInput.plan.mode).toBe("number-boundary");
+              expect(f.resourceInput.plan.literalRequirements.literals.map((item) => item.value)).toEqual(
+                expect.arrayContaining(["", "TypeError", "Value is not callable"]),
+              );
+              const inventory = nativeStringValueReservationInventory(f.tx, f.resources);
+              expect(inventory.map(({ key, space }) => ({ key, space }))).toEqual(
+                f.resourceInput.plan.declarations.map(({ key, space }) => ({ key, space })),
+              );
+              expect(new Set(inventory.map((item) => item.reservation)).size).toBe(inventory.length);
+              if (row.kind === "boolean" || row.kind === "false") {
+                expect(f.resources.number!.booleanBoxes).toBe(f.dependencies.booleanBoxes);
+                expect(f.resourceInput.plan.booleans).toEqual({ boxMode: "interned", unbox: true });
+                const binding = nativeBooleanAbiBindings(f.resourceInput, 0);
+                expect(binding).toHaveLength(1);
+                expect(binding[0]!.reference.binding).toEqual({ kind: "runtime", symbol: "__unbox_boolean" });
+              } else expect(f.resourceInput.plan.booleans).toBeUndefined();
+              const publicAcceptance = acceptPreparedIrProgram(f.program, replayOptions("wasmgc", "standalone"));
+              expect(publicAcceptance.kind).toBe("unsupported");
+              if (publicAcceptance.kind !== "accepted")
+                expect(publicAcceptance.detail).toMatch(/js\.object\.|object|prototype/);
+              expect(f.access.gaps.some((gap) => gap.detail.includes("implicit-prototype companion"))).toBe(true);
+            },
+          },
+          {
+            name: "frozen real invocation and observer reservations",
+            run: () => {
+              observers = reserveGetterResourceObservers(f);
+              callables = freezeGetterInvocation(f);
+            },
+          },
+          {
+            name: "filled native value bodies",
+            run: () => fillNativeStringValueResources(f.tx, f.resources),
+          },
+          {
+            name: "filled native invocation bodies",
+            run: () => fillNativeInvocationResources(f.tx, f.pack, callables, f.exception),
+          },
+          {
+            name: "lowered and filled actual source getter bodies",
+            run: () => fillActualGetterUnits(f),
+          },
+          {
+            name: "filled observer bodies",
+            run: () => fillGetterResourceObservers(f, observers),
+          },
+          {
+            name: "authenticated completion and emitted module",
+            run: () => {
+              runtime = getterResourceRuntime(f, observers);
+            },
+          },
+        ],
+        () => {
+          it(`selects and executes actual ${row.kind} getter dependencies without source calls, decoded=${decoded}`, () => {
+            const expected = oracle(row.source);
+            const closure = runtime.make(...(row.kind === "number" || row.kind === "callable" ? [7] : []));
+            for (let repeat = 0; repeat < 2; repeat++) {
+              const value = runtime.get(closure);
+              if (row.kind === "number") expect(runtime.number(value)).toBe(expected);
+              else if (row.kind === "callable") expect(runtime.invoke(value)).toBe((expected as () => number)());
+              else {
+                expect(runtime.isBoolean(value)).toBe(1);
+                expect(runtime.booleanValue(value)).toBe(expected ? 1 : 0);
+              }
+            }
+          });
+        },
+      );
+    }
   it.each([false, true])("refuses implicit getter boxing when native policy is disabled, decoded=%s", (decoded) => {
     const program = prepareGetterProgram(BOOLEAN, decoded);
     const demands = collectNativeStringValueDemands(program, program.runtime[0]!);

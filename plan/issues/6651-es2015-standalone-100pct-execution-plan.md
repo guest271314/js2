@@ -906,6 +906,38 @@ loc-budget-allow:
   # now names `flags` beside `lastIndex` (the i32 bitfield is not §22.2.6.4's
   # string).
   - src/codegen/builtin-value-read.ts
+  # 2026-09-28 — cluster D slice D4 (`class X extends Promise` in standalone,
+  # #5197 G9; receipt under `## Cluster status`). The mechanisms live in two NEW
+  # leaves: `promise-subclass-proto-link.ts` (the `$bag.$proto` link, the
+  # `instanceof` walk, the inherited-`resolve` fallback) and
+  # `promise-class-receiver-settle.ts` (`Promise.{resolve,reject}.call(C)` for a
+  # class `C`). What cannot move is where each decision is taken:
+  #   - `class-bodies.ts` +18: one import, one link call after the explicit
+  #     `super(executor)` Promise arm, and the implicit-constructor Promise arm
+  #     (a `} else if` between the linked-provider arm and the builtin ladder it
+  #     precedes — the ladder would otherwise commit to the identity-only object);
+  #   - `call-namespace-static.ts` +4: one import and the class-receiver settle
+  #     dispatch (plus its comment) at the end of the `Promise.{resolve,reject}
+  #     .call` arm, after D1's function-constructor arm it complements;
+  #   - `identifiers.ts` +3: one import and the two-line standalone `instanceof`
+  #     arm, ahead of the host-only Promise-subclass arm it is the twin of.
+  # All three paths are already listed below (restated per the stranded-grant rule).
+  # 2026-09-28 — cluster B, slice B10 (receipt under `## Cluster status`). Three
+  # god-files, call sites only (paths already listed below, restated per the
+  # stranded-grant rule); both mechanisms live in NEW leaves
+  # (`regexp-untyped-receiver.ts`, `regexp-proto-to-string.ts`):
+  #   - `src/codegen/index.ts` +5: the import, the pre-scan demand note in both
+  #     pipelines (it must run before ANY closure is minted, so the RegExp
+  #     `toString` member body is chosen before the companion seeder mints it),
+  #     and the finalize arm call in both pipelines (next to the #6678 Date twin,
+  #     ahead of the proto-cache arm that has to stay `__extern_get`'s prefix).
+  #   - `src/codegen/declarations.ts` +2: the import and one mint call at
+  #     module-init start — the one codegen point every source file reaches
+  #     with a `FunctionContext` (an eval-produced RegExp has no creation site
+  #     in the test module to hook instead).
+  #   - `src/codegen/regexp-standalone.ts` +4: the import and the §22.2.6.17
+  #     hand-off ahead of brand recovery in `emitRegExpProtoMemberBody` (the
+  #     member body is chosen there and nowhere else).
 func-budget-allow:
   # 2026-09-26 — lane SC1: `buildNativeGeneratorPlan` +15 as the gate measures it
   # (path already listed below, restated per the stranded-grant rule), of which 9
@@ -1278,6 +1310,19 @@ func-budget-allow:
   # 2026-09-28 — cluster D slice D3: `compileNamespaceStaticCall` +3, the one
   # class-receiver dispatch line described under the LOC grant
   # (`tryEmitClassReceiverCombinatorCall`). Key already listed below.
+  # 2026-09-28 — cluster D slice D4: `compileHostInstanceOf` +2 (the standalone
+  # Promise-subclass `instanceof` arm — its body is `tryEmitPromiseSubclassInstanceOf`
+  # in the new leaf), `compileSuperCall` +1 (the bag-link call after the explicit
+  # `super(executor)` Promise arm), `compileClassBodiesInner` +16 (the implicit
+  # Promise-constructor arm, see the LOC grant) and `compileNamespaceStaticCall`
+  # +3 (the settle dispatch). The last two keys are already listed below.
+  - src/codegen/expressions/identifiers.ts::compileHostInstanceOf
+  - src/codegen/class-bodies.ts::compileSuperCall
+  # 2026-09-28 — cluster B, slice B10: `compileDeclarations` +1 — the single
+  # `mintUntypedRegExpReceiverMembers(...)` call at the top of its nested
+  # `compileModuleInitBody`, the one codegen point every source file reaches with
+  # a `FunctionContext` (mechanism in the new leaf `regexp-untyped-receiver.ts`).
+  - src/codegen/declarations.ts::compileDeclarations
 coercion-sites-allow:
 # 2026-09-26 — lane TA1: `to-locale-string-element.ts` is a NEW file, so its
 # baseline is 0 and every textual mention of a native name counts as growth
@@ -8607,6 +8652,342 @@ companion miss that answers the glue's method singletons without seeding.
 | 2 | `exec/{failure,success}-lastindex-access` | value-rep (B8's table, unchanged) |
 | 2 | `String.prototype.indexOf/searchstring-tostring-{errors,toprimitive}` | spec ToString at the argument site, cluster H (unchanged) |
 | 1 | `@@split/coerce-flags-err` | cluster C `__module_init` null-deref (unchanged) |
+
+### 2026-09-28 — Cluster D, slice D4
+
+Target: the 6 manifest rows where a class extends `Promise` (#5197 G9) —
+`{all,race,resolve,reject}/ctx-ctor` and `{all,race}/invoke-resolve-on-promises-every-iteration-of-custom`.
+
+#### Design
+
+**Measured first, because D3's three sites were partly stale.** On this branch's base
+(D3 merged): the class OBJECT already exists standalone (`class-bodies.ts` stopped skipping
+`__class_<Name>` in #5191 — D3's site 1 note is stale on that half), and explicit
+`super(executor)` to `Promise` already builds a real `$Promise` through the executor bridge
+(`emitStandalonePromiseFromExecutorValue`, the Deno `SafePromise` arm) and then installs
+`constructor` as an own property of the carrier's `$bag` (#5383 S2m) — so D3's site 2 holds
+only for the IMPLICIT constructor (`class Custom extends Promise {}`), and
+`instance.constructor === C` already answers through a dynamic receiver. What was really
+missing (probes `.tmp/d4/js/c1..c7`):
+
+1. the value read (`identifiers.ts` ×2) emitted `env::__promise_subclass_ctor` with no
+   host-free gate — every row failed to compile on that alone;
+2. the native construct dispatcher (`standalone-class-construct.ts`) excludes every
+   builtin-parent class, so `Construct(C, «executor»)` threw "not a constructor";
+3. nothing on a `$Promise` says which class built it, so a dynamic `v instanceof C` was false;
+4. `Promise.{resolve,reject}.call(C)` has no arm for a CLASS `C` (only D1's function arm);
+5. D3's receiver admission excluded Promise-rooted classes.
+
+**Representation — no struct change.** A Promise-subclass instance IS the native `$Promise`
+carrier (so settle / `then` / the combinator drives take it unchanged); its [[Prototype]] is
+recorded the way #2917 records it for the `extends Array` vec carrier: the carrier's intrinsic
+`$bag` (#4241) is an `$Object` whose `$proto` field no bag consumer reads (every bag read is
+own-only, #4563), so construction stores `C.prototype` there. `$Promise` itself — and therefore
+every promise allocation in every module — is untouched. Rejected alternatives: a proto field on
+`$Promise` (moves every module that allocates a promise); a `$Promise` subtype struct (every
+`ref.test $Promise` consumer would still accept it, but `struct.new` sites, the final-type
+marking and the settle bodies' casts would all need auditing for a 6-row slice).
+
+**`super(executor)`** (§27.2.3.1 via §10.1.13 OrdinaryCreateFromConstructor): the existing
+explicit arm already does steps 3-11 (allocate pending, CreateResolvingFunctions, call the
+executor, reject on abrupt completion); D4 adds the same arm for the implicit constructor
+(`class X extends Promise {}` → `constructor(...args) { super(...args) }`, direct heritage
+`Promise` only) and, on both, the bag link after S2m's `constructor` install.
+
+**`instanceof` / `.constructor`.** `.constructor` is S2m's own `constructor` (unchanged).
+`v instanceof C` for a Promise-subclass identifier `C`, standalone, becomes
+`__promise_proto_instanceof(v, C.prototype)`: OrdinaryHasInstance steps 4-6 over the bag link
+(or an `$Object`'s own `$proto`), `ref.eq` until null — so `Y extends X extends Promise` needs
+no per-class list.
+
+**[[Construct]].** A standalone value read of a Promise subclass marks the module; the class
+construct dispatcher then admits Promise-rooted classes (their `<C>_new` returns the carrier).
+Every module that performs such a read failed to compile before D4, so no previously-compiling
+module's dispatcher moves.
+
+**`Promise.{resolve,reject}.call(C, x)`** for a compiled class `C`: NewPromiseCapability(C)
+through D3's construct call, then `Call(capability.[[Resolve]] / [[Reject]], undefined, «x»)`,
+return `capability.[[Promise]]` (§27.2.4.6 / .7; PromiseResolve's step 1 fast path — `x` a
+promise whose `constructor` is `C` — first).
+
+**Gate.** Everything above is `--target standalone` and keyed on a class whose builtin root is
+`Promise`; the gc lane and every module with no such class are byte-identical by construction
+(checked, not assumed — controls below).
+
+#### Receipt
+
+- **Branch** `issue-6651-d4-promise-subclass` (worktree `agent-a25501ba6e0af9e9c`), based on
+  `origin/main` @ `af9de0c1c2` + D3 (`135875abea`, merged in), the slice commit `fcefaa1123`, then
+  `git merge origin/main` twice (@ `f73a4bcd7d`, then @ `422dbf01a0` where D3 itself landed — the
+  second merge moved no `src/`/`tests/`/`scripts/` byte, checked with `git diff`). Every control
+  below was run on the pre-merge tree AND re-run on the merged tree; the two agree row for row.
+  Engine `JS2WASM_EVAL_ENGINE=quickjs` (artifact `073742801ba7`, adapter `d4799bda84cfed0d`),
+  `--standalone --isolate`, 24-row chunks, one runner at a time. Before-states are file-copy A/B:
+  `.tmp/base/` (pre-edit copy) on the pre-merge tree, and on the merged tree the merged files with
+  the slice's own patch reversed (`.tmp/d4/mkbase.sh`) — measured, not inherited from D3.
+
+- **Manifest** `plan/agent-context/6651/D-promise-combinators.txt` (101 rows):
+
+  | | pass | fail | compile_error |
+  | --- | ---: | ---: | ---: |
+  | before (`.tmp/d4/base-chunk-*`, merged: `Mbase-chunk-*`) | 71 | 24 | 6 |
+  | after (`.tmp/d4/new-chunk-*`, merged: `Mnew-chunk-*`) | **75** | 26 | **0** |
+
+  **+4, 0 pass→non-pass, 0 message changes on the 24 rows non-pass in both.** The four are
+  `{all,race,resolve,reject}/ctx-ctor.js`. The other two target rows moved CE → fail (below).
+
+#### What landed
+
+| site | change |
+| --- | --- |
+| `expressions/promise-subclass.ts` `emitPromiseSubclassValueRead` (+ both `identifiers.ts` value-read arms) | host-free: emit nothing (the class-object singleton is read instead) and mark the module |
+| `standalone-class-construct.ts` `collectCandidates` | Promise-rooted classes become construct candidates in a marked module |
+| `class-bodies.ts` | the implicit `constructor(...args){super(...args)}` of `class X extends Promise {}` builds the carrier from `args[0]` (direct heritage `Promise` only); both super arms call the link |
+| NEW `promise-subclass-proto-link.ts` | `emitPromiseSubclassProtoLink` (bag `$proto` = `X.prototype`, runtime-guarded by `ref.test $Promise`), `__promise_proto_instanceof` + `tryEmitPromiseSubclassInstanceOf`, `promiseSubclassResolveFallbackInstrs` |
+| `identifiers.ts` `compileHostInstanceOf` | the standalone Promise-subclass `instanceof` arm, ahead of the host-only twin |
+| NEW `promise-class-receiver-settle.ts` | `Promise.{resolve,reject}.call(C, x)` for a compiled class `C` (Promise subclass or not), with PromiseResolve's step-1 passthrough; a binding that shadows a global value name (`const parseInt = class …`) declines — the value read resolves those to the global |
+| `promise-class-receiver-drive.ts` (D3) | receiver admission widens to Promise subclasses (host-free, same shadow guard); for them GetPromiseResolve falls back to `Get(%Promise%, "resolve")` when `Get(C, "resolve")` is `undefined` (the class object has no link to `%Promise%`), so `Promise.all.call(SubPromise, [])` fulfils with `[]` instead of rejecting |
+
+No new host import; no change to the `$Promise` struct.
+
+#### Controls
+
+| control | result |
+| --- | --- |
+| manifest, 101 rows | 71 → **75**, 0 pass→non-pass, 0 message changes; merged tree identical |
+| byte differential, compile-only through the runner's original-harness assembly (`.tmp/d4/promise-bytes.mts`): the 151 test262 files that spell `extends Promise` or `Promise.{resolve,reject,all,race,allSettled,any}.call(` (171 variants), base vs branch, pre-merge and merged | **gc 171/171 identical**; standalone moves **30 variants of 26 rows**, all 26 run base vs branch below |
+| verdicts on the 26 byte-moved rows (`.tmp/d4/moved-rows.txt`) | base 3 pass / 8 fail / 15 CE → branch **11 pass / 15 fail / 0 CE**; **0 pass→non-pass**, no message change on the 8 fail-on-both. The +8 pass include 4 off-manifest rows: `{allSettled,any}/ctx-ctor.js` and `prototype/finally/subclass-species-constructor-{resolve,reject}-count.js` |
+| corpus: 17 playground + benchmark programs and D2/D2b's 11 shape programs × {gc, standalone} (`.tmp/d4/bytes.mts`) | **56/56 identical**, pre-merge and merged |
+| pin suite `tests/issue-6651-d4-promise-subclass.test.ts` (12) | 12/12 green; on base **10 red** — the two controls (gc lane keeps the host constructor; a module with no Promise subclass never names the helper) are green on both by design |
+| D-family pins + every test file that spells `extends Promise`, one vitest process each | all green except `promise-combinators` (2) and `issue-2671-promise-capability` (1), which fail with the same test names on base — D3's pre-existing three. `issue-3518-host-async-imports` (2) likewise fails identically on base |
+| three pins updated because they asserted the OLD route | D3's "a Promise-subclass receiver is not admitted" control, `deno-safe-promise-combinators` "keeps … on the constructor-aware route" (asserted the `env::Promise_all` import) and `issue-3390` "fall-through … still routes to host" — each now asserts the host-free answer (the Deno one also runs it: the result is `instanceof SafePromise`) |
+| gates | `check-loc-budget`, `check-func-budget` (also with `LOC_GATE_BASE` = origin/main @ `f73a4bcd7d` and @ `422dbf01a0`), `check-coercion-sites`, `check:oracle-ratchet`, `check:dead-exports`, `check-compiler-boundaries --mode inventory --base origin/main` (`inventoryValid: true`, both new leaves classified), `npm run -s typecheck`, `biome lint --diagnostic-level=error`, `check:ir-fallbacks` (OK), `scripts/equivalence-gate.mjs` (22 failing / 1,720 passing / 22 known — no new). Grants: dated D4 notes at the head of this file's `loc-budget-allow` / `func-budget-allow` |
+
+#### Residuals (not taken)
+
+- **`{all,race}/invoke-resolve-on-promises-every-iteration-of-custom` (2 rows, now fail: "async
+  completion marker not observed")** — two gaps, both wider than Promise, so they are named here
+  rather than patched:
+  1. **Static assignments to a class object are invisible to a dynamic Get.** `Custom.resolve =
+     function (…) {…}` then `__extern_get(Custom, "resolve")` answers `undefined`; the same holds
+     for a plain `class K {}` (`K.foo = f; id(K).foo` → `undefined`, `.tmp/d4/js/c8.js`). The
+     drive therefore never sees the user's `resolve` (and falls back to the — reassigned —
+     `Promise.resolve`, which the row asserts is never called). This is the class-object static
+     expando model, not a Promise question.
+  2. **#5197 R3-7: a native `$Promise` has no readable `then`** (`typeof id(p).then` →
+     `undefined`, `.tmp/d4/js/c5.js`), so D3's `Invoke(nextPromise, "then", …)` does not subscribe
+     when `C.resolve` answers a native promise; the aggregate never settles.
+- `class Y extends X {}` where `X extends Promise` (implicit ctor, user parent): still the
+  identity-only object (the builtin-subclass chain skips the parent's constructor — pre-existing
+  for every builtin parent). `instanceof Y` is false.
+- `Object.getPrototypeOf(promiseSubInstance)` does not read the link (no `__getPrototypeOf` arm
+  for `$Promise`); `Get(C, "resolve")` on a Promise subclass stays `undefined` outside the drive
+  (the class object has no [[Prototype]] = `%Promise%`); the fallback also cannot tell an own
+  `C.resolve = undefined` from an absent one.
+- `super()` with NO argument to `Promise` keeps the identity-only object (spec: TypeError, the
+  executor is not callable).
+- Off-manifest, still CE → fail on the branch: `{allSettled,any}/invoke-resolve-on-*-custom`,
+  `try/ctx-ctor`, `withResolvers/ctx-ctor` (no `.call(C)` arm for `try` / `withResolvers`).
+
+### 2026-09-28 — Cluster B, slice B10
+
+`%RegExp.prototype%` seen through an UNTYPED RegExp: a runtime method read, the
+ToString it feeds, and `Object.getPrototypeOf`. Opus 5 High. Branch
+`issue-6651-b10-regexp-untyped-proto` (local, not pushed), base `origin/main` @
+`f73a4bcd7d` + the B9 head `daa9a67132` merged in (B9 not on main at dispatch).
+A `git archive` of that merge (`ce1302df01`) was taken before the first edit
+(`.tmp/base/`), so every base number below was run, not inherited. Engine for
+every verdict: QuickJS (artifact `073742801ba7`, adapter `d4799bda84cfed0d`),
+`--standalone --isolate`, 24-row chunks, one runner at a time; source sha
+checked first→last on every measured tree (after: `b79d4117…`, base:
+`c2249e48…`).
+
+#### What was wrong (measured on the base, probes `.tmp/b10/p/`)
+
+For `var r; r = /./g;` read inside a function (`r` is `any`) and for
+`var result = eval('/1/g')`:
+
+| expression | base | spec |
+| --- | --- | --- |
+| `r.test` / `r.exec` (value read) | `undefined` | `RegExp.prototype.<m>` |
+| `r.toString()`, `String(r)`, `r + ""` | `"null"` | `"/./g"` |
+| `Object.getPrototypeOf(r)` | `null` | `RegExp.prototype` |
+
+B9's root cause for the first row holds (`__extern_get` reaches the prototype
+only through the companion miss, seeded only under `protoMemberDirty`). The
+`toString` row had TWO further causes, found while probing: the implicit
+`%Object.prototype%` consult answered `Object.prototype.toString` ahead of the
+RegExp prototype (so the #4564 `__to_primitive` RegExp arm found a callable
+`toString`, called the wrong one, and never reached its own intrinsic), and the
+reified `RegExp.prototype.toString` closure body is a `null` PLACEHOLDER in
+`emitRegExpProtoMemberBody` (`RegExp.prototype.toString.call(/1/g)` read back
+`"null"` through the value). The six `statementList/eval-*-regexp-literal*`
+rows need both `gPO` and `toString` — fixing `gPO` alone would have flipped
+none of them.
+
+#### What landed (two NEW leaves; god-files carry call sites only)
+
+1. **`regexp-untyped-receiver.ts`** — B9's suggested narrow lever: when a
+   runtime lookup on a `$NativeRegExp` misses its own properties, answer from
+   the builtin method list. A `__extern_get` prologue (`ref.test
+   $NativeRegExp`, own carrier-bag entry still shadows, runs ahead of the
+   implicit `%Object.prototype%` consult — §10.1.8 order) answers
+   `exec|test|compile|toString` with the seeded companion value when the
+   module seeded that member (a replacement/`delete` stays observable), else
+   the identity-stable builtin singleton. A `__getPrototypeOf` arm answers the
+   lazy `%RegExp.prototype%` singleton — the carrier has no `[[Prototype]]`
+   slot, which is why the TYPED spelling already folds to that exact value.
+2. **`regexp-proto-to-string.ts`** — the §22.2.6.17 body (generic, no brand
+   check): `Type(R)` Object check, `ToString(Get(R,"source"))`,
+   `ToString(Get(R,"flags"))` through the coercion engine's spec ToString,
+   `"/" ++ … ++ "/" ++ …`.
+3. **Demand gate** (one cached AST walk per source file, `ctx.oracle`): an
+   identifier bound (initializer or plain `=`) to a regexp literal,
+   `[new] RegExp(…)` or `eval(<string>)` whose text parses to a regexp literal,
+   USED where the checker types it `any`/`unknown` as a non-call
+   `exec|test|compile` read, any `toString` spelling (incl. `String(x)`,
+   `x + …`, a template span), or a `getPrototypeOf` argument. Decided in the
+   PRE-SCAN (before any closure is minted, so the real `toString` body is chosen
+   before the RegExp companion seeder mints that member); closures minted at
+   module-init start; arms at finalize, next to the #6678 Date twin. A module
+   without demand emits exactly as before — including the placeholder
+   `toString` body.
+
+#### Measurements
+
+| set | rows | before | after | Δ |
+| --- | ---: | --- | --- | --- |
+| manifest `B-regexp-protocol.txt` (sha `f34bba06`), standalone | 147 | 134 pass / 13 fail / 0 CE (`.tmp/b10/bm-chunk-0*.log`) | **134** / 13 / 0 (`.tmp/b10/am-chunk-0*.log`) | 0 — the identical 13-row non-pass set as B9's; no row changed status |
+| `language/statementList/*regexp-literal*`, standalone | 16 | 10 pass / 6 fail (`.tmp/b10/bstmt-chunk-00.log`) | **16** / 0 (`.tmp/b10/astmt-chunk-00.log`) | **+6**: `eval-{block,class,fn}-regexp-literal{,-flags}` (the two `eval-class-*` are manifest `I-language-misc.txt` rows 88-89; the other four are in no manifest) |
+
+Target 1 (the method VALUE read) flips no corpus row: the syntactic superset
+below found no scored row that reads `exec|test|compile` as a value off an
+untyped RegExp binding; it is pinned inline and ships because the same arm is
+what makes the `toString` row family correct.
+
+#### Controls
+
+- **Reach, by a superset scan then bytes.** A syntactic superset of the demand
+  gate (types ignored), run over EVERY scored row's ASSEMBLED source (harness
+  included; `.tmp/b10/cand.mts`): **62 rows**. Only three harness files bind a
+  regexp source to a name (`nativeFunctionMatcher.js`, `temporalHelpers.js`,
+  `testIntl.js`), all as typed `const`s, and none uses them in a demand shape.
+- **Byte differential** (compile-only, primary + strict rerun, BOTH targets,
+  base = `.tmp/base`): the 62 candidates + the 16 statementList rows + 80
+  controls (10 rows each including `temporalHelpers`/`nativeFunctionMatcher`/
+  `regExpUtils`/`deepEqual`/`testAtomics`, 20 non-candidate B-manifest rows,
+  the 10 scored rows naming `RegExp.prototype.toString`) = 151 rows, 301
+  (row, target) pairs: **295 identical, 6 changed — all standalone, 0 host**;
+  the 6 are exactly the six eval rows (`.tmp/b10/chg-standalone.tsv`).
+- **Verdicts on every changed row**: base 0 pass / 6 fail → after **6 pass**.
+- **Zero pass→non-pass.**
+- **Byte identity** `website/playground/examples/**` + 3 benchmarks, both
+  targets: **32/32 identical** (`.tmp/b10/bytes-{base,after}.txt`).
+- `node scripts/equivalence-gate.mjs`: 22 failing / 1,720 passing = the 22
+  known, no new. `pnpm run check:ir-fallbacks`: OK.
+- **Pins**: `tests/issue-6651-b10-regexp-untyped-receiver.test.ts` (the 6 rows)
+  and `…-inline.test.ts` (3 programs: method read + identity + call; the three
+  ToString spellings + own-property shadowing and its `delete`; `gPO`) —
+  **9/9 red on the base tree** (`.tmp/b10/pin-ONBASE.log`, `pin3-ONBASE.log`),
+  green after. B-family and neighbour pins, one worker,
+  `VITEST_FORK_MAX_OLD_SPACE_SIZE=2048` (`.tmp/b10/pins-after.log`): B10 ×2,
+  B9 ×2, B8 ×2, B7 ×2, B6 ×2, B5 ×4, B4, B3, exec protocol,
+  `string-symbol-protocol`, `issue-3794`, `issue-6662`, `issue-6665`,
+  `issue-6677`, `issue-4556`, `issue-4176` all green (214/221); the 7 failures
+  are the `issue-3051.test.ts` host-lane cases, which fail identically on this
+  base tree (same 7 names, `.tmp/b10/pin2-ONBASE.log`).
+- Gates (bare): loc (grant above), func (grant above), coercion-sites,
+  oracle-ratchet, dead-exports, typecheck, biome lint, compiler-boundaries
+  inventory (two new leaves classified) — all exit 0; `LOC_GATE_BASE=732d9f75e6`
+  (origin/main at hand-back) loc/func re-runs exit 0. `origin/main` advanced
+  `f73a4bcd7d → 732d9f75e6` during the slice (#6218, #6219, #6220; D3's
+  `promise-class-receiver-drive.ts`, #6704's callable-property leaves, #5151);
+  The measurements above are against `ce1302df01`; see the re-verification
+  below for current main.
+
+#### Post-merge re-verification (origin/main `4351173919`, B9 + D3 landed)
+
+A coordinator run of main + B10 reported 4 of the 6 rows failing
+(`eval-{class,fn}-*`: `Object.getPrototypeOf(result)` → `null`). **Cause: a
+stale QuickJS adapter binary, not main.** The adapter cache key
+(`quickjs-eval-adapter-d4799bda84cfed0d.wasm`) hashes the adapter SOURCE only,
+not the compiler that compiles it, so a 2026-09-21 build (519,123 bytes) is
+served under the same key as today's (582,453 bytes). The old adapter does not
+hand an eval-produced class/function-context RegExp back as a `$NativeRegExp`
+the test module can `ref.test`, so no test-module arm can see it. Reproduced
+exactly on this branch by swapping that old binary in
+(`.tmp/b10/stmt16-stale.log`: the same 4 failures, same message); with an
+adapter rebuilt from main + B10 all 16 rows pass. The rebuilt adapter is
+byte-identical to the one every measurement above used, so B10 does not change
+the adapter. CI rebuilds the adapter per run (`test262-sharded.yml`,
+`build-quickjs-eval-provider.mjs`), so it is not exposed. Anyone measuring
+eval rows locally should delete `.test262-cache/quickjs-eval-adapter-*.wasm`
+after the compiler changes; the cache key missing the compiler is worth a fix of
+its own.
+
+Re-measured on the merged tree against a `git archive` of `4351173919`
+(`.tmp/b10/m2/`, same fresh adapter on both sides; source sha checked
+first→last on both trees):
+
+- the 16 statementList rows: base 10 pass / 6 fail → **16 / 0**, the same six
+  flips;
+- byte differential over the same 151 rows (301 row/target pairs): **295
+  identical, 6 changed — the six eval rows, standalone; 0 host**; zero
+  pass→non-pass;
+- 32/32 playground/benchmark binaries identical on both targets; equivalence
+  gate 22 = 22 known; `check:ir-fallbacks` OK;
+- pins: the 9 B10 cases red on the main base, green after; B-family and
+  neighbour pins 213/220 with only the 7 `issue-3051` host-lane failures, which
+  fail identically on the main base;
+- every gate re-run bare on the merged tree, incl. `LOC_GATE_BASE=4351173919`
+  loc/func: all exit 0. The B9 `loc-budget-allow` block was dropped in the merge
+  (main had removed it once B9 landed).
+
+#### Interpreter-lane gap (PR #6230 `quality`, 2026-09-28)
+
+CI's changed-root step runs `JS2WASM_EVAL_ENGINE=interpreter` with only the
+REFUSAL runtime-eval provider linked. There `eval-{class,fn}-regexp-literal{,-flags}`
+fail at the `eval(...)` call itself — `TypeError: dynamic code evaluation is not
+supported in this standalone build (no js2wasm:runtime-eval interpreter linked —
+tracking: #2928)` — before any RegExp exists, so no codegen change can make them
+pass on that lane; engine parity here is #2928's (a real eval engine on the
+interpreter lane), not B10's. `eval-block-*` passes on both lanes (`{}/1/;` is
+resolved without a runtime eval). Measured on this branch merged with `origin/main`
+`f874b9bd52`, with the refusal provider built exactly as CI builds it
+(`build:compiler-bundle` + `build-runtime-eval-provider.mjs --refusal-only`):
+all 16 statementList rows → 12 pass / 4 fail with that message
+(`.tmp/b10/s16-interp.log`). The pin is now engine-explicit: on the refusal
+lane each of the four rows is still asserted — `fail` AND the refusal
+message, so any other failure (the pre-B10 `getPrototypeOf` → `null`
+included) keeps it red; on the default (QuickJS) lane all six must pass.
+Measured: interpreter/refusal lane 6/6, default lane 6/6 + inline 3/3.
+
+Local-measurement trap found on the way: a locally built
+`scripts/compiler-bundle.mjs` (gitignored) changes the QuickJS adapter cache
+key the runner looks up (it folds in the bundle hash), so with a bundle present
+and no adapter built for it, the default lane silently loses its eval engine
+and the same four rows fail. Delete the bundle, or rebuild the adapter after
+building it.
+
+#### Recorded narrowings / found while probing
+
+- **The `toString` placeholder stays in every module WITHOUT demand.** The
+  member is minted in every module that seeds the RegExp companion, so a global
+  body change reaches that whole set; it is gated like the arms. Any other route
+  that CALLS the reified closure (`var t = RegExp.prototype.toString;
+  t.call(re)` in a typed file) still answers `null` — the next owner can drop
+  the gate once that set is measured.
+- `RegExp.prototype.toString.call(r)` (the STATIC spelling) answers `undefined`
+  on both trees, and a module-level `var r2; r2 = /1/g; r2.toString()` (typed by
+  flow) answers `"undefined"` on both trees — separate static lowerings, not
+  touched.
+- A value-extracted `test` closure's `.call` boxes its i32 result as a NUMBER
+  (`t.call(r, "abc") === true` is false; truthy) — the closure ABI, not this
+  slice; the inline pin asserts truthiness.
+- Evidence is by binding: a RegExp that reaches an untyped slot through a
+  parameter, a property, or a computed `eval` string is not demanded; only
+  literal keys are demand shapes (once a member is demanded, a runtime-keyed
+  `r[k]` read of it is answered too).
 
 ## Handoff — 2026-09-21 (round 1 closed, round 2 ready to dispatch)
 

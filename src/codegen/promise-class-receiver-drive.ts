@@ -94,6 +94,10 @@ import {
 import { armConstructIsConstructorGuard } from "./construct-is-constructor-guard.js";
 import { armExternF64ArgTypeGuard, armExternRefArgTypeGuard } from "./extern-arg-marshal.js";
 import { recordStandaloneRuntimeKeyClassMemberRead } from "./standalone-class-dyn-member.js";
+import { resolvePromiseSubclassName } from "./expressions/promise-subclass.js"; // (#6651 D4)
+import { noJsHost } from "./js-errors.js";
+import { promiseSubclassResolveFallbackInstrs } from "./promise-subclass-proto-link.js";
+import { shadowsGlobalValueName } from "./promise-class-receiver-settle.js";
 
 const EXTERNREF: ValType = { kind: "externref" };
 const I32: ValType = { kind: "i32" };
@@ -429,9 +433,10 @@ function ensureClassDriveRuntime(ctx: CodegenContext): ClassDriveRuntime | undef
 
 /**
  * The class `C` names, when the receiver is an identifier bound to a compiled class that does
- * not extend a builtin (a Promise subclass is #5197 G9, not this mechanism).
+ * not extend a builtin — or (#6651 D4 / #5197 G9) extends `Promise`, whose `<C>_new` builds the
+ * native `$Promise` carrier and so serves NewPromiseCapability(C) through the same construct call.
  */
-function resolveCompiledClassReceiver(ctx: CodegenContext, arg: ts.Expression): string | undefined {
+export function resolveCompiledClassReceiver(ctx: CodegenContext, arg: ts.Expression): string | undefined {
   if (!ts.isIdentifier(arg)) return undefined;
   const decl = ctx.oracle.valueDeclarationOf(arg);
   let node: ts.Node | undefined = decl;
@@ -444,7 +449,9 @@ function resolveCompiledClassReceiver(ctx: CodegenContext, arg: ts.Expression): 
     ctx.anonClassExprNames.get(node as ts.ClassLikeDeclaration) ??
     (node.name ? (ctx.classExprNameMap.get(node.name.text) ?? node.name.text) : undefined);
   if (name === undefined || !ctx.classSet.has(name)) return undefined;
-  // Transitively: a user class chain that reaches ANY builtin keeps its own path.
+  if (resolvePromiseSubclassName(ctx, name) !== undefined)
+    return noJsHost(ctx) && !shadowsGlobalValueName(arg) ? name : undefined;
+  // Transitively: a user class chain that reaches ANY other builtin keeps its own path.
   const seen = new Set<string>();
   for (let c: string | undefined = name; c !== undefined && !seen.has(c); c = ctx.classParentMap.get(c)) {
     seen.add(c);
@@ -455,7 +462,7 @@ function resolveCompiledClassReceiver(ctx: CodegenContext, arg: ts.Expression): 
 }
 
 /** Arm and reserve the one-argument native construct driver (the `new <value>(x)` prelude). */
-function reserveConstructDriver(ctx: CodegenContext, fctx: FunctionContext): number {
+export function reserveConstructDriver(ctx: CodegenContext, fctx: FunctionContext): number {
   ensureLateImport(ctx, "__extern_get", [EXTERNREF, EXTERNREF], [EXTERNREF]);
   ensureLateImport(ctx, "__object_create", [EXTERNREF], [EXTERNREF]);
   flushLateImportShifts(ctx, fctx);
@@ -497,6 +504,7 @@ function emitClassReceiverDrive(
   method: NativeCombinator,
   rt: ClassDriveRuntime,
   L: DriveLocals,
+  promiseRooted: boolean,
 ): void {
   const capability = ensureCustomCapabilityRuntime(ctx)!;
   const wrapperRoot = getFuncRefWrapperRootTypeIdx(ctx)!;
@@ -551,6 +559,9 @@ function emitClassReceiverDrive(
   );
 
   // ── GetPromiseResolve(C) — a throwing getter or a non-callable value rejects. ──
+  // (#6651 D4) A Promise subclass inherits `resolve` from `%Promise%`. Built after every
+  // registration above, so no later late-import shift can strand its baked indices.
+  const resolveFallback = promiseRooted ? (promiseSubclassResolveFallbackInstrs(ctx, fctx, L.resolveFn) ?? []) : [];
   fctx.body.push(
     buildTargetTaggedTry(
       ctx,
@@ -560,6 +571,7 @@ function emitClassReceiverDrive(
         ...stringConstantExternrefInstrs(ctx, "resolve"),
         { op: "call", funcIdx: fn("__extern_get") },
         { op: "local.set", index: L.resolveFn },
+        ...resolveFallback,
       ],
       catchToReject(),
     ),
@@ -963,6 +975,6 @@ export function tryEmitClassReceiverCombinatorCall(
   };
   pushExtern(ctorArg, L.ctor);
   pushExtern(expr.arguments[1], L.arg);
-  emitClassReceiverDrive(ctx, fctx, method, rt, L);
+  emitClassReceiverDrive(ctx, fctx, method, rt, L, resolvePromiseSubclassName(ctx, className) !== undefined);
   return EXTERNREF;
 }

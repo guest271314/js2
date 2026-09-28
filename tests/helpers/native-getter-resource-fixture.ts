@@ -1,10 +1,5 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
-import {
-  getterRequirements,
-  getterResolver,
-  freezeGetterInvocation,
-  fillActualGetterUnits,
-} from "./native-getter-invocation-fixture.js";
+import { getterRequirements, getterResolver } from "./native-getter-invocation-fixture.js";
 import type { PreparedIrProgram } from "../../src/ir/program/prepared-contracts.js";
 import { createEmptyModule } from "../../src/ir/types.js";
 import { PhysicalModuleReservations, type FunctionReservation } from "../../src/wasm/physical/module-reservations.js";
@@ -16,13 +11,11 @@ import { reserveNativeStringLiteralTypes } from "../../src/backend/wasmgc/resour
 import {
   planNativeStringValuePhysical,
   reserveNativeStringValueResources,
-  fillNativeStringValueResources,
   requireCompletedNativeStringValues,
 } from "../../src/backend/wasmgc/program/native-string-values.js";
 import {
   reserveNativeInvocationResources,
   nativeInvocationGetterDispatch,
-  fillNativeInvocationResources,
   requireCompletedNativeInvocation,
 } from "../../src/backend/wasmgc/resources/native-invocation.js";
 import { beginNativeSourceClosureEmission } from "../../src/ir/program-native-invocation.js";
@@ -120,8 +113,8 @@ export function getterResourceFixture(program: PreparedIrProgram) {
   };
 }
 
-/** Executes selected source bodies through C2; this does not implement public ordinary Get. */
-export function getterResourceRuntime(f: ReturnType<typeof getterResourceFixture>) {
+/** Reserve the real observer functions before the invocation transaction freezes. */
+export function reserveGetterResourceObservers(f: ReturnType<typeof getterResourceFixture>) {
   const use = f.invocation.getterUses[0]!,
     getter = f.access.getters[use.getterIndex]!;
   const shape = f.sourceOwner.types.shapes.find((row) => row.id === use.shapeId)!;
@@ -144,10 +137,14 @@ export function getterResourceRuntime(f: ReturnType<typeof getterResourceFixture
         })
       : undefined;
   const method = nativeInvocationGetterDispatch(f.tx, f.pack, f.access);
-  const callables = freezeGetterInvocation(f);
-  fillNativeStringValueResources(f.tx, f.resources);
-  fillNativeInvocationResources(f.tx, f.pack, callables, f.exception);
-  fillActualGetterUnits(f);
+  return { use, getter, shape, captures, make, get, invoke, method };
+}
+
+export function fillGetterResourceObservers(
+  f: ReturnType<typeof getterResourceFixture>,
+  observers: ReturnType<typeof reserveGetterResourceObservers>,
+): void {
+  const { use, getter, shape, captures, make, get, invoke, method } = observers;
   const resolver = getterResolver(f),
     emitter = new WasmGcEmitter(resolver),
     body: Instr[] = [];
@@ -175,6 +172,14 @@ export function getterResourceRuntime(f: ReturnType<typeof getterResourceFixture
       lowerIrFunctionBody(builder.finish(), resolver, emitter, wasmValueTypeConverter("wasmgc", resolver, "invoke")),
     );
   }
+}
+
+/** Completes and emits actual source-body dispatch; this does not implement public ordinary Get. */
+export function getterResourceRuntime(
+  f: ReturnType<typeof getterResourceFixture>,
+  observers: ReturnType<typeof reserveGetterResourceObservers>,
+) {
+  const { make, get, invoke } = observers;
   requireCompletedNativeInvocation(f.tx, f.pack);
   requireCompletedNativeStringValues(f.tx, f.resources);
   const booleans = f.resources.number!.booleans;

@@ -14799,3 +14799,28 @@ inventory. Format that file, verify parsed JSON is identical, and recheck
 format successfully. Preserve the original format-failure record. No source
 or test bytes changed. Final normal commit and push hooks remain required.
 Evidence: .tmp/boolean-getter/main-validation, main-quality and main-refresh.
+
+Boolean/getter PR6240 current-main repair (2026-09-28): integrate main6b69edbf
+without changing its ES2015 source or tests. Preserve every upstream inventory
+entry alongside both Boolean entries. The original CI failure is retained in
+.tmp/boolean-getter/main-refresh/ci-quality-failure.log: eight positive getter
+cases exceeded their35-second single-callback bound. Split their genuine
+prepare/reserve/authenticate/fill/lower/complete/emit lifecycle into named
+35-second setup hooks; retain all15 test rows (eight original/decoded execution
+cases and seven unchanged negatives), all assertions and actual providers.
+No production behavior, fixture expectation, or timeout bound is relaxed.
+The repair is frozen in .tmp/b-getter-ci-repair/freeze.json and awaits the
+current integrated-tree406-test validation and full normal delivery checks.
+This remains bounded getter resource evidence, not public Get or712 parity.
+
+The repaired integrated tree passed TS7 and406/406 tests across all four
+scoped suites, zero skipped/failed, with2,270 inputs unchanged throughout.
+All eight quality gates passed with2,225 unchanged inputs. The15-row getter
+suite retained all original/decoded positives and seven unchanged negatives.
+QuickJS adapter rebuild and canaries passed against2,017 unchanged source
+inputs using the verified external artifact through the supported override.
+The initial external-artifact build failed for missing clang-18; its complete
+log remains preserved separately from the successful retry. Evidence lives in
+.tmp/boolean-getter/second-validation, second-quality, second-provider and
+second-provider-retry. Normal commit/push hooks and protected main delivery
+remain required; no full Get,712 or migration completion is claimed.
