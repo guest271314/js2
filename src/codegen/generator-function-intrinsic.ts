@@ -214,6 +214,16 @@ export function isStaticSyncGeneratorFunctionValue(ctx: CodegenContext, expr: ts
   let e: ts.Expression = expr;
   while (ts.isParenthesizedExpression(e)) e = e.expression;
   if (ts.isFunctionExpression(e)) return isSyncGeneratorFunctionLike(e);
+  // (#6651 A7) `var g = function* () {}; Object.getPrototypeOf(g)` — a
+  // never-rebound binding whose initializer is a sync generator expression.
+  // A read written BEFORE that initializer may run before it (`undefined`, or
+  // a TDZ throw), so it is not claimed.
+  if (ts.isIdentifier(e)) {
+    let init = bindingIsSingleAssignment(ctx, e) ? ctx.oracle.variableInitializerOf(e) : undefined;
+    if (init !== undefined && (init.getSourceFile() !== e.getSourceFile() || init.end > e.pos)) init = undefined;
+    while (init !== undefined && ts.isParenthesizedExpression(init)) init = init.expression;
+    return init !== undefined && ts.isFunctionExpression(init) && isSyncGeneratorFunctionLike(init);
+  }
   if (!ts.isPropertyAccessExpression(e) || !ts.isIdentifier(e.expression) || !ts.isIdentifier(e.name)) return false;
   const holder = e.expression;
   const name = e.name.text;

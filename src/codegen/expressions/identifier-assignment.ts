@@ -7,6 +7,7 @@ import { allocLocal, getLocalType } from "../context/locals.js";
 import { localGlobalIdx } from "../registry/imports.js";
 import { coerceType, compileExpression, valTypesMatch } from "../shared.js";
 import { emitTdzCheckAtGlobal } from "../statements/tdz.js";
+import { isStrictContext } from "../helpers/is-strict-function.js";
 import { emitThrowTypeError, isConstIdentifierAssignmentTarget } from "./helpers.js";
 import {
   analyzeTdzAccess as analyzeIdentifierTdzAccess,
@@ -73,6 +74,39 @@ export function tryConstSet(
     fctx.body.push({ op: "unreachable" });
   }
   return isConst || hasTdzFlag;
+}
+
+/**
+ * (#6651 A7) `name = rhs` where `name` is a named function expression's OWN
+ * name: the binding §15.2.5 (and its generator/async twins) creates with
+ * `CreateImmutableBinding(name, false)`. §9.1.1.1.5 SetMutableBinding step 5
+ * ignores the write in sloppy code and throws a TypeError in strict code; the
+ * RHS is evaluated first either way (§13.15.2), and a sloppy write yields it.
+ * Returns `undefined` when `id` does not denote that binding.
+ *
+ * `readOnlyBindings` names the frames where the binding is live; the oracle
+ * confirms `id` still resolves to it, so a same-spelled block `let`/`const`,
+ * catch parameter or loop binding (the block-scope machinery gives it its own
+ * slot) is written normally instead of swallowed. An identifier the oracle
+ * cannot resolve (inline-compiled eval code) keeps the frame's answer.
+ */
+export function tryFunctionExpressionOwnNameWrite(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  id: ts.Identifier,
+  right: ts.Expression,
+): ValType | null | undefined {
+  if (!fctx.readOnlyBindings?.has(id.text)) return undefined;
+  const declaration = ctx.oracle.valueDeclarationOf(id);
+  const ownName =
+    declaration === undefined || (ts.isFunctionExpression(declaration) && declaration.name?.text === id.text);
+  if (!ownName) return undefined;
+  const rhsType = compileExpression(ctx, fctx, right);
+  if (!isStrictContext(id, ctx.inferModuleStrictArguments)) return rhsType;
+  if (rhsType) fctx.body.push({ op: "drop" });
+  emitThrowTypeError(ctx, fctx, "Assignment to constant variable.");
+  fctx.body.push({ op: "unreachable" });
+  return { kind: "f64" }; // unreachable, but the expression stack needs a type
 }
 
 /**
