@@ -144,6 +144,23 @@ export function nodeContainsYield(root: ts.Node): boolean {
 }
 
 /**
+ * (#6651 A10) A generator METHOD whose computed key holds a `yield` of the
+ * ENCLOSING generator: `function* g() { ({ *[yield]() {} }); }`. TypeScript's
+ * checker recurses without bound on a signature query for this method
+ * (checkYieldExpression → the method's contextual return type → the literal's
+ * contextual type → the same yield), so its callers must answer it
+ * syntactically instead of asking.
+ */
+export function isGeneratorMethodWithYieldKey(node: ts.Node): boolean {
+  return (
+    ts.isMethodDeclaration(node) &&
+    node.asteriskToken !== undefined &&
+    ts.isComputedPropertyName(node.name) &&
+    nodeContainsYield(node.name)
+  );
+}
+
+/**
  * (#6651 A5) True when a native inner generator answers a FORWARDED `.throw()`
  * / `.return()` the way the D2 close (`emitDelegateCloseForward`) models it:
  * the inner runs its finalizers and then completes (return) or re-throws

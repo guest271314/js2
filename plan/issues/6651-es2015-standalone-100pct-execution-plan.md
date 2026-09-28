@@ -10035,6 +10035,13 @@ Out of scope: `module-code/namespace/internals/` and `yield/from-with.js`
 (project-thread lane), `built-ins/GeneratorFunction/**` (A9, PR #6274), and the
 value-semantics rows left for A11. The A10 record lands under this heading.
 
+**Group (a) released — 2026-09-28**, same day, before any code. The leak is
+not generator lowering: the rows self-import their own module, and the
+non-generator twins leak identically (`eval-export-dflt-expr-fn-named` →
+`env::f`). The cause is module linkage plus import-binding immutability, which
+belongs to cluster I (project-thread lane). The finding is recorded in the A10
+record below so the owner can act without redoing it.
+
 ## Handoff — 2026-09-21 (round 1 closed, round 2 ready to dispatch)
 
 ### 2026-09-28 — Cluster H, slice H1

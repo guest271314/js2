@@ -4603,6 +4603,27 @@ function ensureRegisteredNativeGenerator(ctx: CodegenContext, name: string): Nat
   return null;
 }
 
+/**
+ * (#6651 A10, #2170) The instruction that turns a non-null `yield*` delegation
+ * slot into the inner's `(ref $GenState)`. A slot is typed `ref null $Inner`
+ * only when the inner was registered before the outer; an inner declared LATER
+ * in the source (`function* g() { yield* g2(); } function* g2() {}`) leaves the
+ * slot `eqref`, and `ref.as_non_null` then yields a `(ref eq)` the inner's
+ * locals reject — the module failed validation. Cast in that case only, so
+ * every typed slot keeps its bytes.
+ */
+function delegationSlotToInner(
+  ctx: CodegenContext,
+  info: NativeGeneratorInfo,
+  slotFieldIdx: number,
+  inner: NativeGeneratorInfo,
+): Instr {
+  const stateFields = ctx.structFields.get(ctx.typeIdxToStructName.get(info.stateTypeIdx) ?? "");
+  return stateFields?.[slotFieldIdx]?.type.kind === "eqref"
+    ? { op: "ref.cast", typeIdx: inner.stateTypeIdx }
+    : { op: "ref.as_non_null" };
+}
+
 // (#2171/#2979) The default `value` for a done/empty result. The old comment
 // claimed "the consumer never reads value when done=1" — FALSE: JS reads
 // `.value` off a done result routinely, and it must be `undefined`
@@ -5077,7 +5098,7 @@ function emitDelegateCloseForward(
           then: [
             { op: "local.get", index: selfLocal },
             { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: closeSlot.fieldIdx },
-            { op: "ref.as_non_null" },
+            delegationSlotToInner(ctx, info, closeSlot.fieldIdx, closeInner),
             { op: "local.set", index: closeDelegLocal },
             // inner.mode = outer.mode; inner.abrupt = payload; inner.error = outer.error
             { op: "local.get", index: closeDelegLocal },
@@ -5728,7 +5749,7 @@ function compileState(
       // deleg (non-null) → local; drive its resume once.
       body.push({ op: "local.get", index: selfLocal });
       body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: slot.fieldIdx });
-      body.push({ op: "ref.as_non_null" });
+      body.push(delegationSlotToInner(ctx, info, slot.fieldIdx, innerInfo));
       body.push({ op: "local.set", index: delegLocal });
       body.push({ op: "local.get", index: delegLocal });
       body.push({ op: "call", funcIdx: innerResumeIdx });
