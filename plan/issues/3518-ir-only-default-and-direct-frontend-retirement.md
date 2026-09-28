@@ -14444,3 +14444,243 @@ retain unchanged source/test inputs. Eight quality gates passed with2,214
 unchanged inputs. Evidence: .tmp/ir6205-refresh/regexp-main-runtime,
 regexp-main-quality, and regexp-corpus. No legacy retirement or default
 change. Main delivery and merge-group conformance remain unverified.
+
+
+## Claimed follow-up — builtin metadata preservation (2026-09-28)
+
+Claim `3518:builtin-metadata-preservation-20260928` is held by
+`ttraenkler/codex-metadata-preservation-20260928` on branch
+`codex/3518-metadata-preservation-20260928`, isolated from armed PR6205.
+This repairs the 29/100 closure preservation failures already reproduced on
+exact parent 90a; it adds no runtime migration scope and does not retire code.
+
+Implementation plan: authenticate the exact two-line Object.create metadata
+addition at e765c7fb29449ffefa99784b78db766c8555c936 against its actual parent
+36f92e89171e7f0735e8ab59a71bd9c8757302d9. Add a dedicated fixture/helper/test,
+then compose its inverse only in the initial metadata reader in
+`tests/helpers/closure-source-composition.ts`, before existing mutations and
+unchanged donor extraction. Require fixed fixture provenance/digest, unique
+nonempty spans, exact UTF-16 offsets, full input/output hashes and reciprocal
+replay. Reject missing/duplicate/tampered/displaced spans, outside edits,
+wrong direction, unknown paths and receipt tampering. No whole-file substitute,
+source fallback, fixture rebaseline or assertion removal is permitted.
+
+Keep the original 100-row native closure suite and both historical fixtures
+byte-identical. Validate the full original suite, full closure composition
+suite and full new receipt suite, then TS7 and scoped quality gates with
+unchanged-input evidence. Preserve the old 71/100 result. Sign with normal hooks;
+publish separately only after verified delivery of its parent PR6205.
+
+
+Also run the unchanged complete Object.create-as-value regression suite from
+main, comparing actual current compiled execution against its Node oracle.
+This independently checks the runtime behavior behind the metadata addition;
+the historical reader view must not suppress the current implementation.
+
+
+Validation on the frozen five-file follow-up passes TS7 and all 156/156
+assertions across four complete suites: unchanged native closure resources
+100/100, unchanged closure composition 27/27, new exact receipt controls
+28/28, and actual Object.create-as-value execution 1/1 against Node.
+There are no failed or skipped rows, and all 2,217 measured inputs stayed
+unchanged. All eight quality gates pass with 2,213 unchanged inputs.
+Runs used observed nice 10 and one 4 GB fork. Root independently verified
+actual Git parents/blobs, both UTF-16 offsets, unique spans, complete hashes
+and reciprocal replay; the four original suite/fixture hashes remain fixed.
+No production source or script changed. Original 71/100 parent evidence is
+retained; these are measured corrected results, not a rebaseline. Reports live
+in `.tmp/metadata-validation` and `.tmp/metadata-quality` in the isolated
+metadata-preservation worktree. Main delivery remains pending and the claim
+stays active until verified publication and merge.
+
+
+### Parent delivery and metadata refresh (2026-09-28)
+
+PR6205 is delivered on upstream main as
+45ce4a8e207742df5ca3888c0a458e8a48ee1655, with exact published head
+cbf0b97309cb9421bfae574b980b8e7103550414 as its second parent. All 102
+merge-group conformance shards, the final regression gate, CI and differential
+tests passed on that exact merge commit. The IR/backend/runtime source paths
+are byte-identical to the published head. Its delivery claim alone is complete;
+the IR migration and this metadata-preservation claim remain open.
+
+Fresh ls-remote verified this exact main before integration into the metadata
+branch. The sole conflict was this issue file: retain the full upstream record
+and the full local follow-up record. No source or regression test was dropped.
+Validate the four complete metadata/closure/Object.create suites again on this
+integrated tree, then commit through normal hooks and publish through the fork.
+The earlier 156/156 evidence belongs to the pre-refresh tree until rerun.
+
+The integrated45ce tree passes TS7 and all156/156 assertions across the four
+complete suites, with no failures/skips and2,219 unchanged inputs. All eight
+quality gates pass with2,215 unchanged inputs. Evidence is retained in
+.tmp/metadata-main-validation and .tmp/metadata-main-quality.
+
+The fresh pre-publication check then found main41be7d9be9240678bf8df71192f853d9d526b73f.
+Its sole additional commit refreshes16 report/baseline/documentation files,
+with no compiler or test changes. Preserve this verified45ce merge, then
+integrate41be and recheck the changed quality baselines before publication.
+
+The signed45ce integration is0ef3e2ed046c2fa3a7308f883e292902bfea76a3.
+Its normal hooks completed, but the inherited B9 corpus suite skipped three
+rows because this worktree lacked harness/corpus inputs. Those were not
+counted as passes. Provisioned all44 harness files and the three exact rows
+from pinned test262 Git objects atb363f29d3c43c626dc852744ad64a0b48a003693;
+all47 files have recorded blob/SHA256 provenance and no existing file was
+overwritten. The subsequent full five-suite run on the41be integration passed
+159/159, zero skipped/failed, with2,267 unchanged inputs; TS7 passed. Eight
+quality gates passed with2,215 unchanged inputs. Source, scripts and workflows
+match41be exactly; the PR remains the original five-file metadata repair.
+Evidence: .tmp/metadata-final-validation, .tmp/metadata-final-quality, and
+.tmp/metadata-pinned-corpus/provenance.json. Publish through the fork and
+protected queue; this follow-up is not delivered until main is verified.
+
+
+## Claimed continuation — prototype-chain native bodies (2026-09-28)
+
+Claim `3518:prototype-chain-native-bodies-delivery-20260928` is held by
+`ttraenkler/codex-prototype-chain-delivery-20260928` on isolated branch
+`codex/3518-prototype-chain-delivery-20260928`, based on published 25f4ec456c.
+Recover and review the existing prototype-chain-bodies draft before writing
+replacement code. Preserve its original failures and all older worktrees.
+Root owns integration and validation; the draft audit is read-only until its
+exact source/test scope and current-main composition are established.
+
+The current public consumer still refuses unmaterialized ordinary callable
+providers. Native object lookup owns hash/key equality/find/lookup/has only;
+it is not a public Get implementation, and status2 is not an absent property.
+Native prototype requirements are source provenance only. Default creation
+still requires its real implicit-prototype companion. The continuation must
+preserve these honest refusals until the actual required owners are complete.
+
+The original unmodified getter/Number fixture remains the full integration
+target (SHA256 c0550b99175c0eb61afa7d5d110a287f3fe90e9fc8e581c6d58a19fe0a971ba9,
+expected result712): valueOf getter once, returned function once, toString
+not invoked. Pure body extraction is a prerequisite, not proof of this target.
+Complete public Get/Has must preserve lookup cursor versus original receiver,
+real prototype fallback, and no getter invocation by Has. Constructors/member
+providers, dependency graph reservation/fill, Number-owned Get demands and
+canonical physical ABI wiring remain required. Keep legacy operational and
+retain its comparison behavior; do not retire or change defaults.
+
+
+The draft audit confirms six reusable files are still at their frozen hashes:
+legacy prototype adapter, new pure prototype-chain body builder, its exact
+extraction receipt/helper, and full preservation/execution suites. The current
+25f adapter matches the draft donor byte for byte. Port those six files exactly;
+merge only this issue, the existing boundary test's native entry, and the policy
+row/floor. Keep all 1,657 current policy rows, add the one new native leaf and
+raise native floor82 to83 while retaining backend floor37.
+
+An open-PR overlap check found only the older Deno checkpoint PR5784: its
+adapter change adds fillErrorPrototypeArms at the start of fillObjectProtoSingleton.
+Keep that future join visible; do not incorporate or overwrite the separate
+Deno work. The body extraction must leave that function's implementation
+outside its four authorized extraction spans.
+
+The original draft measured 27/27 preservation and349/349 boundary checks;
+its first six execution failures were missing global fills in the test owner.
+The corrected fixture passed6/6 and retains original failed bytes. Its legacy
+cohort remains29/42 with two failures and11 skips: missing QuickJS artifact,
+unexpected success of an it.fails prototype-call case, and missing test262
+harness. Its prepared quality runner never ran; its legacy runner's hardcoded
+TS7 field is not evidence. Preserve all original logs and measure this new base.
+
+Current validation plan: TS7 plus complete preservation/execution/boundary
+suites. Supply verified pinned test262 harness and authenticated QuickJS
+artifact for the unchanged four legacy suites. Compare unexpected it.fails
+success against exact published parent before considering an assertion repair;
+never count missing prerequisites or skipped rows as passing. Required quality
+gates and full normal hooks remain mandatory before publication. This stage
+supplies real reusable chain-body construction, not a finished public Get path.
+
+Exact-parent control on 25f4ec456c1c609629e046ab0f920dcbc8adee9a reproduced
+the stale expected-failure marker in the original prototype-call test: its
+unchanged assertion returns 1, so Vitest reports "Expect test to fail". The
+selected control retained 2,211 unchanged inputs (19 other rows were filtered,
+not validated). Preserve the original test and terminal record; change only
+this case from it.fails to it and correct its stale comment. The assertion and
+source program remain unchanged. This is a pre-existing test expectation repair,
+not a behavior improvement credited to the extraction.
+
+Current-base validation: TS7 passed with 2,265 unchanged inputs. The first
+complete three-suite run passed 381/382: all 27 preservation and six Wasm
+execution cases passed; one boundary assertion expected the newly appended
+chain owner before the existing seeder owner. Preserve the original failure
+in .tmp/prototype-validation-first. Correct only the assertion ordering to
+retain the historical policy order; the targeted rerun passed 1/1 with 348
+other boundary rows filtered, not retested. No production bytes changed after
+the full run. Quality checks and prerequisite-backed legacy validation are
+still outstanding, so this increment is not ready for publication.
+
+Legacy dependency validation now uses all 44 pinned harness files and a
+new canary-verified QuickJS adapter built from the frozen compiler sources.
+The initial corrected-environment run passed34/35 across three suites; an
+incorrect short filename omitted the class suite, so that run is not four-suite
+evidence. The actual class-suite filename was then run separately; retain
+its terminal/result record in .tmp/prototype-class-check. The inherited-in
+residual unexpectedly passes on both candidate and exact25f parent with
+byte-identical harness inputs; both failure records remain preserved.
+
+Ownership audit found claims held by ttraenkler/dev-4643 and
+ttraenkler/claude-es5-standalone for the affected historical test issues.
+Leave the 4643 test untouched. Withdraw this session's local 4637 marker repair
+from deliverable files until ownership is reconciled, preserving its proposed
+bytes and measured20/20 result in local artifacts. No claims were stolen or
+released. Current original-suite expectations therefore retain two proven
+pre-existing failures; do not claim the current legacy suite is green.
+
+The previously omitted class collision suite passed8/8 (no skipped rows),
+with2,267 unchanged inputs. All eight scoped quality gates passed: format,
+lint, LOC, function budget, coercion, oracle, compiler boundary inventory and
+legacy reachability, with2,217 unchanged inputs. Evidence lives under
+.tmp/prototype-class-check and .tmp/prototype-quality. An existing native
+subagent is investigating the two historical claims read-only; do not infer
+abandonment from claim age or take ownership without reconciliation.
+
+
+### Prototype-chain delivery refresh (2026-09-28)
+
+PR6205 is verified delivered at45ce4a8e with102 merge-group conformance shards,
+CI, differential and regression gates passed. Fresh main is3eb7ae5da3951641b97c1af2e9fc27a0c7c41435.
+Integrate it into signed prototype checkpoint4914b413; preserve both complete
+issue append records. The boundary inventory merges automatically and must
+retain every upstream entry plus the extracted prototype-chain module.
+Keep the six implementation/fixture/test files byte-identical to4914; run the
+complete execution, preservation and boundary suites on the integrated tree,
+then the quality gates. Historical4637/4643 tests remain unchanged under their
+existing claims. This is preparation for protected delivery, not main delivery.
+
+Integrated-tree validation passed TS7 and all382/382 rows across the three
+complete execution, preservation and boundary suites, with zero skipped or
+failed rows and2,267 unchanged inputs. All eight scoped quality gates passed
+with2,219 unchanged inputs. The inventory retains all1,659 upstream entries
+byte-for-byte and adds only the prototype-chain runtime module. The six
+implementation/fixture/test files remain byte-identical to4914b413. Evidence:
+.tmp/prototype-main-validation and .tmp/prototype-main-quality. Full commit
+hooks and protected upstream delivery are still required. Existing historical
+legacy-test expectation failures remain explicitly outside this green result.
+
+Prototype PR6237 refresh after metadata delivery: integrate verified main
+1032526d, preserving the full delivered metadata record and this increment's
+record. Main's intervening npm-report refresh changes no compiler inputs.
+Keep all prototype source, fixtures and tests unchanged; run normal commit
+and push gates before updating the existing PR, then verify queue admission
+for the new exact head. No main delivery is claimed for this increment yet.
+
+Prototype PR6237 second integration (2026-09-28): main6b69edbf delivered
+the parallel ES2015 Promise-subclass/RegExp changes. Preserve all of those
+source/test changes and every upstream inventory entry; add only the existing
+prototype runtime entry and its declared module floor. Seven prototype
+implementation/test files remain byte-identical to2da72f87. Revalidate the
+combined tree before updating the existing PR; do not rewrite the ES2015 fixes
+or use the former green head as evidence for this new integration.
+
+The second integrated tree passed TS7 and382/382 scoped tests (zero skipped),
+with2,273 unchanged inputs; all eight scoped quality gates passed. The current
+QuickJS provider rebuilt and passed its execution canaries against2,016 pinned
+source inputs. Six inherited B10 corpus rows were provisioned from repository
+pin b363f29d without overwriting existing corpus files. Full normal hooks and
+protected delivery remain required; this is not a full migration parity claim.
+Evidence: .tmp/prototype-second-validation, .tmp/prototype-second-quality,
+and .tmp/prototype-second-provider.

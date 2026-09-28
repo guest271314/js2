@@ -918,6 +918,7 @@ describe("semantic verification and provider ownership boundary", () => {
           "src/runtime/wasmgc/values/prototype-singleton-bodies.ts",
           "src/runtime/wasmgc/values/own-property-bodies.ts",
           "src/runtime/wasmgc/values/prototype-seeder-bodies.ts",
+          "src/runtime/wasmgc/values/prototype-chain-bodies.ts",
         );
       if (id === "runtime-contracts")
         additions.push("src/runtime/contracts/builtin-brands.ts", "src/runtime/contracts/collection-kind.ts");
