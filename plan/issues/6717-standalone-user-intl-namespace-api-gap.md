@@ -68,8 +68,10 @@ The two preserved passes are:
 - `test/intl402/DisplayNames/ctor-custom-get-prototype-poison-throws.js`
 - `test/intl402/Segmenter/ctor-custom-get-prototype-poison-throws.js`
 
-They are regression controls for abrupt custom-`newTarget` behavior, not proof
-of broad DisplayNames or Segmenter support. The two preserved compile errors
+They are provisional regression controls for abrupt custom-`newTarget`
+behavior, pending target-evaluation and invalid-target ordering proof; they
+are not proof of broad DisplayNames or Segmenter support. The two preserved
+compile errors
 are both standalone host-import leaks:
 
 - `test/intl402/NumberFormat/prototype/format/value-tonumber.js` emits
@@ -107,6 +109,87 @@ Source inspection supports several separate hypotheses that must be tested:
    residuals. The 72 non-passes must not be labelled one root cause before
    representative reductions establish it.
 
+## Source audit: the two `NumberFormat` host-import routes
+
+This read-only audit is pinned to compiler revision
+`5bfc069422c7cece3e7f19f84e7ce3e51be2269c` and Test262 corpus revision
+`b363f29d3c43c626dc852744ad64a0b48a003693`. It isolates only the two
+measured `NumberFormat` compile errors; it is not emitted-Wasm or runtime
+proof for those rows, and it does not attribute the other 70 non-passes to
+this mechanism.
+
+The untouched upstream sources are:
+
+- `test/intl402/NumberFormat/prototype/format/value-tonumber.js`, SHA-256
+  `ecf84de483d81e5ccef5145c4065ceb2d183fc72d54d1781910c52de5b86c78f`;
+- `test/intl402/NumberFormat/prototype/formatToParts/value-tonumber.js`,
+  SHA-256
+  `ec2d2f5eb7d46b32eeb69ce2ea8eaf22a6e71545bd80b33dbd8fff6af8b428fe`.
+
+Both construct the default formatter and require real `ToNumber` behavior for
+`undefined`, null, booleans, and numeric/non-numeric strings; the `format`
+original additionally covers both infinities. An own `Symbol.toPrimitive`
+observes exactly one `"number"` hint, and a Symbol input throws `TypeError` in
+both originals. The `formatToParts` original additionally compares the length
+and every `type` and `value` of the returned part records. A string-only
+fallback, a host facade, or a direct-call-only special case cannot meet that
+contract.
+
+### Current source route
+
+- `src/codegen/extern-declarations.ts` registers `NumberFormat` unconditionally
+  as the `Intl_NumberFormat` extern class, with `format`, `formatToParts`, and
+  `resolvedOptions` members.
+- `src/codegen/registry/imports.ts`'s `collectUsedExternImports` registers
+  `Intl_NumberFormat_new` for the typed new-expression and registers
+  `Intl_NumberFormat_format` or `Intl_NumberFormat_formatToParts` for the
+  property-call before expression lowering. This is the import-policy source
+  of both compile errors.
+- `src/codegen/expressions/new-super.ts`'s generic extern-constructor arm then
+  calls `<importPrefix>_new`; `src/codegen/expressions/extern.ts`'s
+  `compileExternMethodCall` generic fallback calls
+  `<importPrefix>_<method>`. Changing only either final emitter would leave
+  collection and lowering out of agreement.
+- `src/codegen/expressions/identifiers.ts` materializes the ambient `Intl`
+  namespace from `globalThis` only on the JS-host lane. Standalone leaves its
+  user-global path at the null default. The typed constructor route and the
+  user-global route are therefore separate obligations.
+- `src/runtime.ts` maps the same constructor to the host's
+  `Intl.NumberFormat` in its host constructor table. That is a host bridge,
+  not an available standalone provider. Adding `NumberFormat` to
+  `new-intl-host-bridge.ts` would merely turn the current compile error into a
+  deliberate throw, which is not an implementation of this issue.
+
+### Actual reusable substrate, and what is absent
+
+The repository does have host-free mechanisms that a later design may use:
+
+- `src/codegen/standalone-global-object-carriers.ts` and
+  `src/codegen/array-object-proto.ts` seed and read the one native
+  `globalThis` object; `src/codegen/builtin-static-globals.ts` and the object
+  runtime can construct identity-stable namespace objects and descriptor-backed
+  properties. They do not currently model an `Intl` namespace or a
+  constructor-valued `Intl.NumberFormat` property.
+- Native Map/RegExp paths demonstrate the required paired pattern: suppress an
+  extern import only when a corresponding native constructor and member
+  lowering claims the same expression. They are routing examples, not an Intl
+  implementation.
+- `src/codegen/coercion-engine.ts`'s `emitToNumber` and
+  `src/codegen/tonumber-fast-paths.ts`'s `emitStandaloneObjectToNumber` are
+  existing standalone coercion seams. A later formatter path must prove that
+  its receiver/value representations actually take the correct one; it must
+  not duplicate a partial conversion.
+- `src/codegen/number-format-native.ts` supplies decimal formatting for
+  `Number.prototype` methods. It has no ECMA-402 locale negotiation,
+  numbering-system data, `Intl.NumberFormat` object model, or parts builder,
+  so it can at most be a low-level decimal dependency.
+
+No `Intl` semantic capability, CLDR/ICU/locale-data package, or
+`Intl.NumberFormat` provider was found in the runtime-contract and IR-provider
+paths. The QuickJS evaluation provider and the provider-local Temporal
+DateTimeFormat shim remain evaluator/provider mechanisms, not compiled
+user-visible `Intl` support.
+
 ## Proof gate before architecture selection
 
 ### Source-only audit of the two passing poison-prototype rows
@@ -136,12 +219,13 @@ Relevant seams are `call-namespace-static.ts` lines 2315–2527,
 `declarations/import-collector.ts` lines 1470–1488. These pointers describe the
 pinned revision, not stable line numbers across future rebases.
 
-Before relying on these two passes as positive controls, capture the actual
+Before relying on these two passes as regression controls, capture the actual
 emitted target route and pair them with observable target-evaluation and
-invalid-target controls. Keep the original expected exceptions unchanged;
-never manufacture a constructor or suppress the getter to match this
-hypothesis. This audit neither changes the measured 2/74 pass count nor
-attributes the other 72 non-passes to this route.
+invalid-target controls. Until that ordering proof exists, they remain
+provisional. Keep the original expected exceptions unchanged; never
+manufacture a constructor or suppress the getter to match this hypothesis.
+This audit neither changes the measured 2/74 pass count nor attributes the
+other 70 non-passes to this route.
 
 No production change begins until the following evidence is captured against
 the current pinned candidate and a declared baseline. Each reduction uses the
@@ -162,8 +246,9 @@ makes the same observable contract explicit.
    Capture the import list and the codegen route separately from runtime
    behavior; no compile error may be converted into an exclusion or hidden
    warning.
-4. Keep both currently passing custom-get-prototype-poison originals as
-   positive regression controls. Their abrupt `Proxy` behavior must continue
+4. Retain both currently passing custom-get-prototype-poison originals as
+   provisional regression controls, pending the target-evaluation and
+   invalid-target ordering proof. Their abrupt `Proxy` behavior must continue
    to pass after a real namespace/API is introduced.
 5. Add only after the four originals are characterized: a small standalone
    user-source control for `typeof Intl`, global identity through
@@ -175,6 +260,28 @@ Every proof run must use an independently derived exact expected set and
 preserve registered, started, settled, and canonical-verdict completeness. A
 passing focused reduction is necessary evidence, not a reason to omit the
 full 74-row rerun or the final 11,778-row completion run.
+
+### Exact original-source `NumberFormat` proof gate
+
+Before a production route is selected, run the two source hashes above as the
+only paths in the maintained dynamic Test262 chunk with the standalone target.
+The verdict-bearing path must keep the literal original harness assembly and
+untouched upstream body; `wrapTest()` is a transformed diagnostic helper and
+must not replace that verdict. Record the physical corpus revision, original
+source hashes, harness assembly identity, command, compiler/provider artifact
+identities, JSONL, completion receipt, and terminal exit.
+
+Pair that maintained outcome with a diagnostic compilation of the same
+`assembleOriginalHarness(...).primary.source` and the runner's compile options,
+recording `result.imports` and, when a binary is available,
+`WebAssembly.Module.imports`. The diagnostic is for attribution only; it does
+not replace the maintained verdict. The baseline is expected to retain the
+named `env::Intl_NumberFormat_*` imports and compile-error classification, not
+to pass. A candidate must retain the exact source/harness/configuration,
+remove every prohibited `Intl`/global import, and then demonstrate the original
+runtime contract. The two existing poison-prototype rows remain separate,
+provisional regression controls pending their ordering proof; no NumberFormat
+result licenses a claim about them.
 
 ## Architecture decision requirements
 
@@ -197,6 +304,45 @@ or instance methods on a separate host-import route is incomplete. Conversely,
 an implementation for one table-free DateTimeFormat scenario must not claim
 general Intl coverage without its specified data and semantic surface.
 
+## Proposed implementation stages, pending architecture and ownership clearance
+
+These are source-grounded boundaries for a future implementation issue, not a
+selected design or a production-file claim.
+
+1. **Data and semantic architecture.** Select, version, license, package, and
+   budget the actual locale and numbering data needed by the user-visible
+   surface. There is no existing native Intl provider to wire in. The complete
+   goal remains normal user-visible ECMA-402 semantics; a narrowly proven
+   interim behavior can be recorded as evidence for named inputs, but cannot
+   redefine issue completion, remove rows from the expected set, or be an
+   all-throw placeholder API.
+2. **One realm-owned namespace.** A shared-intrinsics owner would need a
+   dedicated `Intl` namespace builder and coordinated changes around
+   `compileIdentifierCore`, `emitBuiltinNamespaceObject`, and
+   `appendStandaloneGlobalNamespaceSeeds`. The direct identifier and
+   `globalThis.Intl` must expose the same native object with ordinary property
+   descriptors and shadowing behavior; a second look-alike object would break
+   identity.
+3. **One paired native NumberFormat routing boundary.** The owner of
+   `extern-declarations.ts`, `collectUsedExternImports`,
+   `compileNewExpression`, and `compileExternMethodCall` must use one
+   capability predicate. It may skip `Intl_NumberFormat_*` collection only
+   after the native constructor and every claimed member route exist. The
+   JS-host extern route remains intact, and an unclaimed shape must not quietly
+   fall through after its import was suppressed.
+4. **Branded formatter semantics.** A dedicated native formatter module/runtime
+   would own instance state, constructor and prototype identity, `format`'s
+   observable callable/property behavior, `formatToParts` arrays of actual
+   `{ type, value }` records, `resolvedOptions`, data-driven formatting, brand
+   checks, and canonical `ToNumber`/Symbol errors. Existing object and numeric
+   helpers are substrate only; they do not supply these semantics.
+5. **Proof and rollout.** First run the exact two-row proof gate, then retain
+   the poison-prototype rows as provisional regression controls pending their
+   target-evaluation and invalid-target ordering proof, and characterize
+   additional original rows. A successful slice remains partial evidence until
+   the frozen 74-row manifest and the unchanged 11,778-path bar are rerun with
+   complete accounting.
+
 ## Data, provider, and ABI constraints
 
 Intl behavior requires an explicit data plan, not an assumption that a QuickJS
@@ -208,9 +354,9 @@ implementation, document:
   API needs;
 - data provenance, license, versioning, deterministic packaging, artifact-size
   budget, cache-key/ABI impact, and the policy for unsupported data;
-- whether a standards-compatible restricted surface can meet the original
-  controls or must refuse honestly, without replacing correct semantics with a
-  broad success claim; and
+- how any interim, exactly characterized behavior is kept explicitly partial:
+  it may not shrink the expected set, stand in for the full ECMA-402 goal, or
+  replace missing semantics with a broad success claim; and
 - how intrinsic-like objects are allocated, branded, attached to the user
   global, and isolated across realms without leaking host references.
 
@@ -237,8 +383,10 @@ compiler/test slot before executing reductions or census runs.
 ## Acceptance for a later implementation slice
 
 - [ ] Baseline and candidate evidence covers the four original non-pass
-      controls and the two existing passing poison-prototype controls, with
-      source hashes, commands, imports, and exact outcomes retained.
+      controls and the two existing passing poison-prototype rows as
+      provisional regression controls, with target-evaluation and
+      invalid-target ordering proof plus source hashes, commands, imports, and
+      exact outcomes retained.
 - [ ] The selected surface gives normal observable semantics for the proven
       API contract, including user-global identity/shadowing, constructor and
       prototype behavior, proxy/error order, and realm-sensitive behavior
@@ -252,6 +400,9 @@ compiler/test slot before executing reductions or census runs.
 - [ ] A final candidate is measured against the unchanged 11,778-path frozen
       manifest. Discovery restoration and any subset improvement alone do not
       satisfy the ES2015 closeout goal.
+- [ ] No intermediate `NumberFormat` or other Intl slice is represented as
+      completion of this issue. Full user-visible ECMA-402 semantics and its
+      required data remain the completion target.
 
 ## Coordination receipt
 
