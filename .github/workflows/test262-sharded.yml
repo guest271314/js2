@@ -1895,10 +1895,11 @@ jobs:
     #
     # With the queue serialized, the matrix instead uses 102 of the 120
     # four-core runners, split by the MEASURED per-lane work ratio — currently
-    # js-host=52 and standalone=50 at a 1.03:1 ratio (#4441, re-derived from
-    # merge_group runs 31870031833/31872537807/31873778381 on 2026-08-15).
-    # That ratio has drifted at every measurement (2.13 -> 1.835 -> 1.31 ->
-    # 1.03), each time leaving one lane the long pole, so the live numbers and
+    # js-host=20 and standalone=82 at a 0.215:1 ratio (re-derived 2026-09-28
+    # from six merge_group runs after the #3451 linked-harness flip made the
+    # js-host lane ~4x cheaper). That ratio has drifted at every measurement
+    # (2.13 -> 1.835 -> 1.31 -> 1.03 -> 0.215), each time leaving one lane the
+    # long pole, so the live numbers and
     # the re-derivation procedure live in scripts/gen-test262-mg-matrix.mjs,
     # which is the single source of truth for the split. The remaining 18
     # runners cover the overlapping CI/equivalence/differential/gate jobs —
@@ -2276,9 +2277,9 @@ jobs:
         if: env.HOST_RAN == 'true'
         env:
           # Static push/dispatch matrices have 57 shards; the capacity-sized
-          # merge_group matrix keeps 52 js-host shards. Missing artifact
+          # merge_group matrix keeps 20 js-host shards. Missing artifact
           # directories must fail the aggregate, not disappear in `find`.
-          EXPECTED_SHARDS: ${{ github.event_name == 'merge_group' && '52' || '57' }}
+          EXPECTED_SHARDS: ${{ github.event_name == 'merge_group' && '20' || '57' }}
         run: |
           mapfile -d '' manifests < <(find shard-artifacts/test262-js-host-shard-* -type f -name 'test262-results-*.shard-*.complete.json' -print0 | sort -z)
           manifest_args=()
@@ -2292,8 +2293,8 @@ jobs:
         if: env.STANDALONE_RAN == 'true'
         env:
           # Static push/dispatch matrices have 57 shards; the capacity-sized
-          # merge_group matrix keeps 50 standalone shards.
-          EXPECTED_SHARDS: ${{ github.event_name == 'merge_group' && '50' || '57' }}
+          # merge_group matrix keeps 82 standalone shards.
+          EXPECTED_SHARDS: ${{ github.event_name == 'merge_group' && '82' || '57' }}
         run: |
           mapfile -d '' manifests < <(find shard-artifacts/test262-standalone-shard-* -type f -name 'test262-standalone-results-*.shard-*.complete.json' -print0 | sort -z)
           manifest_args=()

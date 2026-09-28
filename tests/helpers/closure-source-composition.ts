@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { createHash } from "node:crypto";
 import { readBeforeResumeMain } from "./resume-main-composition.js";
+import { beforeBuiltinMetadataMain } from "./builtin-metadata-main-port.js";
 
 export const closureCompositionFixturePath = "tests/fixtures/issue-3518-closure-source-composition.json";
 export const closureCompositionSha = (source: string): string => createHash("sha256").update(source).digest("hex");
@@ -88,6 +89,6 @@ export function applyClosureComposition(path: string, source: string, inverse: b
   return result;
 }
 export function readBeforeClosureComposition(path: string): string {
-  const source = readBeforeResumeMain(path);
+  const source = beforeBuiltinMetadataMain(path, readBeforeResumeMain(path));
   return expected.some(([p]) => p === path) ? applyClosureComposition(path, source, true) : source;
 }
