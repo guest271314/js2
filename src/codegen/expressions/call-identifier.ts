@@ -4289,6 +4289,8 @@ function compileBoundIdentifierCall(
       });
       // Wrap in vec struct: { length, data }
       fctx.body.push({ op: "struct.new", typeIdx: restInfo.vecTypeIdx });
+      // (#6651 I7) After every operand: `f(1)` for `f(x, y, ...a)` pads `y`; argc says it was absent.
+      maybeSetArgcForKnownCall(ctx, fctx, funcName, expr.arguments.length, restInfo.restIndex);
     } else if (hasSpreadArg && calleeReadsArgsEarly && !restInfo && !hasLinearParamsForCall && paramCountEarly <= 0) {
       // (#2202) Direct call to an `arguments`-reading function where the callee
       // has zero user params, so EVERY argument (spread or not) is an "extra".

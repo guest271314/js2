@@ -4627,7 +4627,7 @@ export function compileObjectLiteralForStruct(
         // (rest/default/destructuring) — §10.2.11 step 22.a.
         const unmapped =
           isStrictFunction(prop, ctx.inferModuleStrictArguments) || !isSimpleParameterList(prop.parameters);
-        emitArgumentsObject(ctx, methodFctx, methodParamTypes, 1, unmapped); // paramOffset 1 to skip 'this'
+        emitArgumentsObject(ctx, methodFctx, methodParamTypes, /* skip 'this' */ 1, unmapped, prop.parameters);
       }
 
       if (isGeneratorMethod && prop.body && objMethNativeGen) {
