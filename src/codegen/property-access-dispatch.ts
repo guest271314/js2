@@ -39,6 +39,7 @@ import { dynamicReadCrossesStandaloneLink, isAdmissibleDynamicReadNarrowing } fr
 import { emitDynGet, widenBooleanDynamicAccess } from "./dyn-read.js";
 import { expectedArgumentCountOfSignature } from "./function-expected-argument-count.js"; // (#4436) §15.1.5
 import { functionPrototypeMemberSpecLength } from "./function-prototype-callable.js"; // (§20.2.3)
+import { promiseProtoMemberSpecLength } from "./promise-dynamic-member-read.js"; // (#6651 D5)
 import { emitSymbolDescLoad, ensureNativeSymbolBoundaryBridge, usesNativeSymbolProvider } from "./symbol-native.js";
 import { ensureObjectRuntime, ensureWrapperStringValueHelper } from "./object-runtime.js";
 import { rollbackSpeculative, snapshotSpeculative } from "./context/speculative.js";
@@ -3108,7 +3109,8 @@ export function tryLengthAndNameReads(
     // there, so the §15.1.5 prefix walk answers 1 for a member the spec pins
     // at 2). Table + gate live in function-prototype-callable.ts.
     if (!isBindResult) {
-      const specLength = functionPrototypeMemberSpecLength(ctx, expr.expression);
+      const specLength =
+        functionPrototypeMemberSpecLength(ctx, expr.expression) ?? promiseProtoMemberSpecLength(ctx, expr.expression);
       if (specLength !== undefined) {
         fctx.body.push({ op: "f64.const", value: specLength });
         return { kind: "f64" };
