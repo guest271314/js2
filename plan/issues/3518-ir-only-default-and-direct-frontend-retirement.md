@@ -14520,3 +14520,17 @@ The fresh pre-publication check then found main41be7d9be9240678bf8df71192f853d9d
 Its sole additional commit refreshes16 report/baseline/documentation files,
 with no compiler or test changes. Preserve this verified45ce merge, then
 integrate41be and recheck the changed quality baselines before publication.
+
+The signed45ce integration is0ef3e2ed046c2fa3a7308f883e292902bfea76a3.
+Its normal hooks completed, but the inherited B9 corpus suite skipped three
+rows because this worktree lacked harness/corpus inputs. Those were not
+counted as passes. Provisioned all44 harness files and the three exact rows
+from pinned test262 Git objects atb363f29d3c43c626dc852744ad64a0b48a003693;
+all47 files have recorded blob/SHA256 provenance and no existing file was
+overwritten. The subsequent full five-suite run on the41be integration passed
+159/159, zero skipped/failed, with2,267 unchanged inputs; TS7 passed. Eight
+quality gates passed with2,215 unchanged inputs. Source, scripts and workflows
+match41be exactly; the PR remains the original five-file metadata repair.
+Evidence: .tmp/metadata-final-validation, .tmp/metadata-final-quality, and
+.tmp/metadata-pinned-corpus/provenance.json. Publish through the fork and
+protected queue; this follow-up is not delivered until main is verified.
