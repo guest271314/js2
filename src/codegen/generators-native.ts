@@ -95,6 +95,7 @@ import {
 // (#3271) Pure AST-scan predicate primitives now live in
 // generators-native-ast-scan.ts; imported back for the planner + candidacy gates.
 import {
+  statementContainsReturn,
   statementContainsYield,
   statementNeedsStructuralLowering,
   nodeContainsYield,
@@ -123,7 +124,7 @@ import {
 import { desugarYieldExpressionStatement } from "./generators-native-general.js";
 import {
   bodyHasComputedKeyYield,
-  bodyHasNestedYield,
+  bodyHasNestedYieldShape,
   lowerNestedYieldStatement,
   type NestedYieldHost,
 } from "./generator-yield-nested.js";
@@ -494,7 +495,7 @@ function generatorElemValType(ctx: CodegenContext, decl: GeneratorDecl): ValType
   if (
     decl.body &&
     noJsHostTarget(ctx) &&
-    (bodyHasPatternYield(decl.body) || bodyHasComputedKeyYield(decl.body) || bodyHasNestedYield(decl.body))
+    (bodyHasPatternYield(decl.body) || bodyHasComputedKeyYield(decl.body) || bodyHasNestedYieldShape(decl.body))
   ) {
     return { kind: "externref" };
   }
@@ -686,7 +687,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   // argument / member target (`generator-yield-nested.ts`). Same gate shape as A4.
   // (#6651 A6) Also a yield nested in a yield operand or a return value.
   const nestedYields =
-    elemIsAny && noJsHostTarget(ctx) && (bodyHasComputedKeyYield(decl.body) || bodyHasNestedYield(decl.body));
+    elemIsAny && noJsHostTarget(ctx) && (bodyHasComputedKeyYield(decl.body) || bodyHasNestedYieldShape(decl.body));
   // (#6651 A5) Inner-generator bodies by delegation name, for the for-of chain's close-transparency gate.
   const delegationInnerBodies = new Map<string, ts.Block>();
 
@@ -1023,6 +1024,11 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
           !stmt.catchClause &&
           stmt.finallyBlock &&
           finallyYieldFree &&
+          // (#6651 A10) A `return` in the finally overrides the completion
+          // (§14.15.3); the replay compiles it raw in the resume function —
+          // `.return(v)` at the suspension then trapped on a null deref. The
+          // region lowering below makes it a completion instead.
+          !statementContainsReturn(stmt.finallyBlock) &&
           !(
             (ctx.standalone || ctx.wasi) &&
             containsDelegatedYield(
@@ -3130,7 +3136,8 @@ function isNativeGeneratorExpressionShape(ctx: CodegenContext, decl: ts.Function
     // values into spill fields; pattern legality is decided by
     // `buildNativeGeneratorPlan`. (#3893) Whole-param defaults are admitted in
     // the no-JS-host lane too — closures.ts emits them in the lifted body =
-    // the factory, again where §10.2.11 wants them. Optional/rest still bail.
+    // the factory, again where §10.2.11 wants them. Optional still bails; rest
+    // is admitted without a JS host (#6651 A10 — the closure ABI packs its vec).
     if (
       !ts.isIdentifier(param.name) &&
       !ts.isArrayBindingPattern(param.name) &&
@@ -3841,7 +3848,10 @@ export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorD
     return false;
   }
   for (const param of decl.parameters) {
-    // (#2920/#3386) Rest params (`...args`) still bail — a separate follow-up.
+    // (#6651 A10) Rest params (`...args`) lower natively without a JS host: every
+    // emit site passes the packed rest vec as an ordinary param (the top-level
+    // declaration registers it via `registerResolvedRestParam`). The host lane
+    // keeps the bail — its eager/lazy-thunk paths are unchanged.
     // Array / object binding-pattern params are natively lowered: the emit
     // site destructures the raw arg EAGERLY (call time, §10.2.11) into factory
     // locals and `compileNativeGeneratorFunction` packs the bound values into

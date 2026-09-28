@@ -94,7 +94,7 @@ export function statementContainsYield(stmt: ts.Statement): boolean {
  * produce `{value, done:true}`, NOT a raw wasm `return` (which `compileStatement`
  * would emit, mis-coercing the value to the resume function's result-ref type).
  */
-function statementContainsReturn(stmt: ts.Statement): boolean {
+export function statementContainsReturn(stmt: ts.Statement): boolean {
   let found = false;
   function visit(node: ts.Node): void {
     if (found) return;
