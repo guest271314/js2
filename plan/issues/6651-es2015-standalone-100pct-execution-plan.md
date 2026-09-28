@@ -182,25 +182,12 @@ loc-budget-allow:
   #     arm must be unshifted before the proto-cache arm that stays the prefix);
   #   - `promise-combinators.ts` +4: one import and the D2 observable element's
   #     "a replaceable `%Promise.prototype%.then` must be Got" branch;
-  #   - `property-access-dispatch.ts` +3: one import and the `?? promiseProto…`
-  #     spec-length fallback beside the `%Function.prototype%` one.
+  #   - `property-access-dispatch.ts` +2: one import and the `?? promiseProto…`
+  #     spec-length fallback beside the `%Function.prototype%` one (the
+  #     statement wraps onto a second line).
+  # The last three paths are already listed below (restated per the
+  # stranded-grant rule); `expressions.ts` is new to this list.
   - src/codegen/expressions.ts
-  # 2026-09-28 — cluster D slice D4 (`class X extends Promise` in standalone,
-  # #5197 G9; receipt under `## Cluster status`). The mechanisms live in two NEW
-  # leaves: `promise-subclass-proto-link.ts` (the `$bag.$proto` link, the
-  # `instanceof` walk, the inherited-`resolve` fallback) and
-  # `promise-class-receiver-settle.ts` (`Promise.{resolve,reject}.call(C)` for a
-  # class `C`). What cannot move is where each decision is taken:
-  #   - `class-bodies.ts` +18: one import, one link call after the explicit
-  #     `super(executor)` Promise arm, and the implicit-constructor Promise arm
-  #     (a `} else if` between the linked-provider arm and the builtin ladder it
-  #     precedes — the ladder would otherwise commit to the identity-only object);
-  #   - `call-namespace-static.ts` +4: one import and the class-receiver settle
-  #     dispatch (plus its comment) at the end of the `Promise.{resolve,reject}
-  #     .call` arm, after D1's function-constructor arm it complements;
-  #   - `identifiers.ts` +3: one import and the two-line standalone `instanceof`
-  #     arm, ahead of the host-only Promise-subclass arm it is the twin of.
-  # All three paths are already listed below (restated per the stranded-grant rule).
   # 2026-09-27 — cluster B, slice B8 (receipt under `## Cluster status`). Two
   # god-files, both paths already listed below and restated per the
   # stranded-grant rule. Both mechanisms live in NEW leaves
@@ -977,14 +964,6 @@ func-budget-allow:
   # fallback; the statement only wraps onto a second line). Bodies are in the new leaf.
   - src/codegen/expressions.ts::compileExpressionInner
   - src/codegen/property-access-dispatch.ts::tryLengthAndNameReads
-  # 2026-09-28 — cluster D slice D4: `compileHostInstanceOf` +2 (the standalone
-  # Promise-subclass `instanceof` arm — its body is `tryEmitPromiseSubclassInstanceOf`
-  # in the new leaf), `compileSuperCall` +1 (the bag-link call after the explicit
-  # `super(executor)` Promise arm), `compileClassBodiesInner` +16 (the implicit
-  # Promise-constructor arm, see the LOC grant) and `compileNamespaceStaticCall`
-  # +3 (the settle dispatch). The last two keys are already listed below.
-  - src/codegen/expressions/identifiers.ts::compileHostInstanceOf
-  - src/codegen/class-bodies.ts::compileSuperCall
   # 2026-09-26 — lane SC1: `buildNativeGeneratorPlan` +15 as the gate measures it
   # (path already listed below, restated per the stranded-grant rule), of which 9
   # are the comment
@@ -9034,6 +9013,105 @@ building it.
   parameter, a property, or a computed `eval` string is not demanded; only
   literal keys are demand shapes (once a member is demanded, a runtime-keyed
   `r[k]` read of it is answered too).
+
+### 2026-09-28 — Cluster D, slice D5
+
+Target: #5197 R3-7 — a native `$Promise` has no readable `then`. A dynamic `p.then` read (through
+`any`, a combinator's `Invoke(nextPromise, "then", …)`, a user-function parameter) did not find
+`%Promise.prototype%.then`, so D1/D3's drives never subscribed to a native element.
+
+#### Measured first — the defect was real but mostly masked
+
+Probes on base (`.tmp/d5/p1`, `p2`, `p4`; 26 shapes): `typeof id(p).then`, `id(p).then ===
+Promise.prototype.then`, `t = p.then; t.call(p, f)`, `Promise.all.call(C, [..])` over a native-
+promise `C.resolve`, and the `Promise.all([...])` Invoke under an overridden
+`Promise.prototype.then` all failed. But on test262 the defect is **largely masked**: a module that
+both reads a builtin-prototype member as a value (`protoMemberDirty`, e.g. `Promise.prototype.then`
+in the source) and writes a builtin prototype (`protoNamedDirty` — the harness sets it in nearly
+every module) already had a SEEDED `Promise.prototype` companion, and `__extern_get`'s terminal
+proto-store consult answers `then` off it (its brand classifier maps `$Promise` → Promise). The
+pin suite's override control is green on base for exactly that reason. So the rows that move are
+the ones outside that coincidence.
+
+#### What landed
+
+NEW leaf `src/codegen/promise-dynamic-member-read.ts`:
+
+| piece | what |
+| --- | --- |
+| `unshiftExternGetPromiseMemberArm` (finalize, both pipelines, beside the #6678 Date twin) | `__extern_get(<$Promise>, "then"/"catch"/"finally")`: (1) an OWN `$bag` entry falls through to the existing bag path (a `p.then = f` — even `undefined` — still shadows); (2) a D4 subclass instance (`bag.$proto` = `C.prototype`) answers the class chain's member when `__extern_has` finds it; (3) otherwise `%Promise.prototype%[key]` — `__protoidx_get_r` when the brand is seeded (the companion is the live own-property table, so a write/`delete` is observed), else the Promise companion's own entry when the program wrote one, else the identity-stable member closure singleton (the same object a static `Promise.prototype.then` read yields) |
+| `demandPromiseDynamicMember` / `notePromiseDynamicMemberRead` | the demand gate: a VALUE read of `.then/.catch/.finally` (property or literal-key element access, never a call's callee) in a file that names `Promise` mints the member closure at compile time; the arm answers only demanded + minted members |
+| D1 (`promise-custom-combinator.ts`) / D3 (`promise-class-receiver-drive.ts`) | demand `then`: their `Invoke(next, "then")` is a `__extern_get` |
+| `promiseProtoThenMayBeReplaced` (D2 observable element, `promise-combinators.ts`) | demands `then`; when the program writes a `.prototype.then` (the #4492 pre-scan member set) a native `$Promise` element takes the generic Get+Call Invoke instead of the direct subscription, so an overridden `%Promise.prototype%.then` is called (§27.2.4.1.1 step 8.i) |
+| `promiseProtoMemberSpecLength` (`property-access-dispatch.ts`, `?? ` beside the `%Function.prototype%` table) | `p.then.length` / `.catch` / `.finally` on a `Promise`-typed receiver answers the spec length (2/1/1); the static fold counted `lib.es5.d.ts`'s leading required params — all optional — and answered 0 (S25.4.5.3_A1.1_T2) |
+
+No new host import; `$Promise` unchanged; every piece is `--target standalone` (non-WASI) only.
+
+#### Receipt
+
+- **Branch** `issue-6651-d5-promise-dynamic-then` (worktree `agent-a22934061a60ce2c8`), based on
+  `origin/main` @ `732d9f75e6` + D4 (`2d6b4fe383`, merged in — D4 was not on main yet). Engine
+  `JS2WASM_EVAL_ENGINE=quickjs` (artifact `073742801ba7`, adapter `d4799bda84cfed0d`),
+  `--standalone --isolate`, 24-row chunks, one runner at a time. Before-state measured by file-copy
+  A/B from `.tmp/base/` (copied before the first edit), not inherited. Every controlled run below
+  is on the pre-merge tree; then `origin/main` @ `cb50f21b90` was merged in (D4 had landed; the
+  merge conflicted only on the additive `index.ts` finalize lines beside B10's twin and on duplicated
+  D4 grant/classification text, resolved by keeping one copy), and the manifest was re-run on the
+  merged tree both ways — the merged files with this slice's patch reversed (`.tmp/d5/mbase`) 75 / 26
+  / 0, the branch 77 / 24 / 0, the same two rows, 0 pass→non-pass — together with the pin suite,
+  the D-family pins, the equivalence gate and every gate below.
+
+- **Candidate set** — the 329 non-pass `built-ins/Promise` rows of the standalone baseline ∪ the
+  101-row manifest (357 rows, `.tmp/d5/cand.txt`), every row run base and after:
+
+  | | pass | fail | compile_error |
+  | --- | ---: | ---: | ---: |
+  | manifest before | 75 | 26 | 0 |
+  | manifest after | **77** | 24 | 0 |
+  | candidate set before | 79 | 167 | 111 |
+  | candidate set after | **82** | 164 | 111 |
+
+  **+3, 0 pass→non-pass.** `prototype/then/S25.4.5.3_A1.1_T2` and `race/resolve-self` (manifest),
+  `prototype/finally/is-a-method` (off-manifest). Five more change message only — the
+  `*/invoke-resolve-on-*-every-iteration-of-custom` rows now settle (residual 1 below).
+
+#### Controls
+
+| control | result |
+| --- | --- |
+| reach — every test262 file the change can touch: a `.then/.catch/.finally` value read (253, regex is a superset of the compiler's non-callee rule), an `asyncHelpers.js` includer (392 — its `typeof res.then` is a demand site), a `Promise.<m>.call(` / `.prototype.then =` spelling (159), ∪ the candidate set: **937 rows, 1,096 compiled variants** through the runner's original-harness assembly (`.tmp/d5/promise-bytes*.mts`), base vs branch | **gc 1,096/1,096 identical.** Standalone moves **410 rows**: 296 asyncHelpers includers, 45 value-read rows, 60 `.call` rows, 88 candidate rows |
+| verdicts on all 410 byte-moved rows, base vs branch | 214 pass(+skip) / 67 fail / 129 CE → **217 / 64 / 129**; **0 pass→non-pass**; the only changes are the +3 and the 5 message changes above. The asyncHelpers includers do not move a verdict: they are `protoMemberDirty` + store-live modules, where the seeded companion already answered `res.then` |
+| corpus: 17 playground + benchmark programs (34 binaries) and D2/D2b's 11 shape programs × {gc, standalone} (`.tmp/d5/bytes*.mts`) | **34/34 playground/benchmark identical**; gc 11/11 shapes identical; standalone moves exactly the three shapes that reach a demand site (`d2:custom-ctor-call` → D1, `d2:observable-resolve-all` / `d2:observable-then-race` → D2's observable element) |
+| probes (`.tmp/d5/p1…p4`, 29 shapes) | `p1` (13) base 1 → 9 pass; after the full slice `p1`+`p2` 17/21, `p3` 1/3 (the two failures are D1's `this`-less [[Call]] of a function `C`, pre-existing), `p4` 4/5; every remaining failure is a residual below (`p2`–`p4` were written after the first edit and not run on base) |
+| pin suite `tests/issue-6651-d5-promise-dynamic-then.test.ts` (9) | 9/9 green; on base (file-copy revert) **6 red** — the three controls are green on both by design (the written-override control is the masking path above) |
+| D-family pins, one vitest process per file (20 files, incl. `promise-expando-standalone`, `issue-5197-own-then-indirection`, D3, D4) | all green except `promise-combinators` (2) and `issue-2671-promise-capability` (1), which fail with the same test names on base (D3/D4's pre-existing three) |
+| gates (merged tree) | `check-loc-budget`, `check-func-budget` (both also with `LOC_GATE_BASE` = origin/main @ `cb50f21b90`), `check-coercion-sites`, `check:oracle-ratchet`, `check:dead-exports`, `check-compiler-boundaries --mode inventory --base origin/main` (`inventory-valid`, the new leaf classified), `npm run -s typecheck`, `biome lint --diagnostic-level=error`, `check:ir-fallbacks` (OK), `scripts/equivalence-gate.mjs` (22 failing / 1,720 passing / 22 known — no new). Grants: dated D5 notes at the head of this file's `loc-budget-allow` (`expressions.ts` +2 new; `index.ts` +3, `promise-combinators.ts` +4, `property-access-dispatch.ts` +2 restated) and `func-budget-allow` (`compileExpressionInner` +1, `tryLengthAndNameReads` +1) |
+
+#### Residuals (measured, not taken)
+
+- `{all,race,allSettled,any}/invoke-resolve-on-{promises,values}-every-iteration-of-custom` (5
+  rows) now SETTLE (were "async completion marker not observed") and fail on the next assertion,
+  "`Promise.resolve` is never invoked — 3": `Custom.resolve = …` on the class object is invisible
+  to `Get(C, "resolve")`, so D4's fallback reaches the reassigned `Promise.resolve`. That is the
+  class-object static-expando gap (D4 residual 1), being fixed by the parallel slice; with it these
+  rows need nothing further from D5 (the `then` read now resolves).
+- `finally` does not `Invoke(this, "then")`: `finally/{invokes-then-with-function,
+  invokes-then-with-non-function, this-value-then-*, this-value-thenable, this-value-proxy,
+  *-observable-then-calls*}` (≈11 rows) — `emitStandalonePromiseFinally` subscribes natively for a
+  `$Promise` and never reads an own/overridden `then`. The D5 arm gives that body a correct Get to
+  call; the change is in `async-scheduler.ts` (a god file) and was left for its own slice.
+- A dynamic CALL `id(p).then(f)` with `Promise.prototype.then` overridden still runs the native
+  `then` (the `.then(...)` call bridge in `calls.ts` tests `ref.test $Promise` first and checks only
+  an OWN bag `then`); `p["then"](f)` throws "called on a non-Promise receiver" (probe q6) — a
+  separate element-access call path.
+- `var t = p.then; t.length` still folds to 0 (the fold's receiver is `t`, typed by the method
+  signature; only the direct `p.then.length` spelling is covered).
+- `Promise.resolve = function (v) { return new Promise(…) }; Promise.race([1, 2])` still rejects
+  "Promise then is not callable" (probe q11) — not diagnosed; the same user `resolve` answers a
+  readable `then` when called directly (probe r5), so the defect is in the observable literal
+  path's element, not in the read this slice fixes.
+- The static `Promise.prototype.then` read after a static `Promise.prototype.then = f` write still
+  answers the builtin singleton (probe r1; pre-existing, the static fold ignores the companion).
 
 ## Handoff — 2026-09-21 (round 1 closed, round 2 ready to dispatch)
 
