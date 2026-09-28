@@ -63,6 +63,8 @@ const FLAGS_NONE = 0x00;
 const FLAGS_CONFIGURABLE = 0x04;
 /** Well-known symbol id of `Symbol.toStringTag` for `__box_symbol`. */
 const SYMBOL_TO_STRING_TAG_ID = 4;
+/** (#6651 A9) Lazy global holding `%GeneratorFunction%` once the singleton is reified. */
+const GENERATOR_FUNCTION_GLOBAL = "__native_generator_function";
 
 function lazyGlobal(ctx: CodegenContext, name: string): number {
   let idx = ctx.builtinObjectGlobals.get(name);
@@ -137,11 +139,12 @@ export function emitGeneratorFunctionPrototypeSingleton(ctx: CodegenContext, fct
         { op: "local.tee", index: protoLocal },
         { op: "global.set", index: protoGlobal },
       );
-      // C = %GeneratorFunction%
+      // C = %GeneratorFunction% (published too: the #6651 A9 call guard compares against it)
       fctx.body.push(
         { op: "local.get", index: fpLocal },
         { op: "call", funcIdx: createIdx },
-        { op: "local.set", index: ctorLocal },
+        { op: "local.tee", index: ctorLocal },
+        { op: "global.set", index: lazyGlobal(ctx, GENERATOR_FUNCTION_GLOBAL) },
       );
       pushMarkBuiltinCarrierCallable(ctx, fctx, ctorLocal);
       define(
@@ -274,4 +277,16 @@ export function isStaticSyncGeneratorFunctionValue(ctx: CodegenContext, expr: ts
   };
   visit(expr.getSourceFile());
   return !written;
+}
+
+/**
+ * (#6651 A9) Leave `%GeneratorFunction%` itself on the stack — the object
+ * `emitGeneratorFunctionPrototypeSingleton` reifies as the prototype's
+ * `constructor`, so both share one identity. `null` when the object runtime is
+ * unavailable.
+ */
+export function emitGeneratorFunctionConstructorSingleton(ctx: CodegenContext, fctx: FunctionContext): ValType | null {
+  if (emitGeneratorFunctionPrototypeSingleton(ctx, fctx) === null) return null;
+  fctx.body.push({ op: "drop" }, { op: "global.get", index: lazyGlobal(ctx, GENERATOR_FUNCTION_GLOBAL) });
+  return { kind: "externref" };
 }

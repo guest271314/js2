@@ -14,7 +14,11 @@ export type IrRuntimeEvalSiteKind =
   | "intrinsic-value"
   | "global-eval-property"
   | "global-script-eval"
-  | "provider-definition";
+  | "provider-definition"
+  // (#6651 A9) A call or `new` whose callee is statically `%GeneratorFunction%`
+  // (CreateDynamicFunction, kind "generator"): see
+  // `isStaticGeneratorFunctionConstructorSyntax`.
+  | "generator-function-constructor";
 
 export interface IrRuntimeEvalSite {
   readonly sourceId: string;
@@ -97,7 +101,59 @@ function stableSourceId(sourceFile: ts.SourceFile, index: number): string {
  */
 export function sourceMayContainRuntimeEvalBoundary(sourceFile: ts.SourceFile): boolean {
   const text = sourceFile.text;
-  return text.includes("eval") || text.includes("Function") || text.includes("__runtime_") || text.includes("\\u");
+  return (
+    text.includes("eval") ||
+    text.includes("Function") ||
+    text.includes("__runtime_") ||
+    text.includes("\\u") ||
+    // (#6651 A9) `Object.getPrototypeOf(function* () {}).constructor(src)`
+    // reaches CreateDynamicFunction without spelling `Function`.
+    (text.includes("constructor") && GENERATOR_FUNCTION_KEYWORD.test(text))
+  );
+}
+
+const GENERATOR_FUNCTION_KEYWORD = /function\s*\*/;
+
+/**
+ * (#6651 A9) Does `expression` denote `%GeneratorFunction%` by SYNTAX alone?
+ *
+ *  - `Object.getPrototypeOf(G).constructor` or `(G).constructor`, where `G` is
+ *    a sync generator function EXPRESSION — both read the `constructor` that
+ *    `%GeneratorFunction.prototype%` owns (§27.3.3.1);
+ *  - an identifier whose variable initializer is one of those (one hop).
+ *
+ * This is the inventory's half of the claim. The codegen half
+ * (`generator-function-dynamic.ts`) additionally proves the binding is never
+ * reassigned and guards the value at run time, and it only claims a node this
+ * inventory recorded — so the two can never disagree about which module links
+ * the provider.
+ */
+export function isStaticGeneratorFunctionConstructorSyntax(
+  expression: ts.Expression,
+  oracle: TypeOracle,
+  viaBinding = false,
+): boolean {
+  const e = unwrapExpression(expression);
+  if (ts.isIdentifier(e)) {
+    if (viaBinding) return false;
+    const init = oracle.variableInitializerOf(e);
+    return init !== undefined && isStaticGeneratorFunctionConstructorSyntax(init, oracle, true);
+  }
+  if (!ts.isPropertyAccessExpression(e) || e.name.text !== "constructor") return false;
+  let holder = unwrapExpression(e.expression);
+  if (ts.isCallExpression(holder)) {
+    const callee = unwrapExpression(holder.expression);
+    if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== "getPrototypeOf") return false;
+    const receiver = unwrapExpression(callee.expression);
+    if (!ts.isIdentifier(receiver) || receiver.text !== "Object" || !isGlobalIntrinsic(receiver, oracle)) return false;
+    if (holder.arguments.length !== 1) return false;
+    holder = unwrapExpression(holder.arguments[0]!);
+  }
+  return (
+    ts.isFunctionExpression(holder) &&
+    holder.asteriskToken !== undefined &&
+    !holder.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword)
+  );
 }
 
 function stringArguments(args: readonly ts.Expression[] | undefined): { literalSource?: string; unknown: boolean } {
@@ -281,6 +337,12 @@ export function buildIrRuntimeEvalBoundaryPlan(
             if (literalSource !== undefined) dynamicSourceFragments.push(literalSource);
             else if (source !== undefined) unknownDynamicSource = true;
           }
+        }
+        if (isStaticGeneratorFunctionConstructorSyntax(callee, oracle)) {
+          const source = stringArguments(node.arguments);
+          addSite(sourceFile, id, node, "generator-function-constructor", "required", source.literalSource);
+          if (source.literalSource !== undefined) dynamicSourceFragments.push(source.literalSource);
+          if (source.unknown) unknownDynamicSource = true;
         }
       }
 

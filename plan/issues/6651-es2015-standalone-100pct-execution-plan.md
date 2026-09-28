@@ -1427,6 +1427,16 @@ func-budget-allow:
   # fallback; the statement only wraps onto a second line). Bodies are in the new leaf.
   - src/codegen/expressions.ts::compileExpressionInner
   - src/codegen/property-access-dispatch.ts::tryLengthAndNameReads
+  # 2026-09-28 — cluster A, slice A9 (`%GeneratorFunction%` in standalone;
+  # record under the A9 claim). `compileCallExpression` +1: the
+  # `?? tryEmitDynamicGeneratorFunction(…)` hand-off beside the runtime-eval
+  # boundary intrinsic it sits with. `compileNewExpression` +4: the same
+  # hand-off for `new %GeneratorFunction%(…)`, and the `new g()` TypeError arm
+  # learning that a binding initialised by such a call holds a generator
+  # (§27.3.4). The lowering, the claim and its run-time guard live in the new
+  # leaf `src/codegen/generator-function-dynamic.ts`.
+  - src/codegen/expressions/calls.ts::compileCallExpression
+  - src/codegen/expressions/new-super.ts::compileNewExpression
 coercion-sites-allow:
 # 2026-09-26 — lane TA1: `to-locale-string-element.ts` is a NEW file, so its
 # baseline is 0 and every textual mention of a native name counts as growth
