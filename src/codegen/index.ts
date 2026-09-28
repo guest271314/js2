@@ -449,7 +449,7 @@ import {
 import { fillArrayToPrimitive } from "./array-to-primitive.js";
 import { fillNumberToLocaleString, fillTaToLocaleString } from "./to-locale-string-element.js"; // (#6651 TA1)
 import { fillVecOwnToPrimitive } from "./vec-own-to-primitive.js"; // (#6651 E3)
-import { fillClassToPrimitive } from "./class-to-primitive.js";
+import { brandedI32ResultBoxIdx, fillClassToPrimitive } from "./class-to-primitive.js";
 import {
   captureToPrimitiveDispatchFrame,
   ensureToPrimitiveDispatchBoxing,
@@ -9454,6 +9454,8 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
       if (resultType === null || resultType === undefined) {
         // A completed void method returns undefined, never a dispatch miss.
         instrs.push(...canonicalUndefinedExternInstrs(ctx));
+      } else if (brandedI32ResultBoxIdx(ctx, resultType) !== undefined) {
+        instrs.push({ op: "call", funcIdx: brandedI32ResultBoxIdx(ctx, resultType)! }); // (#6651 H1) not a number
       } else if (resultType.kind === "f64" || resultType.kind === "i32" || resultType.kind === "i64") {
         const boxIdx = ctx.funcMap.get("__box_number");
         if (boxIdx === undefined) throw new Error("ToPrimitive method result requires __box_number");
