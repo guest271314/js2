@@ -1543,6 +1543,10 @@ export function emitReflectiveNativeProtoClosureCall(
   // every other reflective ABI retains its existing null/undefined policy.
   const nativeStringNormalize =
     (ctx.standalone || ctx.wasi) && getNativeProtoBuiltinGlue(ctx, brand)?.name === "String" && member === "normalize";
+  // (#6701) `Array.prototype.slice.call(o, k)`: an omitted `end` is
+  // `undefined` (⇒ len), not `null` (⇒ 0), so pad it with the canonical
+  // undefined — `[].slice.call(arguments, 1)` answered an empty array.
+  const arraySliceEnd = ctx.standalone && member === "slice" && getNativeProtoBuiltinGlue(ctx, brand)?.name === "Array";
   for (let i = 0; i < paramTypes.length; i++) {
     const pType = paramTypes[i]!;
     if (nativeProtoVariadic && i === 1) {
@@ -1574,7 +1578,9 @@ export function emitReflectiveNativeProtoClosureCall(
       // optional *form* slot (index 1) represents an omitted argument as the
       // canonical undefined singleton; explicit null is still a real value.
       const missingPad =
-        nativeStringNormalize && i === 1 ? canonicalUndefinedExternInstrs(ctx) : arrayBufferUndefinedPad;
+        (nativeStringNormalize && i === 1) || arraySliceEnd
+          ? canonicalUndefinedExternInstrs(ctx)
+          : arrayBufferUndefinedPad;
       fctx.body.push(...(missingPad ?? [{ op: "ref.null.extern" }]));
     } else {
       pushDefaultValue(fctx, pType, ctx);
