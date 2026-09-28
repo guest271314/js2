@@ -68,28 +68,54 @@ export type NestedYieldReplacement =
 
 /** The planner's view of `buildNativeGeneratorPlan`'s state cursor. */
 export interface NestedYieldHost<U> {
-  /** Suspend at `yieldExpr`; the resumed value lands in the returned spill (null = refuse). */
-  suspend(yieldExpr: ts.YieldExpression, unwind: readonly U[]): string | null;
+  /**
+   * Suspend at `yieldExpr`; the resumed value lands in the returned spill (null =
+   * refuse). (#6651 A6) `operand` lists the replacements its OPERAND reads — the
+   * earlier yields / captures nested in it — attached to the suspending state so
+   * its terminator compiles the operand against them.
+   */
+  suspend(
+    yieldExpr: ts.YieldExpression,
+    unwind: readonly U[],
+    operand: readonly NestedYieldReplacement[],
+  ): string | null;
   /** True when `expr` can be evaluated once, now, into a typed spill. */
   canCapture(expr: ts.Expression): boolean;
   /** Evaluate `expr` once in the current state, into a spill (null = refuse). */
   capture(expr: ts.Expression): string | null;
-  /** Append `stmt` to the current state, reading every replaced node from its spill. */
+  /**
+   * Append `stmt` to the current state, reading every replaced node from its
+   * spill. (#6651 A6) A `return` instead terminates the state with a completion
+   * (a prelude `return` would be a raw wasm return from the resume function).
+   */
   finish(stmt: ts.Statement, replacements: readonly NestedYieldReplacement[]): boolean;
 }
 
 export type NestedYieldAttempt = "lowered" | "not-applicable" | "failed";
 
-type NestedEvent =
+/**
+ * `owners` (#6651 A6): the yields whose OPERAND contains this event, innermost
+ * last. An event inside the operand of the next yield to suspend is evaluated by
+ * that yield's terminator — between the previous suspension and that one, which
+ * is exactly where the spec puts it.
+ */
+type NestedEventBody =
   | { kind: "yield"; node: ts.YieldExpression }
   | { kind: "value"; node: ts.Expression; shorthand: boolean }
   | { kind: "fn" }
   | { kind: "callee"; node: ts.Expression }
   | { kind: "op" };
+type NestedEvent = NestedEventBody & { owners: readonly ts.YieldExpression[] };
 
 /** `expr` is, or holds, a yield of THIS function (computed names included). */
 function holdsYield(node: ts.Node): boolean {
   return ts.isYieldExpression(node) || nodeContainsYield(node);
+}
+
+/** `node` is `ancestor` or lies inside it. */
+function isWithin(node: ts.Node, ancestor: ts.Node): boolean {
+  for (let cur: ts.Node | undefined = node; cur !== undefined; cur = cur.parent) if (cur === ancestor) return true;
+  return false;
 }
 
 function skipOuterExpressions(expr: ts.Expression): ts.Expression {
@@ -131,13 +157,54 @@ export function bodyHasComputedKeyYield(body: ts.Node): boolean {
   return found;
 }
 
-/** Every yield of THIS function in `root`, in source order (computed names included). */
+/**
+ * (#6651 A6) The second generator-level gate: the body (outside nested function
+ * scopes) holds a non-delegating yield whose OPERAND holds a yield
+ * (`yield yield 1`, `yield [...yield]`), or a `return` whose expression holds a
+ * yield other than the direct `return yield* x` (which has its own arm). Both
+ * used to compile as a plain terminator whose inner yield read `undefined` with
+ * no suspension at all — `function* g() { return yield 1; }` completed on the
+ * first `next()`.
+ */
+export function bodyHasNestedYield(body: ts.Node): boolean {
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (ts.isYieldExpression(node) && !node.asteriskToken && node.expression && holdsYield(node.expression)) {
+      found = true;
+      return;
+    }
+    if (
+      ts.isReturnStatement(node) &&
+      node.expression &&
+      holdsYield(node.expression) &&
+      !(ts.isYieldExpression(node.expression) && node.expression.asteriskToken)
+    ) {
+      found = true;
+      return;
+    }
+    if (isFunctionLikeScope(node)) {
+      const name = (node as { name?: ts.PropertyName }).name;
+      if (name !== undefined && ts.isComputedPropertyName(name)) visit(name);
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(body, visit);
+  return found;
+}
+
+/**
+ * Every yield of THIS function in `root`, in evaluation order (computed names
+ * included): a yield's operand is evaluated BEFORE the yield suspends, so a yield
+ * nested in another yield's operand comes first (#6651 A6).
+ */
 function collectYields(root: ts.Node): ts.YieldExpression[] {
   const out: ts.YieldExpression[] = [];
   const visit = (node: ts.Node): void => {
     if (ts.isYieldExpression(node)) {
-      out.push(node);
       if (node.expression) visit(node.expression);
+      out.push(node);
       return;
     }
     if (isFunctionLikeScope(node)) {
@@ -155,9 +222,11 @@ function collectYields(root: ts.Node): ts.YieldExpression[] {
 class EvaluationOrderWalk {
   readonly events: NestedEvent[] = [];
   failed = false;
+  /** (#6651 A6) The yields whose operand is being walked, outermost first. */
+  private readonly owners: ts.YieldExpression[] = [];
 
-  private push(event: NestedEvent): void {
-    this.events.push(event);
+  private push(event: NestedEventBody): void {
+    this.events.push({ ...event, owners: [...this.owners] });
   }
 
   expression(expr: ts.Expression): void {
@@ -168,8 +237,19 @@ class EvaluationOrderWalk {
     }
     const e = skipOuterExpressions(expr);
     if (ts.isYieldExpression(e)) {
-      if (e.asteriskToken || (e.expression !== undefined && holdsYield(e.expression))) this.failed = true;
-      else this.push({ kind: "yield", node: e });
+      if (e.asteriskToken) {
+        this.failed = true;
+        return;
+      }
+      // (#6651 A6) §15.5.5: a yield evaluates its operand, THEN suspends — so a
+      // yield inside the operand (`yield yield 1`, `yield [...yield]`) comes
+      // first, and the rest of the operand runs between the two suspensions.
+      if (e.expression !== undefined && holdsYield(e.expression)) {
+        this.owners.push(e);
+        this.expression(e.expression);
+        this.owners.pop();
+      }
+      this.push({ kind: "yield", node: e });
       return;
     }
     if (ts.isObjectLiteralExpression(e)) {
@@ -584,6 +664,9 @@ class ReplayFacts {
    */
   callee(expr: ts.Expression): boolean {
     const e = skipOuterExpressions(expr);
+    // (#6651 A6) An immediately-invoked function / arrow: creating the closure is
+    // unobservable, so creating it after the resume is the same program.
+    if (ts.isFunctionExpression(e) || ts.isArrowFunction(e)) return true;
     if (ts.isPropertyAccessExpression(e)) {
       if (e.questionDotToken || !ts.isIdentifier(e.name)) return false;
       const base = skipOuterExpressions(e.expression);
@@ -633,6 +716,10 @@ export function lowerNestedYieldStatement<U>(
     walk.expression(declarator.initializer);
   } else if (ts.isClassDeclaration(stmt)) {
     walk.classLike(stmt);
+  } else if (ts.isReturnStatement(stmt) && stmt.expression) {
+    // (#6651 A6) `return <expr holding a yield>`: the value is computed in the
+    // state after the last suspension, which completes the generator.
+    walk.expression(stmt.expression);
   } else {
     return "not-applicable";
   }
@@ -651,8 +738,18 @@ export function lowerNestedYieldStatement<U>(
 
   const facts = new ReplayFacts(ctx, decl, stmt);
   const captureAt = new Set<number>();
+  let nextYield = -1;
   for (let i = 0; i < lastYield; i++) {
     const event = walk.events[i]!;
+    if (nextYield < i) {
+      nextYield = i;
+      while (walk.events[nextYield]!.kind !== "yield") nextYield++;
+    }
+    // (#6651 A6) Part of the OPERAND of the next yield to suspend: that yield's
+    // terminator evaluates it, after the previous resume and before this
+    // suspension — its spec position — and later states read the yield's spill.
+    const next = walk.events[nextYield]!;
+    if (event.kind !== "yield" && next.kind === "yield" && event.owners.includes(next.node)) continue;
     switch (event.kind) {
       case "yield":
       case "fn":
@@ -677,7 +774,9 @@ export function lowerNestedYieldStatement<U>(
   for (let i = 0; i <= lastYield; i++) {
     const event = walk.events[i]!;
     if (event.kind === "yield") {
-      const sent = host.suspend(event.node, unwind);
+      const operand = event.node.expression;
+      const inOperand = operand ? replacements.filter((r) => isWithin(r.expression, operand)) : [];
+      const sent = host.suspend(event.node, unwind, inOperand);
       if (sent === null) return "failed";
       replacements.push({ kind: "yield", expression: event.node, spillName: sent });
     } else if (captureAt.has(i) && event.kind === "value") {

@@ -14958,6 +14958,223 @@ Keep all prototype source, fixtures and tests unchanged; run normal commit
 and push gates before updating the existing PR, then verify queue admission
 for the new exact head. No main delivery is claimed for this increment yet.
 
+### Implementation plan: authentic ordinary Get integration (2026-09-28)
+
+Claim `3518:public-object-get-owner-20260928` is verified on the authoritative
+upstream issue-assignments branch for `ttraenkler/codex-public-object-get-20260928`.
+Use isolated branch `codex/3518-public-object-get-20260928`, starting from signed
+prototype checkpoint4914b41307aaa65f8ffd12a18edb3b5e6b8afe10. Do not edit the
+CI-running parent PR6205 or overwrite the prepared Boolean/getter increment.
+
+The existing ordinary lookup already walks actual Object.proto links and
+returns present=1, explicit-null exhaustion=0, implicit terminal=2. The existing
+buildOrdinaryObjectGetDefinition invokes method0 with its original receiver,
+separate from the lookup cursor. Reuse this body instead of adding a duplicate
+walk. Status2 remains an unresolved companion requirement, never a missing
+property or undefined return. The current five-function lookup owner does not
+own Get. The getter resource fixture's get(null, getter) observer does not
+validate public descriptor lookup or original-receiver routing.
+
+1. Add an issued Get resource owner joining the authentic lookup owner and the
+   genuine C2 getter-dispatch owner in the same physical reservation transaction.
+   Reserve before freeze, fill after freeze, and require all dependencies to be
+   completed before certification. Reject forged, cloned, cross-transaction,
+   stale, substituted and double-filled resource packs. Retain the status/value
+   protocol until a real complete prototype companion can discharge status2.
+2. Validate actual descriptor lookup and inherited getter execution with the
+   original receiver through real source-closure invocation; include data,
+   missing, throwing and inherited accessors. Has must never invoke a getter.
+   Test wrappers are observation only and must not stand in for public providers.
+3. Complete the default-prototype companion graph: real constructor/member
+   descriptors, callable implementations, literals and aliases; reserve cyclic
+   singleton/provider dependencies before filling. No empty seed, foreign-null
+   fallback or freshly-created-object exception may certify this graph.
+4. Connect issued object-access and companion requirements to canonical public
+   physical planning, ABI binding, reservation/fill/completion and emission.
+   Number-owned Get demands must enter this same graph; source-visible getters
+   alone are not a sufficient demand census. Keep located unsupported results
+   until each required owner is physically materialized.
+5. Run the unchanged original712 fixture through preparation, codec roundtrip,
+   public acceptance/emission and fresh-process execution against the Node and
+   retained legacy oracles. Prove getter once, returned function once, untouched
+   toString getter and result712. Preserve all original failing evidence. Full
+   IR coverage and equal behavior, not this increment alone, authorize retirement.
+
+Root owns this issue and shared boundary inventory. Implementation ownership
+must name concrete source/test paths before dispatch; do not touch historical
+4637/4643 tests whose claims have not been reconciled. Publication remains
+ordered after verified upstream delivery of prerequisites.
+
+Current-source audit refines the sequence above. The first internal Get owner
+can use4914 directly: nativeInvocationGetterDispatch already authenticates the
+exact access/invocation join and exposes method0. It does not need the separate
+Boolean increment to execute numeric getters. The full prototype companion
+still needs the canonical constructor, all ten advertised Object methods and
+applicable accessor descriptors, plus genuine runtime callables. Existing
+hasOwnProperty/propertyIsEnumerable reflected routing bodies now exist; do
+not repeat the superseded claim that they are absent. toLocaleString still
+reaches refusal, valueOf lacks full ToObject/canonical-undefined handling, and
+__proto__ installation is absent from the catalog. Seeder descriptor-tail
+checks alone cannot certify those providers.
+
+Number introduces an additional source-authority seam: C1 currently discovers
+getters from explicit js.object.get calls only, while the retained712 program
+requires Get inside js.number.from-value. Add an issued Number-owned demand
+variant anchored to that real occurrence. Track @@toPrimitive lookup, ordered
+valueOf lookup/call and toString fallback, including both actual source getter
+and returned-closure allocation/capture identities. Implement the actual Number
+provider, including its Symbol/BigInt obligations; native unboxNumber is not a
+replacement for these observable semantics. Bind Get's two-result internal
+protocol to a scalar public ABI only through a completed companion-aware
+adapter. Reject incomplete plans before any emitted bytes.
+
+Delegated ownership is restricted to new native-object-get.ts under backend
+resources and new issue-3518-native-object-get-owner.test.ts. Root retains this
+issue, boundary inventory and public integration ownership. The agent must
+freeze and report source hashes before root runs serial validation; it may not
+commit, push or edit historical shared tests in this increment.
+
+#### Fresh public-path probes on4914 (2026-09-28)
+
+The unchanged712 fixture retains SHA256
+c0550b99175c0eb61afa7d5d110a287f3fe90e9fc8e581c6d58a19fe0a971ba9 and independently
+returns712 in Node. With actual source analysis and native number/string
+policy, prepareWholeIrProgram returns invariant/verifier-failure at verify:
+`runtime feature js.number.from-value has no provider`. Public acceptance and
+emission are not reached. This is a fresh measured stopping point, not merely
+an expectation copied from the older source test.
+
+A receiver-observing source getter (`marker:7`, getter returning this.marker)
+returns7 in Node but preparation returns unsupported/body-shape-rejected at
+build: `ir/from-ast: 'this' reference outside an instance method body
+(run__closure_0)`. Preserve this source and result. Current Get-owner tests may
+prove inherited descriptor lookup and genuine captured getter invocation, but
+must not claim execution of source receiver semantics until the producer join
+is implemented. An instruction-level receiver check is distinct evidence.
+
+Both probes ran to exit0 as evidence collectors, not passing native execution
+checks. Reports are .tmp/public-object-get/baseline-712.json and
+baseline-getter-this.json; no production/test bytes changed for the probes.
+
+Receiver-producer implementation constraint: instance-method `selfParam` binds
+`this` to its first IR parameter, but a lifted closure's first `__self` is its
+closure/capture carrier. Reusing that option for a getter would confuse two
+unrelated identities. C2 already reserves currentThis and its real method body
+installs the exact receiver, then restores invocation state on normal and
+exceptional exits. A future source-getter receiver read must be an explicit,
+verified runtime-context obligation bound to this exact invocation owner, or
+an equivalently explicit receiver ABI extension. It must not invent a raw
+global name or reinterpret the capture carrier as the receiver. Arrow lexical
+this, nested/reentrant getters and restoration after throw need separate
+regressions. No receiver-support claim follows from body inspection alone.
+
+The retained-compiler baseline now executes the unchanged 712 fixture with
+`target: standalone` and `disableIrFirst: true`: compilation succeeds without
+diagnostics, irCompiledFuncs is empty, the Wasm import list is empty, and run()
+returns 712, matching Node. Binary SHA256:
+3ec27734dd0b4cd929fdd86696dc20383a333b8a1187d8743147026c5a6fd843.
+Evidence is .tmp/public-object-get/baseline-retained-712.json. This pins the
+behavior the public IR path must match; it is not evidence of IR completion.
+
+The first frozen Get-owner source typechecks with zero diagnostics and 1,659
+unchanged source inputs. Its SHA256 is
+d36a7e7065cc426b1cf86c6ccd8408e4d92cf6faab0baf8687701e55c845ee50.
+Execution/negative tests are still being completed, so no tested resource
+completion or publishable checkpoint is claimed yet.
+
+#### First complete Get-owner validation (2026-09-28)
+
+The pinned six-suite run completed with 589 passed, 2 failed and 18 skipped out
+of 609 rows; all six expected files were present, and all 2,221 snapshotted
+inputs remained unchanged. TS7 passed. This is failed validation, not a ready
+checkpoint. Reports remain in .tmp/public-object-get-validation.
+
+Both real-execution groups stopped at their capture-layout setup assertion:
+frozen IR records use null prototypes, unlike the plain expected literals.
+The duplicate-fill negative similarly compared the filled live module with a
+structuredClone snapshot that had lost those prototypes. No actual module
+mutation is established by that mismatch. The completion row built two fully
+independent provider transactions and exceeded its unchanged 35-second limit.
+
+Repair the test harness without weakening the proof: compare the exact capture
+data; preserve prototype and collection data in unchanged-module snapshots and
+pin their mutation detection; split the independent failed-transaction and
+fresh-positive controls into separate tests. Retain all identity/currentness
+checks, source bodies, actual descriptor execution and the existing timeout.
+Do not count the 18 skipped rows as runtime evidence. Rerun after the test files
+are frozen; retain this first failure report for comparison.
+
+The read-only receiver review also confirms that binding this alone is
+insufficient: prepareOrdinaryObjectAccessResolver currently recognizes
+literal/const receivers, so this.marker needs an actual property intent.
+Proposed next work is an authenticated invocation-receiver callable plus the
+existing js.object.get(receiver,key,receiver) edge. Lexical this in arrows must
+capture the getter-entry receiver, never reread ambient currentThis. This
+proposal is not implemented receiver support, and still requires genuine
+public Get/default-prototype completion. Details are retained in
+.tmp/public-object-get/receiver-producer-review.md.
+
+#### Repaired Get-owner validation (2026-09-28)
+
+The frozen second run passed all 66 Get-owner rows with zero skips and zero
+failures; TS7 passed, and all 2,217 inputs remained unchanged. This includes
+actual descriptor traversal, captured source getters, original thrown values,
+normal/exceptional invocation-state restoration, Has without getter invocation,
+explicit-null exhaustion and unresolved implicit-prototype status2, on both
+original and decoded/offset programs. Receiver-observing source this remains
+an explicit preparation refusal; these rows do not claim that support.
+
+The new snapshot helper preserves prototypes and native collection contents,
+sharing and cycles, with eight direct positive/mutation controls. The two
+independent transaction controls are now separate tests. Each test and each
+real runtime lifecycle stage retains its 35-second bound. No production owner
+code changed during the test repair; its SHA256 remains
+d36a7e7065cc426b1cf86c6ccd8408e4d92cf6faab0baf8687701e55c845ee50.
+
+Eight quality gates passed (format, lint, LOC/function budgets, coercion,
+oracle, boundary inventory, reachability) with 2,216 unchanged inputs.
+Combined evidence is 552 passing rows in the five unchanged suites from the
+first run plus 66 passing Get rows from the second: 618 across two runs, not a
+fresh six-suite all-green run. Preserve the first 589/2/18 report. Evidence:
+.tmp/public-object-get-validation-second and .tmp/public-object-get-quality.
+This prepares an internal-resource checkpoint; public Get, default-prototype
+completion, receiver production and original712/Number conversion remain open.
+
+The public integration review identifies exact remaining joins: both consumer
+acceptance and physical invocation planning currently omit issued object-access
+requirements; supplemental object ABI bindings and complete support-function
+receipts must be added alongside real resource reservation/fill/completion.
+C2 currently admits source callables only. Builtin prototype members require an
+issued builtin callable adapter for their explicit receiver convention; fake
+source getter rows cannot authorize them. Preserve originalReceiver when the
+public scalar adapter resolves status2 through a completed companion reader.
+
+### Native Get dependency integration (2026-09-28)
+
+Integrate the published prototype increment9f468127 (PR6237), which contains
+upstream main3eb7ae5d, into signed native Get checkpoint45316410. Preserve
+both issue append records, every existing boundary entry and the unchanged
+Get implementation and regression suite. This is an explicit predecessor
+dependency; protected delivery must follow its main merge. Revalidate TS7,
+the complete66-row Get suite and349-row boundary suite, plus quality gates.
+Keep the original712 fixture and public scalar Get/provider gaps explicit;
+the internal status/value prerequisite is not full public Get completion.
+
+The integrated Get tree passed TS7 and both complete suites:415/415 rows
+(66 Get plus349 boundary), zero failures/skips, with2,219 unchanged inputs.
+All eight scoped quality gates passed with2,218 unchanged inputs. Preserve
+evidence in .tmp/public-object-get-main-validation and
+.tmp/public-object-get-main-quality. The implementation and regression test
+bytes remain those of signed45316410; publication waits for the refreshed
+prototype dependency. These are internal-resource tests, not full public
+Get or original712 acceptance.
+
+Refresh the uncommitted dependency merge to published prototype head2da72f87
+after its main-conflict repair. Preserve the complete Get record and prior
+415/415 validation evidence. Authenticate the before/after input comparison;
+no production source or script changes are permitted in this refresh. Normal
+commit hooks will validate the final combined tree before publication.
+
 Prototype PR6237 second integration (2026-09-28): main6b69edbf delivered
 the parallel ES2015 Promise-subclass/RegExp changes. Preserve all of those
 source/test changes and every upstream inventory entry; add only the existing
@@ -14974,6 +15191,83 @@ pin b363f29d without overwriting existing corpus files. Full normal hooks and
 protected delivery remain required; this is not a full migration parity claim.
 Evidence: .tmp/prototype-second-validation, .tmp/prototype-second-quality,
 and .tmp/prototype-second-provider.
+
+Get PR6242 conflict refresh (2026-09-28): integrate published prototype
+heada3332a61, preserving its current ES2015 main integration and both issue
+records. Keep the existing ready PR on hold until prototype delivery is
+verified on main. Current Get head450f2d3c had no normal compiler CI runs
+and conflicted with main; refresh this existing delivery so CI can validate it.
+The Get owner,66-row regression suite and boundary test remain byte-identical.
+Revalidate TS7 plus the complete415-row Get/boundary suites and all quality
+gates, then normal hooks before publishing the exact refreshed head.
+Status/value ownership still does not implement full public Get or712 parity.
+
+The current Get integration passed TS7 and415/415 tests, zero skipped or
+failed, with2,269 unchanged inputs. All eight scoped quality gates passed
+with2,224 unchanged inputs. The current QuickJS adapter rebuilt and passed
+its execution canaries against2,017 unchanged source inputs. Evidence is in
+.tmp/public-object-get-current-validation, -current-quality and -current-provider.
+
+Prototype PR6237 is now verified delivered on main at
+355632194772f32e5411e8b0c611c616a5321789, with publish head a3332a61 an
+ancestor and all nine delivered files byte-identical. Its actual merge group
+passed20/20 js-host and82/82 standalone conformance shards, the regression
+gate, CI and differential checks. The prototype delivery claim is completed
+on the authoritative issue-assignments branch. This satisfies the Get delivery
+predecessor only; Get itself still needs signed normal hooks, publication,
+required CI and protected queue delivery before its claim can complete.
+
+Get PR6242 lifecycle timing refinement (2026-09-28): nine completed-graph
+rows measured24.798–31.796seconds locally under35-second callback bounds.
+Related Boolean getter CI measured457.947seconds versus237.301 locally;
+this is proactive margin work, not an observed Get CI failure. Split only
+those nine rows into real bounded fixture/reservation, freeze/bind, resource
+fill, invocation, source-lowering and Get phases. Preserve all66 rows, every
+assertion and full snapshot, independent destructive transactions, current
+completion authentication, and the same35-second limits. Existing runtime
+hooks remain unchanged. Static preservation, format and lint passed; runtime
+validation is required before publication. Evidence and original bytes:
+.tmp/public-object-get/ci-lifecycle-repair. No production changes.
+
+The first frozen lifecycle refinement passed TS7 and66/66 Get rows, zero
+skips/failures, with2,272 unchanged inputs (650.722seconds). The now-terminal
+published47485 quality job establishes actual failures: the same nine
+completed-graph cases exceeded35seconds, and both existing completed-owner
+runtime hooks timed out, leaving18 runtime rows skipped (39 passed,9 failed,
+18 skipped). Preserve that failure and the first local positive separately.
+Extend only the two measured-failing hooks into genuine dependency phases;
+retain all66 cases, sources, assertions and35-second limits, then revalidate.
+
+CI delivery resource candidate: authoritative claim
+3518:get-ci-memory-delivery-20260928 belongs to
+ttraenkler/codex-get-ci-memory-delivery-20260928. All17 open PR file lists and
+active assignment records were inspected; no shared-workflow overlap found.
+The separate issue-tests job was cancelled after20m16s, consistent with its
+20-minute cap; its log does not independently identify the cancellation
+initiator. Boundary349 passed, with no Get terminal result. Its changed-test
+step explicitly used1GB while the existing changed-root runner defaults to
+4GB. Set only that changed-test step to4GB; leave the pinned cohort, complete
+selectors, one-worker scheduling, error handling,20-minute cap and35-second
+limits unchanged. Memory pressure is a hypothesis, not a proven cause; a
+complete exact-candidate CI result is required before claiming delivery fixed.
+Evidence: .tmp/public-object-get/ci-lifecycle-repair, including both raw logs
+and cancelled-job-analysis.json. No new production behavior is introduced.
+
+Second hook repair frozen: both measured-failing runtime completion hooks
+now execute the same dependency operations as separate bounded phases,
+followed by Get fill and fresh completion authentication. All66 callback
+bodies, including18 runtime callbacks, retain exact syntax token streams;
+the first nine-case repair, distinct decoded/offset transactions, source
+programs, emission and assertions are unchanged. Static preservation,
+format and lint checks passed. Final runtime evidence will come from normal
+commit hooks after TS7; the first66/66 run does not prove this later patch.
+Evidence: .tmp/public-object-get/ci-runtime-hook-repair. The temporary local
+workflow edit lock is removed after edits freeze; the upstream CI scope
+claim stays held until verified delivery.
+
+Final frozen repair passed TS7 with all owned inputs unchanged. Production
+source, scripts, shared helpers and fixtures are unchanged from47485. The
+normal commit-hook run remains the required final runtime proof.
 
 Boolean PR6240 prototype-main integration (2026-09-28): merge verified
 main35563219 after prototype PR6237 delivery. The only conflict was this
@@ -15009,3 +15303,75 @@ identical to verified main35563219. Preserve the failure log; retry the same
 normal hooks with their supported LOC_GATE_BASE and CHANGED_ROOT_TESTS_BASE
 set to that verified main commit. No allowance, source, gate, timeout, or
 assertion is changed. Evidence: prototype-main-refresh/commit.log.
+
+Get PR6242 was observed OPEN at exact head54039a0f with no queue entry and
+CONFLICTING against fresh upstream main2d8a1d6e. Its prior exact-head CI passed;
+this refresh addresses real merge conflicts, not a reason to bypass checks.
+Both complete issue append records and both runtime boundary inventory entries
+are preserved. The incoming main includes the delivered Boolean path and
+ES2015 fixes. No Number712 pending implementation is mixed into this PR.
+Normal hooks and required exact-head CI/merge-group verification remain
+required before queue delivery; historical queued status is no longer current.
+
+Get main refresh validation correction (2026-09-28): normal hooks passed 66/66 Get owner tests but stopped at the boundary suite (348/349) because combining the Get and primitive-boundary ABI entries preserved both modules while retaining minModules=38. The combined inventory contains 39 entries; raised its floor to 39, leaving the signed historical composition and regression assertion intact. Original failure retained in .tmp/get-main-refresh/commit.log. Full hooks require a new successful run before publication.
+
+
+Get CI timeout follow-up (2026-09-28, claim `3518:get-ci-memory-delivery-20260928`): run 36424443886 / job 108935185687 exhausted its 20-minute whole-job limit on published head 5332a8218. Pinned cohort passed 277 tests with one existing skip; boundary349 passed in 248.837s, leaving 829.7s before cancellation without a Get terminal report. The separate required quality job 108934839508 subsequently completed its changed-root step successfully. This is not evidence of an assertion failure or OOM. Plan: retain every selected file, 4GB worker limit, callback timeouts, fatal/advisory policy, and required checks; use a fresh serial fork per changed file and a bounded 40-minute aggregate job budget. Verify workflow syntax/selection and normal hooks, then publish to the existing PR and require exact-head terminal CI before queue admission. No legacy retirement or coverage reduction.
+
+
+### Runtime root-finality fingerprint delivery (2026-09-28)
+
+Claim: `3518:root-finality-fingerprint-20260928`, owner
+`ttraenkler/codex-root-finality-fingerprint-20260928`. Delivery branch:
+`codex/3518-root-finality-fingerprint-20260928`.
+
+Implementation: include emitted extensibility in canonical root-type tokens;
+normalize plain, inline, and generic subtype encodings with equal Wasm meaning.
+An unused `final` field on a plain struct does not change its emitted finality.
+Fingerprint ABI version 3 refuses version-2 fingerprints, which could conflate
+final and extensible roots. Providers must be regenerated for the new ABI.
+
+Evidence: the preserved regression initially passed 53/120 and failed 67/120,
+with no skipped cases. After the fix all 120 passed. It compares independent
+emitted Wasm modules using engine `ref.test`, compares structural fingerprints,
+and verifies emitted recursive-group bytes across seven encodings and shifted
+type indices. The existing canonical runtime-linking and provider-manifest suites
+also passed: 135/135 combined, with a clean typecheck. Those results were measured
+in the Number integration worktree; validation on this isolated fresh-main branch
+is recorded separately before publication. The change neither retires legacy
+code nor grants wrapper allocation, intrinsic prototype, or ToObject completion.
+
+Acceptance for this checkpoint: current-root tests and normal hooks, a signed
+commit with accurate attribution, fork publication, protected queue validation,
+and verified upstream main ancestry/content. Queue entry or a PR is not delivery.
+
+Current isolated-base validation:139/139 tests passed on upstream2148f208f066e5abd9a64ef31a332cafb7477583 (124finality controls plus15existing canonical/runtime-provider cases),0skipped; TS7 reported no errors. Added raw-byte positive/negative controls for generic array/function root encodings because they share subtype normalization. Normal commit/push hooks and protected queue are still required.
+
+
+### 2026-09-28: primitive wrapper delivery integration
+
+Claim: `3518:primitive-wrapper-delivery-20260928`, owned by
+`ttraenkler/codex-primitive-wrapper-delivery-20260928` on upstream
+`issue-assignments`. The existing extensible-root, wrapper-layout, wrapper-body,
+and wrapper-storage implementation claims remain intact.
+
+Implementation plan: deliver the existing symbolic extensible self-root reservation,
+five private-slot primitive wrapper layouts, pure allocation/read bodies, and
+authenticated backend storage owner together. Build from upstream main
+`f083fd4a9ad676cf08d69b7693954b1ca93c78e9`, which includes the separately delivered
+root-finality fingerprint fix. Keep the default ordinary Object layout final;
+require an explicit native-only extensible-root opt-in. Preserve the existing
+signed boundary composition and append only these four new modules.
+
+Validation plan: run all four wrapper/root suites and existing ordinary-layout
+and Get owner regressions, TypeScript checking, boundary composition and
+preservation gates, then the normal commit/push hooks and protected merge queue.
+Fresh isolated delivery validation passed TypeScript checking and 633/633 tests
+across six suites, with zero failures, skips, or reported unhandled errors. The full
+boundary suite passed 349/349, and all six inventory/preservation/budget/oracle/
+coercion gates passed. Strict closure remains open; hooks and delivery are pending.
+
+This provides wrapper storage, not completed canonical realm prototypes, native
+String exotic behavior, ToObject factory population, or public Number parity.
+No legacy retirement is authorized by this slice. Completion requires verified
+upstream main ancestry and reviewed file content; a local test pass is not delivery.

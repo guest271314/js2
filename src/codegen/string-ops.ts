@@ -76,6 +76,7 @@ import { emitDerivedNativeCharCodeRead, selectProvenAsciiCaseHelper } from "./de
 import { tryEmitStaticI32Expression } from "./i32-static-range-expr.js";
 import { tryEmitRuntimeIsRegExpSearchArg } from "./string-isregexp-guard.js"; // (#5152)
 import { tryEmitStaticNeedleIndexOf } from "./static-needle-indexof.js";
+import { ensureSpecArgToString, externalizeObjectLiteralArg } from "./spec-arg-coercion.js"; // (#6651 H1)
 import {
   getArrTypeIdxFromVec,
   getOrRegisterRefCellType,
@@ -294,7 +295,13 @@ export function emitHostExternrefToNativeString(ctx: CodegenContext, fctx: Funct
  * stack; false when the caller should fall back to its own handling.
  */
 
-function compileNativeConcatOperand(ctx: CodegenContext, fctx: FunctionContext, operand: ts.Expression): boolean {
+// (#6651 H1) `specToString`: an argument's §7.1.17 ToString, not the lenient `+` one.
+function compileNativeConcatOperand(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  operand: ts.Expression,
+  specToString = false,
+): boolean {
   // Precondition: caller has established `noJsHost(ctx)` (WASI / --target
   // standalone). There, `number_toString` is the pure-Wasm helper whose
   // externref result wraps a native `$AnyString` (so `any.convert_extern` +
@@ -406,11 +413,21 @@ function compileNativeConcatOperand(ctx: CodegenContext, fctx: FunctionContext, 
     // Dynamic externref (boxed string / any / $Object) → runtime ToString.
     // For standalone $Object values this routes through native
     // OrdinaryToPrimitive("string") before the native-string concat helper.
-    const dynToStrIdx = ensureLateImport(ctx, "__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }]);
+    const dynToStrIdx = specToString // (#6651 H1) an argument's ToString is the spec one
+      ? ensureSpecArgToString(ctx, fctx)
+      : ensureLateImport(ctx, "__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }]);
     flushLateImportShifts(ctx, fctx);
     if (dynToStrIdx !== undefined) {
       fctx.body.push({ op: "call", funcIdx: dynToStrIdx });
     }
+    emitNativeStringRefFromExternref(ctx, fctx);
+    return true;
+  }
+
+  // (#6651 H1) An object-LITERAL argument takes the runtime §7.1.1 walk — see
+  // spec-arg-coercion.ts for the shapes the static dispatch below gets wrong.
+  if (specToString && externalizeObjectLiteralArg(ctx, fctx, opType)) {
+    fctx.body.push({ op: "call", funcIdx: ensureSpecArgToString(ctx, fctx) });
     emitNativeStringRefFromExternref(ctx, fctx);
     return true;
   }
@@ -524,7 +541,7 @@ export function emitArgAsNativeString(ctx: CodegenContext, fctx: FunctionContext
     // search/concat argument as needing it, so register it on demand here
     // (idempotent — guarded by `funcMap.has`). Mirrors the numeric-`join` path.
     emitNativeNumberFormat(ctx, new Set(["number_toString"]));
-    if (compileNativeConcatOperand(ctx, fctx, value)) return;
+    if (compileNativeConcatOperand(ctx, fctx, value, true)) return;
     // Engine declined (unexpected shape) — fall through to the legacy coercion.
   }
   compileExpression(ctx, fctx, value, nativeStringType(ctx));
@@ -2558,7 +2575,9 @@ export function compileStringIntegerArg(
   // No new #2108 coercion site (reuses the engine). The legacy direct-i32 path
   // is kept for the JS-host nativeStrings mode (these slices are standalone).
   if (noJsHost(ctx)) {
-    const argType = compileExpression(ctx, fctx, arg);
+    let argType = compileExpression(ctx, fctx, arg);
+    // (#6651 H1) An object-literal position takes the runtime §7.1.1 walk.
+    if (externalizeObjectLiteralArg(ctx, fctx, argType)) argType = { kind: "externref" };
     if (!argType) {
       // void → undefined → ToNumber NaN. Most integer-indexed methods map
       // NaN to 0; lastIndexOf supplies its spec-specific +∞ sentinel so the

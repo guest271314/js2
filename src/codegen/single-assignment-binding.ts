@@ -141,10 +141,16 @@ function writingOccurrences(sourceFile: ts.SourceFile): Map<string, ts.Identifie
 /**
  * Is `id`'s binding declared exactly once and never assigned after its
  * initializer? `false` on any doubt — an unresolvable binding, more than one
- * declaration, or an occurrence the checker cannot place.
+ * declaration, or an occurrence the checker cannot place. `ignoreDeclaration`
+ * lets a caller discount declarations it has proven are not bindings.
  */
-export function bindingIsSingleAssignment(ctx: CodegenContext, id: ts.Identifier): boolean {
-  const decls = ctx.oracle.declarationsOf(id);
+export function bindingIsSingleAssignment(
+  ctx: CodegenContext,
+  id: ts.Identifier,
+  ignoreDeclaration?: (declaration: ts.Declaration) => boolean,
+): boolean {
+  const all = ctx.oracle.declarationsOf(id);
+  const decls = ignoreDeclaration ? all.filter((d) => !ignoreDeclaration(d)) : all;
   if (decls.length !== 1) return false;
   const decl = decls[0];
   if (decl === undefined) return false;

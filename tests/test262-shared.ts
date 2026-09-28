@@ -795,6 +795,7 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
               linkedHarnessPrefix?: string;
               linkedHarnessBody?: string;
               linkedHarnessStrict?: boolean;
+              linkedHarnessHonestSource?: string;
             } =
               linkedAssembly && !linkedAssembly.raw
                 ? {
@@ -802,6 +803,12 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                     linkedHarnessPrefix: linkedAssembly.harnessPrefix,
                     linkedHarnessBody: linkedAssembly.primary.body,
                     linkedHarnessStrict: linkedAssembly.primary.strict,
+                    // (#6723 D3) The per-row fallback compiles THIS — the
+                    // honest assembly of the same variant — not
+                    // `prefix + bodySource`, which puts a strict variant's
+                    // directive after the harness (no longer a prologue) and
+                    // skips the honest-only strata (#4626 `$262` rename).
+                    linkedHarnessHonestSource: harnessAssembly.primary.source,
                   }
                 : {};
             const inferModuleStrictArguments = isModuleGoal(category, meta, source);
@@ -834,11 +841,10 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
             // single-source test retain their existing path.
             const isModuleNamespaceTest = relPath.startsWith("test/language/module-code/namespace/");
             const selfModuleImport = isModuleNamespaceTest && hasSelfModuleImport(testRelativePath, source);
-            // #3509 — Dynamic fixture metadata alone does not mean this test
-            // executes import(). Compiler capability validation rejects eager
-            // #3494 cases while allowing an uncalled ordinary closure to reach
-            // the test with a host-free runtime trap in its body. Do not turn
-            // dynamic fixtures into eager compileMulti inputs.
+            // #3509/#3494 — Dynamic fixture metadata alone does not mean this
+            // test executes import(). Standalone import() of a module outside
+            // the compiled graph settles as a rejected Promise at runtime. Do
+            // not turn dynamic fixtures into eager compileMulti inputs.
             if (Object.keys(fixtureGraph.fixtureFiles).length > 0 || selfModuleImport) {
               // Fixture tests are rare — compile in-process
               try {
@@ -1224,6 +1230,11 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
               );
 
             let r = await runHarnessSource(compileSource, relPath);
+            // (#6723 D3) A linked row that fell back compiled the HONEST
+            // assembly, so its error lines are offset by the honest prefix.
+            if ((r as { linkedFallback?: boolean }).linkedFallback) {
+              lineAdjustOffset = harnessAssembly.primary.bodyLineOffset;
+            }
             if (r.status === "pass" && harnessAssembly.strictRerun) {
               const primaryCompileMs = r.compileMs ?? 0;
               const primaryExecMs = r.execMs ?? 0;
@@ -1243,8 +1254,12 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
               if (linkedAssembly?.strictRerun && !linkedAssembly.raw) {
                 linkedHarnessOpts.linkedHarnessBody = linkedAssembly.strictRerun.body;
                 linkedHarnessOpts.linkedHarnessStrict = linkedAssembly.strictRerun.strict;
+                linkedHarnessOpts.linkedHarnessHonestSource = harnessAssembly.strictRerun.source;
               }
               const strictResult = await runHarnessSource(compileSource, `${relPath} [strict rerun]`);
+              if ((strictResult as { linkedFallback?: boolean }).linkedFallback) {
+                lineAdjustOffset = harnessAssembly.strictRerun.bodyLineOffset;
+              }
               r = {
                 ...strictResult,
                 ...(strictResult.status === "pass"
@@ -1306,6 +1321,11 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                       scriptGoal,
                       temporal: needsTemporal,
                       ...nativeHarnessOpts,
+                      // (#6723 D2) `compileSource` is the linked BODY-ONLY unit
+                      // in a linked run; retrying it without the descriptor
+                      // compiled the body with no harness at all, so every
+                      // retried row scored `verifyProperty is not defined`.
+                      ...linkedHarnessOpts,
                     },
                     RETRY_TIMEOUT_MS,
                   ),
@@ -1381,6 +1401,11 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                       scriptGoal,
                       temporal: needsTemporal,
                       ...nativeHarnessOpts,
+                      // (#6723 D2) `compileSource` is the linked BODY-ONLY unit
+                      // in a linked run; retrying it without the descriptor
+                      // compiled the body with no harness at all, so every
+                      // retried row scored `verifyProperty is not defined`.
+                      ...linkedHarnessOpts,
                     },
                     RETRY_TIMEOUT_MS,
                   ),

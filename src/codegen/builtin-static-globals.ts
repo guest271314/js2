@@ -22,6 +22,7 @@ import { addStringConstantGlobal } from "./registry/imports.js";
 import { addFuncType } from "./registry/types.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { ensureLateImport, flushLateImportShifts } from "./shared.js";
+import { noteBuiltinCollectionCarrierReserved } from "./builtin-collection-dyn-construct.js";
 
 const SUPPORTED_STATIC_PROPS: ReadonlyMap<string, readonly string[]> = new Map([
   ["Array", ["isArray"]],
@@ -195,6 +196,7 @@ export function reserveBuiltinConstructorIdentityGlobal(ctx: CodegenContext, bui
     init: [{ op: "ref.null.extern" }],
   });
   ctx.builtinObjectGlobals.set(key, globalIdx);
+  noteBuiltinCollectionCarrierReserved(ctx, builtinName); // (#6720)
   return globalIdx;
 }
 

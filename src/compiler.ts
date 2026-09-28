@@ -929,51 +929,6 @@ function isWasmException(e: unknown): boolean {
   );
 }
 
-const STANDALONE_DYNAMIC_IMPORT_ERROR =
-  "Standalone dynamic import is unsupported until compileMulti provides internal module records and namespace objects";
-
-/**
- * #3494 — catch eager import() before codegen, including top-level await paths
- * that the flattened module initializer may not lower through
- * compileCallExpression. A standalone binary cannot satisfy the host loader,
- * and compileMulti has no honest internal module-record substitute yet.
- *
- * #3509 — ordinary arrow/function-expression bodies are runtime-trap eligible:
- * creating one needs no loader, and calls.ts emits a host-free TypeError if its
- * import executes. Async/generator functions stay fatal here because a direct
- * synchronous throw would not preserve their rejection/lazy-throw semantics.
- */
-function detectStandaloneDynamicImports(sourceFile: ts.SourceFile): CompileError[] {
-  const errors: CompileError[] = [];
-  const canTrapAtRuntime = (call: ts.CallExpression): boolean => {
-    for (let parent: ts.Node | undefined = call.parent; parent; parent = parent.parent) {
-      if (!ts.isFunctionLike(parent)) continue;
-      if (!ts.isArrowFunction(parent) && !ts.isFunctionExpression(parent)) return false;
-      const isAsync = parent.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword) ?? false;
-      const isGenerator = ts.isFunctionExpression(parent) && parent.asteriskToken !== undefined;
-      return !isAsync && !isGenerator;
-    }
-    return false;
-  };
-  const visit = (node: ts.Node): void => {
-    if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
-      if (canTrapAtRuntime(node)) return;
-      const { line, character } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
-      errors.push({
-        message: STANDALONE_DYNAMIC_IMPORT_ERROR,
-        line: line + 1,
-        column: character + 1,
-        severity: "error",
-        file: sourceFile.fileName,
-      });
-      return;
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(sourceFile);
-  return errors;
-}
-
 /**
  * #1927 — the single, shared front-end pipeline core. Owns everything from ES
  * early-error detection down through binary/WAT/dts/WIT emit. It is SYNCHRONOUS
@@ -1028,16 +983,6 @@ function runPipeline(input: PipelineInput): CompileResult {
     if (hasNewError(earlyErrors)) {
       return failResult(errors);
     }
-  }
-
-  // Step 1a-ii: target-capability validation. This is deliberately independent
-  // of allowJs: Test262 module fixtures use JavaScript source, and silently
-  // skipping this gate there produced a success result with no runnable import
-  // semantics for top-level `await import(...)`.
-  if (targetProfile.target === "standalone") {
-    const dynamicImportErrors = userSourceFiles.flatMap(detectStandaloneDynamicImports);
-    errors.push(...dynamicImportErrors);
-    if (dynamicImportErrors.length > 0) return failResult(errors);
   }
 
   // Step 1b: Safe mode validation for all user source files.

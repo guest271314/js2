@@ -1465,6 +1465,17 @@ async function getWorkerHarnessProvider(harnessPrefix, target) {
   return promise;
 }
 
+/**
+ * (#6723 D3) The text a linked-lane row compiles when it falls back to the
+ * honest lane: the honest assembly of the same variant, as the parent built it.
+ * `prefix + source` is NOT that for a strict variant — the directive lands
+ * after the harness, where it is no longer a directive prologue, so a strict
+ * row silently ran sloppy (4 standalone rows flipped pass→fail on it).
+ */
+function linkedHarnessHonestSource(linkedHarness, source) {
+  return linkedHarness.honestSource ?? linkedHarness.harnessPrefix + source;
+}
+
 async function doCompile(
   source,
   sourceMapUrl,
@@ -1598,7 +1609,7 @@ async function doCompile(
     if (linkedHarness) {
       linkedHarness.fellBack = true;
       linkedHarness.fallbackReason = "temporal row: honest compile (compileWithTemporalGlobal)";
-      temporalSource = linkedHarness.harnessPrefix + source;
+      temporalSource = linkedHarnessHonestSource(linkedHarness, source);
     }
     return compilerBundle.compileWithTemporalGlobal(temporalSource, temporal, {
       allowJs: true,
@@ -1663,7 +1674,7 @@ async function doCompile(
       linkedHarness.fallbackReason = "no harness provider in this fork";
     }
     linkedHarness.fellBack = true;
-    return compileSingleSource(linkedHarness.harnessPrefix + source, bodyOptions);
+    return compileSingleSource(linkedHarnessHonestSource(linkedHarness, source), bodyOptions);
   }
   if (originalHarness) {
     // The authoritative sharded-CI and test262.fyi lanes both compile literal
@@ -1755,6 +1766,13 @@ function extractWasmExceptionMessage(err, instance) {
       if (t === "object" || t === "function") {
         const native = tryNativeExnRender(instance, payload);
         if (native != null) return native;
+        // (#6723) A STANDALONE linked row: the payload may be minted by the
+        // harness provider (a `Test262Error` thrown by `assert.*`), whose GC
+        // layout only the provider's own `__exn_render_*` exports can read.
+        for (const peer of currentLinkedPeers) {
+          const viaPeer = tryNativeExnRender({ exports: peer }, payload);
+          if (viaPeer != null) return viaPeer;
+        }
       }
       return safeStringifyThrown(payload);
     }
@@ -1807,6 +1825,27 @@ function extractWasmExceptionMessage(err, instance) {
 function drainAndCaptureNativeStdout(instance, append) {
   const exp = instance?.exports;
   if (!exp) return null;
+  // (#6723) A standalone linked row has one microtask ring and one stdout sink
+  // PER MODULE: `$DONE` lives in the harness provider, so its completion marker
+  // lands in the provider's sink, and a continuation can hop between rings.
+  // Drain every ring until none makes progress, then read every sink.
+  const peers = currentLinkedPeers;
+  if (peers.length > 0) {
+    let drainError = null;
+    const modules = [exp, ...peers];
+    for (let round = 0; round < 8; round++) {
+      for (const moduleExports of modules) {
+        if (typeof moduleExports.__drain_microtasks !== "function") continue;
+        try {
+          moduleExports.__drain_microtasks();
+        } catch (err) {
+          drainError ??= err;
+        }
+      }
+    }
+    for (const moduleExports of modules) captureNativeStdout(moduleExports, append);
+    return drainError;
+  }
   let drainError = null;
   if (typeof exp.__drain_microtasks === "function") {
     try {
@@ -1815,6 +1854,12 @@ function drainAndCaptureNativeStdout(instance, append) {
       drainError = err;
     }
   }
+  captureNativeStdout(exp, append);
+  return drainError;
+}
+
+/** Mirror one module's native `__stdout_*` sink into `append`, line by line. */
+function captureNativeStdout(exp, append) {
   if (typeof exp.__stdout_prepare === "function" && typeof exp.__stdout_char === "function") {
     let len = 0;
     try {
@@ -1832,7 +1877,20 @@ function drainAndCaptureNativeStdout(instance, append) {
       }
     }
   }
-  return drainError;
+}
+
+/**
+ * (#6723) Export objects of the linked provider instances of the row being
+ * executed (standalone linked-harness lane), for exception rendering and the
+ * host-free async drain. Empty for every unlinked row.
+ */
+let currentLinkedPeers = [];
+
+function standaloneLinkedPeers(target, result, importObj) {
+  if (target !== "standalone") return [];
+  return (result.linkedModules ?? [])
+    .map((artifact) => importObj[artifact.namespace])
+    .filter((exports) => exports && typeof exports === "object");
 }
 
 function originalHarnessExceptionMatches(err, instance, expectedErrorType) {
@@ -2010,12 +2068,12 @@ process.on("message", async (msg) => {
   const fixtureGraph = staticFixtureGraph || selfNamespaceGraph;
   const compileStart = performance.now();
 
-  // #3492/#3509 — Dynamic fixture discovery is transport metadata, not proof
-  // that a loader is needed during this test. Let the compiler distinguish an
-  // eager import (fatal #3494) from an ordinary deferred closure (host-free
-  // runtime trap, #3509). A blanket graph guard false-failed syntax-valid tests
-  // whose arrow was never invoked. No dynamic fixture is promoted to a static
-  // compileMulti edge here.
+  // #3492/#3509/#3494 — Dynamic fixture discovery is transport metadata, not
+  // proof that a loader is needed during this test. A standalone import() of a
+  // module outside the compiled graph settles as a rejected Promise at runtime
+  // (#3494). A blanket graph guard false-failed syntax-valid tests whose arrow
+  // was never invoked. No dynamic fixture is promoted to a static compileMulti
+  // edge here.
 
   // (#5353) The parent computes the PATH-or-`features:` gate (it is the side
   // that knows both) and this worker double-checks the two conditions it owns:
@@ -2053,6 +2111,9 @@ process.on("message", async (msg) => {
           harnessPrefix: msg.linkedHarnessPrefix,
           body: msg.linkedHarnessBody,
           strict: msg.linkedHarnessStrict === true,
+          // (#6723 D3) The honest assembly of THIS variant. Absent (an older
+          // parent) ⇒ the pre-#6723 `prefix + source` reconstruction.
+          honestSource: typeof msg.linkedHarnessHonestSource === "string" ? msg.linkedHarnessHonestSource : undefined,
           fellBack: false,
           fallbackReason: undefined,
         }
@@ -2352,6 +2413,7 @@ process.on("message", async (msg) => {
       runtimeIntrinsicCanarySnapshot = snapshotRuntimeIntrinsicSurface(importObj);
     }
 
+    currentLinkedPeers = [];
     try {
       // (#4162) The ONE shared instantiate seam. Standalone goes module-first
       // (import list inspectable → #2928 E6 provider attachment); the host lane
@@ -2379,7 +2441,9 @@ process.on("message", async (msg) => {
           ? { deps: { console: consoleProxy }, options: { globalSandbox: harnessSandbox } }
           : undefined,
       });
+      currentLinkedPeers = standaloneLinkedPeers(target, result, importObj);
     } catch (err) {
+      currentLinkedPeers = standaloneLinkedPeers(target, result, importObj);
       const execMs = performance.now() - execStart;
       // Real Wasm compile/link failures stay as compile_error. A throw from
       // the module's start function — which surfaces as WebAssembly.Exception
