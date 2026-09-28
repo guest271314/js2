@@ -33,6 +33,7 @@ import {
  */
 import { ts } from "../ts-api.js";
 import { resolveComputedKeyExpression } from "./literals.js";
+import { hasStaticModifier } from "./ast-modifiers.js";
 import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3b) stable-regime minting
 import {
   isBooleanType,
@@ -3804,10 +3805,15 @@ export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorD
   // sites already key the method by the FOLDED name (`resolveClassMemberName` /
   // `resolveAccessorPropName` -> `${owner}_${key}`), so the funcMap key threads
   // exactly like an identifier's. An unfoldable computed key still bails.
+  // (#6651 A10) …except a standalone CLASS member: the class lowering keys an
+  // unfoldable computed member by its synthetic `__cmdyn$<ordinal>` name
+  // (`resolveInstallableClassMemberName`, #5195), unique per member.
+  const dynamicClassMember = isStandaloneDynamicClassMethod(ctx, decl);
   if (
     ts.isMethodDeclaration(decl) &&
     !ts.isIdentifier(decl.name) &&
     !ts.isPrivateIdentifier(decl.name) &&
+    !dynamicClassMember &&
     foldedMethodKey(ctx, decl.name) === undefined
   ) {
     return false;
@@ -3900,16 +3906,20 @@ export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorD
     // (#6651 A3) Uniqueness is decided on the FOLDED key — the one the emit
     // sites key by — so `*['a']()` and `*a()` in one body collide, as they do
     // at the funcMap. An unfoldable computed name bailed above.
-    const ownName = foldedMethodKey(ctx, decl.name);
-    if (ownName === undefined) return false;
+    const ownName = dynamicClassMember ? undefined : foldedMethodKey(ctx, decl.name);
+    if (ownName === undefined && !dynamicClassMember) return false;
     const parent = decl.parent;
-    if (ts.isClassLike(parent) || ts.isObjectLiteralExpression(parent)) {
+    if (ownName !== undefined && (ts.isClassLike(parent) || ts.isObjectLiteralExpression(parent))) {
       const members: readonly ts.Node[] = ts.isObjectLiteralExpression(parent) ? parent.properties : parent.members;
+      // (#6651 A10) In a class, `static *m()` beside `*m()` no longer collides:
+      // `classMemberFuncKey` gives the static member its own funcMap key, so
+      // only members of the SAME placement count.
+      const ownStatic = ts.isClassLike(parent) && hasStaticModifier(decl);
       let sameName = 0;
       for (const m of members) {
-        if (ts.isMethodDeclaration(m) && m.asteriskToken && foldedMethodKey(ctx, m.name) === ownName) {
-          sameName++;
-        }
+        if (!ts.isMethodDeclaration(m) || !m.asteriskToken || foldedMethodKey(ctx, m.name) !== ownName) continue;
+        if (ts.isClassLike(parent) && hasStaticModifier(m) !== ownStatic) continue;
+        sameName++;
       }
       if (sameName > 1) return false;
     }
@@ -3919,10 +3929,16 @@ export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorD
   // `arguments` is the bounded C02 exception: its vec is now carried by the
   // native frame, while the remaining unsupported method cases stay on the
   // host path / clean standalone refusal.
+  // (#6651 A10) `super` is admitted in a standalone OBJECT-LITERAL method: its
+  // closure carries the [[HomeObject]] capture (`emitObjectLiteralMethodFn`,
+  // #4688), which the resume function rehydrates by name, and its receiver is
+  // the frame's `dynamic_this` snapshot. A class method has neither in the
+  // resume function, so it keeps the bail.
+  const literalSuper = ctx.standalone && ts.isObjectLiteralExpression(decl.parent);
   if (
     ts.isMethodDeclaration(decl) &&
     decl.body &&
-    (methodBodyUsesSuper(decl.body) ||
+    ((methodBodyUsesSuper(decl.body) && !literalSuper) ||
       // (#3032 W4) Outer-scope captures are ADMITTED for method generators in
       // the standalone/wasi lane: a class / object-literal method body never
       // receives captures as params — it resolves them through the
@@ -3971,6 +3987,16 @@ function isAnonymousDefaultExportDeclaration(decl: GeneratorDecl): boolean {
  * `undefined` when the name does not fold. Mirrors `resolveClassMemberName` /
  * `resolveAccessorPropName` (the two emit sites' key derivations).
  */
+function isStandaloneDynamicClassMethod(ctx: CodegenContext, decl: GeneratorDecl): boolean {
+  return (
+    ctx.standalone &&
+    ts.isMethodDeclaration(decl) &&
+    ts.isClassLike(decl.parent) &&
+    ts.isComputedPropertyName(decl.name) &&
+    foldedMethodKey(ctx, decl.name) === undefined
+  );
+}
+
 function foldedMethodKey(ctx: CodegenContext, name: ts.PropertyName): string | undefined {
   if (ts.isIdentifier(name)) return name.text;
   if (ts.isPrivateIdentifier(name)) return "__priv_" + name.text.slice(1);
@@ -4256,7 +4282,8 @@ export function registerNativeGenerator(
       ts.isFunctionExpression(decl) ||
       (ts.isMethodDeclaration(decl) && ts.isObjectLiteralExpression(decl.parent))) &&
     decl.body !== undefined &&
-    bodyReferencesOwnThis(decl.body);
+    // (#6651 A10) A `super` reference reads the receiver too (§12.3.5.3).
+    (bodyReferencesOwnThis(decl.body) || (ts.isMethodDeclaration(decl) && methodBodyUsesSuper(decl.body)));
   // (#2571) The synthetic `this` (when present) is the FIRST param name, aligned
   // with the caller's `paramTypes[0] === receiverType`. User params follow.
   // (#2920) A binding-pattern param has no source identifier; mint a unique
