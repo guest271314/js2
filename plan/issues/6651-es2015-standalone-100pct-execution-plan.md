@@ -10422,6 +10422,193 @@ Resume steps (`.tmp/` is not pushed — these are the commands, not file refs):
    trees; the new pin suite `tests/issue-6651-a5-computed-key-yield.test.ts`,
    red on base, `result.imports` asserted `[]`).
 
+#### Resumed and finished — 2026-09-28
+
+Resumed by session `session_01FEGi3DmyPRPD5dx4kWU8hs` in worktree
+`/home/user/js2/.claude/worktrees/agent-af2f609008ac6fb35` (local branch
+`a5-resume`, every commit pushed to `claude/es6-test262-standalone-g10c7u`,
+PR #6101). Every number below was measured in this session unless it names
+another artifact.
+
+**Commits.**
+
+| sha | what |
+| --- | --- |
+| `9a0f2694fa` | merge `origin/main` @ `732d9f75e6`. One conflict, the native-gen `yield*` arm of `emitYield`: kept main's `\|\| hostLane` (#1691 keeps a nested generator's `yield*` eager on host) AND A5's for-of chain admission (which replaces the replay-only refusal). Plan file: both sides kept. |
+| `99ca4b6002` | target 2 finished + `quality` fix (details below) |
+| `4401a4126d` | pin suite |
+| `3ee2e051c5` | retire the #680 `fails closed for computed object key` pin (it pinned the refusal target 1 removes); positive twin of the exact shape added to the A5 suite — A4's treatment of its destructuring case |
+| `a245bfe94e` | fix: the harness callee `assert.sameValue` was refused (below) |
+| `5787999b14` | `issue-6651-generator-default-lane`'s NEGATIVE computed-accessor-name case pinned the #680 refusal A5 removes; it now asserts the suspension the A2 carve-out protects (first `next()` stops AT the key, value 1). Red on base, green here |
+| `921912f2e7` | merge `origin/main` @ `3556321947` (102 commits, none in the generator files or these tests). One conflict: `scripts/compiler-boundaries.json`, where main moved the neighbouring generator entries into its later module list; the A5 entry follows them |
+
+**#1691 does not overlap target 2.** It routes a GENERIC-iterable `yield*`
+through the protocol delegation state on the JS host, and bails a native-gen
+delegate back to the eager host path (`|| hostLane`) before any A5 code runs.
+There was no second delegate-close to reuse: the D2 forwarding
+(`emitDelegateCloseForward`) is main's own #2864 block, extracted verbatim.
+
+**Target 2, as finished.**
+
+- (a) The D2 delegate-close block moved verbatim out of `compileState`'s legacy
+  `abruptResume` branch into `emitDelegateCloseForward`, and is called from BOTH
+  branches — in the `unwind` branch after `fctx.body = abruptBody`, before
+  `emitUnwindWalk`. A close that throws upgrades `mode` to throw, which the walk
+  then reads. The legacy branch is byte-identical (control below).
+- (b) `throwRoute` clears the native-gen delegation slot, as it already cleared
+  the protocol-iterable one. Without it a runtime throw from the inner, caught
+  by a `catch` in the loop body, left the completed inner in the slot and the
+  next iteration's `yield* inner()` resumed it (pin: `NaN`, i.e. no second
+  inner, without the clear).
+- (c) **Not in the suspended plan — added because (a) alone traded a loud
+  refusal for a silently wrong answer.** D2 drives the inner ONCE and discards
+  its result. §27.5.3.7 7.b/7.c instead re-yield a not-done inner result, and
+  let a done `.throw()` result complete the `yield*` normally. So the for-of
+  chain admission now also requires `isCloseTransparentGenerator(inner body)`
+  (`generators-native-ast-scan.ts`): no `catch` whose try block holds a
+  yield, no `finally` around a yield that itself yields or returns, no nested
+  `yield*`. Measured: an inner `try { yield 1 } catch { yield 99 }` delegated
+  from a for-of body answered the outer's rethrow where the spec yields 99;
+  with the gate it refuses with #680, as on base. **The same approximation is
+  live on `main` for a plain `yield* inner()` outside any loop** (probe:
+  `.throw()` rethrows on BOTH trees, spec yields 99). That is the legacy
+  replay-only chain; it is untouched here and left as a residual.
+- (d) `scripts/compiler-boundaries.json` classifies
+  `src/codegen/generator-yield-nested.ts` (`mixed-needs-split`,
+  `backend-wasmgc`, like its siblings). It is not a main-written baseline — PRs
+  add their own entries (e.g. `66315eb368`).
+  `check-compiler-boundaries.mjs --mode inventory --base origin/main`:
+  `errors: []`.
+
+**Target 1 fix (`a245bfe94e`).** The first after-run left 4 of the 9
+target-1 rows at #680 CE. In a JS source the harness's module-scope expandos
+(`assert.sameValue = function …`) list the BASE identifier `assert` as a
+declaration of the function's symbol (7 `Identifier@PropertyAccessExpression`
+entries next to the `FunctionDeclaration`), so `moduleScopeOrAmbient` refused
+`assert.sameValue` as a callee before a later yield. Those declarations add a
+property; they do not rebind the name — filtered out. Pinned red → green.
+
+**Trees.** base = `git archive 732d9f75e6` (`.tmp/basetree`); after = HEAD
+`a245bfe94e` (`.tmp/aftertree`). Both verified blob-for-blob over `src/`,
+`tests/`, `scripts/` against their revision (6,937 / 6,939 files, 0
+mismatches). Engine QuickJS, artifact key `2e2d7736713beeda`, adapter
+`d4799bda84cfed0d` (cache hits on both trees).
+
+**A manifest, per path** — 4 chunks (50/50/50/47),
+`JS2WASM_EVAL_ENGINE=quickjs COMPILER_POOL_SIZE=2 … --standalone --isolate`,
+each under the shared lock.
+
+| A manifest, 197 rows | pass | fail | compile_error |
+| --- | ---: | ---: | ---: |
+| base `732d9f75e6` (`.tmp/a5/A-base.tsv`) | 152 | 2 | 43 |
+| after `a245bfe94e` (`.tmp/a5/A-after.tsv`) | **165** | 4 | 28 |
+
+Join: 152 pass → pass, **13 CE → pass**, 2 CE → fail, 28 CE → CE, 2 fail →
+fail. **0 pass → non-pass.** Same totals as the lost 2026-09-24 record, on a
+base 5 days newer.
+
+| target row | base | after |
+| --- | --- | --- |
+| `expressions/object/cpn-obj-lit-computed-property-name-from-yield-expression.js` | CE (#680) | pass |
+| `expressions/object/accessor-name-computed-yield-expr.js` | CE (#680) | pass |
+| `expressions/object/method-definition/computed-property-name-yield-expression.js` | CE (#680) | pass |
+| `expressions/class/accessor-name-inst-computed-yield-expr.js` | CE (#680) | pass |
+| `statements/class/accessor-name-inst-computed-yield-expr.js` | CE (#680) | pass |
+| `expressions/class/cpn-class-expr-computed-property-name-from-yield-expression.js` | CE (#680) | pass |
+| `expressions/class/cpn-class-expr-accessors-computed-property-name-from-yield-expression.js` | CE (#680) | pass |
+| `statements/class/cpn-class-decl-computed-property-name-from-yield-expression.js` | CE (#680) | pass |
+| `statements/class/cpn-class-decl-accessors-computed-property-name-from-yield-expression.js` | CE (#680) | pass |
+| `statements/for-of/yield-star.js` | CE (host imports) | pass |
+| `statements/for-of/yield-star-from-try.js` | CE (host imports) | pass |
+| `statements/for-of/yield-star-from-catch.js` | CE (host imports) | pass |
+| `statements/for-of/yield-star-from-finally.js` | CE (host imports) | pass |
+
+The 2 CE → fail are `{expressions,statements}/class/accessor-name-static-computed-yield-expr.js`
+(`yieldSet` undefined): the generator half is right; a runtime-keyed STATIC
+setter on a class value is not dispatched. Reproduced with NO generator on
+BOTH trees (`class { static get [k1]() {…} static set [k2](v) {…} }` from a
+factory: getter answers, setter never runs — probe 70 where the spec gives 75).
+Class lowering, cluster C.
+
+**Compile-only byte differential, both targets.** Set: every test262 row whose
+source holds a `yield*` or a yield inside a computed property name **of a sync
+generator** (TypeScript AST scan; an async generator is never a native
+candidate — `isNativeGeneratorCandidate` returns false on `async`; no harness
+file matches), 162 rows, ∪ the A manifest = **342 rows**, 473 variants
+(primary + strict rerun, the runner's assembly and compile options, canonical
+`fileName` so both trees compile identical input). This replaces the lost
+record's 747-row textual set with an AST-exact one; every A5 edit is reachable
+only through one of the two shapes.
+
+| lane | variants | changed |
+| --- | ---: | ---: |
+| host | 473 | **0** |
+| standalone | 473 | 17 rows (all primary) |
+
+Standalone verdicts, all 17: the 13 target rows (gained, above); the 2
+static-accessor rows (CE → fail, above); and two rows outside the manifest,
+both run through the runner on both trees:
+
+- `expressions/object/method-definition/name-prop-name-yield-expr.js`: CE (host
+  imports) → **fail**. The failing assertion is `Object.prototype.hasOwnProperty.call(obj, …)`
+  with `obj` a script `var` initialised to `null` and written inside a function.
+  That reads `null` with **no generator at all, on both trees** (`var obj = null;
+  function f() { obj = { k: 1 }; } f(); hasOwnProperty.call(obj, 'k')` →
+  "called on null or undefined"). The A5 half is verified separately: four
+  variants of the same generator (statement before / after, declaration form,
+  via a local) pass on the after tree when the write is observed with
+  `obj !== null` instead. Pre-existing, generator-independent; not A5's.
+- `expressions/object/method-definition/generator-prop-name-yield-expr.js`: CE →
+  CE, "Maximum call stack size exceeded" on both trees (the hash moves only
+  with the IR-fallback note's shifted type indices).
+
+Every other `yield*` row (139 of 143) is byte-identical on standalone, which is
+the control for the verbatim D2 extraction.
+
+**Other controls.**
+
+- `website/playground/examples/` (13) + `benchmarks/suites/*.ts` (4) +
+  `benchmarks/*.bench.ts` (2) = 19 programs × host/standalone: **38/38
+  byte-identical** (after = `a245bfe94e`).
+- Pin suite `tests/issue-6651-a5-computed-key-yield.test.ts`, 15 cases: on the
+  base tree **12 red** (all the #680 refusal), 3 CONTROLS green on both (a
+  yield-keyed class field; a call-argument yield in a generator with no computed
+  key; an inner that catches the forwarded throw). Green on the after tree.
+- A-family + generator pin suites (`issue-6651-a*`, `*generator*`, `*yield*`,
+  `issue-680*`; one vitest process per file, 2 GB fork heap — a single 51-file
+  run OOMs the default 512 MB fork): base 52 files / 468 tests, after 53 / 482.
+  The 11 failing on base fail identically on the after tree (`issue-2173-yieldstar-generic-iterable`
+  ×9, `issue-2864-standalone-generator-carrier` ×2 — the set A4's record
+  already names). The one after-only failure was
+  `issue-6651-generator-default-lane`'s NEGATIVE pin of the refusal A5
+  removes, converted in `5787999b14` (11/11 green after, the converted case
+  red on base).
+- `pnpm run check:ir-fallbacks` (after tree): **OK** — no unintended,
+  post-claim or module-level increase.
+- `node scripts/equivalence-gate.mjs` (after tree): PENDING
+- **After the second merge (`921912f2e7`), re-run:** `typecheck`; every source
+  gate, including `LOC_GATE_BASE=3556321947` (exit 0); `check-compiler-boundaries
+  --mode inventory --base origin/main` (`errors: []`, `inventoryValid: true`);
+  the A5 + A4 + default-lane suites (37/37); the 13 target rows through the
+  runner (13/13 pass). The manifest, byte differential and pin-family runs
+  above were NOT repeated on the merged tree — they measure `732d9f75e6` vs
+  `a245bfe94e`.
+- Gates, bare, before every commit: `typecheck`, biome lint (error level),
+  prettier, `check-loc-budget` / `check-func-budget` (also with
+  `LOC_GATE_BASE=732d9f75e6`; grants restated in this file's frontmatter,
+  dated), `check-coercion-sites`, `check:oracle-ratchet`, `check:dead-exports`
+  — all exit 0.
+
+**Residuals.**
+
+| rows | shape | what it needs |
+| ---: | --- | --- |
+| 2 | `accessor-name-static-computed-yield-expr` ×2 (now fail) | runtime-keyed static setter dispatch (class lowering, cluster C) |
+| 1 | `name-prop-name-yield-expr` (outside the manifest, now fail) | a null-initialised script `var` written in a function reads `null` through `hasOwnProperty.call` — generator-independent |
+| 1 | `generator-prop-name-yield-expr` | stack overflow compiling `*[yield]() {}` |
+| 1 | `obj.foo = yield` in `try {} finally { return 1 }` | target 3, unchanged from the record above |
+| — | D2 on the legacy chain | an inner that catches a forwarded `.throw()` / yields or returns in a finally is answered as if it rethrew / completed (pre-existing on `main`); the for-of chain gates it out |
+
 ### 2026-09-24 — Cluster E, slice E8
 
 **Status: WIP, suspended at the session wrap-up — NOT mergeable yet** (the
