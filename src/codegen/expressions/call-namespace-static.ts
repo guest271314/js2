@@ -10,6 +10,7 @@
 // Number / Array / String / Object value-type statics). Returns `undefined` when
 // the callee is not one of these, so the caller in calls.ts continues into the
 // receiver-type method dispatch. Moved verbatim: emitted Wasm is byte-identical.
+import { jsonIsPrimitive, jsonReplacerSeesRoot, reserveJsonToJson } from "../json-stringify-carriers.js";
 import { ts } from "../../ts-api.js";
 import { tryEmitStandalonePerformanceNow } from "../standalone-unavailable-globals.js";
 import { integrityVarKey } from "../widened-var-key.js";
@@ -469,6 +470,12 @@ function emitJsonCodecValueAsAnyref(
         valueType = { kind: "externref" };
       } else {
         valueType = raw;
+      }
+    } else if (jsonIsPrimitive(ctx, unwrapped)) {
+      valueType = compileExpression(ctx, fctx, value, { kind: "externref" });
+      if (valueType !== null && valueType.kind !== "externref") {
+        coerceType(ctx, fctx, valueType, { kind: "externref" });
+        valueType = { kind: "externref" };
       }
     } else {
       valueType = compileExpression(ctx, fctx, value, { kind: "anyref" });
@@ -3558,7 +3565,12 @@ export function compileNamespaceStaticCall(
         // answers `1` where node answers `"w:1"`. That is base behaviour on both
         // lanes; the regression was answering `"w:null"`, i.e. handing the
         // replacer a null value, and that is gone.
-        const primitiveStringType = tryEmitJsonStringifyPrimitive(ctx, fctx, expr.arguments[0]!);
+        // (#1599) …except under a native FUNCTION replacer: §25.5.2 step 12
+        // serialises its return for the root (`JSON.stringify(null, () => ({a: 1}))`).
+        const primitiveStringType =
+          useNativeJsonProvider && jsonReplacerSeesRoot(ctx, expr.arguments[0]!, expr.arguments[1])
+            ? undefined
+            : tryEmitJsonStringifyPrimitive(ctx, fctx, expr.arguments[0]!);
         if (primitiveStringType !== undefined) {
           // Compile remaining args (replacer, space) for their side
           // effects only — primitive stringify ignores them per spec
@@ -3591,29 +3603,16 @@ export function compileNamespaceStaticCall(
           // PR-B threads a *static* `space` argument (number/string literal)
           // into the codec's indent path; a function/array replacer or a
           // *dynamic* space still keeps the refusal below.
+          reserveJsonToJson(ctx, fctx);
           const replacerArg = expr.arguments[1];
           const spaceArg = expr.arguments[2];
           const replacerNullish =
             replacerArg === undefined ||
             replacerArg.kind === ts.SyntaxKind.NullKeyword ||
             (ts.isIdentifier(replacerArg) && replacerArg.text === "undefined");
-          // PR-A serialises `$Object` graphs only. Arrays (closed typed-vec
-          // structs `number[]` etc.) and tuples are a separate sub-slice
-          // (PR-A2) — they are NOT `$ObjVec`, so routing them to the codec
-          // would emit wrong output. Detect an array/tuple static type via the
-          // checker and keep it on the refusal path below.
-          const arg0Type = ctx.checker.getTypeAtLocation(expr.arguments[0]!);
-          const checkerArr = ctx.checker as unknown as {
-            isArrayType?: (t: unknown) => boolean;
-            isTupleType?: (t: unknown) => boolean;
-          };
-          const isArrayLike =
-            (checkerArr.isArrayType?.(arg0Type) ?? false) ||
-            (checkerArr.isTupleType?.(arg0Type) ?? false) ||
-            // Fallback when the internal predicates are unavailable: a numeric
-            // index type with only integer / `length` own keys looks array-like.
-            (arg0Type.getNumberIndexType() !== undefined &&
-              arg0Type.getProperties().every((p) => /^\d+$/.test(p.name) || p.name === "length"));
+          // (#1599) Only a TUPLE (a closed positional struct no codec arm reads)
+          // keeps the refusal; vecs normalise into the `$ObjVec` arm (#4085).
+          const isTupleValue = ctx.oracle.typeFactOf(expr.arguments[0]!).kind === "tuple";
           const valueExpression = unwrapReflectConstructExpr(expr.arguments[0]!);
           const arrayLiteralForCodec =
             ts.isArrayLiteralExpression(valueExpression) && !valueExpression.elements.some(ts.isSpreadElement)
@@ -3640,7 +3639,7 @@ export function compileNamespaceStaticCall(
           if (
             replacerNullish &&
             gap !== undefined &&
-            (!isArrayLike || arrayLiteralForCodec !== undefined || proxyShapedValue)
+            (!isTupleValue || arrayLiteralForCodec !== undefined || proxyShapedValue)
           ) {
             if (!emitJsonCodecValueAsAnyref(ctx, fctx, expr.arguments[0]!)) return null;
             emitJsonStringifyValue(ctx);
@@ -3666,7 +3665,7 @@ export function compileNamespaceStaticCall(
           if (
             !replacerNullish &&
             gap !== undefined &&
-            (!isArrayLike || arrayLiteralForCodec !== undefined || proxyShapedValue) &&
+            (!isTupleValue || arrayLiteralForCodec !== undefined || proxyShapedValue) &&
             replacerArg !== undefined
           ) {
             const replacerCallable =
