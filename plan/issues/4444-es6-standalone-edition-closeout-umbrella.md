@@ -111,6 +111,49 @@ Next measurement plan, after the runner quality/publication slot:
    this restored-subset census replaces a complete zero-non-pass full-scope
    run on the final candidate.
 
+### 2026-09-28 measured frozen Intl census
+
+The planned 74-path census is complete at source commit
+`db5fe17e84365f93f90c9134636f989f94a453dc`. Its exact frozen input and
+wrapper snapshot have SHA256
+`f1c370eed335e514cb60340e9d105545719599017fd20acfdfb0be2d9883d2a3`; both
+contain precisely the 74 `test/intl402/...` rows from the 11,778-path manifest.
+The maintained standalone dynamic chunk (0/1), with one worker, a 4096 MiB
+fork heap, history off, and the verified QuickJS linked pair completed all
+identity accounting: 74 registered, 74 verdicts, 74 started, 74 settled, and
+zero exclusions. The QuickJS artifact key was `2e2d7736713beeda`, its wasm
+SHA256 was `e9f8d30bc347dbc56f31b3389f7696eb6dedc9f05ea729781fc412f09a3e6b17`,
+and the current compiler-keyed adapter was `6dfa2dab8d8bfa0d`.
+
+The preserved result is **2 pass / 70 fail / 2 compile errors / 0 skip**. The
+passes are exactly the DisplayNames and Segmenter
+`ctor-custom-get-prototype-poison-throws.js` originals; they do not establish
+general user-Intl support. The two compile errors preserve the standalone host
+imports for NumberFormat constructor/format and constructor/formatToParts.
+Wrapper exit 0 means the expected dataset completed, not that the census
+passed. JSONL, completion, and report hashes are respectively
+`62150442b185548dd9a95c18a162984d0cd491aaf7ff746ac79bc64101ebac07`,
+`3deed2815b81bfe32bfd28d075cd4d879cb55ec6ac7ecf97e11fe02b662c16bf`, and
+`2c9c8ec92598fc66f5e18ac44d346f5e6745bf6d645aa756c5f3572fc2036411`.
+
+The report's existing 72-row error bucketing is useful triage data, not a
+single-cause diagnosis. The host-only Intl route noted in #5206 and the
+provider-local temporal DateTimeFormat shim in #6442 are adjacent but distinct:
+neither authorizes excluding paths or claiming a fix for all 72 non-passes.
+
+### Proposed follow-up boundary: standalone user-Intl namespace/API gap
+
+The proof-first [#6717 standalone user-Intl namespace/API
+plan](./6717-standalone-user-intl-namespace-api-gap.md) now owns this
+follow-up boundary. It remains explicitly distinct from #5206's completed
+host-only route and #6442's provider-local Temporal shim. It begins with
+original-file reproductions and positive controls: retain the two passing
+poison-prototype originals, select representative null/undefined namespace and
+host-import-leak cases, and verify each proposed surface through the maintained
+standalone runner. It preserves the 74-path and 11,778-path denominators,
+states that report buckets are not causal proof, and makes no compiler/runtime
+change until its scope and acceptance controls are reviewed.
+
 > **Dispatch plan lives in #6651** (`plan/issues/6651-es2015-standalone-100pct-execution-plan.md`,
 > 2026-09-20): fresh census 10,384 / 11,704, the 1,320-row gap partitioned into
 > nine frozen cluster manifests under `plan/agent-context/6651/`, each with an

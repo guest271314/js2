@@ -26,13 +26,38 @@ const ROOT = resolve(import.meta.dirname, "..");
 const RUNNER = resolve(ROOT, "scripts/run-test262-vitest.sh");
 const FULL_MANIFEST = resolve(ROOT, "scripts/test262-es2015-11778-manifest.txt");
 const EDITION_INDEX = resolve(ROOT, "website/public/benchmarks/results/test262-file-editions.json");
-const HISTORICAL_STRIPPED_SHA256 = "f2fdd4e4544a44608f0b53d89d343526cfa9c9044ca263e860da949dc1a2f59f";
+const HISTORICAL_ES2015_PATHS_SHA256 = "f2fdd4e4544a44608f0b53d89d343526cfa9c9044ca263e860da949dc1a2f59f";
 const CANONICAL_SHA256 = "632db3bbecb0d6ea42b0915b13740912bf3fd8e32e2a15a8b28c1f63b6434360";
-const PINNED_EDITION_INDEX_SHA256 = "f210201674b728743d61f60dad6aeaf036c1f55bdbec433f2180c076e6f49d52";
 
 const selectionEnv = ["TEST262_EXACT_MANIFEST_FILE", "TEST262_PATH_FILTER", "TEST262_PATH_FILTER_FILE"] as const;
 const originalEnv = new Map<string, string | undefined>();
 for (const key of selectionEnv) originalEnv.set(key, process.env[key]);
+
+type EditionIndex = {
+  editions: string[];
+  files: Record<string, number>;
+};
+
+function pathsForEdition(index: EditionIndex, edition: string): string[] {
+  const editionIndex = index.editions.indexOf(edition);
+  if (editionIndex < 0) throw new Error(`Edition index is missing ${edition}`);
+  return Object.entries(index.files)
+    .filter(([, value]) => value === editionIndex)
+    .map(([path]) => `test/${path}`)
+    .sort();
+}
+
+function strippedPathSetSha256(paths: readonly string[]): string {
+  const stripped =
+    paths
+      .map((path) => {
+        if (!path.startsWith("test/")) throw new Error(`Expected canonical Test262 path: ${path}`);
+        return path.slice("test/".length);
+      })
+      .sort()
+      .join("\n") + "\n";
+  return createHash("sha256").update(stripped).digest("hex");
+}
 
 function unsetSelectionEnv(key: (typeof selectionEnv)[number]) {
   Reflect.deleteProperty(process.env, key);
@@ -379,33 +404,75 @@ describe("#6712 frozen ES2015 population", () => {
     const text = readFileSync(FULL_MANIFEST, "utf8");
     expect(text.endsWith("\n")).toBe(true);
     const manifest = parseTest262ExactManifest(text, FULL_MANIFEST);
-    const editionIndex = JSON.parse(readFileSync(EDITION_INDEX, "utf8")) as {
-      editions: string[];
-      files: Record<string, number>;
-    };
-    // This is a base-359c2 reconstruction control, not a license to rewrite
-    // the frozen manifest when a later edition map is recategorized. A map
-    // change must be audited and receive a new explicit receipt first.
-    expect(createHash("sha256").update(readFileSync(EDITION_INDEX)).digest("hex")).toBe(PINNED_EDITION_INDEX_SHA256);
-    const es2015 = editionIndex.editions.indexOf("ES2015");
-    const fromIndex = Object.entries(editionIndex.files)
-      .filter(([, edition]) => edition === es2015)
-      .map(([path]) => `test/${path}`)
-      .sort();
+    const editionIndex = JSON.parse(readFileSync(EDITION_INDEX, "utf8")) as EditionIndex;
+    // The base-359c2 raw-index SHA is a historical reconstruction receipt in
+    // the issue plan. This generated report index is mutable, so the ongoing
+    // control pins its ES2015 identities to the immutable manifest instead of
+    // pinning unrelated serialization such as the edition-label order.
+    expect(editionIndex.editions).toContain("ES2015");
+    const fromIndex = pathsForEdition(editionIndex, "ES2015");
     const manifestSet = new Set(manifest);
     const indexSet = new Set(fromIndex);
     expect(manifest).toHaveLength(11_778);
+    expect(fromIndex).toHaveLength(11_778);
     expect(manifest.filter((path) => path.startsWith("test/intl402/"))).toHaveLength(74);
+    expect(fromIndex.filter((path) => path.startsWith("test/intl402/"))).toHaveLength(74);
     expect(manifest.every((path, index) => index === 0 || manifest[index - 1]! < path)).toBe(true);
     expect([...indexSet].filter((path) => !manifestSet.has(path))).toEqual([]);
     expect([...manifestSet].filter((path) => !indexSet.has(path))).toEqual([]);
     expect(createHash("sha256").update(text).digest("hex")).toBe(CANONICAL_SHA256);
-    const stripped =
-      manifest
-        .map((path) => path.slice("test/".length))
-        .sort()
-        .join("\n") + "\n";
-    expect(createHash("sha256").update(stripped).digest("hex")).toBe(HISTORICAL_STRIPPED_SHA256);
+    expect(strippedPathSetSha256(manifest)).toBe(HISTORICAL_ES2015_PATHS_SHA256);
+    expect(strippedPathSetSha256(fromIndex)).toBe(HISTORICAL_ES2015_PATHS_SHA256);
+  });
+
+  it("keeps ES2015 identities stable across reordered edition labels with remapped indices", () => {
+    const before: EditionIndex = {
+      editions: ["ES5", "ES2015", "ES2021"],
+      files: {
+        "built-ins/legacy.js": 0,
+        "intl402/Locale/es2015.js": 1,
+        "language/es2015.js": 1,
+        "language/modern.js": 2,
+      },
+    };
+    const reordered: EditionIndex = {
+      editions: ["ES2021", "ES5", "ES2015"],
+      files: {
+        "built-ins/legacy.js": 1,
+        "intl402/Locale/es2015.js": 2,
+        "language/es2015.js": 2,
+        "language/modern.js": 0,
+      },
+    };
+
+    const beforePaths = pathsForEdition(before, "ES2015");
+    const reorderedPaths = pathsForEdition(reordered, "ES2015");
+    expect(reorderedPaths).toEqual(beforePaths);
+    expect(strippedPathSetSha256(reorderedPaths)).toBe(strippedPathSetSha256(beforePaths));
+  });
+
+  it("detects a changed ES2015 membership despite a valid edition-index shape", () => {
+    const before: EditionIndex = {
+      editions: ["ES5", "ES2015", "ES2021"],
+      files: {
+        "built-ins/legacy.js": 0,
+        "intl402/Locale/es2015.js": 1,
+        "language/es2015.js": 1,
+        "language/modern.js": 2,
+      },
+    };
+    const reclassified: EditionIndex = {
+      ...before,
+      files: {
+        ...before.files,
+        "intl402/Locale/es2015.js": 2,
+      },
+    };
+
+    const beforePaths = pathsForEdition(before, "ES2015");
+    const reclassifiedPaths = pathsForEdition(reclassified, "ES2015");
+    expect(reclassifiedPaths).not.toEqual(beforePaths);
+    expect(strippedPathSetSha256(reclassifiedPaths)).not.toBe(strippedPathSetSha256(beforePaths));
   });
 });
 

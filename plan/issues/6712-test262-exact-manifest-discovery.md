@@ -266,3 +266,123 @@ The earlier umbrella-slice claim is superseded. No GitHub issue was created.
   scripts/run-test262-vitest.sh`, selected Prettier checking, and scoped Biome
   lint all passed. This remains discovery/completeness evidence, not a whole
   Test262 runtime pass claim.
+
+## Publication receipt
+
+Committed as `db5fe17e84365f93f90c9134636f989f94a453dc`
+(`fix(test262): restore exact ES2015 manifest discovery`) with Thomas
+Tränkler's required attribution and the Codex/Terra Max trailers. The normal
+fork push completed after typecheck, lint, formatting, ratchet, numeric-local,
+documentation-sync, and issue-integrity gates passed; its remote ref was
+independently verified at that same SHA. The implementation is published for
+review as [upstream PR 6210](https://github.com/loopdive/js2/pull/6210), based
+on `main`. At publication it is open, non-draft, and GitHub reports
+`mergeable=MERGEABLE`; its `BEHIND` state is deliberately not rebased blindly,
+so the pinned-base discovery/runtime evidence above remains intact until any
+future integration validation is coordinated.
+
+## Post-publication frozen Intl census (2026-09-28)
+
+The 74 `test/intl402/...` identities from the frozen 11,778-path manifest were
+measured without adding unrelated Intl editions. The newline-terminated input
+`.tmp/6712/intl74-originals.txt` and the wrapper-created exact-manifest
+snapshot both have SHA256
+`f1c370eed335e514cb60340e9d105545719599017fd20acfdfb0be2d9883d2a3`.
+The input is byte-for-line equal to the frozen manifest's 74 Intl rows.
+
+Run `20260928-015700` used the maintained standalone dynamic chunk (index 0,
+total 1), one worker, a 4096 MiB fork heap, source commit
+`db5fe17e84365f93f90c9134636f989f94a453dc`, and history publication disabled.
+Before the wrapper started, the sanctioned QuickJS consumer check reported a
+required linked-pair cache hit for artifact key `2e2d7736713beeda`, adapter key
+`6dfa2dab8d8bfa0d`, and compiler bundle key `3683fc47b6486637`. The pinned
+artifact's `libquickjs.wasm` SHA256 is
+`e9f8d30bc347dbc56f31b3389f7696eb6dedc9f05ea729781fc412f09a3e6b17`.
+
+The maintained wrapper completed its accounting: the shard receipt has the
+same 74 registered paths as the input, 74 recorded/canonical verdicts,
+`callbacksStarted=74`, `callbacksSettled=74`, `allCallbacksSettled=true`, and
+zero proposal or official exclusions. Its exit 0 therefore proves complete
+dataset accounting, **not** conformance success. The retained outcomes are
+2 pass, 70 fail, 2 compile errors, and 0 skips. The two exact passes are
+`test/intl402/DisplayNames/ctor-custom-get-prototype-poison-throws.js` and
+`test/intl402/Segmenter/ctor-custom-get-prototype-poison-throws.js`; they do
+not establish broad API coverage. The two compile errors preserve standalone
+host-import leaks for
+`NumberFormat/prototype/format/value-tonumber.js`
+(`env::Intl_NumberFormat_new`, `env::Intl_NumberFormat_format`) and
+`NumberFormat/prototype/formatToParts/value-tonumber.js`
+(`env::Intl_NumberFormat_new`, `env::Intl_NumberFormat_formatToParts`).
+
+Preserved artifact SHA256 values are:
+
+- JSONL: `62150442b185548dd9a95c18a162984d0cd491aaf7ff746ac79bc64101ebac07`
+- shard completion: `3deed2815b81bfe32bfd28d075cd4d879cb55ec6ac7ecf97e11fe02b662c16bf`
+- report: `2c9c8ec92598fc66f5e18ac44d346f5e6745bf6d645aa756c5f3572fc2036411`
+
+The generated report's existing bucketing classifies all 72 non-passes; it is
+an aggregation aid, not proof of one implementation cause. In particular,
+the observed host-only Intl route and earlier #5206/#6442 work are follow-up
+clues only. The proof-first [#6717 standalone user-Intl
+plan](./6717-standalone-user-intl-namespace-api-gap.md) now defines the
+required representative repros and positive controls before any implementation
+is claimed.
+
+## CI generated-index serialization diagnosis (2026-09-28)
+
+The historical reconstruction receipt remains tied to base
+`359c2d63b6753e0c540b8761d13647b00e24a9a4`: its generated per-file edition
+index had raw SHA256
+`f210201674b728743d61f60dad6aeaf036c1f55bdbec433f2180c076e6f49d52` and
+reconstructed the frozen set. It is evidence about that base, not an invariant
+for a later regenerated report artifact.
+
+The published #6210 quality job checked out GitHub's synthetic merge
+`ea11335db4fde6029fdbeab86c9109ac06d56350` (head
+`db5fe17e84365f93f90c9134636f989f94a453dc` into current main
+`fb006fe12498c7d53c3ff4d99bd389d937dabe9c`). Its generated index SHA256 was
+`7ad7c2c05d75ddd9bc436320100d834cc865ca00798f8e1573dc282d7f537b97` after
+the baseline-refresh commit `aca46e64cded68942686f67a52c38bb1d3c358ab`.
+That refresh reordered the `editions` array's `ES5` and `ES2021` labels and
+remapped their compact numeric values (9,174 `ES5` entries `0→1`; 472
+`ES2021` entries `1→0`). It made 9,646 numeric mapping changes but zero
+semantic edition-label changes.
+
+The exact ES2015 comparison across those two index revisions is unchanged:
+11,778 paths on each side, no old-only or new-only identity, and 74 `intl402`
+paths on each side. The ongoing regression therefore binds the current index's
+sorted semantic ES2015 identities to the immutable stripped-set SHA256
+`f2fdd4e4544a44608f0b53d89d343526cfa9c9044ca263e860da949dc1a2f59f`, while
+retaining canonical-manifest SHA256
+`632db3bbecb0d6ea42b0915b13740912bf3fd8e32e2a15a8b28c1f63b6434360`, the
+11,778/74 census, exact set-difference checks, and completeness controls. A
+serialization-only generated-index change no longer wedges an otherwise
+identical frozen population; any actual ES2015 membership change still fails.
+
+Post-repair validation (2026-09-28) used the bundled Node `v24.19.0` on
+`db5fe17e84365f93f90c9134636f989f94a453dc`, one fork/worker, a 4096 MiB main
+and fork heap, and no file parallelism:
+
+```text
+NODE_OPTIONS=--max-old-space-size=4096 VITEST_FORK_MAX_OLD_SPACE_SIZE=4096 \
+VITEST_MIN_FORKS=1 VITEST_MAX_FORKS=1 <node24> node_modules/vitest/dist/cli.js run \
+  tests/issue-6712-test262-exact-manifest-discovery.test.ts \
+  tests/issue-4412-run-history-guard.test.ts \
+  tests/issue-5215-test262-verdict-completeness.test.ts \
+  tests/test262-scope-classification.test.ts \
+  tests/issue-1390-import-defer-skip.test.ts \
+  --pool=forks --poolOptions.forks.singleFork=true --maxWorkers=1 --minWorkers=1 \
+  --no-file-parallelism --reporter=verbose
+```
+
+It exited 0: five files and 44 tests passed in 33.89 seconds. The focused
+#6712 file supplied 14 of those tests, including the edition-array
+reorder/remap positive control and changed-membership negative control. The
+input receipts were test SHA256
+`1d7cb91c43e94c3164284c2478217736667740334af8447fe9a29692709e2ae3`, canonical
+manifest SHA256
+`632db3bbecb0d6ea42b0915b13740912bf3fd8e32e2a15a8b28c1f63b6434360`, and the
+branch's historical index SHA256
+`f210201674b728743d61f60dad6aeaf036c1f55bdbec433f2180c076e6f49d52`. This is
+selection/completeness regression evidence only; it does not rerun the frozen
+corpus or claim its runtime outcomes.
