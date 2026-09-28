@@ -352,33 +352,112 @@ function fillSource(f: Fixture) {
   }
   requireCompletedNativeSourceClosures(f.tx, f.sourceOwner);
 }
+interface FixturePhase {
+  readonly name: string;
+  readonly run: (f: Fixture) => void;
+}
+function dependencyPhases(sourceBodies = true): FixturePhase[] {
+  let callables: ReturnType<typeof nativeSourceClosureCallableBindings>;
+  const phases: FixturePhase[] = [
+    {
+      name: "frozen source slots",
+      run(f) {
+        const { tx } = f;
+        tx.freezeReservations();
+        bindNativeSourceClosureUnits(tx, f.sourceOwner, f.slots);
+        callables = nativeSourceClosureCallableBindings(tx, f.sourceOwner, f.invocation.requirements);
+        if (f.prefix) tx.fillFunction(f.prefix, { locals: [], body: [{ op: "i32.const", value: 123 }] });
+      },
+    },
+    {
+      name: "filled string resources",
+      run(f) {
+        const { tx } = f;
+        fillNativeStringLiteralResources(tx, f.strings);
+        fillNativeStringFlattenResources(tx, f.flatten);
+        fillNativeStringEqualityResources(tx, f.equality);
+        fillNativeStringNumberResources(tx, f.scanner);
+      },
+    },
+    {
+      name: "filled primitive resources",
+      run(f) {
+        const { tx } = f;
+        fillNativeValueResources(tx, f.values, f.valueDependencies);
+        fillNativeBooleanResources(tx, f.booleans);
+        fillNativeBigIntResources(tx, f.bigints);
+        fillNativeSymbolCarrierResources(tx, f.symbols);
+      },
+    },
+    {
+      name: "filled ordinary lookup and storage",
+      run(f) {
+        const { tx } = f;
+        fillNativeObjectLookupResources(tx, f.lookup);
+        fillNativeObjectStorageResources(tx, f.storage);
+        fillNativeObjectSameValueResources(tx, f.sameValue);
+      },
+    },
+    {
+      name: "filled descriptor resources",
+      run(f) {
+        const { tx } = f;
+        fillNativeErrorResources(tx, f.errors);
+        fillNativeObjectDescriptorResources(tx, f.descriptors, f.exception);
+        requireCompletedNativeObjectDescriptors(tx, f.descriptors, f.descriptorDependencies);
+      },
+    },
+    {
+      name: "filled invocation resources",
+      run(f) {
+        fillNativeInvocationResources(f.tx, f.invocation, callables, f.exception);
+      },
+    },
+  ];
+  if (sourceBodies) phases.push({ name: "lowered actual source getters", run: fillSource });
+  return phases;
+}
 function fillDependencies(f: Fixture, sourceBodies = true) {
-  const { tx } = f;
-  tx.freezeReservations();
-  bindNativeSourceClosureUnits(tx, f.sourceOwner, f.slots);
-  const callables = nativeSourceClosureCallableBindings(tx, f.sourceOwner, f.invocation.requirements);
-  if (f.prefix) tx.fillFunction(f.prefix, { locals: [], body: [{ op: "i32.const", value: 123 }] });
-  fillNativeStringLiteralResources(tx, f.strings);
-  fillNativeStringFlattenResources(tx, f.flatten);
-  fillNativeStringEqualityResources(tx, f.equality);
-  fillNativeStringNumberResources(tx, f.scanner);
-  fillNativeValueResources(tx, f.values, f.valueDependencies);
-  fillNativeBooleanResources(tx, f.booleans);
-  fillNativeBigIntResources(tx, f.bigints);
-  fillNativeSymbolCarrierResources(tx, f.symbols);
-  fillNativeObjectLookupResources(tx, f.lookup);
-  fillNativeObjectStorageResources(tx, f.storage);
-  fillNativeObjectSameValueResources(tx, f.sameValue);
-  fillNativeErrorResources(tx, f.errors);
-  fillNativeObjectDescriptorResources(tx, f.descriptors, f.exception);
-  requireCompletedNativeObjectDescriptors(tx, f.descriptors, f.descriptorDependencies);
-  fillNativeInvocationResources(tx, f.invocation, callables, f.exception);
-  if (sourceBodies) fillSource(f);
+  for (const phase of dependencyPhases(sourceBodies)) phase.run(f);
 }
 function complete(f: Fixture) {
   fillDependencies(f);
   fillNativeObjectGetResources(f.tx, f.get);
   return requireCompletedNativeObjectGet(f.tx, f.get, f.dependencies);
+}
+
+function describeFixturePhases(phases: readonly FixturePhase[], fixture: () => Fixture, tests: () => void): void {
+  const [phase, ...rest] = phases;
+  if (!phase) {
+    tests();
+    return;
+  }
+  describe(phase.name, () => {
+    beforeAll(() => phase.run(fixture()), 35_000);
+    describeFixturePhases(rest, fixture, tests);
+  });
+}
+
+/** Fresh setup per row; related CI timings justify phase bounds, not a larger timeout or cached authority. */
+function phasedGetTest(
+  title: string,
+  sourceBodies: "before-get" | "after-get" | "missing",
+  test: (f: Fixture) => void,
+): void {
+  describe("independent real Get lifecycle", () => {
+    let f: Fixture;
+    beforeAll(() => {
+      f = fixture();
+    }, 35_000);
+    const phases = dependencyPhases(sourceBodies === "before-get");
+    phases.push({ name: "filled canonical Get", run: (f) => fillNativeObjectGetResources(f.tx, f.get) });
+    if (sourceBodies === "after-get") phases.push({ name: "lowered actual source getters", run: fillSource });
+    describeFixturePhases(
+      phases,
+      () => f,
+      () => it(title, () => test(f)),
+    );
+  });
 }
 
 interface Runtime {
@@ -651,9 +730,8 @@ describe("issued internal ordinary Get ownership", () => {
     expect(f.invocation.requirements.getterUses).toHaveLength(1);
     unchanged(f, () => expect(requireNativeObjectGetReservations(f.tx, f.get, f.dependencies)).toBe(f.get));
   });
-  it("uses the exact actual C2 method-zero slot and original-receiver operand", () => {
-    const f = fixture();
-    complete(f);
+  phasedGetTest("uses the exact actual C2 method-zero slot and original-receiver operand", "before-get", (f) => {
+    requireCompletedNativeObjectGet(f.tx, f.get, f.dependencies);
     const dispatch = nativeInvocationGetterDispatch(f.tx, f.invocation, f.access);
     const expected = buildOrdinaryObjectGetDefinition({
       propEntryTypeIdx: f.layouts.propEntry.typeIndex,
@@ -920,47 +998,47 @@ describe("ordinary Get canonical fill and completion", () => {
     unchanged(f, () => expect(() => fillNativeObjectGetResources(f.tx, f.get)).toThrow(/missing|incomplete/));
     expect(f.get.get.object.body).toStrictEqual([]);
   });
-  it("permits graph filling but refuses completion until actual source getter bodies are lowered", () => {
-    const f = fixture();
-    fillDependencies(f, false);
-    fillNativeObjectGetResources(f.tx, f.get);
-    expect(f.get.get.object.body.length).toBeGreaterThan(0);
-    expect(nativeInvocationGetterDispatch(f.tx, f.invocation, f.access).object.body.length).toBeGreaterThan(0);
-    expect([...f.slots.values()].every((slot) => slot.object.body.length === 0)).toBe(true);
-    expect(() => requireCompletedNativeObjectGet(f.tx, f.get, f.dependencies)).toThrow("missing function fill");
-    expect(f.tx.state).toBe("failed");
-  });
-  it("completes the paired fresh graph after actual source getter bodies are lowered", () => {
-    // A failed physical transaction cannot be repaired or reused. Its paired positive is fresh.
-    const positive = fixture();
-    fillDependencies(positive, false);
-    fillNativeObjectGetResources(positive.tx, positive.get);
-    fillSource(positive);
-    expect(requireCompletedNativeObjectGet(positive.tx, positive.get, positive.dependencies)).toBe(positive.get);
-  });
-  it("refuses a duplicate canonical fill after the positive completed owner", () => {
-    const f = fixture();
-    expect(complete(f)).toBe(f.get);
+  phasedGetTest(
+    "permits graph filling but refuses completion until actual source getter bodies are lowered",
+    "missing",
+    (f) => {
+      expect(f.get.get.object.body.length).toBeGreaterThan(0);
+      expect(nativeInvocationGetterDispatch(f.tx, f.invocation, f.access).object.body.length).toBeGreaterThan(0);
+      expect([...f.slots.values()].every((slot) => slot.object.body.length === 0)).toBe(true);
+      expect(() => requireCompletedNativeObjectGet(f.tx, f.get, f.dependencies)).toThrow("missing function fill");
+      expect(f.tx.state).toBe("failed");
+    },
+  );
+  phasedGetTest(
+    "completes the paired fresh graph after actual source getter bodies are lowered",
+    "after-get",
+    (positive) => {
+      // A failed physical transaction cannot be repaired or reused. Its paired positive is fresh.
+      expect(requireCompletedNativeObjectGet(positive.tx, positive.get, positive.dependencies)).toBe(positive.get);
+    },
+  );
+  phasedGetTest("refuses a duplicate canonical fill after the positive completed owner", "before-get", (f) => {
+    expect(requireCompletedNativeObjectGet(f.tx, f.get, f.dependencies)).toBe(f.get);
     unchanged(f, () => expect(() => fillNativeObjectGetResources(f.tx, f.get)).toThrow("duplicate canonical fill"));
     expect(requireCompletedNativeObjectGet(f.tx, f.get, f.dependencies)).toBe(f.get);
   });
-  it.each(["get", "lookup", "dispatch", "source"] as const)("rejects an already-filled %s body mutation", (kind) => {
-    const f = fixture();
-    expect(complete(f)).toBe(f.get);
-    const token =
-      kind === "get"
-        ? f.get.get
-        : kind === "lookup"
-          ? f.lookup.lookup
-          : kind === "dispatch"
-            ? nativeInvocationGetterDispatch(f.tx, f.invocation, f.access)
-            : [...f.slots.values()][0]!;
-    token.object.body.push({ op: "nop" });
-    expect(() => requireCompletedNativeObjectGet(f.tx, f.get, f.dependencies)).toThrow("altered completed function");
-  });
-  it("rejects replacement with a byte-equal filled Get body array", () => {
-    const f = fixture();
-    expect(complete(f)).toBe(f.get);
+  for (const kind of ["get", "lookup", "dispatch", "source"] as const) {
+    phasedGetTest(`rejects an already-filled ${kind} body mutation`, "before-get", (f) => {
+      expect(requireCompletedNativeObjectGet(f.tx, f.get, f.dependencies)).toBe(f.get);
+      const token =
+        kind === "get"
+          ? f.get.get
+          : kind === "lookup"
+            ? f.lookup.lookup
+            : kind === "dispatch"
+              ? nativeInvocationGetterDispatch(f.tx, f.invocation, f.access)
+              : [...f.slots.values()][0]!;
+      token.object.body.push({ op: "nop" });
+      expect(() => requireCompletedNativeObjectGet(f.tx, f.get, f.dependencies)).toThrow("altered completed function");
+    });
+  }
+  phasedGetTest("rejects replacement with a byte-equal filled Get body array", "before-get", (f) => {
+    expect(requireCompletedNativeObjectGet(f.tx, f.get, f.dependencies)).toBe(f.get);
     f.get.get.object.body = structuredClone(f.get.get.object.body);
     expect(() => requireCompletedNativeObjectGet(f.tx, f.get, f.dependencies)).toThrow("altered completed function");
   });
@@ -982,122 +1060,135 @@ describe.each([false, true])("real descriptor → lookup → source getter, deco
     observers = reserveRuntimeObservers(f);
   }, 35_000);
   describe("completed real owner", () => {
-    beforeAll(() => {
-      complete(f);
-    }, 35_000);
-    describe("emitted module", () => {
-      beforeAll(() => {
-        r = runtime(f, observers);
-      }, 35_000);
-      it("returns the actual captured source getter value through installed descriptors", () => {
-        const object = r.createDefault(),
-          key = r.key();
-        r.defineAccessor(object, key, r.make(3), null, 310);
-        const [status, value] = r.get(object, key, object);
-        expect(status).toBe(1);
-        expect(r.unbox(value)).toBe(sourceOracle()(3));
-        expect(r.unbox(value)).toBe(7);
-      });
-      it("walks multiple explicit prototypes and distinguishes inherited from overriding getters", () => {
-        const parent = r.create(),
-          child = r.withPrototype(parent),
-          leaf = r.withPrototype(child),
-          key = r.key();
-        r.defineAccessor(parent, key, r.make(3), null, 310);
-        expect(r.unbox(r.get(leaf, key, leaf)[1])).toBe(7);
-        r.defineAccessor(child, key, r.make(8), null, 310);
-        expect(r.unbox(r.get(leaf, key, leaf)[1])).toBe(12);
-        expect(r.unbox(r.get(parent, key, leaf)[1])).toBe(7);
-        expect(r.has(leaf, key)).toBe(1);
-      });
-      it("returns own data without invoking a throwing inherited getter", () => {
-        const parent = r.create(),
-          child = r.withPrototype(parent),
-          key = r.key();
-        r.defineAccessor(parent, key, r.make(-1), null, 310);
-        const value = r.box(42);
-        r.defineData(child, key, value, 191);
-        const result = r.get(child, key, child);
-        expect(result[0]).toBe(1);
-        expect(result[1]).toBe(value);
-        expect(r.unbox(result[1])).toBe(42);
-      });
-      it("propagates the original thrown source value and restores invocation state", () => {
-        const parent = r.create(),
-          child = r.withPrototype(parent),
-          key = r.key(),
-          previousThis = { previous: true };
-        r.defineAccessor(parent, key, r.make(-1), null, 310);
-        r.currentThis.value = previousThis;
-        r.argc.value = 37;
-        let actual: unknown, oracle: unknown;
-        try {
-          r.get(child, key, child);
-        } catch (error) {
-          actual = error;
-        }
-        try {
-          sourceOracle()(-1);
-        } catch (error) {
-          oracle = error;
-        }
-        expect(oracle).toBe(99);
-        expect(actual).toBeInstanceOf(WebAssembly.Exception);
-        const exception = actual as WebAssembly.Exception;
-        expect(exception.is(r.exception)).toBe(true);
-        expect(r.unbox(exception.getArg(r.exception, 0))).toBe(oracle);
-        expect(r.currentThis.value).toBe(previousThis);
-        expect(r.argc.value).toBe(37);
-      });
-      it("restores caller state on successful real getter dispatch", () => {
-        const object = r.create(),
-          key = r.key(),
-          previousThis = { previous: "normal" };
-        r.defineAccessor(object, key, r.make(5), null, 310);
-        r.currentThis.value = previousThis;
-        r.argc.value = 23;
-        const result = r.get(object, key, { distinctOriginalReceiver: true });
-        expect(result[0]).toBe(1);
-        expect(r.unbox(result[1])).toBe(9);
-        expect(r.currentThis.value).toBe(previousThis);
-        expect(r.argc.value).toBe(23);
-      });
-      it("does not invoke getters during Has", () => {
-        const object = r.create(),
-          key = r.key();
-        r.defineAccessor(object, key, r.make(-1), null, 310);
-        expect(r.has(object, key)).toBe(1);
-        expect(r.has(object, r.missing())).toBe(0);
-      });
-      it("keeps present undefined distinct from an exhausted explicit null chain", () => {
-        const object = r.create(),
-          key = r.key(),
-          undef = r.undefinedValue();
-        r.defineData(object, key, undef, 191);
-        expect(r.get(object, key, object)).toStrictEqual([1, undef]);
-        expect(r.get(object, r.missing(), object)).toStrictEqual([0, undef]);
-        expect(r.get(r.withPrototype(null), key, object)).toStrictEqual([0, undef]);
-      });
-      it("returns canonical undefined for an explicitly absent accessor getter", () => {
-        const object = r.create(),
-          key = r.key(),
-          undef = r.undefinedValue();
-        r.defineAccessor(object, key, undef, null, 310);
-        expect(r.get(object, key, object)).toStrictEqual([1, undef]);
-      });
-      it("preserves needsImplicitPrototype through direct and inherited default tails", () => {
-        const parent = r.createDefault(),
-          child = r.withPrototype(parent),
-          key = r.missing(),
-          undef = r.undefinedValue();
-        expect(r.get(parent, key, child)).toStrictEqual([2, undef]);
-        expect(r.get(child, key, child)).toStrictEqual([2, undef]);
-        expect(r.has(child, key)).toBe(2);
-        const value = r.box(18);
-        r.defineData(parent, key, value, 191);
-        expect(r.get(child, key, child)).toStrictEqual([1, value]);
-      });
-    });
+    const phases = dependencyPhases();
+    phases.push(
+      { name: "filled canonical Get", run: (f) => fillNativeObjectGetResources(f.tx, f.get) },
+      {
+        name: "authenticated completed Get",
+        run(f) {
+          requireCompletedNativeObjectGet(f.tx, f.get, f.dependencies);
+        },
+      },
+    );
+    describeFixturePhases(
+      phases,
+      () => f,
+      () => {
+        describe("emitted module", () => {
+          beforeAll(() => {
+            r = runtime(f, observers);
+          }, 35_000);
+          it("returns the actual captured source getter value through installed descriptors", () => {
+            const object = r.createDefault(),
+              key = r.key();
+            r.defineAccessor(object, key, r.make(3), null, 310);
+            const [status, value] = r.get(object, key, object);
+            expect(status).toBe(1);
+            expect(r.unbox(value)).toBe(sourceOracle()(3));
+            expect(r.unbox(value)).toBe(7);
+          });
+          it("walks multiple explicit prototypes and distinguishes inherited from overriding getters", () => {
+            const parent = r.create(),
+              child = r.withPrototype(parent),
+              leaf = r.withPrototype(child),
+              key = r.key();
+            r.defineAccessor(parent, key, r.make(3), null, 310);
+            expect(r.unbox(r.get(leaf, key, leaf)[1])).toBe(7);
+            r.defineAccessor(child, key, r.make(8), null, 310);
+            expect(r.unbox(r.get(leaf, key, leaf)[1])).toBe(12);
+            expect(r.unbox(r.get(parent, key, leaf)[1])).toBe(7);
+            expect(r.has(leaf, key)).toBe(1);
+          });
+          it("returns own data without invoking a throwing inherited getter", () => {
+            const parent = r.create(),
+              child = r.withPrototype(parent),
+              key = r.key();
+            r.defineAccessor(parent, key, r.make(-1), null, 310);
+            const value = r.box(42);
+            r.defineData(child, key, value, 191);
+            const result = r.get(child, key, child);
+            expect(result[0]).toBe(1);
+            expect(result[1]).toBe(value);
+            expect(r.unbox(result[1])).toBe(42);
+          });
+          it("propagates the original thrown source value and restores invocation state", () => {
+            const parent = r.create(),
+              child = r.withPrototype(parent),
+              key = r.key(),
+              previousThis = { previous: true };
+            r.defineAccessor(parent, key, r.make(-1), null, 310);
+            r.currentThis.value = previousThis;
+            r.argc.value = 37;
+            let actual: unknown, oracle: unknown;
+            try {
+              r.get(child, key, child);
+            } catch (error) {
+              actual = error;
+            }
+            try {
+              sourceOracle()(-1);
+            } catch (error) {
+              oracle = error;
+            }
+            expect(oracle).toBe(99);
+            expect(actual).toBeInstanceOf(WebAssembly.Exception);
+            const exception = actual as WebAssembly.Exception;
+            expect(exception.is(r.exception)).toBe(true);
+            expect(r.unbox(exception.getArg(r.exception, 0))).toBe(oracle);
+            expect(r.currentThis.value).toBe(previousThis);
+            expect(r.argc.value).toBe(37);
+          });
+          it("restores caller state on successful real getter dispatch", () => {
+            const object = r.create(),
+              key = r.key(),
+              previousThis = { previous: "normal" };
+            r.defineAccessor(object, key, r.make(5), null, 310);
+            r.currentThis.value = previousThis;
+            r.argc.value = 23;
+            const result = r.get(object, key, { distinctOriginalReceiver: true });
+            expect(result[0]).toBe(1);
+            expect(r.unbox(result[1])).toBe(9);
+            expect(r.currentThis.value).toBe(previousThis);
+            expect(r.argc.value).toBe(23);
+          });
+          it("does not invoke getters during Has", () => {
+            const object = r.create(),
+              key = r.key();
+            r.defineAccessor(object, key, r.make(-1), null, 310);
+            expect(r.has(object, key)).toBe(1);
+            expect(r.has(object, r.missing())).toBe(0);
+          });
+          it("keeps present undefined distinct from an exhausted explicit null chain", () => {
+            const object = r.create(),
+              key = r.key(),
+              undef = r.undefinedValue();
+            r.defineData(object, key, undef, 191);
+            expect(r.get(object, key, object)).toStrictEqual([1, undef]);
+            expect(r.get(object, r.missing(), object)).toStrictEqual([0, undef]);
+            expect(r.get(r.withPrototype(null), key, object)).toStrictEqual([0, undef]);
+          });
+          it("returns canonical undefined for an explicitly absent accessor getter", () => {
+            const object = r.create(),
+              key = r.key(),
+              undef = r.undefinedValue();
+            r.defineAccessor(object, key, undef, null, 310);
+            expect(r.get(object, key, object)).toStrictEqual([1, undef]);
+          });
+          it("preserves needsImplicitPrototype through direct and inherited default tails", () => {
+            const parent = r.createDefault(),
+              child = r.withPrototype(parent),
+              key = r.missing(),
+              undef = r.undefinedValue();
+            expect(r.get(parent, key, child)).toStrictEqual([2, undef]);
+            expect(r.get(child, key, child)).toStrictEqual([2, undef]);
+            expect(r.has(child, key)).toBe(2);
+            const value = r.box(18);
+            r.defineData(parent, key, value, 191);
+            expect(r.get(child, key, child)).toStrictEqual([1, value]);
+          });
+        });
+      },
+    );
   });
 });
 

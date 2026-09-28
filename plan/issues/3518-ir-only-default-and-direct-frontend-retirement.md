@@ -14926,3 +14926,55 @@ gate, CI and differential checks. The prototype delivery claim is completed
 on the authoritative issue-assignments branch. This satisfies the Get delivery
 predecessor only; Get itself still needs signed normal hooks, publication,
 required CI and protected queue delivery before its claim can complete.
+
+Get PR6242 lifecycle timing refinement (2026-09-28): nine completed-graph
+rows measured24.798–31.796seconds locally under35-second callback bounds.
+Related Boolean getter CI measured457.947seconds versus237.301 locally;
+this is proactive margin work, not an observed Get CI failure. Split only
+those nine rows into real bounded fixture/reservation, freeze/bind, resource
+fill, invocation, source-lowering and Get phases. Preserve all66 rows, every
+assertion and full snapshot, independent destructive transactions, current
+completion authentication, and the same35-second limits. Existing runtime
+hooks remain unchanged. Static preservation, format and lint passed; runtime
+validation is required before publication. Evidence and original bytes:
+.tmp/public-object-get/ci-lifecycle-repair. No production changes.
+
+The first frozen lifecycle refinement passed TS7 and66/66 Get rows, zero
+skips/failures, with2,272 unchanged inputs (650.722seconds). The now-terminal
+published47485 quality job establishes actual failures: the same nine
+completed-graph cases exceeded35seconds, and both existing completed-owner
+runtime hooks timed out, leaving18 runtime rows skipped (39 passed,9 failed,
+18 skipped). Preserve that failure and the first local positive separately.
+Extend only the two measured-failing hooks into genuine dependency phases;
+retain all66 cases, sources, assertions and35-second limits, then revalidate.
+
+CI delivery resource candidate: authoritative claim
+3518:get-ci-memory-delivery-20260928 belongs to
+ttraenkler/codex-get-ci-memory-delivery-20260928. All17 open PR file lists and
+active assignment records were inspected; no shared-workflow overlap found.
+The separate issue-tests job was cancelled after20m16s, consistent with its
+20-minute cap; its log does not independently identify the cancellation
+initiator. Boundary349 passed, with no Get terminal result. Its changed-test
+step explicitly used1GB while the existing changed-root runner defaults to
+4GB. Set only that changed-test step to4GB; leave the pinned cohort, complete
+selectors, one-worker scheduling, error handling,20-minute cap and35-second
+limits unchanged. Memory pressure is a hypothesis, not a proven cause; a
+complete exact-candidate CI result is required before claiming delivery fixed.
+Evidence: .tmp/public-object-get/ci-lifecycle-repair, including both raw logs
+and cancelled-job-analysis.json. No new production behavior is introduced.
+
+Second hook repair frozen: both measured-failing runtime completion hooks
+now execute the same dependency operations as separate bounded phases,
+followed by Get fill and fresh completion authentication. All66 callback
+bodies, including18 runtime callbacks, retain exact syntax token streams;
+the first nine-case repair, distinct decoded/offset transactions, source
+programs, emission and assertions are unchanged. Static preservation,
+format and lint checks passed. Final runtime evidence will come from normal
+commit hooks after TS7; the first66/66 run does not prove this later patch.
+Evidence: .tmp/public-object-get/ci-runtime-hook-repair. The temporary local
+workflow edit lock is removed after edits freeze; the upstream CI scope
+claim stays held until verified delivery.
+
+Final frozen repair passed TS7 with all owned inputs unchanged. Production
+source, scripts, shared helpers and fixtures are unchanged from47485. The
+normal commit-hook run remains the required final runtime proof.

@@ -801,6 +801,8 @@ jobs:
       - name: Run issue tests this PR touched (advisory)
         continue-on-error: true
         env:
+          # Match changed-root-tests.sh for real runtime-provider graphs (#3518).
+          VITEST_FORK_MAX_OLD_SPACE_SIZE: "4096"
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
         run: |
