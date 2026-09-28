@@ -13110,9 +13110,12 @@ function typeHasObjLitAccessorProperty(tsType: ts.Type): boolean {
  * #2724 object-REST steering (see the note in `resolveWasmType`).
  */
 export function resolveWasmTypeForClosureReturn(ctx: CodegenContext, retType: ts.Type): ValType {
-  const symName = retType.getSymbol()?.name;
-  if ((symName === "__type" || symName === "__object") && typeHasObjLitAccessorProperty(retType)) {
-    return { kind: "externref" };
+  // (#6651 B8) Each union member too: `exec` overrides return `null | { get 0() {…} }`.
+  for (const member of retType.isUnion() ? retType.types : [retType]) {
+    const symName = member.getSymbol()?.name;
+    if ((symName === "__type" || symName === "__object") && typeHasObjLitAccessorProperty(member)) {
+      return { kind: "externref" };
+    }
   }
   return resolveWasmType(ctx, retType);
 }

@@ -28,6 +28,7 @@ import {
   valTypesMatch,
 } from "./shared.js";
 import { emitThrowTypeError, noJsHost } from "./expressions/helpers.js";
+import { emitObjectCreateValueBody } from "./object-create-value-body.js";
 import { allocLocal } from "./context/locals.js";
 import { isViewRefTestInstrs } from "./dataview-native.js"; // (#5150) ArrayBuffer.isView value closure
 import { reportErrorNoNode } from "./context/errors.js";
@@ -1034,6 +1035,11 @@ export function ensureStandaloneBuiltinStaticMethodClosure(
       paramTypes = [{ kind: "externref" }];
       returnType = { kind: "externref" };
       break;
+    // (#6684) One slot, not spec arity 2 — see object-create-value-body.ts.
+    case "Object.create":
+      paramTypes = [{ kind: "externref" }];
+      returnType = { kind: "externref" };
+      break;
     case "Object.getOwnPropertyDescriptor":
       paramTypes = [{ kind: "externref" }, { kind: "externref" }];
       returnType = { kind: "externref" };
@@ -1361,6 +1367,8 @@ export function ensureStandaloneBuiltinStaticMethodClosure(
       if (returnType && !valTypesMatch({ kind: "externref" }, returnType)) {
         coerceType(ctx, closureFctx, { kind: "externref" }, returnType);
       }
+    } else if (key === "Object.create") {
+      if (!emitObjectCreateValueBody(ctx, closureFctx)) return null;
     } else if (key === "Object.getOwnPropertyNames") {
       const namesIdx = ensureLateImport(ctx, "__getOwnPropertyNames", [{ kind: "externref" }], [{ kind: "externref" }]);
       if (namesIdx === undefined) return null;

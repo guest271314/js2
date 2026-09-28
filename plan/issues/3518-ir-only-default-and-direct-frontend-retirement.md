@@ -14168,3 +14168,64 @@ the previous run, all 2,188 inputs unchanged, and no observed unhandled-error
 markers. Original numeric and five callable regressions are fixed. The two
 upstream Date failures remain explicit failures. The retained legacy compiler
 and incomplete IR parity boundary are unchanged.
+
+## 2026-09-28: PR 6205 current-main integration and coercion-gate repair
+
+The upstream issue-assignments claim `3518:pr6205-native-resource-delivery`
+is verified for `ttraenkler/codex-ir-delivery-20260927`. Delivery remains open.
+CI quality rejected net growth of one `__extern_toString` lookup; the local
+coercion command had fallen back to whole-tree mode because its URL pathname
+retained `%20` in this workspace. Preserve that failed evidence. Use a space-free
+script entry with Node's preserve-symlinks-main flag to run the actual
+change-scoped gate, without weakening its implementation or allowances.
+Replace both direct native-addition ToString lookups with the existing
+getExternrefToStringProvider engine API, retaining late-import re-reads.
+
+Merge exact upstream f2e06e122439bc5b4c5629abc6f9d76e5a23c432. The only textual
+conflict is compiler-boundaries.json. Merge its file inventory by path using
+the actual three-way base, preserving independently changed metadata and all
+IR resource entries and upstream ES2015 entries. Preserve upstream tests,
+callback/RegExp/iterator repairs, undefined-global index repair, and baseline
+artifacts. Combined validation is required before publishing this merge.
+
+The merged 17-suite run measured 278/285 passing, three failing and four
+corpus-dependent skips, with 2,210 unchanged inputs. Materializing the exact
+pinned b363f29d3c43c626dc852744ad64a0b48a003693 harness and four selected
+RegExp rows then measured 4/4; pre-existing harness bytes were verified equal
+and preserved. The two Date failures and the frontend-layer expectation
+(minModules 1 versus the three roots already present on both parents) were
+reproduced on exact current main f2e06e122439bc5b4c5629abc6f9d76e5a23c432.
+All three complete failure messages match after only checkout-prefix
+normalization. No assertions are removed. Across the initial run and the
+four-row corpus rerun, 282/285 pass and three inherited failures remain;
+this is composed evidence, not an all-green single run.
+
+Receipt review identified a separate integration obligation: the 126-byte
+undefinedGlobalIdx shift changes imports.ts under its pinned BigInt receipt,
+and the incoming own-property fold-precedence import and guard change calls.ts
+under the resume-main receipt. The unchanged receipt suites measured 125/178
+passing; all 53 failures concern these two paths or their composition. Preserve
+that failing run and authenticate both upstream deltas before the old checks.
+Slice `3518:pr6205-undefined-shift-receipt` is claimed upstream by
+`ttraenkler/codex-pr6205-receipt-20260928` in an isolated worktree. Its scope is
+new tests/helpers/delivery-main-refresh-port.ts, a new matching JSON fixture
+and regression suite, plus reader joins in resume-main-composition.ts and
+issue-3518-bigint-carrier-port.test.ts. Authenticate the exact incoming delta
+and reciprocal reconstruction before existing receipts; preserve all old
+fixtures, hashes and negative controls. No production changes belong to this
+slice. Root retains integration ownership and serial heavy validation.
+
+The five-file receipt update is integrated from its frozen isolated donor. Root
+independently verified all historical Git blob and SHA-256 pins, both actual
+merged files and unchanged historical fixtures. All 19 directly affected full
+suites pass: 879/879 assertions, including the original 178 receipt assertions
+and 39 new corruption controls, with 2,213 unchanged inputs. The original
+125/178 failing run remains recorded. Of 75 incoming main paths, all 72
+upstream-only paths are byte-identical to main; the three shared paths retain
+the reviewed policy union, accessor-union return repair and undefined-global
+index repair. Final typecheck and quality gates precede the signed merge.
+
+Final combined typecheck and all eight quality gates pass with 2,195 unchanged
+inputs, including the actual change-scoped coercion check and moved-reference
+preservation audit. Claims were reread from upstream immediately before
+staging and still match the integration owner and isolated receipt owner.

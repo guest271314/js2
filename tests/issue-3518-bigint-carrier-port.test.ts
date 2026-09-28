@@ -22,10 +22,11 @@ import { buildObjectSameValueBody } from "../src/runtime/wasmgc/values/object-sa
 import { readBeforeResumeMain, applyResumeMainComposition } from "./helpers/resume-main-composition.js";
 import type { Instr, LocalDef } from "../src/wasm/model/instructions.js";
 import { beforeDescriptorAdapterRelocation } from "./helpers/descriptor-adapter-relocation.js";
+import { beforeDeliveryMainRefresh } from "./helpers/delivery-main-refresh-port.js";
 
 const receipt = authenticateBigIntCarrierPort();
 function positive(path: string) {
-  const current = beforeDescriptorAdapterRelocation(path, readBigIntPortSource(path)),
+  const current = beforeDescriptorAdapterRelocation(path, beforeDeliveryMainRefresh(path, readBigIntPortSource(path))),
     prior = applyBigIntCarrierPort(path, current, true);
   expect(prior).not.toBe(current);
   expect(applyBigIntCarrierPort(path, prior, false)).toBe(current);

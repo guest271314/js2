@@ -7,6 +7,7 @@ import { allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import { addOperandCallableSourceText, emitAddOrdinaryToPrimitiveResidue } from "./add-to-primitive.js";
 import { admitsObjectAddition } from "./addition-to-primitive.js";
 import { callableToStringLiteral } from "./callable-to-string.js";
+import { getExternrefToStringProvider } from "./coercion-engine.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { stringConstantExternrefInstrs, ensureNativeStringHelpers } from "./native-strings.js";
 import { resolveStructNameForExpr, resolveStructName } from "./property-access.js";
@@ -433,7 +434,7 @@ export function emitAnyAddFromExternTemps(
         // Static conversion can acquire providers and shift imports. Read the
         // canonical mappings again after it; never retain a provisional index.
         const currentToPrim = ctx.funcMap.get("__to_primitive");
-        const currentToString = ctx.funcMap.get("__extern_toString");
+        const currentToString = getExternrefToStringProvider(ctx);
         fctx.body.push({ op: "local.get", index: source });
         if (currentToPrim !== undefined) {
           fctx.body.push({ op: "ref.null.extern" });
@@ -465,7 +466,7 @@ export function emitAnyAddFromExternTemps(
       }
       ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
       flushLateImportShifts(ctx, fctx);
-      const liveToString = ctx.funcMap.get("__extern_toString");
+      const liveToString = getExternrefToStringProvider(ctx);
       const liveTypeofString = ctx.funcMap.get("__typeof_string");
       const liveUnboxNumber = ctx.funcMap.get("__unbox_number");
       const liveConcat = ctx.nativeStrHelpers.get("__str_concat");
