@@ -4060,3 +4060,495 @@ The eval worker is the passive shepherd for 6246. No polling/watch or ready
 transition is authorized while the four tuple/iterator failures remain. This
 is publication of an unfinished checkpoint, not completion of issue 5157 or
 the ES2015 goal. Its clean worktree and diagnostic evidence remain preserved.
+
+### Post-6247 verification plan: landed Promise D4
+
+Documentation checkpoint c713478c21 is published as non-draft upstream PR
+6247, verified exact head/base main and MERGEABLE at creation. Normal push
+session 99763 passed all gates, including 18/18 numeric-local parity and issue
+integrity. This new section is subsequent work, not part of that published head.
+
+The read-only Promise audit maps frozen `Promise/all/ctx-ctor.js` to landed
+D4's native class-capability path, also covering race/resolve/reject constructor
+receivers. Module-shaped focused coverage does not prove the Script-shaped
+original. Root will run those four exact originals plus the previously passing
+`Promise/all/resolve-ignores-late-rejection-deferred.js` control on source
+86dbc35c4e, with fresh bundles/adapter and completeness. The five-row manifest
+is `.tmp/4444/d4-current-exact.txt`; no runtime result is claimed yet.
+Known custom-resolve residuals are not mislabelled positive controls or removed
+from the full ES2015 scope. Frozen census source and receipts stay unchanged.
+
+### Promise D4 fresh original verification: 5/5 pass
+
+Maintained run 20260928-113946, terminal session 90682 exit zero, completed
+five registered verdicts: **5 pass, zero fail/compile errors/skips/exclusions**.
+Root independently checked exact identities, uniqueness and reached_test.
+All four `Promise/{all,race,resolve,reject}/ctx-ctor.js` originals and the
+previously passing late-rejection control pass. The source/script/test tree
+is unchanged from 86dbc35c4e; HEAD c713478c21 is documentation-only.
+
+Manifest SHA-256 `d7313987340cd44eb923f762f56d90ffe52f9df8ea04401192eb2e9bc423f53e`.
+Compiler bundle `8c54357178577a9e238de9beffd5db5826ceed39456f7a6fad977098d0169be1`;
+runtime bundle `8dd093a1ab45e959215add1444dd08afd5716da127f92b9721a2202143c27fbd`.
+Adapter MISS rebuilt and canary-verified as dd57532e96e6eb53 against the
+unchanged QuickJS artifact e9f8d30bc347. Standalone/auto, UTC, Temporal off,
+single worker, one dynamic shard. JSONL basename
+`benchmarks/results/test262-standalone-results-20260928-113946.jsonl`
+SHA-256 `6c4d310c0d86711e9b50f3b9f3fb766eb11de5594df27b51665bb1bd4975e4df`;
+completion `.shard-1-of-1.complete.json` SHA-256
+`d7fdd9af3e41f97f7a5a7d01493cd00b82bc3266e5c9f48f7d5015c54212c7e7`.
+
+The frozen all/ctx-ctor host-import failure is therefore resolved on this
+measured main source; no duplicate fix is needed. This does not credit the
+unmeasured custom-resolve residuals or establish full-suite conformance.
+Historical trend publication was disabled for this scoped run.
+
+### Frozen census index 41 accepted
+
+Terminal session 40074 exited 1 in 81.36 seconds: 93 originals, 88 pass,
+five fail, no compile errors/skips. Completeness passed 93/93 with no exclusions.
+Basename `test262-standalone-es2015-fullscope-128-results-es2015-fullscope-128-f924650-chunk041-a01`.
+JSONL SHA-256 `ff454d3a1c0548448092353be5b5ea50be97db7165274a602071bd8735dd1f4b`;
+completion `.shard-42-of-128.complete.json` SHA-256
+`fbb96c4ba1fc15809cd4ad44dc9f69e086ffc8a45ba3cdcc2e586c0a1d6cceef`.
+All 42 receipt pairs and unique scope membership verified:
+**3,861 measured: 3,620 pass, 206 fail, 35 compile errors; 7,917 unmeasured**.
+Next index 42. Frozen-source evidence only, not integrated current conformance.
+
+Failures concern computed super property access, Script function declaration
+configurability, Iterator.windows nonobject next results, Date subclass
+prototype identity and Array.of Proxy define-property abrupt completion.
+The Script declaration failure and preceding TypedArray detachment failure
+are assigned read-only current-source audits; no edit is licensed merely by
+the frozen error message. Existing overlap holds remain in force.
+
+### Frozen census index 42 accepted
+
+Terminal session 7376 exited 1 in 92.60 seconds: 93 originals, 90 pass,
+two fail, one compile error, zero skips. Completeness passed 93/93 with no
+exclusions. Basename
+`test262-standalone-es2015-fullscope-128-results-es2015-fullscope-128-f924650-chunk042-a01`.
+JSONL SHA-256 `7ff3b37d81f4faac54128d6f967334256f12f3496f7972e77d8cc7e78b99625e`;
+completion `.shard-43-of-128.complete.json` SHA-256
+`c88b126b389a0415fc0b6e0f17f3ccfa796ce6522d6970486f8ec975ac8b382f`.
+All 43 receipt pairs and unique scope membership verified:
+**3,954 measured: 3,710 pass, 208 fail, 36 compile errors; 7,824 unmeasured**.
+Next index 43. Frozen-source census only, not an integrated current pass rate.
+Nonpasses are yield-from-with native generator refusal, Promise.then
+`S25.4.5.3_A5.1_T1` async assertion (3 versus 4), and Iterator.windows
+throwing return getter (wrong exception type). No retries or exclusions.
+
+### TypedArray detachment audit and current-original verification plan
+
+The worker traced the observed detached-buffer TypeError to a likely fallback
+constructor after custom species lookup, not the public byteOffset accessor
+(which already returns zero after detachment). The original expects the stored
+internal offset after end coercion detaches the buffer and returns a prebuilt
+result from a computed `[Symbol.species]` constructor literal. A closed literal
+can be invisible to runtime symbol-key lookup, unlike the open holder used by
+the existing focused custom-species test. This remains a source hypothesis.
+
+Root will run four unchanged originals on source 86dbc: the failing byteoffset
+case, pre-detached ordering case, previously passing custom-ctor control, and
+custom-ctor invocation case. The manifest is
+`.tmp/4444/typedarray-subarray-current-exact.txt`. Do not alter detachment
+semantics to hide a species lookup failure. A producer-side repair would touch
+the currently protected literal representation path; no edit is authorized
+by this diagnostic plan, and results are not yet known.
+
+### TypedArray current-original verification result
+
+Run `20260928-114844` on source
+`86dbc35c4ed772f2f100ec95dbe86ce86e9eee84` completed: **2 pass, 2 fail / 4**.
+Independent completeness validation confirms four registered verdicts, all
+reached, zero exclusions. Both custom-species constructor controls pass.
+`detached-buffer.js` fails observable ToInteger(begin) ordering;
+`byteoffset-with-detached-buffer.js` throws a detached-buffer TypeError.
+These remain separate diagnostic questions, not a proven shared defect.
+The runner wrapper exited zero despite failed verdicts; it is not a pass signal.
+
+JSONL `benchmarks/results/test262-standalone-results-20260928-114844.jsonl`
+SHA-256 `02bcada2692fa3b8ffd25dc041b27c2740216b82b03af1392de18bfbff2efa94`;
+completion `.shard-1-of-1.complete.json` SHA-256
+`8c5a1843c8bb246468030d053c15719010cf0d528dbf96ea7da1b898da938ebb`.
+Compiler SHA-256
+`8c54357178577a9e238de9beffd5db5826ceed39456f7a6fad977098d0169be1`;
+runtime `8dd093a1ab45e959215add1444dd08afd5716da127f92b9721a2202143c27fbd`.
+The existing audit worker will reconcile the passing species controls and
+trace pre-detached ordering independently before any repair is proposed.
+
+### Array.of Proxy writer implementation handoff
+
+Read-only audit at source 86dbc established that Array.of.call preserves the
+constructor's returned Proxy. The shared constructor-lane writer in
+`array-from-native.ts` instead calls `__defineProperty_value` (which skips
+Proxy defineProperty dispatch), followed by ordinary Set. That cannot implement
+CreateDataPropertyOrThrow for a handler exposing only defineProperty.
+
+The next isolated worker must first revalidate issue 5268 ownership and current
+PR overlap, update its MD implementation plan, and implement the Proxy writer
+through existing descriptor/trap machinery. Descriptor flags must request
+writable/enumerable/configurable; false results must throw; abrupt completion
+must propagate; no subsequent Set may run on that Proxy path. Preserve existing
+non-Proxy vector storage and test Array.from callers as well as Array.of.
+No literal, inference or IR changes are included in this assignment.
+
+### Global Script function descriptor audit handoff
+
+At source 86dbc, `language/global-code/script-decl-func.js` enters the dedicated
+`$262.evalScript` lowering in calls.ts, then the `__runtime_script_eval`
+provider export. The adapter's global-Script path reuses `qjsCreateEdiBindings`,
+which creates new bindings by assignment with configurable=true. Pulling the
+function value back preserves that descriptor. Global Script declaration
+instantiation instead requires configurable=false for this new function.
+
+This is not the normal eval snapshot-order defect in PR 6246. Eval's
+configurable=true behavior remains necessary; a global change to the shared
+EDI helper would be incorrect. Static function-binding flags and host-mirror
+defaults do not cover the dynamic string in this original. The audit worker
+is checking adapter ownership and PR overlap before any isolated repair.
+Required controls include ordinary eval descriptors, new Script functions,
+existing bindings/redeclarations and lexical declaration failures. No provider
+edits or new passing-test claims accompany this audit.
+
+### Frozen census index 43 accepted
+
+Terminal session 75409 exited 1 in 85.43 seconds: **92 originals, 85 pass,
+7 fail, zero compile errors or skips**. Completeness passed 92/92 with zero
+exclusions. Basename
+`test262-standalone-es2015-fullscope-128-results-es2015-fullscope-128-f924650-chunk043-a01`.
+JSONL SHA-256 `c5a59ec864e47ac0172aec654dcebc1d867ec1bfea69f93dc8eb2e3e706f1fec`;
+completion `.shard-44-of-128.complete.json` SHA-256
+`a3c6f5ad6decdb490c03b1f1b37a77061fde8c9c7960dfae57c8a139633742e9`.
+All 44 receipt pairs and unique exact-scope membership verified:
+**4,046 measured: 3,795 pass, 215 fail, 36 compile errors; 7,732 unmeasured**.
+Next index 44. These are frozen-source measurements, not an integrated current
+pass rate. Failures concern derived default constructor length, module namespace
+key sorting, cross-realm Function/ThrowTypeError behavior, Proxy defineProperty
+nonextensible-target invariants and Error.stack Proxy receivers. No retries,
+scope exclusions or semantic shortcuts were applied.
+
+### Frozen census index 44 accepted
+
+Session 7704 exited 1 in 93.41 seconds: **93 originals, 85 pass, 8 fail**,
+zero compile errors/skips. Completeness passed 93/93 with zero exclusions.
+Basename `test262-standalone-es2015-fullscope-128-results-es2015-fullscope-128-f924650-chunk044-a01`;
+JSONL SHA-256 `2ff5b4945d3f83f56da3d31d84b41f53eb65a41fb9ffecbc8190a6c6b45b74fb`;
+completion `.shard-45-of-128.complete.json` SHA-256
+`63706ba2cd2aed3cff41722c4bbda806664bc170684d938f3feeae3e8c8af970`.
+All 45 receipt pairs and unique scope identities verified: **4,139 measured,
+3,880 pass, 223 fail, 36 compile errors; 7,639 unmeasured**. Next index 45.
+Frozen-source evidence only. Failures cover DataView constructor identity,
+computed class accessors/symbol methods, destructuring iterator override,
+Script declaration collision, Error.stack subclass receiver, Iterator.join
+method presence and module namespace key enumeration.
+
+### TypedArray audit distinguishes two mechanisms
+
+The current-source audit identifies early `emitTaDynViewValidate` in
+`emitDynViewSpeciesMethodTwoArm` as the pre-detached subarray ordering failure:
+start/end coercions must still occur with sourceLength zero. A prospective
+subarray-only prelude should use `pushTaDynViewInBoundsLen`, not the effective
+length helper, and preserve validation of the newly constructed result.
+
+The passing species controls assign `constructor[Symbol.species]` dynamically;
+the failing original uses a closed computed-symbol literal. Closed field
+`@@species` lacks a boxed-Symbol lookup arm in closed-struct extern Get, supporting
+the independent species fallback hypothesis. No runtime A/B yet proves that
+repair. Any consumer/MOP or literal producer edit requires overlap review;
+do not combine these mechanisms into one unverified diagnosis.
+
+### Candidate review and test-lease handoff
+
+The Array.of/Array.from Proxy candidate now exists in isolated
+`codex/5268-array-of-proxy-create-data-property` on base 86dbc. Root reviewed
+the initial shared-writer diff: descriptor dispatch consumes its result,
+falsy completion constructs TypeError, and only the ordinary receiver branch
+retains dense-slot Set. Fresh throw instruction trees avoid shared remapping.
+This is static review, not validation or pass credit. The worker holds the
+next heavy-process lease for unchanged-base attribution and candidate tests.
+
+The success regression must expect `define:0,set:length`: final strict Set of
+length is required by both algorithms. Poisoning every Set would reject correct
+behavior; only unexpected element Set should fail that control. Root's unchanged
+86dbc documentation worktree is available for baseline execution without
+swapping candidate source files.
+
+The Script descriptor follow-up requires more than changing configurable:
+preserve existing var descriptors, validate declaration admissibility and
+lexical collisions before effects, and reconcile declared values on abrupt
+completion as well as success. The worker's cached-ref audit is insufficient
+for remote ownership; fresh action-tied claims/PR overlap checks are required
+before creating its separate implementation lane. Ordinary eval's EDI helper
+must remain unchanged.
+
+### Proxy candidate dependency review
+
+Root inspected `__create_descriptor`: attribute bits 1/2/4 construct a fresh
+ordinary descriptor with value plus all three booleans. The existing
+`buildDefineDispatch` already invokes descriptor invariant validation; its
+older registration comment claiming that invariants are deferred is stale.
+Do not duplicate or bypass that validation in this fix. A trap-absent Proxy
+forwarding control is requested because the new branch also routes through
+`__obj_define_from_desc` when no defineProperty trap exists. Verify stored value
+and writable/enumerable/configurable attributes, not merely absence of throws.
+
+Baseline execution must use the unchanged root documentation worktree even
+when its exact manifest is stored in the candidate worktree. Candidate source
+has already changed, so running there cannot count as baseline evidence.
+No baseline or candidate result has yet been received for this new fix.
+
+### Array.of Proxy baseline independently verified
+
+Maintained run `20260928-100517` in the unchanged-source root documentation
+worktree reproduces the original: **0 pass / 1 fail**, reached and settled,
+zero exclusions. The exact one-path manifest is SHA-256
+`40d661b014462c8dd8b2b7d7fb97acd450c609699c336927dc749325b556839f`.
+The failure is missing expected Test262Error from the defineProperty trap.
+Root independently read the row and validated completeness against its actual
+`.shard-1-of-16.complete.json` receipt (one selected local shard, not a completed
+sixteen-shard suite). The registered identity matches the entire one-path scope.
+
+JSONL `benchmarks/results/test262-standalone-results-20260928-100517.jsonl`
+SHA-256 `985f25004fd562d99a1b0ea5845a3075a4cff59577f057de2f8e3e7a5a52c1e1`;
+completion SHA-256
+`dcae659e283819eccfc8fc3955d28845c904c9c7b873ef7b1289072b0d3a5f53`.
+Candidate execution is still outstanding. Separately, Node v24.19.0 passed
+eight oracle controls (four each for Array.of/from): descriptor and trap order,
+exact thrown identity, false rejection and trap-absent forwarding. These are
+reference semantics only, not compiler pass credit.
+
+### Array.from candidate review: shared instruction identity
+
+Root found that `ensureNativeArrayFrom` constructs one `perElement` instruction
+array and embeds its objects in both the iterator try body and array-like
+branch. The candidate adds a Proxy ref.test/type index and throw subtree to
+that shared array. `buildStandardTryTable` does not clone: the physical
+exception-control helper mutates branch depths and embeds the same body.
+Reusing mutable instruction objects across two positions risks repeated index
+remapping. A fresh per-element instruction factory for each branch was requested
+within the owned array-from-native file; no IR/helper changes are requested.
+Both array-like and iterable Array.from controls must exercise the result.
+This static review finding is not a measured runtime failure or a passing fix.
+
+### Candidate preparation correction and infrastructure attempt
+
+The worker implemented the per-branch instruction factory, and root verified
+both iterator and array-like consumers call it independently. The dedicated
+regression now covers iterable Array.from as well. Root executed all five
+original fixture bodies against their exact expected output arrays in fresh
+Node v24.19.0 contexts: 5/5 reference results, not compiler evidence.
+
+The first candidate runner attempt stopped before compiler build with
+`ERROR: test262 symlink failed`; the worker reports terminal PID 86456 and no
+candidate verdict or completion receipt. Treat this as setup failure, not a
+conformance failure or a completed run. The repository's symlink-only worktree
+dependency provisioning is authorized after inspection and preservation checks;
+verify corpus identity against baseline before a distinct retry. The valid
+unchanged-source baseline remains intact.
+
+The next attempt, run `20260928-101024` / worker session 59517, completed
+compiler bundling but stopped before Vitest: the new worktree lacked a cached
+QuickJS artifact and local clang-18/WASI tooling. Again there is no candidate
+verdict or completion receipt. Root verified the supported
+`JS2WASM_QUICKJS_ARTIFACT_DIR` acquisition path and immutable existing binary
+SHA-256 `e9f8d30bc347dbc56f31b3389f7696eb6dedc9f05ea729781fc412f09a3e6b17`.
+The worker will reuse that artifact with the matching ABI, then build a fresh
+compiler-keyed candidate adapter; do not reuse a baseline linked adapter.
+No installation, test exclusion or semantic-provider downgrade is needed.
+
+### Array.of Proxy original flips on candidate
+
+Worker session 76653 is terminal. Maintained run `20260928-101135` records
+**1/1 pass**, reached, zero exclusions/compile errors, for the unchanged
+`Array/of/return-abrupt-from-data-property-using-proxy.js` original. Root
+independently read the verdict and verified completeness. Baseline run
+`20260928-100517` above failed this same path on unchanged source 86dbc.
+
+Candidate JSONL `benchmarks/results/test262-standalone-results-20260928-101135.jsonl`
+SHA-256 `5598c9fdd8212a265a89d6b3fca953a0fdc475514f9d2082468ad4484b3976df`;
+completion `.shard-1-of-1.complete.json` SHA-256
+`782e16744c7ab2b275b06bf1f99d8f5ef9557eba3a043349b22ed24444a620d8`.
+Worker reports candidate adapter key `e9d493340eadb728`, built and canary
+verified against bundle prefix `b250085587e81964`; immutable QuickJS artifact
+remains e9f8d30bc347. Dedicated regressions and normal gates are still required
+before publication/readiness. This isolated candidate flip is not a landed or
+integrated full-suite result.
+
+The subarray-ordering worker now owns isolated branch
+`codex/6651-subarray-ordering` in `/Users/thomas/.codex/worktrees/subarray-ordering/js2`
+at source 86dbc. Exact remote hunk review found the only open array-methods
+change is disjoint boolean metadata in PR 5748; PR 5753 has neither target
+file across its paginated file list. Only the subarray prelude/import and a
+dedicated test are authorized; no closed-symbol or IR changes are included.
+
+### Proxy candidate regression result: not ready
+
+Dedicated session 11522 is terminal: **3/5 pass, 2 fail**. Exact thrown-object
+identity, false-result TypeError and ordinary custom/default controls pass.
+The successful-trap case observes the required descriptor and exact
+define-index/Set-length ordering for Array.of, array-like Array.from and iterable
+Array.from, but each comparison with the captured Proxy variable returns false.
+The trap-absent forwarding case throws an opaque Wasm exception during module
+initialization before descriptor assertions complete.
+
+Both failing assertions stay intact. The worker must compare these exact
+fixtures against unchanged source and isolate the first failing operation;
+neither failure is established as unrelated or pre-existing. In particular,
+the candidate changes the trap-absent dispatch path, so its failure must not be
+dismissed as an external limitation without attribution. No ready PR or
+five-test green claim is justified. The one original Test262 flip remains
+valid isolated evidence, not sufficient acceptance.
+
+### Subarray ordering candidate initial review
+
+The isolated worker has now implemented the planned subarray-only prelude.
+Root inspected the diff and the existing in-bounds-length helper: subarray
+avoids early validation/materialization, snapshots its length and calculates
+the byte offset before end coercion; map/filter/slice retain their prior
+validation/materialization path. The plan was corrected to state that moving
+offset calculation is a change, not preservation of the old ordering.
+Shared-prelude controls for slice/map/filter are required. No compiler result
+exists yet for this candidate; it waits behind the Proxy diagnostic lease.
+
+### Proxy attribution and test-slot transfer
+
+The worker reports exact focused-fixture A/B with fresh tsx source loading,
+empty imports and valid Wasm: both baseline and candidate fail captured Proxy
+identity comparisons, and both throw during the exact trap-absent fixture.
+Candidate event traces change from element Set to the required descriptor
+dispatch followed by Set(length). These measurements attribute those two
+residual fixtures as pre-existing, not proof of global regression freedom.
+
+A baseline direct-versus-bound diagnostic reports direct Array.of/from result
+identity true, bound result identity false. This narrows the next emitted-route
+investigation to result binding/conversion rather than native return identity;
+candidate diagnostic and persisted raw attribution records remain pending.
+The original failing assertions are unchanged.
+
+Root verified no compiler process in a read-only process snapshot; the Proxy
+worker then explicitly confirmed no live process and released the heavy lease.
+The subarray worker's five-control fixture is ready, so it now holds the lease
+for the matched four-original maintained run followed by focused regression
+checks. No parallel compiler run is authorized.
+
+### Namespace census failures: preserve the harness-linked reproduction
+
+Root read the unchanged `own-property-keys-sort.js` original and the older
+6651 N2 audit before proposing another namespace fix. The historical audit
+reproduced its standalone illegal cast only in harness-linked assembly;
+equivalent compileMulti/self-import/unicode-key probes passed. It specifically
+calls for WAT from the runner-assembled module around Reflect.ownKeys index
+reads, not another speculative export-sort repair.
+
+For `own-property-keys-binding-types.js`, that audit refuted an alias-resolution
+diagnosis with a successful ten-key compileMulti control, while the old runner
+observed seven keys. Current frozen census instead records an illegal cast.
+These are different first failures; do not transfer the old attribution to the
+new result. Future work must remeasure both unchanged originals under the
+current maintained runner and inspect its assembled artifact before source
+ownership or implementation is assigned. No new namespace fix is claimed.
+
+### Checkpoint publication state and provider review
+
+An action-tied publication check confirms PR 6247 merged at
+2026-09-28T10:00:03Z. Fetched upstream main is
+`2e23e49fb1d7ee1a6b86ab16c3e85aee1d95c143`; the published checkpoint head
+c713478 is an ancestor. Source remains byte-identical: intervening differences
+are npm-compat result artifacts. New appended handoffs are still uncommitted
+and are not claimed as part of that merged PR.
+
+Script-only provider work is now tracked in local issue 6724. Root review of
+its first draft identified three unresolved correctness concerns: unknown
+probe/resource results must not silently authorize skipping carrier declaration
+checks; fresh-realm own-name differences omit declarations reusing intrinsic
+names; and failed value crossings must not be hidden by clearing refusal state.
+These were returned to the worker before runtime validation. The dedicated
+runTest262File suite is supplemental; a maintained exact-cohort runner receipt
+is also required. No provider fix or pass gain is claimed.
+
+### Subarray candidate matched originals: one verified flip
+
+Session 30119 is terminal. Maintained run `20260928-122422` gives **3 pass,
+1 fail / 4**, versus baseline 114844's 2 pass/2 fail. Root independently read
+all verdicts and verified four registered/settled originals, zero exclusions.
+`subarray/detached-buffer.js` now passes and both species controls remain
+passing. `byteoffset-with-detached-buffer.js` remains included and fails with
+the same detached-buffer TypeError; it is outside this repair's mechanism,
+not excluded from the cohort or the goal.
+
+JSONL `benchmarks/results/test262-standalone-results-20260928-122422.jsonl`
+SHA-256 `d3bee17997ffda8cf96efbc77ff96488257a8c110202c1f4712266884399997d`;
+completion `.shard-1-of-1.complete.json` SHA-256
+`e2e44303f5ba1e530f8a178f33fb43d8d0c2f6789c0ea7be6fac01f2d7c2022f`.
+Candidate adapter `244c81abc2a5004e` was freshly built and canary-verified.
+Focused five-control session 1413 is now live. This is isolated candidate
+evidence, not a landed fix or integrated suite result.
+
+### Subarray focused validation complete; publication preparation
+
+Focused session 1413 exited zero in 52.44 seconds: **5/5 passed**. Coverage
+includes pre-detached coercions, begin-detach length snapshot, end-detach byte
+offset/species arguments, attached shared-view aliasing and map/filter/slice
+continuity. Together with the maintained 3/4 versus 2/4 original comparison,
+this supports the narrow ordering fix, not the remaining closed-species issue.
+The worker is updating issue 6651 and preparing normal gates and an upstream
+PR. No commit, published PR or gate success is claimed yet.
+
+Root also verified the Proxy worker's preserved record and source hashes:
+validation record `05abcc46f505a3b27e0af99f3043c873312f8e6f40f6573f8cc48ab742723cf9`,
+candidate writer `bfbdd069ad742fd4a21867224ad6089f991e8a600738845b6887a9e4e2021995`,
+baseline writer `da86fc673667dba0878a196a380b46b9832c8e6450da34fe3c68141ccdf47d95`.
+Both worktrees contain the same focused A/B script SHA
+`d8c640d3c16dc51421f5d5111379de593148155235e009ef8e905690dcc629d4`.
+The Proxy lane now has the released test slot for its bounded candidate
+direct-versus-bound diagnostic and existing Array.from regression suite.
+
+### Final checkpoint 44 handoff before publication
+
+The Proxy candidate's direct-versus-bound diagnostic matches baseline
+(`of-direct=true`, `of-bound=false`, `from-direct=true`, `from-bound=false`),
+with empty imports and valid Wasm. Existing
+`issue-5268-r3-array-from.test.ts` then passed **10/10** in terminal session
+44027 (60.06 seconds). Dedicated candidate regressions remain **3/5**, with
+both unresolved assertions retained. Updated preserved validation record SHA
+is `93da38fd86b0ce8f5bfc82d4d10023467e9c7b0ac69fae9ddba188177dbdf13e`.
+This checkpoint is not ready to be described as a completed Proxy repair.
+
+The subarray lane now holds the heavy lease for normal publication gates.
+The Script provider draft remains unmeasured and under review; metadata probes
+must not depend on Object/String/globalThis bindings that user declarations
+can replace. No provider success is credited.
+
+Root's handoff branch is `codex/4444-census-handoff-044`, fast-forwarded to
+verified upstream `2e23e49fb1d7ee1a6b86ab16c3e85aee1d95c143` without changing
+compiler source or the existing baseline fixtures. All census counts remain
+frozen-source evidence: **4,139/11,778 measured; 3,880 pass, 223 fail,
+36 compile errors; 7,639 unmeasured**. Next frozen index is 45. Current candidate
+flips are tracked separately and do not rewrite this historical denominator.
+The full integrated 100% goal remains unachieved.
+
+### Proxy result-binding follow-up: producer classification seam
+
+The worker's read-only audit narrows the direct-versus-bound discrepancy:
+`call-builtin-static.ts` returns externref from the intrinsic Array.from/of
+`.call` route, but module-global inference does not classify that producer as
+requiring externref. The initializer therefore requests a vector, and
+`type-coercion.ts` materializes one when the Proxy fails the vector ref-test.
+This explains the measured identity loss at source level; WAT confirmation
+is still pending and no broader inference fix is credited.
+
+The proposed repair is a producer-specific predicate, not a blanket change to
+externref-to-vector coercion. It must cover module/local/hoisted bindings,
+preserve ordinary/default/nullish constructor lanes, and explicitly account
+for generator spill typing. The worker's one-shot overlap check found active
+changes in declarations/index/variables/call-builtin-static, so these shared
+files remain coordination-gated. The existing failing assertions stay intact.
+
+Subarray's normal commit hooks have passed. The worker reports rebased commit
+`010107c75c` in mandatory pre-push validation (session 88040); remote publication
+and an upstream PR remain unverified at this checkpoint. The Script GDI worker
+is replacing realm-visible bookkeeping with a retained private QuickJS closure
+and parser-based name probes. That draft remains unmeasured; valid Unicode and
+escaped declarations must not be replaced by blanket refusal to obtain green
+tests.
