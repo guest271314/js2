@@ -124,6 +124,26 @@ export function test(): number {
     expect(await run(src)).toBe(600);
   });
 
+  it("a callee that is an expando of a module-scope function (the harness's assert.sameValue) is replayed", async () => {
+    // The test262 harness shape: `assert.sameValue = function …` makes the base
+    // identifier a declaration of `assert`'s symbol; it must not refuse the callee.
+    const src = `let fails = 0;
+function assert(ok: any): void { if (!ok) fails++; }
+assert.sameValue = function (a: any, b: any): void { if (a !== b) fails++; };
+function* g(): any {
+  let o: any = { [yield 9]: 9 };
+  assert.sameValue(o[yield 9], 9);
+}
+export function test(): number {
+  const it: any = g();
+  let n = 0;
+  let r: any = it.next();
+  while (!r.done && n < 10) { n++; r = it.next(r.value); }
+  return n * 100 + fails;
+}`;
+    expect(await run(src)).toBe(200);
+  });
+
   it("a discarded statement-level literal keyed by a yield suspends (formerly a #680 fails-closed pin)", async () => {
     const src = `function* g(): Generator<undefined, void, unknown> {
   ({ [yield]: 1 });

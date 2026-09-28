@@ -594,7 +594,12 @@ class ReplayFacts {
   }
 
   private moduleScopeOrAmbient(id: ts.Identifier): boolean {
-    const declarations = this.ctx.oracle.declarationsOf(id);
+    // In a JS source a module-scope expando (`assert.sameValue = function …`, the
+    // test262 harness) lists the BASE identifier as a declaration of the
+    // function's symbol. It adds a property; it does not rebind the name.
+    const declarations = this.ctx.oracle
+      .declarationsOf(id)
+      .filter((d) => !(ts.isIdentifier(d) && ts.isPropertyAccessExpression(d.parent) && d.parent.expression === d));
     if (declarations.length === 0) return false;
     if (declarations.every((d) => d.getSourceFile().isDeclarationFile)) return true;
     return declarations.every(
