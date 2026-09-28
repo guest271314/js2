@@ -19591,6 +19591,7 @@ export function buildImports(
   startImportCounting?: () => void;
   takeImportCounts?: () => Record<string, number>;
 } {
+  if (options?.globalSandbox) wsh.snapshotSandboxIntrinsics(options.globalSandbox); // (#6651) realm intrinsics
   // (#1933) Per-instance state for stateful imports. Created FIRST so the
   // RegExp-accessor install below (and every `resolveImport` call) can thread
   // it. Everything here was previously module-level and bled across / retained

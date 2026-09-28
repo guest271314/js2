@@ -51,6 +51,7 @@ import { emitScriptGlobalVarBindings } from "./global-var-bindings.js"; // (#449
 import { isHoistedTopLevelVarName } from "./top-level-hoisted-var-names.js"; // (#4491 T3) pre-declaration writes
 import { isAssignmentOverTopLevelFunctionName } from "./top-level-assigned-function-names.js"; // (#4491 T12)
 import { moduleVarDirectPreInitValueIsObserved } from "./declarations/hoisted-var-preinit-read.js";
+import { isExpressionRootedAssignmentTarget } from "./declarations/expression-rooted-assignment-target.js"; // (#6651) `f(o).p = v`
 import {
   ASYNC_CPS_ENABLED,
   asyncFnNeedsCps,
@@ -2518,7 +2519,8 @@ function shouldCollectTopLevelAssignment(ctx: CodegenContext, target: ts.Express
     isAssignmentOverTopLevelFunctionName(target) ||
     (operator === ts.SyntaxKind.EqualsToken && isExactTopLevelClassAccessorWrite(ctx, target)) ||
     (operator === ts.SyntaxKind.EqualsToken && isTopLevelClassAccessorPropertyWrite(ctx, target)) ||
-    createsGlobalObjectBinding(target, ctx.sloppyImplicitGlobals)
+    createsGlobalObjectBinding(target, ctx.sloppyImplicitGlobals) ||
+    isExpressionRootedAssignmentTarget(target)
   );
 }
 
