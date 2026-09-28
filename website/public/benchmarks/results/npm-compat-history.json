@@ -19602,6 +19602,24 @@
           }
         }
       }
+    },
+    {
+      "generatedAt": "2026-09-28T13:07:02.634Z",
+      "sourceRevision": "f08d2a21bd01668e6e529cf823e524ac6b6823cb",
+      "optimizationLevels": {
+        "js-host": 4,
+        "js-host-native": 4,
+        "standalone": 4
+      },
+      "packages": {
+        "lit": {
+          "jsHostNative": {},
+          "jsHost": {
+            "dynamic": 0.01174290667227585
+          },
+          "standalone": {}
+        }
+      }
     }
   ]
 }
