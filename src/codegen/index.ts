@@ -414,6 +414,7 @@ import { unshiftExternGetIterRecArm } from "./iterator-proto-next.js"; // (#6484
 import { unshiftRegExpAccessorGetArm } from "./regexp-accessor-get-arm.js"; // (#6651 B4) §22.2.6 accessor reads
 import { installRegExpLastIndexCarrierArms } from "./regexp-lastindex-carrier.js"; // (#6651 B6) lastIndex MOP
 import { unshiftDateCarrierMemberArms } from "./date-carrier-dynamic-member.js"; // (#6678) untyped Date members
+import { unshiftExternGetPromiseMemberArm } from "./promise-dynamic-member-read.js"; // (#6651 D5)
 import { noteUntypedRegExpDemand, unshiftUntypedRegExpReceiverArms } from "./regexp-untyped-receiver.js"; // (#6651 B10)
 import { unshiftExternMethodCallProtoArm } from "./native-proto-method-call.js"; // (#4619) proto-receiver method CALL
 import {
@@ -6598,6 +6599,7 @@ export function generateModule(
     // one through `__iter_rec_proto`. No-op unless the module demanded it.
     unshiftExternGetIterRecArm(ctx);
     unshiftDateCarrierMemberArms(ctx); // (#6678) untyped Date members
+    unshiftExternGetPromiseMemberArm(ctx); // (#6651 D5) %Promise.prototype% members off a `$Promise`
     unshiftUntypedRegExpReceiverArms(ctx); // (#6651 B10) untyped-RegExp proto reads
     // (#4619) The CALL twin, which delegates to `__extern_get` — so it must
     // run after the read arm above. See native-proto-method-call.ts.
@@ -11278,6 +11280,7 @@ export function generateMultiModule(multiAst: MultiTypedAST, options?: CodegenOp
     // body's PREFIX for the #4157 inline extractor.
     profilePhase("unshift-extern-get-iter-rec", () => unshiftExternGetIterRecArm(ctx));
     profilePhase("unshift-date-carrier-member", () => unshiftDateCarrierMemberArms(ctx)); // (#6678)
+    profilePhase("unshift-extern-get-promise-member", () => unshiftExternGetPromiseMemberArm(ctx)); // (#6651 D5)
     profilePhase("unshift-untyped-regexp-receiver", () => unshiftUntypedRegExpReceiverArms(ctx)); // (#6651 B10)
     // (#4619) The CALL twin, which delegates to `__extern_get` — so it must
     // run after the read arm above. See native-proto-method-call.ts.
