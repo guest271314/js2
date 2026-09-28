@@ -1,7 +1,8 @@
 ---
 id: 6723
 title: "test262: give the standalone lane the linked-harness oracle — compile the harness prefix once per include-set on standalone too (standalone is ~82 % of merge_group test262 work)"
-status: ready
+status: in-progress
+assignee: ttraenkler/opus-6723-p0
 sprint: current
 priority: high
 horizon: l
@@ -10,6 +11,14 @@ reasoning_effort: max
 requested_by: ttraenkler/opus-lead
 created: 2026-09-28
 related: [3451, 6486, 6492, 5383, 5407, 6722, 6676]
+# 2026-09-28 (#6723 P0 D1): the provider allow-list admits `js2wasm:runtime-eval`
+# for standalone providers via one spread line in compileLinkedProject; the
+# rationale lives in the new helper `standaloneProviderRuntimeImports` (+12
+# lines of helper + doc, +1 line in the function).
+loc-budget-allow:
+  - src/package-linker.ts
+func-budget-allow:
+  - src/package-linker.ts::compileLinkedProject
 ---
 
 ## Problem
@@ -219,3 +228,86 @@ If P0 lifts the linked share on standalone to the host lane's 81 % and the
 core-hours drop to ~11.7, and the lane to ~20 core-hours with Temporal
 unchanged: about 1.9× less standalone work per merge group. The P2
 measurement decides whether P3 goes ahead.
+
+## P0 results (2026-09-28)
+
+Sample: the same 360 files as the Measurement section (taken verbatim from
+the lead's `salinked-honest` result file; re-deriving `random.seed(6723)`
+from today's re-promoted baseline gives a different sample, 3/360 overlap).
+Same procedure: fresh harness cache per run, `COMPILER_POOL_SIZE=3`, quickjs
+eval engine, 4-core box. Linked arm = `&& IS_HOST_LANE` removed from the
+gate by file copy, never committed. Result files (local only):
+`benchmarks/results/p0{new-sa-honest,base-sa-linked,b-sa-linked,base-host-linked,final-host-linked}-results-*.jsonl`.
+
+### What each defect actually was
+
+| | root cause | fix |
+|---|---|---|
+| D1 | `$262` is exported by the provider, so the runtime shim's `evalScript` direct eval stays live and the provider imports `js2wasm:runtime-eval` (the prefix compiled ALONE reports none only because `$262` is dead code there). `runtimeEvalProvider: false` does not remove it (measured: same refusal) and would change eval verdicts anyway. On this box EVERY include-set failed (359/360 rows "no harness provider"), not just the default one. | `src/package-linker.ts`: admit `js2wasm:runtime-eval` for `target: standalone` providers (not under `runtimeEvalProvider: false`). `scripts/test262-import-object.mjs`: attach the row's ONE runtime-eval instance when the consumer OR any linked provider imports it; the provider inherits it (non-env namespaces pass through `buildProviderImportObject`). |
+| D2 | Not a binding bug. The compile-timeout and poison RETRIES in `tests/test262-shared.ts` re-sent the linked body-only unit without `linkedHarnessOpts`, so the retried row compiled the body with no harness. Every D2 row in the lead's file carries `retried: true`; the first attempts were cold-provider timeouts. Affects the host lane too (any timed-out linked row). | Spread `...linkedHarnessOpts` into both retry calls. |
+| D3 | As diagnosed: `prefix + bodySource` puts the strict directive after the harness. | The parent sends `linkedHarnessHonestSource` (the honest assembly of the variant being run, primary or strict rerun); the worker's fallback and the Temporal branch compile it. Error-line offset switches to the honest one on fallback rows. |
+
+Also (worker, standalone-only): exception payloads minted by the provider
+(`Test262Error` from `assert.*`) are rendered through the provider's own
+`__exn_render_*` exports, and the async drain runs every linked module's
+microtask ring. Verdict-neutral except where the message decides a
+runtime-negative match; it is what made the table below readable.
+
+### Standalone, 360 rows
+
+| arm | pass | fail | CE | timeout | rows linked | compile ms (all rows) |
+|---|---:|---:|---:|---:|---:|---:|
+| honest (`p0new-sa-honest`) | 313 | 31 | 16 | 0 | — | 1,034,969 |
+| linked, main (`p0base-sa-linked`) | 309 | 35 | 16 | 0 | 1 | 1,506,951 |
+| linked, P0 (`p0b-sa-linked`) | 193 | 153 | 14 | 0 | 305 | 646,191 |
+
+- main linked vs honest: exactly the 4 D3 rows (`11.13.2-23-s`,
+  `15.3.5.4_2-21gs`, `10.5-1-s`, `10.4.3-1-9gs`), all fallback rows.
+- P0: every include-set in the sample built a provider (19 distinct
+  providers, 27 cold builds, max 12.3 s, 0 "no harness provider"); the 55
+  fallbacks are all body-level `linked compile failed` (syntax the body-only
+  unit rejects, as on host).
+- Compile on the 305 linked rows: honest 1,009,551 ms vs linked 595,007 ms
+  (1.7×); median per row 2,542 ms vs 1,248 ms. Standalone linked body
+  compile is ~5× the host lane's ~0.25 s, so the speed-up is much smaller
+  than the 4.3× measured on 11 rows.
+- No cold-build timeouts in this run (P1 still applies: 12.3 s builds are
+  charged to rows).
+
+### P0 is NOT correct yet: a new defect class (D4) appears once rows link
+
+125 verdict diffs vs honest (122 pass→fail, 2 →pass, 1 CE→fail), none attributable to D1–D3.
+They are cross-module semantics on standalone — two modules, two sets of
+in-wasm intrinsics, and the provider reading consumer-minted values:
+
+| count | class | example |
+|---:|---|---|
+| 39 | `assert.throws`: provider reads `thrown.constructor` of a consumer-minted error → `undefined` ("Expected a TypeError but got a undefined") | `TypedArray/prototype/filter/BigInt/callbackfn-not-callable-throws.js`, `arguments-object/10.5-1-s.js` |
+| 27 | provider-minted/foreign payload not renderable (`[object Object]`), same family | `TypedArray/prototype/set/array-arg-return-abrupt-from-src-get-length.js` |
+| 18 | async completion marker not observed: the provider's `print` compiles to the no-sink drop (no `__stdout_*` in either module) | `class/elements/async-gen-private-method-static/yield-star-getiter-sync-returns-number-throw.js` |
+| 11 | `verifyProperty` descriptor reads on consumer functions (`length`/`name`) | `Array/prototype/toString/length.js` |
+| 10 | provider's TypedArray constructors/prototypes used from the body → `undefined` methods | `TypedArray/prototype/map/return-new-typedarray-from-positive-length.js` |
+| 4 | iterator protocol across modules ("value is not iterable") | `for-of/dstr/array-empty-iter-close.js` |
+| 13 | other pass→fail (sameValue on foreign values, `asyncTest` flag, 1 illegal cast) | |
+
+This is the #5383 reverse-peer boundary (`src/codegen/standalone-link-reverse-peer.ts`)
+not yet covering getOwnPropertyDescriptor / `constructor` / iterator / typed
+array arms, plus per-module intrinsics. Options, none chosen here:
+
+1. Extend the reverse-peer ABI arm by arm (descriptor read, error
+   `constructor`, iterator step, TypedArray brand) until the sample's diffs
+   clear — incremental, but each arm is its own #5383-sized slice.
+2. One intrinsic realm per linked graph: the provider owns the intrinsics
+   and the consumer imports them (the host lane gets this for free from the
+   JS realm). Removes most classes at once; large ABI change.
+3. Gate the standalone linked lane per include-set / per body shape and
+   fall back otherwise — cheap, but the classes above hit the core
+   `assert.throws`/`verifyProperty` helpers, so little would link.
+4. Fix the provider stdout sink separately (18 rows) — a compiler defect in
+   the multi-file standalone plan, independent of 1–3.
+
+### Host lane unchanged
+
+`p0base-host-linked` (main) vs `p0final-host-linked` (P0), same 360 rows,
+`TEST262_ORACLE_MODE=linked`: 302 / 57 / 1 CE both, 316 linked / 44
+fallback both, **0 verdict diffs**.
