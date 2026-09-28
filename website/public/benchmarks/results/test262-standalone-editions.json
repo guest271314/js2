@@ -48,8 +48,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11117,
-    "fail": 546,
+    "pass": 11121,
+    "fail": 542,
     "ce": 41,
     "skip": 0,
     "total": 11704,
@@ -102,8 +102,8 @@
       },
       {
         "name": "Symbol",
-        "pass": 553,
-        "fail": 54,
+        "pass": 555,
+        "fail": 52,
         "ce": 2,
         "skip": 0,
         "total": 609,
@@ -174,12 +174,12 @@
       },
       {
         "name": "computed-property-names",
-        "pass": 124,
-        "fail": 9,
+        "pass": 128,
+        "fail": 5,
         "ce": 0,
         "skip": 0,
         "total": 133,
-        "pct": 93
+        "pct": 96
       },
       {
         "name": "cross-realm",
@@ -192,12 +192,12 @@
       },
       {
         "name": "Symbol.toPrimitive",
-        "pass": 72,
-        "fail": 11,
+        "pass": 76,
+        "fail": 7,
         "ce": 0,
         "skip": 0,
         "total": 83,
-        "pct": 87
+        "pct": 92
       },
       {
         "name": "let",
@@ -1507,18 +1507,18 @@
   },
   {
     "edition": "ES2020",
-    "pass": 1045,
+    "pass": 1046,
     "fail": 481,
-    "ce": 491,
+    "ce": 490,
     "skip": 18,
     "total": 2035,
     "pct": 51,
     "features": [
       {
         "name": "BigInt",
-        "pass": 630,
+        "pass": 631,
         "fail": 340,
-        "ce": 78,
+        "ce": 77,
         "skip": 0,
         "total": 1048,
         "pct": 60
@@ -1597,12 +1597,12 @@
       },
       {
         "name": "Symbol.toPrimitive",
-        "pass": 20,
+        "pass": 21,
         "fail": 43,
-        "ce": 2,
+        "ce": 1,
         "skip": 0,
         "total": 65,
-        "pct": 31
+        "pct": 32
       },
       {
         "name": "Atomics",
@@ -1624,12 +1624,12 @@
       },
       {
         "name": "computed-property-names",
-        "pass": 17,
+        "pass": 18,
         "fail": 38,
-        "ce": 1,
+        "ce": 0,
         "skip": 0,
         "total": 56,
-        "pct": 30
+        "pct": 32
       },
       {
         "name": "Symbol.species",
@@ -4304,8 +4304,8 @@
   },
   {
     "edition": "Unclassified (untagged)",
-    "pass": 4534,
-    "fail": 839,
+    "pass": 4536,
+    "fail": 837,
     "ce": 72,
     "skip": 0,
     "total": 5445,

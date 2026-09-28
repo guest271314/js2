@@ -647,7 +647,7 @@
     {
       "name": "Strings",
       "testCategories": ["built-ins/String", "built-ins/StringIteratorPrototype"],
-      "passCount": 1153,
+      "passCount": 1160,
       "totalCount": 1230,
       "editionSpread": [
         {
@@ -657,7 +657,7 @@
         },
         {
           "edition": "ES2015",
-          "pass": 270,
+          "pass": 274,
           "total": 277
         },
         {
@@ -672,7 +672,7 @@
         },
         {
           "edition": "ES2020",
-          "pass": 6,
+          "pass": 7,
           "total": 27
         },
         {
@@ -697,7 +697,7 @@
         },
         {
           "edition": "Unclassified (untagged)",
-          "pass": 64,
+          "pass": 66,
           "total": 75
         }
       ]
@@ -1031,7 +1031,7 @@
     {
       "name": "Computed property names",
       "testCategories": ["language/computed-property-names"],
-      "passCount": 124,
+      "passCount": 128,
       "totalCount": 133
     },
     {
@@ -1080,7 +1080,7 @@
     {
       "name": "Symbol",
       "testCategories": ["built-ins/Symbol"],
-      "passCount": 1814,
+      "passCount": 1818,
       "totalCount": 1955
     },
     {
@@ -1240,7 +1240,7 @@
     {
       "name": "BigInt",
       "testCategories": ["built-ins/BigInt"],
-      "passCount": 630,
+      "passCount": 631,
       "totalCount": 1048
     },
     {
