@@ -15009,3 +15009,32 @@ identical to verified main35563219. Preserve the failure log; retry the same
 normal hooks with their supported LOC_GATE_BASE and CHANGED_ROOT_TESTS_BASE
 set to that verified main commit. No allowance, source, gate, timeout, or
 assertion is changed. Evidence: prototype-main-refresh/commit.log.
+
+
+### Runtime root-finality fingerprint delivery (2026-09-28)
+
+Claim: `3518:root-finality-fingerprint-20260928`, owner
+`ttraenkler/codex-root-finality-fingerprint-20260928`. Delivery branch:
+`codex/3518-root-finality-fingerprint-20260928`.
+
+Implementation: include emitted extensibility in canonical root-type tokens;
+normalize plain, inline, and generic subtype encodings with equal Wasm meaning.
+An unused `final` field on a plain struct does not change its emitted finality.
+Fingerprint ABI version 3 refuses version-2 fingerprints, which could conflate
+final and extensible roots. Providers must be regenerated for the new ABI.
+
+Evidence: the preserved regression initially passed 53/120 and failed 67/120,
+with no skipped cases. After the fix all 120 passed. It compares independent
+emitted Wasm modules using engine `ref.test`, compares structural fingerprints,
+and verifies emitted recursive-group bytes across seven encodings and shifted
+type indices. The existing canonical runtime-linking and provider-manifest suites
+also passed: 135/135 combined, with a clean typecheck. Those results were measured
+in the Number integration worktree; validation on this isolated fresh-main branch
+is recorded separately before publication. The change neither retires legacy
+code nor grants wrapper allocation, intrinsic prototype, or ToObject completion.
+
+Acceptance for this checkpoint: current-root tests and normal hooks, a signed
+commit with accurate attribution, fork publication, protected queue validation,
+and verified upstream main ancestry/content. Queue entry or a PR is not delivery.
+
+Current isolated-base validation:139/139 tests passed on upstream2148f208f066e5abd9a64ef31a332cafb7477583 (124finality controls plus15existing canonical/runtime-provider cases),0skipped; TS7 reported no errors. Added raw-byte positive/negative controls for generic array/function root encodings because they share subtype normalization. Normal commit/push hooks and protected queue are still required.
