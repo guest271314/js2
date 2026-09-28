@@ -8902,7 +8902,46 @@ what makes the `toString` row family correct.
   (origin/main at hand-back) loc/func re-runs exit 0. `origin/main` advanced
   `f73a4bcd7d → 732d9f75e6` during the slice (#6218, #6219, #6220; D3's
   `promise-class-receiver-drive.ts`, #6704's callable-property leaves, #5151);
-  NOT merged, so every measurement above is against `ce1302df01`.
+  The measurements above are against `ce1302df01`; see the re-verification
+  below for current main.
+
+#### Post-merge re-verification (origin/main `4351173919`, B9 + D3 landed)
+
+A coordinator run of main + B10 reported 4 of the 6 rows failing
+(`eval-{class,fn}-*`: `Object.getPrototypeOf(result)` → `null`). **Cause: a
+stale QuickJS adapter binary, not main.** The adapter cache key
+(`quickjs-eval-adapter-d4799bda84cfed0d.wasm`) hashes the adapter SOURCE only,
+not the compiler that compiles it, so a 2026-09-21 build (519,123 bytes) is
+served under the same key as today's (582,453 bytes). The old adapter does not
+hand an eval-produced class/function-context RegExp back as a `$NativeRegExp`
+the test module can `ref.test`, so no test-module arm can see it. Reproduced
+exactly on this branch by swapping that old binary in
+(`.tmp/b10/stmt16-stale.log`: the same 4 failures, same message); with an
+adapter rebuilt from main + B10 all 16 rows pass. The rebuilt adapter is
+byte-identical to the one every measurement above used, so B10 does not change
+the adapter. CI rebuilds the adapter per run (`test262-sharded.yml`,
+`build-quickjs-eval-provider.mjs`), so it is not exposed. Anyone measuring
+eval rows locally should delete `.test262-cache/quickjs-eval-adapter-*.wasm`
+after the compiler changes; the cache key missing the compiler is worth a fix of
+its own.
+
+Re-measured on the merged tree against a `git archive` of `4351173919`
+(`.tmp/b10/m2/`, same fresh adapter on both sides; source sha checked
+first→last on both trees):
+
+- the 16 statementList rows: base 10 pass / 6 fail → **16 / 0**, the same six
+  flips;
+- byte differential over the same 151 rows (301 row/target pairs): **295
+  identical, 6 changed — the six eval rows, standalone; 0 host**; zero
+  pass→non-pass;
+- 32/32 playground/benchmark binaries identical on both targets; equivalence
+  gate 22 = 22 known; `check:ir-fallbacks` OK;
+- pins: the 9 B10 cases red on the main base, green after; B-family and
+  neighbour pins 213/220 with only the 7 `issue-3051` host-lane failures, which
+  fail identically on the main base;
+- every gate re-run bare on the merged tree, incl. `LOC_GATE_BASE=4351173919`
+  loc/func: all exit 0. The B9 `loc-budget-allow` block was dropped in the merge
+  (main had removed it once B9 landed).
 
 #### Recorded narrowings / found while probing
 
