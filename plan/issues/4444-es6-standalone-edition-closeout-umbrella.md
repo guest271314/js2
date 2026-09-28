@@ -18,6 +18,99 @@ related: [2860, 2864, 2865, 2867, 2906, 3032, 3178, 2161, 2175, 2158, 2159, 4445
 
 # #4444 — UMBRELLA: ES6 (ES2015) standalone edition close-out
 
+## 2026-09-28 census handoff: 24 of 128 frozen shards complete
+
+The maintained standalone runner has completed indices 0–23 at frozen source
+`f924650c6c26237f62b08a362d7003d4d2b1e12d`. Across the accepted receipts:
+**2,191 unique original paths: 2,052 pass, 117 fail, 22 compile errors**.
+The original 11,778-path scope is unchanged; **9,587 paths remain unmeasured**.
+These are frozen-baseline observations, not current-main or post-fix results.
+No landed fix has been subtracted from these counts.
+
+The execution ledger is preserved at
+`/Users/thomas/.codex/worktrees/manifest-baseline/js2/.tmp/4444/es2015-fullscope-128-execution-ledger.json`.
+All 24 accepted JSONL and completion-file SHA256 hashes were independently
+checked; all recorded identities are unique members of the exact manifest
+(`632db3bbecb0d6ea42b0915b13740912bf3fd8e32e2a15a8b28c1f63b6434360`).
+Each shard passed the maintained completeness validator. No scope exclusions
+or manual conformance retries were introduced. The tracked census contract is
+`plan/agent-context/4444-es2015-fullscope-census-128-ledger.json` in that checkout.
+
+Latest terminal runs, each with 92 registered/verdict identities and zero
+explicit exclusions:
+
+- Index 19: 87 pass, 5 fail, 0 compile errors; session 45884 exited 1 in
+  88.21 seconds. JSONL SHA256
+  `d8f4dea2db07da02a15c941201b29c62fdf75cdad41830edcbe5dcb42f9bebfd`;
+  completion SHA256
+  `910ffd23edf8152b4cd4f7751ff310fbe5e92de3032ee2ce67700169111079a5`.
+- Index 20: 89 pass, 3 fail, 0 compile errors; session 30282 exited 1 in
+  88.06 seconds. JSONL SHA256
+  `0e82bf826b14b6bb9b914e0372aa36bd09f9a4fc10777374fc225cb8ebdd7f9b`;
+  completion SHA256
+  `9ecb7ba984020a959ba29c35ffa76af1b8350ac5552cad0e8d1523258bec170b`.
+- Index 21: 88 pass, 4 fail, 0 compile errors; session 68795 exited 1 in
+  82.82 seconds. JSONL SHA256
+  `5ce659b0ed3f7c13f2a3edce92c340f9432d3ba28b0b9f88e401a246128be397`;
+  completion SHA256
+  `d77bc261a3e6003cabb1d483fff32533edf4207fed834e1ff4b48d4c9fddc0ad`.
+- Index 22: 84 pass, 6 fail, 2 compile errors; session 27808 exited 1 in
+  87.68 seconds. JSONL SHA256
+  `36d4b9856c67b47bb6228940a76f0d48d1a7f314102e759da9d17aa1a8173f17`;
+  completion SHA256
+  `2d556c49b8369c55c36e29fed8d7d51ab9733108b5c2795dd2effdb145ced471`.
+- Index 23: 81 pass, 7 fail, 4 compile errors; session 35200 exited 1 in
+  90.92 seconds. JSONL SHA256
+  `52566527b0450a9ac4a894c457656d49cb40faca5dfaecd9aab5501e90fb5c03`;
+  completion SHA256
+  `50bec60527d78ac9b4e2c1c06a74591c6368c0e30414f1553c06c77b13ac8a71`.
+
+Newly observed failures remain in scope, including proposal paths already
+present in the frozen manifest. Triage routing is not root-cause attribution:
+`Array.prototype.concat_large-typed-array.js` is already listed under #4446;
+WeakMap's `iterator-item-second-entry-returns-abrupt.js` belongs with #5151's
+iterable-construction follow-up; Iterator `chunks/non-constructible.js` and
+`chunks/return-is-not-forwarded-after-exhaustion.js` belong with #5147's helper
+semantics. `language/statements/class/subclass/builtins.js` fails its first
+Uint8Array-subclass length assertion (2 instead of 10), before the later byte,
+prototype, and brand assertions; no inference about those later checks is valid.
+
+Read-only Iterator follow-up at `27d215fb9e`: the `chunks/non-constructible`
+original stops at its first assertion, `new iter.chunks(1)`, so the later
+`new Iterator.prototype.chunks(1)` and subclass form are not measured by this
+failure. Lazy-helper lowering handles calls, while the reflected
+`ITERATOR_PROTO_METHODS` list omits `chunks`/`windows`. #5147 already identifies
+nonconstructable prototype-closure seeding as unfinished. A dynamic-member
+constructor no-match is a source hypothesis, not an emitted-route proof.
+Before choosing a repair, capture each original constructor form separately
+while retaining the original full test as acceptance, and preserve callee and
+argument side effects plus shadowing. Shared `new-super.ts`/prototype glue
+ownership must be cleared before edits; no new implementation claim is made.
+
+Index 21 also reconfirms the existing #5156 cluster G residual
+`test/built-ins/Date/prototype/toJSON/to-object.js`: the runtime reports
+`Date.prototype.toJSON is not yet implemented in --target standalone`.
+Source inspection at `732d9f75e6` matches an unwired reflective body:
+`array-object-proto.ts` delegates Date members to `emitDateProtoMemberBody`
+and `emitDateReflectiveSetterBody`; both decline `toJSON`, and
+`native-proto.ts` supplies the catchable refusal. This is not evidence that
+the direct Date formatter path is missing. The unchanged test first checks
+undefined/null rejection, then successful calls with boxed number and Symbol
+receivers and prototype-provided `toISOString`; a blanket TypeError can make
+the negative checks pass while still violating the positive cases. Keep all
+four assertions when reproducing against current upstream. Reuse #5156's
+generic ToObject/ToPrimitive/Invoke plan and clear shared glue ownership before
+implementation; do not reopen completed Date getter/formatter slices or
+replace this generic method with a Date-brand-only implementation.
+
+Next: resume index 24 using the same pinned compiler/provider/corpus and
+serialized execution slot; retain handles through terminal completion and
+validate completeness before accepting rows. Reproduce candidates against
+current upstream before implementation, preserve each original assertion,
+and record plans in the corresponding issue. Final acceptance still requires
+all 11,778 original paths passing on the final source under the maintained
+standalone runner, with complete identity accounting and no exclusions.
+
 ## 2026-09-28 implementation plan: exact-manifest discovery
 
 The implementation is routed to dedicated issue
