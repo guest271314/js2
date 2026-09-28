@@ -9621,6 +9621,19 @@ build (`0fe97d70133c`).
 | D-family pins, one vitest process per file (20 files: D3, D4, D5, D6, C-expando, call-root, `promise-combinator-drive`, `promise-custom-combinator`, `issue-5197-*` ×4, `issue-2671-promise-executor`, `issue-3390`, `issue-4682`, `deno-safe-promise-*` ×2, `promise-expando-standalone`, `promise-combinators`, `issue-2671-promise-capability`) | all green except `promise-combinators` (2) and `issue-2671-promise-capability` (1) — the SAME test names fail on base (`.tmp/d6/pin-base-*.log`), D3/D4/D5's pre-existing three |
 | gates | `check-loc-budget`, `check-func-budget` (both also with `LOC_GATE_BASE` = origin/main `86dbc35c4e`), `check-coercion-sites`, `check:oracle-ratchet`, `check:dead-exports`, `typecheck`, `biome lint --diagnostic-level=error`, `check:host-import-policy`, `check-compiler-boundaries --mode inventory --base origin/main` (`inventoryValid: true`, the new leaf classified), `check:ir-fallbacks` (OK), `scripts/equivalence-gate.mjs` (22 failing / 1,720 passing / 22 known — no new). Grant: dated D6 note at the head of `loc-budget-allow` (`property-access-dispatch.ts` +3) |
 
+#### Post-merge re-verification
+
+Slice commit `4d9a7fdddb`; then `origin/main` @ `e5e69140ea` merged in (it had absorbed #6245 and
+A5; the only conflict was the head of `loc-budget-allow`, both notes kept). The merged tree differs
+from `e5e69140ea` in exactly this slice's 7 files. Against the merged tree minus the slice's `src`
+patch (`.tmp/mbase/src`): QuickJS adapter rebuilt from both trees, identical (`0fe97d70133c`); D
+manifest + the 5 targets (104 rows) **77 → 82 pass, the same 5 flips, 0 pass→non-pass, 0 message
+changes**; byte differential over the 151 reach rows — gc 171/171 identical, standalone moves the
+same 5 variants; playground + benchmarks 34/34; pin 7/8 red on the merged base, 8/8 green after;
+the 20 D-family pin files with the same three pre-existing failures; equivalence gate 22 / 1,720 /
+22 known; `check:ir-fallbacks` OK; every gate above re-run bare (`LOC_GATE_BASE=e5e69140ea`), all
+exit 0.
+
 A harness note for the next byte differential: comparing base and branch in ONE process (as
 `.tmp/cx/bytes.mts` did) moved 36 gc/standalone variants of 10 unrelated rows here — the TS
 checker is shared between the two imported compiler trees, so well-known-symbol member names
