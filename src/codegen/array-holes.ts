@@ -44,6 +44,7 @@ export { excludeArgumentsArrayCarrier } from "./arguments-carrier-brand.js";
 import { allocTempLocal } from "./context/locals.js";
 import { emitUndefined } from "./expressions/late-imports.js";
 import { isBrandedBuiltinName } from "./builtin-brands.js"; // (#4176) named proto-write pre-scan
+import { isRegExpProtoSymbolWrite } from "./regexp-proto-symbol-writes.js"; // (#6651 B9)
 import { planHoleyArrayCarrier } from "./holey-array-plan.js"; // (#4222) isolated sparse-carrier proof
 import { recordDescriptorArrayReceiver } from "./declarations/descriptor-array-carrier.js"; // (#4670)
 
@@ -134,6 +135,10 @@ export function scanForArrayHoles(ctx: CodegenContext, root: ts.Node): void {
     if (!ctx.protoMemberDirty && isFunctionProtoMemberValueUse(node)) {
       ctx.protoMemberDirty = true;
     }
+    // (#6651 B9) Replacing `RegExp.prototype[Symbol.match]` & co. makes the
+    // member a runtime value (the static read declines), so the companion must
+    // hold the builtin before the write — seeded only under this flag.
+    if (!ctx.protoMemberDirty && isRegExpProtoSymbolWrite(node)) ctx.protoMemberDirty = true;
     if (!ctx.vecAccessorDescriptorDirty && isNonDataDescriptorDefine(node)) {
       ctx.vecAccessorDescriptorDirty = true;
     }

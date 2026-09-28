@@ -1,10 +1,10 @@
 ---
 id: 5151
 title: "ES2015 standalone: collections conformance wave 1"
-status: in-review
+status: in-progress
 sprint: current
 created: 2026-08-28
-updated: 2026-08-28
+updated: 2026-09-28
 priority: high
 horizon: l
 feasibility: medium
@@ -29,9 +29,11 @@ loc-budget-allow:
   - src/codegen/property-access.ts
   - src/codegen/expressions/calls.ts
   - src/codegen/proto-index-store.ts
+  - src/codegen/declarations/param-return-inference.ts
 func-budget-allow:
   - src/codegen/expressions/new-super.ts::compileNewExpression
   - src/codegen/expressions/calls.ts::compileCallExpression
+  - src/codegen/declarations/param-return-inference.ts::inferParamTypeFromCallSites
 ---
 
 # #5151 — ES2015 standalone: collections conformance wave 1
@@ -41,6 +43,15 @@ iterable-constructor protocol (adder [[Get]]+dispatch, iterator drive,
 IteratorClose) for four collection constructors, reified live Map/Set
 iterators, and the ctor/prototype reflection surface — all new standalone
 codegen in the files listed above. No baseline edits.
+
+Narrow #5151 parameter-boundary exception (2026-09-28): the independently
+reviewed `Map`/`Set` size repair adds 63 lines to
+`param-return-inference.ts` and 15 lines to `inferParamTypeFromCallSites`.
+That growth is the ambient NativeProto representation proof plus the guarded
+withdrawal that preserves an actual collection-prototype carrier when an
+otherwise agreeing `$Map` ABI would null-cast it. It does not change a global
+budget or either baseline; the exact entries above are limited to this issue's
+leaf repair.
 
 ## Problem
 
@@ -212,19 +223,331 @@ Files: `src/codegen/property-access.ts` (computed symbol read),
    without setter, non-strict test code): evaluate RHS for side effects, drop,
    do NOT store an expando readable by a later read.
 
-### Step F — `size` reflection through variable receivers (2 tests)
+### Step F — `size` reflection through dynamic descriptor calls (2 tests; residual)
 
-Files: `src/codegen/builtin-static-gopd.ts`, `src/codegen/native-proto-own-props.ts`.
-1. Let the `gOPD(<recv>, 'size')` arm accept a receiver VARIABLE whose value
-   is a native proto page (propertyHelper's internal `var obj = …`), not just
-   syntactic `Map.prototype` — resolve via `ctx.oracle.declaredNameOf` /
-   `variableInitializerOf` (see the ES5_OBJECT_PROTOTYPES lookup in
-   `object-get-prototype-of.ts:246` for the pattern), falling back to the
-   runtime `$NativeProto` brand.
-2. Fix `propertyIsEnumerable.call(<proto page>, 'size')` → false (accessor is
-   {e:F,c:T} per §17); the own-props enumeration surface is
-   `native-proto-own-props.ts` (#4786 touched the same file for
-   @@toStringTag).
+Claim: `#5151:dynamic-size-descriptor` is held by
+`ttraenkler/codex-5151-size-descriptor` on
+`codex/5151-dynamic-size-descriptor` (upstream `issue-assignments`,
+2026-09-28T01:44:58Z).
+
+The previous plan assumed that a syntactic-variable receiver was the whole
+gap. A fresh standalone fullscope shard instead records
+`test/built-ins/Map/prototype/size/size.js` as a real runtime failure
+(`TypeError: Cannot convert undefined or null to object`; result JSONL
+SHA-256 `8ea77faa631251b39194860569dcbec7a2fc6386dc1851eedcb422e9c7144d41`).
+That ledger has no inner stack or phase marker, so it does not identify the
+throwing operation.
+
+The focused, versioned diagnostic
+`tests/issue-5151-map-size-descriptor.test.ts` uses the unannotated JavaScript
+`propertyHelper.js` shape—`var __getOwnPropertyDescriptor =
+Object.getOwnPropertyDescriptor` plus a receiver parameter—and independently
+checks Map and Set. Its phase checks require a present descriptor, callable
+getter, absent setter, `{ enumerable: false, configurable: true }`, matching
+`propertyIsEnumerable(..., "size") === false`, and a getter that returns the
+known collection size. The same source returns `9090909` under native Node
+24.19.0 after an export-only VM transformation. In the standalone compiler it
+returned `9091010`: direct literal Map and Set controls each reached phase 9,
+while both captured lanes reached phase 10. Phase 10 is deliberately the
+outer captured-path catch around the call plus descriptor inspection; it is
+evidence of a failing captured lane, not proof that the call itself threw.
+The complete command, source/oracle hashes, and terminal logs are retained in
+`.tmp/5151-map-size-descriptor-20260928-034204/RECEIPT.md`.
+
+**No production seam is approved from this result alone.** In particular, the
+passing direct literals bypass both a dynamic-native-prototype descriptor path
+and a first-class builtin-function call path. Do not widen
+`resolveBuiltinProtoGopdReceiver` or add a `$NativeProto` descriptor arm until
+the following bounded source-only diagnostic matrix had terminal evidence:
+
+1. Keep the direct literal Map/Set controls, but add
+   `Object.getOwnPropertyDescriptor(proto, "size")` on the same unannotated
+   parameter shape. This separates syntactic receiver recognition from the
+   captured-function path.
+2. Add a captured-gOPD positive control over an ordinary object with a real own
+   data property. It distinguishes failure to dispatch a first-class
+   `Object.getOwnPropertyDescriptor` value from a descriptor gap specific to a
+   native prototype receiver.
+3. Interpret the matrix only at that boundary: a broken ordinary-object
+   captured control points to first-class builtin-call handling; a passing
+   ordinary control paired with a failed dynamic Map/Set descriptor points to
+   native-prototype descriptor handling; a passing direct-parameter call with
+   a failed captured Map/Set call leaves a captured-call-specific seam to trace.
+   None of those outcomes alone authorizes a broad generic descriptor rewrite.
+
+The discriminator is terminal. Its same-source native Node 24.19.0 oracle
+returned `909090909`; the compiler test returned `1010101009` (exit 1), decoded
+as direct-parameter Map `10`, direct-parameter Set `10`, captured Map `10`,
+captured Set `10`, captured ordinary object `9`. Here `10` is the local catch
+around the **gOPD call itself**, while `11` would have meant returned-descriptor
+inspection failed. This rules out a generic first-class
+`Object.getOwnPropertyDescriptor` call defect: the same captured value works
+for an ordinary own data property.
+
+### Emitted-WAT proof (terminal; no module execution)
+
+The separately leased compile-only probe used the exact discriminator source
+SHA-256 `60b2c938a55103a84a94e763d098f1eb92df1ebc53ac57289b5b592741ffd1ed`
+and completed with exit 0, `success: true`, and `errors: []`. It emitted binary
+SHA-256 `3d54f0db7d48c2140261694a12c81be3182b5dfa551f44c77085d6db0ddb87cd`
+and WAT SHA-256
+`ede2f9cb6565abe289e538a76e3204e7655cafc063296b49f1eef7a1e070d081`
+(2,359,170 characters). Raw WAT and the mechanically indexed summary are
+retained in `.tmp/5151-map-size-descriptor-20260928-034204/`; the probe did
+not instantiate the module or invoke an export.
+
+The WAT replaces the descriptor-arm hypothesis with an exact parameter-boundary
+failure:
+
+1. `$test` materializes non-null Map/Set `$NativeProto` singleton globals
+   `162`/`204`, stores them, and calls `__protoidx_companion(25, 1)` /
+   `__protoidx_companion(26, 1)` before either dynamic gOPD call. The native
+   prototype/companion seed path therefore ran.
+2. Both `directParameterSizePhase` and `capturedSizePhase` use WAT type `68`
+   (`$directParameterSizePhase_type`), whose first parameter is
+   `(ref null 64)` — the `$Map` carrier type. At each Map/Set prototype call,
+   `$test` converts the native-prototype externref to anyref, performs
+   `ref.test (ref 64)`, and takes the `else ref.null 64` branch before calling
+   either function. The actual `$NativeProto` is thus discarded **before** the
+   parameter reaches either gOPD spelling.
+3. Both functions call native `__getOwnPropertyDescriptor` (WAT call `220`)
+   with that null parameter. The callee first calls `__protoidx_own_recv`
+   (call `137`); its `$NativeProto` test receives null, returns it unchanged,
+   and the native gOPD nullish branch throws the observed TypeError.
+
+This is a **dynamic native-prototype argument/parameter ABI boundary**, not a
+missing `$NativeProto` descriptor arm and not a companion-seeding failure. Do
+not widen `resolveBuiltinProtoGopdReceiver`, add a generic native descriptor
+arm, or alter `native-proto-own-props.ts` for this residue. The full upstream
+Map/Set `size.js` rows remain red; no focused diagnostic is acceptance.
+
+### Parameter-narrowing seam and approved narrow slice
+
+Source review identifies the producer of WAT type `68` precisely:
+
+1. `src/codegen/declarations/param-return-inference.ts`:
+   `inferParamTypeFromCallSites` reads each argument's checker type, calls
+   `resolveWasmType`, and accepts a concrete ABI when the resulting physical
+   `ValType`s agree. `inferImplicitAnyParamType` returns that result before
+   body-usage fallback.
+2. `src/codegen/index.ts:resolveWasmType` intentionally maps Map, Set,
+   WeakMap, and WeakSet checker types to the shared `ctx.mapTypeIdx` `$Map`
+   carrier. That remains correct for actual collection **instances**.
+3. `src/codegen/declarations.ts:lowerParamType` consumes the inferred `$Map`
+   unchanged. The normal direct-call reader (`call-identifier.ts` →
+   `internal-call-argument.ts` → `type-coercion.ts`) then performs the observed
+   `$NativeProto`-to-`$Map` guarded conversion and null fallback. Those readers
+   are witnesses, not edit targets.
+4. The runtime producer is
+   `property-access-dispatch.ts:tryIdentifierNamespaceAndStaticReceiverRead`:
+   an unshadowed, ambient `<Builtin>.prototype` whose brand is actually wired
+   through `builtin-value-read.ts:tryEnsureNativeProtoBrand` is emitted as a
+   `$NativeProto` externref.
+
+The approved leaf repair belongs only in
+`param-return-inference.ts`: while inferring an *unannotated implicit-any*
+parameter from call sites, recognize the actual standalone collection-prototype
+producer shape—transparent wrappers around a *resolved*, unshadowed ambient
+`Map`/`Set`/`WeakMap`/`WeakSet` `.prototype` read—and withdraw a concrete
+inference when that argument occurs. The parameter then remains `externref`,
+preserving the native-prototype identity through the dynamic call boundary.
+The group is deliberately the four constructors that share the `$Map` instance
+carrier and whose native-prototype producer is wired; it is not a blanket rule
+for all branded builtins or for all collection calls. A parameter whose observed
+arguments are only actual Map/Set/WeakMap/WeakSet instances keeps its existing
+`$Map` fast path.
+
+The predicate must require a nonempty `ctx.oracle.declarationsOf` population
+whose entries are all declaration-file ambient bindings. This deliberately
+rejects an unresolved spelling, local `Map`/`Set` class, import, or rebinding
+without adding a raw checker query. Direct producer evidence is enough for the
+maintained `propertyHelper` shape. Do **not** follow arbitrary identifier
+aliases in this slice: `isSingleAssignmentBinding` can prove a binding is
+stable, but it does not itself prove that the alias's *storage ABI* has
+preserved a NativeProto rather than already applying the same `$Map` cast. An
+alias expansion therefore needs an independently demonstrated storage-carrier
+path and is explicitly deferred rather than claimed by this parameter fix.
+
+Collision/IR review found no owner of the call-site inference leaf. The code
+scope is `param-return-inference.ts` plus the focused
+`tests/issue-5151-map-size-descriptor.test.ts`; no `index.ts`, declarations,
+IR, descriptor-runtime, or coercion change is authorized. The focused test is
+the first acceptance gate. Its carrier controls require direct prototype
+identity for all four supported collection prototypes, retain Map/Set and weak
+collection instance behavior, and exercise both a local and a module-shadowed
+`Map` spelling. A separate mixed-call-site control sends `Map.prototype` and a
+real `Map` instance through the same implicit-any parameter: this proves the
+NativeProto observation withdraws an otherwise agreeing `$Map` ABI rather than
+only covering separate parameter functions. They do not claim identifier-alias
+support. The original Map/Set `size.js` property-helper rows must still be run
+unchanged before calling Step F complete.
+
+#### Candidate focused receipt (terminal; not full acceptance)
+
+On 2026-09-28, the repaired candidate completed the focused file once under
+Node `v24.19.0`, one Vitest fork, and explicit 4096 MiB parent/fork limits:
+
+```text
+VITEST_FORK_MAX_OLD_SPACE_SIZE=4096 NODE_OPTIONS=--max-old-space-size=4096 VITEST_MAX_FORKS=1 /Users/thomas/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --max-old-space-size=4096 node_modules/vitest/dist/cli.js run tests/issue-5151-map-size-descriptor.test.ts --pool=forks --poolOptions.forks.singleFork=true --no-file-parallelism --reporter=verbose
+```
+
+It exited `0` after 17.03 s: all four rows passed—the original propertyHelper-
+style Map/Set descriptor regression, the direct/captured discriminator, the
+four-prototype identity plus instance-behavior controls, and the module-shadow
+control. The local-shadow control is part of the carrier source's fourth row.
+The later-added mixed-call-site control is not part of this historical
+four-row receipt and remains separately unverified at this point in the plan.
+The terminal log, command, exit code, and before-run SHA receipt are retained
+at `/private/tmp/js2-5151-candidate.wo2pMO/`. The before/after hashes matched:
+test file `a3ac0189414174f59272500a94674e7893774851e4acf7e3324c2b65c808c42b`,
+inference source `fb4f7a92df5743c2091fd897b2ed7d849a9e5336b82f5c1e7d38b09f3b938f4c`,
+and this plan before recording the result
+`504fa8a919845ac345d82197ce3b4f609daba87528d3f9e9f52423b065bb6228`.
+
+This is candidate evidence only. A clean-base run of the byte-identical test
+fixture and the unchanged upstream Map/Set `size.js` rows remain required; no
+fullscope/Test262 claim follows from this receipt.
+
+#### Matched clean-base A/B receipt (terminal; focused only)
+
+The same fixture was then installed with `apply_patch` into the separate clean
+baseline checkout `/Users/thomas/.codex/worktrees/map-size-baseline/js2`, at
+the same base `37b11b28919ef22a428cb13aa31006850e331ecb`. Its fixture SHA-256
+matched the candidate exactly (`a3ac0189414174f59272500a94674e7893774851e4acf7e3324c2b65c808c42b`);
+its unmodified inference source SHA-256 was
+`8e5cc75c8a80214dfa29a84078533cfeafc6afa19dde7bfb4221503cbadebb3a` before
+and after the run. The identical Node 24.19.0 / one-fork / 4096 MiB command
+above exited `1` after 16.75 s, with these exact transitions:
+
+- propertyHelper-style descriptor source: baseline `9091010` → candidate
+  `9090909`;
+- direct/captured discriminator: baseline `1010101009` → candidate
+  `909090909`;
+- NativeProto identity and instance controls: baseline `99999` → candidate
+  `999999999` (the four direct-prototype lanes were zero only on baseline;
+  all four instance lanes and the local-shadow lane already returned `9`);
+- module-shadow control: `9` → `9`.
+
+The baseline command, terminal log, exit code, and source-hash receipt are
+retained at `/private/tmp/js2-5151-baseline.33Kl5A/`. This proves the focused
+repair is causally responsible for the three repaired lanes while preserving
+the controls. It does **not** replace the planned unchanged upstream Map/Set
+`size.js` validation.
+
+#### Maintained-row registration incident (terminal; no verdict)
+
+The first direct dynamic-runner attempt used a two-line filter spelling without
+the runner's leading `test/` path component. The source comment called the
+file entries "test-relative," but the actual registration identity at
+`test262-shared.ts:585` is `relative(TEST262_ROOT, filePath)`, i.e.
+`test/built-ins/...`. The original filter was preserved at
+`.tmp/5151-test262-map-set-size.paths` with SHA-256
+`ad66e42d2ba1ea5ee8bb19df257cf24a04f03fb0ad45ddf3bd45ad5cc1d89152`.
+
+Candidate attempt `5151-candidate-20260928T023920Z-96539` therefore registered
+zero callbacks and Vitest reported `No test suite found`. The shared module had
+already opened its result file, so the durable JSONL exists but is zero bytes:
+`benchmarks/results/test262-5151-candidate-results-5151-candidate-20260928T023920Z-96539.jsonl`.
+It has no completion manifest and no recorded verdict; the completeness gate
+correctly exited 2. This is a harness-scope incident, not candidate evidence.
+The corrected v2 filter is a separately named pair of files with the actual
+two identities and SHA-256
+`07e369ea4c10d70032529908d3671496b4e9a43480f99d0e7eea66bfdf1deb53`.
+
+#### Final revised focused A/B receipt (terminal; five rows only)
+
+The final leaf revision replaces the new raw checker declaration lookup with
+the nonempty, all-ambient-declaration `ctx.oracle.declarationsOf` proof and
+adds a same-parameter mixed carrier control. Under Node `v24.19.0`, one
+Vitest fork, and 4096 MiB parent/fork limits, the candidate passed all five
+focused rows (exit 0, 18.67 s): the original propertyHelper descriptor source,
+the direct/captured discriminator, four NativeProto identities plus instance
+controls, the same implicit-any parameter receiving `Map.prototype` and a real
+`Map`, and the module-shadow negative control. Its source hashes were inference
+`ec49c4303a6a7418d7a9e8bbd4056aabe788db1258b0703e163ed45782b3a68b` and
+fixture `32ff946252cc96e6fb22c8e2e3eccbdeaaf3934001b1f1f8c63391b3a88d7304`.
+Receipt: `.tmp/5151-focused-candidate-final-20260928T024746Z-43158/full.log`.
+
+Those behavioral receipts predate a mechanical Prettier-only source format
+pass. The final formatted inference source SHA-256 is
+`18128ef4dd1f2f93f2a09ab2e70546e45fbd2c7c1ccc3b5d6c496159f61e8fd2`;
+the actual ratchet measurement is 1836 → 1899 lines (+63) and 407 → 422
+functions (+15). The earlier `ec49c430…` hash remains a historical validation
+receipt for semantically identical source, rather than being relabeled as the
+final formatted artifact.
+
+The byte-identical fixture ran in clean base
+`37b11b28919ef22a428cb13aa31006850e331ecb`, whose unchanged inference source
+SHA-256 was `8e5cc75c8a80214dfa29a84078533cfeafc6afa19dde7bfb4221503cbadebb3a`.
+It exited 1 with the four expected negative lanes and one preserved module-
+shadow positive lane: `9091010` → `9090909` (propertyHelper descriptor),
+`1010101009` → `909090909` (discriminator), `99999` → `999999999` (direct
+NativeProto identities while instance/local-shadow controls stay positive),
+`9` → `99` (same-parameter prototype plus instance), and `9` → `9` (module
+shadow). Baseline receipt:
+`/Users/thomas/.codex/worktrees/map-size-baseline/js2/.tmp/5151-focused-baseline-final-20260928T024858Z-50943/full.log`.
+This proves the narrow parameter-boundary repair and guards only, not full
+collection conformance.
+
+#### Final maintained Map/Set size A/B receipt (terminal; exactly two rows)
+
+The original unmodified upstream files ran via maintained
+`tests/test262-chunk-dynamic.test.ts`, never a custom wrapper. The v2 filter
+contains the actual registration identities `test/built-ins/Map/prototype/size/size.js`
+and `test/built-ins/Set/prototype/size/size.js`, with two unique entries and
+SHA-256 `07e369ea4c10d70032529908d3671496b4e9a43480f99d0e7eea66bfdf1deb53`.
+Both sides resolved the physical `test262/test` and `test262/harness` paths to
+`/Users/thomas/Code/js2/.claude/worktrees/es2016-test262-standalone-parallel-0c0628/test262`,
+at corpus HEAD and outer gitlink `b363f29d3c43c626dc852744ad64a0b48a003693`;
+tracked corpus status was clean. The two test sources plus `propertyHelper.js`,
+`assert.js`, and `sta.js` hashes are preserved in each log.
+
+Each side used Node `v24.19.0`, standalone QuickJS full-runtime evaluation,
+UTC, realm recycling, one Vitest fork, one compiler worker, and 4096 MiB
+parent/fork/worker limits. The immutable artifact key was `2e2d7736713beeda`
+with wasm SHA-256 `e9f8d30bc347dbc56f31b3389f7696eb6dedc9f05ea729781fc412f09a3e6b17`;
+adapters were independently built and verified in each worktree cache.
+
+Candidate exit was 0 with both rows passing. Its bundle/runtime hashes were
+`2bc2d74e4a839cdea89113eb412a1a76a4aa0919a5f3a16cf134113ccc3fd001` and
+`ff79916e43e1d5b9aab7680272804d5a70f83e6ae50b6fc157e337cdafd009e4`; fresh
+adapter key `196217d0f1a1cc0a`; JSONL/manifest hashes
+`c8e92dc2701b875ff1a05bb80bfa830d4a0fb6b86d0561c8e2db0a8d3de5bb81` and
+`cfa611792ca189e37a0e06c34371c0cb759519540fd4b8911ef341f275b5d586`.
+The validator recorded exactly 2 registered/recorded/canonical/started/settled
+callbacks, zero exclusions, and both expected paths. Receipt:
+`.tmp/5151-candidate-v2-20260928T025034Z-56699/full.log`.
+
+Baseline exit was 1 with exactly those two rows failing at runtime with
+`TypeError: Cannot convert undefined or null to object`. Its bundle/runtime
+hashes were `68b95260c3a4a3be86a518c4a469fff7a5fe688221684945438bfae95b5c6879`
+and `16c2de87f8cf3f0fa2cc38d0b2c04a5ec9122416787ddd61af2d98be3fee4914`;
+fresh adapter key `924e58cf1a604265`; JSONL/manifest hashes
+`21efb6a4ab36c7b9e219695c256bdfdfb26a0f49ab80df346e9c7ee352888804` and
+`d3ff5f336d778344e526b13762adf8e979b37a213058d08a9a8b09335508d350`.
+It has the same complete 2/2 invariants and zero exclusions. Receipt:
+`/Users/thomas/.codex/worktrees/map-size-baseline/js2/.tmp/5151-baseline-v2-20260928T025200Z-57197/full.log`.
+This is a bounded two-row causal A/B result; no other collections residual or
+full-corpus claim follows from it.
+
+#### Neighboring parameter-inference controls (terminal; one matched red control)
+
+Under the same Node `v24.19.0`, one-fork, 4096 MiB configuration, the nearby
+call-site inference controls passed 16/16: all six #318 basic inference cases,
+the #2949 no-ABI-withdrawal case, the #2917 opaque/forwarded/destructured
+withdrawal case, and all eight #3471 polymorphic/boxed plus numeric-preservation
+cases. Receipt:
+`.tmp/5151-neighbor-inference-20260928T025456Z-57935/full.log`.
+
+The selected two-test #4491 vec-identity control is deliberately not counted
+as green: its accessor case failed and its setter case passed (1F/1P, 17
+unselected) on both candidate and clean baseline with byte-identical fixture
+SHA-256 `1b4b483f3ddcea33c80434305df4ca3310a516509ff5a5e4eef0c2b6a2048444`.
+The fixture defines a getter-only `arr[1]` and assigns `arr[1] = 4` at module
+top level, so strict-module assignment can throw before the named read-through
+assertion. This is an existing #4491 red control, not evidence about #5151;
+its fixture was not changed. Baseline receipt:
+`/Users/thomas/.codex/worktrees/map-size-baseline/js2/.tmp/5151-neighbor-4491-baseline-20260928T025606Z-58140/full.log`.
 
 ### Step G — heterogeneous key/value lanes (1 test + unblocks A4)
 
@@ -273,6 +596,14 @@ cross-cutting rows here.
   Step H, in which case 72/76 + the filed follow-up is acceptance).
 - Every test in `.tmp/es2015/wp-collections-passing-spotcheck.txt` (40 rows)
   still passes via the same probe.
+- **Step F is not accepted from a descriptor-read probe alone.** Run the
+  unmodified upstream `test/built-ins/Map/prototype/size/size.js` and
+  `test/built-ins/Set/prototype/size/size.js` with their real
+  `propertyHelper.js` include. Their `verifyConfigurable` path destructively
+  deletes `obj[name]` and verifies the missing own property, so acceptance must
+  also preserve the runner's normal Map/Set prototype restoration for the
+  following strict/repeated invocation. A static `configurable: true` read, or
+  merely calling the getter, is insufficient evidence.
 - All source-ratchet gates pass (`check-loc-budget`, `check-func-budget`,
   `check-coercion-sites`, `check:oracle-ratchet`, `check:dead-exports`).
 - Equivalence tests pass (`npm test -- tests/equivalence.test.ts`).

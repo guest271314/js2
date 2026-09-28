@@ -14427,6 +14427,24 @@ The upstream assignment was reread before staging and remains held by
 `ttraenkler/codex-ir-delivery-20260927`. Publication and protected queue
 validation still follow; no main delivery or retirement is claimed here.
 
+### Exact upstream refresh: RegExp and collection main, 2026-09-28
+
+PR6205 left the protected queue and became conflicting. Fresh upstream main
+was011e1278f531676b3e255558dc67c06396c21072, verified by GraphQL and fetch;
+merge it into exact published head25f4ec456c1c609629e046ab0f920dcbc8adee9a.
+The sole conflict was compiler-boundaries.json: retain all1,657 existing
+IR entries and add the two upstream unmigrated RegExp files, total1,659.
+All11 incoming source/test files outside policy match upstream byte-for-byte.
+
+TS7 passed. The initial four-suite run passed358/361 with three missing-corpus
+skips, not passes. Restore those exact three test262 files from pinned
+b363f29d3c43c626dc852744ad64a0b48a003693, authenticate their Git blobs, and
+rerun their complete suite:3/3 passed without skips. The original358 results
+retain unchanged source/test inputs. Eight quality gates passed with2,214
+unchanged inputs. Evidence: .tmp/ir6205-refresh/regexp-main-runtime,
+regexp-main-quality, and regexp-corpus. No legacy retirement or default
+change. Main delivery and merge-group conformance remain unverified.
+
 
 ## Claimed follow-up — builtin metadata preservation (2026-09-28)
 
@@ -14474,3 +14492,31 @@ retained; these are measured corrected results, not a rebaseline. Reports live
 in `.tmp/metadata-validation` and `.tmp/metadata-quality` in the isolated
 metadata-preservation worktree. Main delivery remains pending and the claim
 stays active until verified publication and merge.
+
+
+### Parent delivery and metadata refresh (2026-09-28)
+
+PR6205 is delivered on upstream main as
+45ce4a8e207742df5ca3888c0a458e8a48ee1655, with exact published head
+cbf0b97309cb9421bfae574b980b8e7103550414 as its second parent. All 102
+merge-group conformance shards, the final regression gate, CI and differential
+tests passed on that exact merge commit. The IR/backend/runtime source paths
+are byte-identical to the published head. Its delivery claim alone is complete;
+the IR migration and this metadata-preservation claim remain open.
+
+Fresh ls-remote verified this exact main before integration into the metadata
+branch. The sole conflict was this issue file: retain the full upstream record
+and the full local follow-up record. No source or regression test was dropped.
+Validate the four complete metadata/closure/Object.create suites again on this
+integrated tree, then commit through normal hooks and publish through the fork.
+The earlier 156/156 evidence belongs to the pre-refresh tree until rerun.
+
+The integrated45ce tree passes TS7 and all156/156 assertions across the four
+complete suites, with no failures/skips and2,219 unchanged inputs. All eight
+quality gates pass with2,215 unchanged inputs. Evidence is retained in
+.tmp/metadata-main-validation and .tmp/metadata-main-quality.
+
+The fresh pre-publication check then found main41be7d9be9240678bf8df71192f853d9d526b73f.
+Its sole additional commit refreshes16 report/baseline/documentation files,
+with no compiler or test changes. Preserve this verified45ce merge, then
+integrate41be and recheck the changed quality baselines before publication.
