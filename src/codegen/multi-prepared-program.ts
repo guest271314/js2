@@ -53,6 +53,7 @@ import type { ProgramAbiSession, PublishedProgramAbi } from "./program-abi-sessi
 import type { IrExactFunctionClaim } from "./ir-overlay-safety.js";
 import {
   assertMultiPreparedModuleInitCensusCurrent,
+  assertMultiPreparedModuleInitCensusSourceCurrent,
   buildMultiPreparedModuleInitCensus,
   isMultiPreparedModuleInitCensusObservedFor,
   projectMultiPreparedModuleInitCensus,
@@ -2288,8 +2289,8 @@ export class MultiPreparedProgramOwner<Plan extends MultiPreparedScalarLeafPlan 
 
   #stateForBodySource(sourceFile: SourceFile): RouteState<Plan> | undefined {
     this.#requireState("body-boundary-sealed");
-    assertMultiPreparedModuleInitCensusCurrent(this.#moduleInitCensus);
     const expected = this.#sourceFiles[this.#bodyCursor];
+    assertMultiPreparedModuleInitCensusSourceCurrent(this.#moduleInitCensus, expected); // #6737: entered source only
     if (expected !== sourceFile) this.#fail("body-phase-order", `body source visit is out of semantic order`);
     this.#bodyCursor++;
     this.#bodySourceIds.push(this.#sourceId(sourceFile));
@@ -2298,7 +2299,9 @@ export class MultiPreparedProgramOwner<Plan extends MultiPreparedScalarLeafPlan 
 
   #stateForOverlaySource(sourceFile: SourceFile): RouteState<Plan> | undefined {
     this.#requireState("body-boundary-sealed");
-    assertMultiPreparedModuleInitCensusCurrent(this.#moduleInitCensus);
+    // #6737: the first overlay visit is the body-to-overlay boundary (whole program); later ones the entered source.
+    const entered = this.#overlayCursor === 0 ? undefined : this.#sourceFiles[this.#overlayCursor];
+    assertMultiPreparedModuleInitCensusSourceCurrent(this.#moduleInitCensus, entered);
     if (!this.#overlayEnabled) this.#fail("overlay-phase-order", "overlay state requested while overlay is disabled");
     if (this.#bodyCursor !== this.#sourceFiles.length)
       this.#fail("overlay-phase-order", "overlay began before all body visits");

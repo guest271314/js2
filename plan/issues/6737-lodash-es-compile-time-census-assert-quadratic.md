@@ -1,10 +1,11 @@
 ---
 id: 6737
 title: "perf: lodash-es standalone compile takes 10-17 min — 61 % is a whole-program module-init census check run once per module"
-status: ready
+status: done
+completed: 2026-09-29
 sprint: Backlog
 created: 2026-09-28
-updated: 2026-09-28
+updated: 2026-09-29
 priority: high
 horizon: m
 feasibility: medium
@@ -13,7 +14,7 @@ task_type: performance
 area: compiler
 goal: standalone
 requested_by: ttraenkler/sendev-standalone
-related: [6720, 6704, 3525]
+related: [6720, 6704, 3525, 6741, 6745, 6732]
 loc-budget-allow:
   # 2026-09-28 (#6737): +16 — the user-program name sets of
   # collectDeclaredGlobals move into a memoized helper in the same file.
@@ -137,3 +138,34 @@ Measured on the lane driver, `optimize: 0`, main `a08ed30b5c`, same box
 
 Lane after this slice: `measured`, checksum 54 = 54, `compileDurationMs`
 435,879 (O4 included) — still over the 120 s child budget.
+
+## Implementation Plan (structural census fix, executed with #6741)
+
+Remaining hotspot 2 above — the census syntax walk — is fixed structurally in
+[#6741](https://js2wasm.loopdive.com/dashboard/issue.html?slug=6741-jsdom-standalone-quadratic-module-init-census):
+the per-module-entry check re-derives the AST syntax, terminal denominator
+and legacy parity for the ENTERED source only, keeps every whole-program
+join / order / queue-identity check per entry, and the whole-program
+re-derivation runs at every phase boundary. See #6741 for the plan and the
+invariant-strength argument.
+
+## Resolution
+
+lodash-es lane driver, `optimize: 0`, codegen only, same box (load 150–210):
+standalone 424.6 s → 220.2 s, JS-host 401.1 s → 220.3 s, both binaries
+byte-identical (`f5349301…` / `43ba3a44…`). Census share of the profile
+43 % → 7.6 % (the syntax walk itself 0.5 %).
+
+Lane (`--lane standalone-dynamic`, optimize 4), before → after:
+`optimization-error` → `optimization-error`, `compileDurationMs` 1,046,026 →
+982,016 (Binaryen dominates; box load 150–340). Next blocker, verbatim:
+
+```
+wasm-opt -O4 did not produce the measured artifact: wasm-opt -O4 failed: unexpected expr type
+UNREACHABLE executed at /home/runner/work/binaryen.js/binaryen.js/binaryen/src/passes/Flatten.cpp:231!
+```
+
+That is the #4586 / [#6732](https://js2wasm.loopdive.com/dashboard/issue.html?slug=6732-standalone-axios-o4-no-flatten-retry-exceeds-timeout)
+O4-Flatten class (present on main before this change); the remaining
+compile-time item is hotspot 1 (`wasm-opt -O4` on a 5.8 MB module) and
+hotspot 3 (first module-init pass), both unchanged here.
