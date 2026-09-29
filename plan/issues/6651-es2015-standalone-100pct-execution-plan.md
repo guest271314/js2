@@ -11190,9 +11190,17 @@ generator rows (the adapter change is invisible to a byte diff: a realm
 generator object now crosses out with a protocol) ∪ 31 reachable rows that
 mention `Proxy` (classification walks the prototype chain with
 `isPrototypeOf`, which runs a realm proxy's `getPrototypeOf` trap) = 820 rows,
-`--isolate`, both trees (`.tmp/a9/v2-{mainb,final}.log`).
+`--isolate` (`.tmp/a9/v2-final.log`, `.tmp/a9/v2-mainb-np.log`).
 
-_(Verdict run in progress; this paragraph is replaced with the per-row result when both trees finish.)_
+The branch passes 680, fails 107, has 31 compile errors and 2 runner skips.
+Main was then run on the 138 rows the branch does not pass — the only rows
+that can be pass → non-pass. All 138 fail on main too, with the same status on
+every row (107 fail, 31 compile_error); 135 have the identical first-line
+reason, and the other 3 are target rows that now fail later
+(`instance-name` at a different offset, `instance-prototype` past its first
+assertion, `instance-yield-expr-in-param` past its SyntaxError half).
+**0 pass → non-pass.** Main was not run on the 680 rows the branch passes, so
+gains outside the target set are not counted here.
 
 **Controls** (branch `ef5748a7a9`):
 
@@ -11204,7 +11212,13 @@ _(Verdict run in progress; this paragraph is replaced with the per-row result wh
 - Playground + benchmark bytes — the 32 `.ts` files under
   `website/playground/examples` and `benchmarks`, host and standalone:
   64 / 64 identical to main `f58f09bd3c`.
-- Generator suites — _(re-run on both trees in progress.)_
+- Generator suites — `tests/issue-6651-*`, `generator-*`, `issue-2864-*`
+  (98 files, QuickJS, on `.tmp/a9/final`): 827 pass, 5 fail. The 5 fail on
+  the pre-merge base `e9d078e36f` too: the two `#2864` carrier pins, RS1, SN1
+  and SY1. (The same run inside the worktree also failed 4 B10 rows. Cause:
+  the adapter cache key had moved with the commit, so no adapter was built for
+  it. After a rebuild, B10 passes 6 / 6 there; on main and on
+  `.tmp/a9/final` it passes 6 / 6 as well.)
 - A9 pins (`tests/issue-6651-a9-generator-function.test.ts`) — red on main
   (both linkage cases fail; the behavioural suite fails in `beforeAll`, because
   the module links no provider), 11 / 11 on the branch. SG1's
