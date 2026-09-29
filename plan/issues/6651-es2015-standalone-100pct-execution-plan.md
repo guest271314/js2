@@ -438,6 +438,18 @@ loc-budget-allow:
   #     `generateMultiModule`, beside the `fillArrayToPrimitive` /
   #     `fillClassToPrimitive` calls they twin. Finalize ordering lives in the
   #     driver, which is the whole reason the fill exists there.
+  # 2026-09-29 — cluster A, slice A12 (a parameter write survives a
+  # suspension). `generators-native.ts` +11 and `context/types.ts` +4 (both
+  # paths already listed, restated per the stranded-grant rule). The MECHANISM
+  # — which parameters the body can write, and the post-body reconcile for a
+  # re-typed parameter local — is the NEW leaf `generator-param-writeback.ts`;
+  # the store-back itself is 5 lines in `frame-core.ts::storeSpills`, the one
+  # helper every suspension already calls. What stays in the god-file is
+  # irreducible: the field's `mutable:` flag where the frame struct is built,
+  # the local-index record in the resume prelude's parameter copy (the only
+  # point that knows the index), and the reconcile call beside the spill
+  # reconcile it mirrors. The two `NativeGeneratorInfo` fields carry that
+  # record from the prelude to `storeSpills`.
   - src/codegen/context/types.ts
   - src/codegen/array-methods.ts
   - src/codegen/expressions/call-receiver-method.ts
@@ -1135,6 +1147,14 @@ func-budget-allow:
   # restated per the stranded-grant rule): the parameter-shadow check on the
   # self registration and the unregister before `hoistVarDeclarations` — the
   # only point between the parameter prologue and the body hoist.
+  # 2026-09-29 — cluster A, slice A12: `ensureNativeGeneratorResumeFunction`
+  # +6 (the parameter-copy loop records each writable parameter's local index
+  # for the store-back, plus the reconcile call) and
+  # `registerNativeGenerator` +4 (the writable-parameter scan and the field's
+  # `mutable:` flag). Both functions own the data they write — the frame
+  # struct and the resume prelude; the scan and the reconcile are the leaf
+  # `generator-param-writeback.ts`. (`registerNativeGenerator` is already
+  # listed further down.)
   - src/codegen/generators-native.ts::ensureNativeGeneratorResumeFunction
   # 2026-09-28 — cluster A, slice A5: `buildNativeGeneratorPlan` +40 as the gate
   # measures it (path already listed below, restated per the stranded-grant
@@ -9745,6 +9765,196 @@ non-pass.** Residuals, first-line errors:
   merged onto `origin/main`, and every gate passes, including host-import
   policy and the compiler-boundaries inventory (both new leaves are
   registered).
+
+### 2026-09-29 — Cluster A, slice A12: generator parameter writes lost at suspension (claim)
+
+**Claimed 2026-09-29** by session `session_01FEGi3DmyPRPD5dx4kWU8hs`, branch
+`claude/es6-6651-a12-gen-param-writes`, stacked on A11 (#6285) because both
+touch the native generator frame. A write to a parameter of a sloppy generator
+is lost once the generator suspends: in
+`language/expressions/yield/formal-parameters-after-reassignment-non-strict.js`
+the mapped `arguments` sees the first write and not the second (`45` vs `54`).
+Scope: the parameter / mapped-`arguments` storage across a suspension point,
+root-caused from the emitted frame, plus every other ES2015 row with the same
+mechanism that the lane finds. Out of scope: `scope-param-*-var-open` rows (eval
+in a parameter default) and rest-binding rows (cluster I, I7 residual 3).
+
+### A12 record — 2026-09-29 (cluster A: a generator parameter write survives a suspension)
+
+**Branch** `claude/es6-6651-a12-gen-param-writes`, fix commit `bd3b64f17`.
+Rows and the byte differential were measured on `origin/main` @ `c7901473a` +
+A11 (stacked); the controls on that tree merged with `origin/main` @
+`ec0d337d1`. After A11 landed, the branch was merged onto `origin/main` @
+`a4e5b800a` — a plain child of main now, 7 files — and the pins (17/17),
+typecheck and every gate were re-run there. Engine
+`JS2WASM_EVAL_ENGINE=quickjs`, `--isolate`, one runner at a time under the
+shared lock. Every "base" figure below is a file-copy A/B of the four touched
+source files against `.tmp/base/` (captured before the first edit), not an
+inherited artifact.
+
+#### Root cause (read off the emitted WAT, `.tmp/a12/p1.wat`)
+
+The brief's hypothesis holds, with one correction. The frame
+`$__GenState_g` declares every parameter as an IMMUTABLE field
+(`(field $param_a externref)`), and the resume function's prelude copies each
+field into a local on every `.next()`. The mapped write `arguments[1] = 54`
+compiles correctly — `array.set` on the frame-carried `arguments` vec **and**
+`local.set` of the parameter local — so the alias is wired to both copies.
+What loses the write is the suspension: `storeSpills`, which runs before every
+suspension, stores body-declared locals only (`bodySpills` filters the
+parameter names out), so the parameter local is never written back and the
+next resume re-reads 45 from the frame. `yield a` survived only because it ran
+in the same resume call as the write.
+
+It is not an `arguments` bug. Every write to a parameter before a suspension
+was lost, on **both** targets (the native lowering is shared):
+
+| shape (`function* g(a)` …) | base sa | base host | branch sa | branch host |
+| --- | --- | --- | --- | --- |
+| `arguments[1] = 54; yield a; yield b` (target shape) | fail | fail | pass | pass |
+| `a = 5; yield a; yield a` | fail | fail | pass | pass |
+| `yield; arguments[0] = 11; yield; yield a` | fail | fail | pass | pass |
+| `a++` / `[a] = [6]` / `var a = 5`, then `yield; yield a` | fail | fail | pass | pass |
+| `a: number`, `a = a + 1` (f64 lane) | fail | fail | pass | pass |
+| class / object-literal method, function expression, then `a = 5` | fail | pass¹ | pass | pass¹ |
+| defaulted parameter `(a = 3)`, `a = a + 5` | fail | fail | pass | pass |
+| strict generator, `arguments[0] = 13` (unmapped) | pass | pass | pass | pass |
+
+¹ the host lane compiles these three through its eager (non-native) path.
+
+#### What landed
+
+- NEW leaf `src/codegen/generator-param-writeback.ts`:
+  - `writableGeneratorParamIndices` — which parameters the body can write:
+    assignment / update / destructuring targets, `for-in/of` heads, a `var`
+    re-declaration with an initializer or as a loop head, a same-named function
+    declaration; with a MAPPED `arguments`, every parameter once `arguments` is
+    written through or escapes (`f(arguments)`, `Object.defineProperty(arguments, …)`).
+    A pure read (`arguments[i]`, `arguments.length`, `...arguments`) marks
+    nothing. It over-approximates (nested functions are scanned without
+    shadowing), never under-approximates.
+  - `reconcileParamWriteBack` — runs after the resume body compiles. The
+    resume function's parameter is an ordinary LOCAL there, and a `var a = 5`
+    re-declaration re-types it (externref → f64; a real wasm param never is),
+    which would leave `local.get <f64>; struct.set <externref field>` invalid.
+    A numeric ↔ externref store is routed through a field-typed temporary whose
+    `local.set` the stack-balance repair coerces (the same repair that already
+    coerces the prelude's copy the other way); any other mismatch degrades to a
+    re-read of the field — the pre-A12 no-op — never to invalid Wasm.
+- `registerNativeGenerator`: a writable parameter's field is `mutable`.
+  Unwritten parameters keep immutable fields, their wasm type and their bytes
+  (an f64 lane stays f64 — pinned).
+- `ensureNativeGeneratorResumeFunction`: the parameter-copy loop records each
+  writable parameter's LOCAL INDEX (not its name, which a lexical shadow could
+  rebind) as `info.paramWriteBack`, then calls the reconcile.
+- `frame-core.ts::storeSpills` stores `paramWriteBack` after the spills — the
+  one helper every suspension already calls, so no terminator changed. The
+  async frame never sets the field and is untouched.
+
+No new host import; both targets; `NativeGeneratorInfo` gains two optional
+fields.
+
+#### Rows
+
+- **Target**, `language/expressions/yield/formal-parameters-after-reassignment-non-strict.js`:
+  **fail → pass on standalone and on host** (`--isolate`).
+- **Other ES2015 rows with this mechanism: none.** The search was exhaustive,
+  not sampled: a TypeScript-AST scan of all 53,575 test262 files for a
+  generator or async function-like that writes a parameter or a mapped
+  `arguments` element AND contains a suspension point
+  (`.tmp/a12/scan.mts` → `scan.tsv`) finds 4 files — the target and three
+  `staging/sm/generators/*` files that are not in the baseline. The
+  strict twin `formal-parameters-after-reassignment-strict.js` already passes
+  (unmapped: the write never reaches the parameter).
+- **Excluded ES2015 generator non-pass rows** (none writes a parameter across a
+  suspension; their base errors name other mechanisms):
+  - A11 (on this branch's base): `yield/iter-value-{specified,unspecified}`,
+    `{statements,expressions}/class/gen-method/yield-spread-arr-{single,multiple}`,
+    `method-definition/generator-invoke-fn-{strict,no-strict}`,
+    `class/accessor-name-static-computed-yield-expr` ×2,
+    `params-dflt-gen-meth-ref-arguments`, `generators/scope-name-var-open-non-strict`;
+  - A13 singles: `method-definition/{generator-property-desc,generator-super-prop-param,name-prop-name-yield-expr}`,
+    `generators/has-instance`, `Object/prototype/toString/symbol-tag-generators-builtin`,
+    `TypedArrayConstructors/ctors/object-arg/as-generator-iterable-returns`,
+    `generators/eval-body-proto-realm`;
+  - A14: `built-ins/GeneratorFunction/*` (9 rows), `class/subclass/builtin-objects/GeneratorFunction/*` (5),
+    `AsyncGeneratorFunction/is-a-constructor`;
+  - out of scope by the brief: `scope-param-elem-var-open` ×3 (eval in a
+    parameter default), `scope-param-rest-elem-var-{open,close}` (rest, cluster I),
+    `yield/from-with` (`with`);
+  - A10 / compile errors: `object/concise-generator`, `class/definition/fn-name-gen-method`,
+    `method-definition/generator-super-prop-body`, `scope-gen-meth-param-rest-elem-var-*`
+    (host-import leaks), `generators/yield-star-before-newline` (invalid
+    `local.tee`), `GeneratorPrototype/return/try-finally-set-property-within-try`
+    (#680 CE), `method-definition/generator-prop-name-yield-expr` (stack overflow);
+  - module code (cluster I): `module-code/{eval-export-dflt-expr-gen-*,instn-named-bndng-*gen*,instn-iee-bndng-gen}`;
+  - not a generator: `arguments-object/{mapped,unmapped}/Symbol.iterator`.
+
+#### Measurements
+
+- **Reach set, bounded by the implementation's own predicate.** Only a
+  generator whose `writableGeneratorParamIndices` is non-empty changes bytes
+  (mutable field + store-back); everything else is byte-identical by
+  construction. Running that predicate over every test262 file and harness
+  include, with `argumentsMapped` over-approximated to true
+  (`.tmp/a12/reach.mts`), gives **46 files** (43 non-staging, 0 harness
+  includes): the target, its strict twin, 32 `eval-code/direct/*-fn-body-cntns-arguments-*`,
+  7 `params-dflt-*-args-unmapped`, 2 `arguments-with-arguments-lex`, 3 staging.
+- **Compile-only byte differential** of those 46 through the runner's own
+  original-harness assembly (primary + strict-rerun variants,
+  `.tmp/a12/bytes.mts`), base vs branch, fresh process per tree and target:
+  host **44 identical / 2 changed** (the target, `statements/generators/params-dflt-args-unmapped`);
+  standalone **36 identical / 10 changed** (the target, the 7
+  `params-dflt-*-args-unmapped` rows — each writes `x = 2` — and 2 staging files).
+  The async-generator `eval-code` rows are identical: async generators never
+  take the native lowering.
+- **Verdicts on all 43 non-staging reach rows**, `--isolate`, both lanes, base
+  vs branch: standalone **42 → 43 pass**, host **42 → 43 pass**; the only
+  move is the target. **0 pass → non-pass.**
+- **Cluster-A manifest** (197 rows, standalone, `--isolate`): base **184 pass /
+  12 CE / 1 fail** → branch **184 / 12 / 1**, the identical non-pass set. None
+  of its rows is in the reach set. Of the other manifests only G holds a reach
+  row, and it is the target itself (measured above).
+#### Controls
+
+- `node scripts/equivalence-gate.mjs` (merged tree): 22 failing / 1,720
+  passing, all 22 in the known-failures baseline — no new regressions.
+- `pnpm run check:ir-fallbacks`: OK. `node scripts/run-guard-suite.mjs`: 20
+  files, 255 tests, all pass.
+- Byte identity, `website/playground/examples/**` + `benchmarks/suites/**` +
+  `benchmarks/*.bench.ts` (19 programs × gc + standalone): **38/38 identical**
+  (none of them has a generator that writes a parameter).
+- vitest on `tests/issue-6651-*`, `tests/*generator*`, `tests/issue-2864-*`
+  and the frame / async-frame / `arguments` suites the change reaches (140
+  files, 1,288 tests, merged tree, the A12 pins included): 1,257 pass, 8
+  skipped, 23 fail in 11 files; the same 11 files on base fail the **identical
+  23 tests** (by name), none of them a generator-parameter case (#680
+  delegation refusals, source-preservation receipts, policy lists, eval-RegExp
+  rows).
+- Pins `tests/issue-6651-a12-gen-param-writes.test.ts`: 17/17 on the branch;
+  on base 12 fail and the 5 GUARDs pass.
+- Gates, bare: loc-budget, func-budget (also with `LOC_GATE_BASE` = `origin/main`),
+  coercion-sites, oracle-ratchet, dead-exports, typecheck, prettier,
+  `biome lint --diagnostic-level=error`, host-import-policy, and the
+  compiler-boundaries inventory (the new leaf is registered) — all OK. Growth
+  is granted above in this file's frontmatter, dated 2026-09-29.
+
+#### Residuals
+
+- **A mutably captured binding is lost across a suspension** — a separate
+  mechanism, not parameter-specific: `function* g() { var x = 1; var f = () => { x = 8; }; f(); yield; yield x; }`
+  yields 1 (base and branch, both targets), and so does the parameter form.
+  The capture's ref cell (`__boxed_x`) is allocated inside the resume
+  function and lives in an unspilled local, so every resume starts a new cell.
+  The scan found no ES2015 row that needs it (0 nested-write hits). Design
+  question for a later slice: carry the cell in the frame (spill the cell ref,
+  hydrate it in the prelude) vs. allocate capture cells in the factory.
+- `for (a of xs)` with a parameter as the loop head is a #680 compile error in
+  standalone (unchanged); the host lane's `a = yield v` generators take the
+  eager path (unchanged).
+- A TypeScript-only edge: `function* g(a: number) { var a: any = "s"; … }`
+  still reads NaN after a resume (the f64 field cannot hold a string; base
+  fails the same way). JavaScript parameters are `externref` and do not hit it.
 
 ### 2026-09-28 — Cluster D, slice D5
 

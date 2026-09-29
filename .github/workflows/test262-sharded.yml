@@ -415,6 +415,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
           MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          MG_BASE_REF: ${{ github.event.merge_group.base_ref }}
         run: |
           set -uo pipefail
           # Emit all three verdicts at once. EVERY fail-safe path calls
@@ -480,6 +481,41 @@ jobs:
             exit 0
           fi
 
+          # #6762 — a STACKED group's base_sha is the head of the queue entry
+          # ahead of it, not the base branch. When this group passes, GitHub
+          # merges every entry underneath it too, including ones whose own
+          # group FAILED. So the skip decision must see the whole stack: also
+          # diff the base branch's current tip against head, and classify the
+          # union. Without this, an artifact-only PR (npm-compat refresh) on top
+          # of failed groups skipped every shard, went green, and merged them
+          # all (#6299 under #6302; #6301/#6307/#6306 under #6309; #6285/#6308
+          # under #6315 — all 2026-09-29).
+          FILTER_BASE="$MG_BASE_SHA"
+          MAIN_TIP=""
+          if [ -n "${MG_BASE_REF:-}" ]; then
+            git fetch --no-tags --depth=1 origin "$MG_BASE_REF" 2>/dev/null \
+              && MAIN_TIP=$(git rev-parse FETCH_HEAD 2>/dev/null) || MAIN_TIP=""
+          fi
+          if [ -z "$MAIN_TIP" ]; then
+            echo "::warning::could not resolve the tip of '${MG_BASE_REF:-}' — cannot rule out a stacked group (#6762). FAIL-SAFE run_shards=true."
+            emit_all true
+            exit 0
+          fi
+          if [ "$MAIN_TIP" != "$MG_BASE_SHA" ]; then
+            set +e
+            STACK_DIFF=$(git diff --name-only "$MAIN_TIP" "$MG_HEAD_SHA" 2>/tmp/diff_err)
+            src=$?
+            set -e
+            if [ "$src" -ne 0 ]; then
+              echo "::warning::stacked-group diff $MAIN_TIP..$MG_HEAD_SHA failed (rc=$src): $(cat /tmp/diff_err) — FAIL-SAFE run_shards=true (#6762)."
+              emit_all true
+              exit 0
+            fi
+            echo "Stacked group (#6762): base_sha $MG_BASE_SHA is not the ${MG_BASE_REF} tip $MAIN_TIP — classifying the whole stack."
+            DIFF=$(printf '%s\n%s\n' "$DIFF" "$STACK_DIFF" | sed '/^$/d' | sort -u)
+            FILTER_BASE="$MAIN_TIP"
+          fi
+
           echo "Changed paths in queued group:"
           echo "$DIFF" | sed 's/^/  /'
 
@@ -508,7 +544,7 @@ jobs:
           # Exit code, not emptiness, decides trust: empty stdout is a legal
           # success here, so a crash must be detected some other way.
           set +e
-          FILTERED=$(printf '%s\n' "$DIFF" | node scripts/manifest-version-only.mjs --base "$MG_BASE_SHA" --head "$MG_HEAD_SHA")
+          FILTERED=$(printf '%s\n' "$DIFF" | node scripts/manifest-version-only.mjs --base "$FILTER_BASE" --head "$MG_HEAD_SHA")
           filter_rc=$?
           set -e
           if [ "$filter_rc" -ne 0 ]; then
