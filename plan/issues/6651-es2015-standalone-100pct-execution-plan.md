@@ -19055,3 +19055,18 @@ time (the adapter cache key hashes `src/` — never add `src/` files mid-run),
 byte differential on both targets in separate processes, zero pass→non-pass,
 full gate chain incl. host-import-policy (`src/runtime.ts` is at its cap),
 eval-free pin suite red on base, commit with ✓ and trailers, no push.
+
+### 2026-09-29 — Cluster H, slice H6: Array methods over a proxy — IsArray, ArraySpeciesCreate, revocation (claim)
+
+Claimed by the lead session (lane H6). Target: the 15 ES2015 standalone
+non-pass rows under `built-ins/Array/prototype/**` whose names match
+`proxy`, `species` or `invalid-len`, excluding the `*-realm*` rows. Measured
+on main `ee50a5a7a` (standalone baseline promoted 2026-09-29 13:43):
+`{map,filter,slice,splice,concat}/create-proxy.js`,
+`{map,filter,slice,splice}/create-revoked-proxy.js`,
+`concat/is-concat-spreadable-proxy-revoked.js`, the three
+`*-invalid-len.js` RangeError rows, `splice/property-traps-order-with-species.js`
+and `copyWithin/return-abrupt-from-delete-proxy-target.js`. The 2026-09-26
+root-cause table lists `*/create-proxy.js` as "shared front-end, 5 rows, 0
+standalone-only" and revoked-proxy reachability as "not root-caused". The
+record follows when the lane reports.
