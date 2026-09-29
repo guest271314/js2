@@ -30,6 +30,36 @@ import { absoluteFuncIndexCached } from "../emit/resolve-layout.js"; // (#1916 S
  */
 export function instrPopsPushes(instr: Instr, mod: WasmModule): { pops: number; pushes: number } | null {
   const op = instr.op as string;
+  if (OPERAND_DEPENDENT_EFFECT_OPS.has(op)) return computeInstrPopsPushes(instr, mod);
+  // (#6759) Every other op's effect is a function of the opcode alone, so the
+  // regex ladder below runs once per distinct opcode per process instead of
+  // once per instruction. Cached results are frozen: callers only read them.
+  let effect = OPCODE_EFFECT_CACHE.get(op);
+  if (effect === undefined) {
+    effect = computeInstrPopsPushes(instr, mod);
+    if (effect) Object.freeze(effect);
+    OPCODE_EFFECT_CACHE.set(op, effect);
+  }
+  return effect;
+}
+
+/** Ops whose (pops, pushes) read an immediate or the module's type/function tables. */
+const OPERAND_DEPENDENT_EFFECT_OPS: ReadonlySet<string> = new Set([
+  "struct.new",
+  "array.new_fixed",
+  "call",
+  "call_ref",
+  "call_indirect",
+  "block",
+  "loop",
+  "try",
+  "try_table",
+  "if",
+]);
+const OPCODE_EFFECT_CACHE = new Map<string, { readonly pops: number; readonly pushes: number } | null>();
+
+function computeInstrPopsPushes(instr: Instr, mod: WasmModule): { pops: number; pushes: number } | null {
+  const op = instr.op as string;
 
   // Pure pushers.
   if (
@@ -303,4 +333,51 @@ export function locateOperandProducers(instrs: Instr[], mod: WasmModule): Map<nu
     for (let p = 0; p < eff.pushes; p++) producers.push(i);
   }
   return out;
+}
+
+/**
+ * (#6759) Push every nested instruction list a structured instruction owns onto
+ * `out` — the non-allocating form of the per-file `nestedBodies` helpers. The
+ * whole-module repair passes call this once per instruction, so returning a
+ * fresh array (plus a temporary arm array) per call was measurable GC load.
+ */
+export function pushNestedInstrArrays(instr: Instr, out: Instr[][]): void {
+  const a = instr as {
+    body?: Instr[];
+    then?: Instr[];
+    else?: Instr[];
+    catches?: { body?: Instr[] }[];
+    catchAll?: Instr[];
+  };
+  if (Array.isArray(a.body)) out.push(a.body);
+  if (Array.isArray(a.then)) out.push(a.then);
+  if (Array.isArray(a.else)) out.push(a.else);
+  if (Array.isArray(a.catchAll)) out.push(a.catchAll);
+  if (Array.isArray(a.catches)) for (const c of a.catches) if (Array.isArray(c.body)) out.push(c.body);
+}
+
+/**
+ * Instruction arrays reached from more than one function root. Such an array
+ * has no single local namespace, so function-local repairs must decline it.
+ * The result does not depend on traversal order: an array is shared iff two
+ * distinct functions reach it.
+ */
+export function crossFunctionInstrArrays(mod: WasmModule): WeakSet<Instr[]> {
+  const owners = new WeakMap<Instr[], WasmModule["functions"][number]>();
+  const shared = new WeakSet<Instr[]>();
+  const pending: Instr[][] = [];
+  for (const func of mod.functions) {
+    const seen = new WeakSet<Instr[]>();
+    pending.push(func.body);
+    while (pending.length > 0) {
+      const body = pending.pop()!;
+      if (seen.has(body)) continue;
+      seen.add(body);
+      const owner = owners.get(body);
+      if (owner && owner !== func) shared.add(body);
+      else if (!owner) owners.set(body, func);
+      for (const instr of body) pushNestedInstrArrays(instr, pending);
+    }
+  }
+  return shared;
 }

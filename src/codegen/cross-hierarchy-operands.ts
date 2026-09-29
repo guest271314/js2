@@ -55,7 +55,7 @@
  */
 
 import type { Instr, TypeDef, ValType, WasmModule } from "../ir/types.js";
-import { locateOperandProducers } from "./call-arg-producers.js";
+import { crossFunctionInstrArrays, locateOperandProducers, pushNestedInstrArrays } from "./call-arg-producers.js";
 import { callArgCoercionInstrs, getFullParamTypes, inferInstrType, resolveFuncType } from "./stack-balance.js";
 import type { CodegenError } from "./context/types.js";
 
@@ -66,41 +66,6 @@ interface Env {
   readonly boxNumberIdx: number | null;
   readonly unboxNumberIdx: number | null;
   readonly diagnostics?: CodegenError[];
-}
-
-/** Every nested instruction list a structured instruction owns. */
-function nestedInstrArrays(instr: Instr): Instr[][] {
-  const nested: Instr[][] = [];
-  const any = instr as {
-    body?: Instr[];
-    then?: Instr[];
-    else?: Instr[];
-    catchAll?: Instr[];
-    catches?: { body?: Instr[] }[];
-  };
-  for (const arm of [any.body, any.then, any.else, any.catchAll]) if (Array.isArray(arm)) nested.push(arm);
-  if (Array.isArray(any.catches)) for (const c of any.catches) if (Array.isArray(c.body)) nested.push(c.body);
-  return nested;
-}
-
-/** Arrays whose local-index meaning differs because two functions own them. */
-function crossFunctionBodies(mod: WasmModule): WeakSet<Instr[]> {
-  const owners = new WeakMap<Instr[], (typeof mod.functions)[number]>();
-  const shared = new WeakSet<Instr[]>();
-  for (const func of mod.functions) {
-    const seen = new WeakSet<Instr[]>();
-    const pending = [func.body];
-    while (pending.length > 0) {
-      const body = pending.pop()!;
-      if (seen.has(body)) continue;
-      seen.add(body);
-      const owner = owners.get(body);
-      if (owner && owner !== func) shared.add(body);
-      else if (!owner) owners.set(body, func);
-      for (const instr of body) pending.push(...nestedInstrArrays(instr));
-    }
-  }
-  return shared;
 }
 
 /** `externref` and `(ref extern)` — the EXTERNAL reference hierarchy. */
@@ -188,8 +153,13 @@ function repairBody(
   let fixups = 0;
   // Nested arms are separate instruction lists with their own stack — walk each
   // on its own, exactly as the two legacy repairs do.
+  // One scratch list per body, refilled per instruction: the recursion below
+  // only splices into the arms themselves, never into `instr`'s arm slots.
+  const arms: Instr[][] = [];
   for (const instr of body) {
-    for (const arm of nestedInstrArrays(instr))
+    arms.length = 0;
+    pushNestedInstrArrays(instr, arms);
+    for (const arm of arms)
       fixups += repairBody(arm, localTypes, globalTypes, env, visited, contextBlocked, reportedBlocked);
   }
 
@@ -252,7 +222,7 @@ export function repairCrossHierarchyOperands(mod: WasmModule, diagnostics?: Code
   };
 
   let fixups = 0;
-  const contextBlocked = crossFunctionBodies(mod);
+  const contextBlocked = crossFunctionInstrArrays(mod);
   const visited = new WeakSet<Instr[]>();
   const reportedBlocked = new WeakSet<Instr[]>();
   for (const func of mod.functions) {

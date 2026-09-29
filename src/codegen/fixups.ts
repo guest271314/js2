@@ -13,46 +13,7 @@ import type { FuncTypeDef, Instr, ValType, WasmFunction, WasmModule } from "../i
 import type { CodegenContext, CodegenError } from "./context/types.js";
 import { absoluteFuncIndexCached } from "../emit/resolve-layout.js"; // (#1916 S3)
 // (#4077) The exact forward stack model now lives beside its second consumer.
-import { callTargetFuncType, locateCallArgProducers } from "./call-arg-producers.js";
-
-/** Every nested instruction array owned by one structured instruction. */
-function nestedBodies(instr: Instr): Instr[][] {
-  const a = instr as {
-    body?: Instr[];
-    then?: Instr[];
-    else?: Instr[];
-    catches?: { body?: Instr[] }[];
-    catchAll?: Instr[];
-  };
-  const out: Instr[][] = [];
-  for (const body of [a.body, a.then, a.else, a.catchAll]) if (Array.isArray(body)) out.push(body);
-  if (Array.isArray(a.catches)) for (const c of a.catches) if (Array.isArray(c.body)) out.push(c.body);
-  return out;
-}
-
-/**
- * Arrays reached from multiple function roots have no single local namespace.
- * Context-sensitive fixups must decline them instead of mutating one owner's
- * interpretation into every other owner.
- */
-function crossFunctionBodies(mod: WasmModule): WeakSet<Instr[]> {
-  const owners = new WeakMap<Instr[], WasmFunction>();
-  const shared = new WeakSet<Instr[]>();
-  for (const func of mod.functions) {
-    const seen = new WeakSet<Instr[]>();
-    const pending = [func.body];
-    while (pending.length > 0) {
-      const body = pending.pop()!;
-      if (seen.has(body)) continue;
-      seen.add(body);
-      const owner = owners.get(body);
-      if (owner && owner !== func) shared.add(body);
-      else if (!owner) owners.set(body, func);
-      for (const instr of body) pending.push(...nestedBodies(instr));
-    }
-  }
-  return shared;
-}
+import { callTargetFuncType, crossFunctionInstrArrays, locateCallArgProducers } from "./call-arg-producers.js";
 
 function recordContextBlockedFixup(
   mod: WasmModule,
@@ -188,7 +149,7 @@ export function markLeafStructsFinal(
  */
 export function repairStructTypeMismatches(mod: WasmModule, diagnostics?: CodegenError[]): number {
   let totalFixed = 0;
-  const contextBlocked = crossFunctionBodies(mod);
+  const contextBlocked = crossFunctionInstrArrays(mod);
   const visited = new WeakSet<Instr[]>();
   const reportedBlocked = new WeakSet<Instr[]>();
 
@@ -945,7 +906,7 @@ export function fixupStructNewResultCoercion(ctx: CodegenContext): void {
     }
   }
 
-  const contextBlocked = crossFunctionBodies(ctx.mod);
+  const contextBlocked = crossFunctionInstrArrays(ctx.mod);
   const visited = new WeakSet<Instr[]>();
   const reportedBlocked = new WeakSet<Instr[]>();
   for (const func of ctx.mod.functions) {
@@ -1007,25 +968,26 @@ export function fixupExternConvertAny(ctx: CodegenContext): void {
     }
     if (visited.has(instrs)) return;
     visited.add(instrs);
-    // Recurse into nested blocks first
+    // Recurse into nested blocks first (order: body, then, else, catches,
+    // catchAll). `Array.isArray(x.k)` is exactly `"k" in x && Array.isArray(x.k)`
+    // for these plain-data instructions, without the `in` probes (#6759).
     for (const instr of instrs) {
-      if ("body" in instr && Array.isArray((instr as any).body)) {
-        fixupInstrs(func, (instr as any).body, visited, contextBlocked, reportedBlocked);
-      }
-      if ("then" in instr && Array.isArray((instr as any).then)) {
-        fixupInstrs(func, (instr as any).then, visited, contextBlocked, reportedBlocked);
-      }
-      if ("else" in instr && Array.isArray((instr as any).else)) {
-        fixupInstrs(func, (instr as any).else, visited, contextBlocked, reportedBlocked);
-      }
-      if ("catches" in instr && Array.isArray((instr as any).catches)) {
-        for (const c of (instr as any).catches) {
+      const n = instr as {
+        body?: Instr[];
+        then?: Instr[];
+        else?: Instr[];
+        catches?: { body?: Instr[] }[];
+        catchAll?: Instr[];
+      };
+      if (Array.isArray(n.body)) fixupInstrs(func, n.body, visited, contextBlocked, reportedBlocked);
+      if (Array.isArray(n.then)) fixupInstrs(func, n.then, visited, contextBlocked, reportedBlocked);
+      if (Array.isArray(n.else)) fixupInstrs(func, n.else, visited, contextBlocked, reportedBlocked);
+      if (Array.isArray(n.catches)) {
+        for (const c of n.catches) {
           if (Array.isArray(c.body)) fixupInstrs(func, c.body, visited, contextBlocked, reportedBlocked);
         }
       }
-      if ("catchAll" in instr && Array.isArray((instr as any).catchAll)) {
-        fixupInstrs(func, (instr as any).catchAll, visited, contextBlocked, reportedBlocked);
-      }
+      if (Array.isArray(n.catchAll)) fixupInstrs(func, n.catchAll, visited, contextBlocked, reportedBlocked);
     }
 
     // Scan for extern.convert_any with non-anyref inputs
@@ -1107,6 +1069,13 @@ export function fixupExternConvertAny(ctx: CodegenContext): void {
     // instruction produces each argument. Calls it could not model are absent
     // from the map and fall through to the legacy backwards walk below, so this
     // pass can never rewrite fewer call sites than it did before.
+    //
+    // (#6759) Both the exact and the legacy arm below rewrite ONLY a
+    // `ref.null.extern` sitting in this list, and nothing else in this function
+    // runs after them. A list without one is therefore a guaranteed no-op, and
+    // skipping it avoids the forward stack model plus the per-call walk — the
+    // bulk of this pass's cost, since almost no list carries one.
+    if (!instrs.some((instr) => instr.op === "ref.null.extern")) return;
     const exactProducers = locateCallArgProducers(instrs, ctx.mod);
 
     for (let j = 0; j < instrs.length; j++) {
@@ -1238,7 +1207,7 @@ export function fixupExternConvertAny(ctx: CodegenContext): void {
     }
   }
 
-  const contextBlocked = crossFunctionBodies(ctx.mod);
+  const contextBlocked = crossFunctionInstrArrays(ctx.mod);
   const visited = new WeakSet<Instr[]>();
   const reportedBlocked = new WeakSet<Instr[]>();
   for (const func of ctx.mod.functions) {
