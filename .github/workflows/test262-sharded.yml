@@ -2402,8 +2402,16 @@ jobs:
       # Besides the per-edition floors, an edition marked `completed` in the
       # baseline (it reached 100 %) is zero-tolerance: every one of its rows in
       # the merged run must pass, whether or not a compare baseline is on disk.
+      #
+      # (#6760) Its failure is DEFERRED like the high-water floor's (#6461): a
+      # breach here used to skip every later step, including the #1897
+      # standalone regression guard -- the one that NAMES the moved rows -- so a
+      # park said "ES5 -1, host-free -54" and nothing else. The re-raise is the
+      # "Fail on per-edition ratchet breach (deferred)" step below.
       - name: Per-edition conformance ratchet (no completed edition may regress)
+        id: edition_ratchet
         if: env.STANDALONE_RAN == 'true'
+        continue-on-error: true
         run: |
           COMPARE=""
           if [ -s .test262-cache/test262-standalone-current.jsonl ]; then
@@ -2813,6 +2821,15 @@ jobs:
         if: always() && env.STANDALONE_RAN == 'true' && steps.standalone_highwater.outcome == 'failure'
         run: |
           echo "::error::STANDALONE high-water floor (#2097) breached — see the 'Standalone pass-count high-water floor (#2097)' step above for the count, and the '#1897' standalone regression guard + per-edition ratchet steps for WHICH tests moved. Failing the required check here rather than at the floor step so those diagnostics run (#6461)."
+          exit 1
+
+      # (#6760) Re-raise the per-edition ratchet's failure after the #1668 /
+      # #1897 diagnostics have run (see the ratchet step). `always()` for the
+      # same reason as the high-water re-raise above.
+      - name: Fail on per-edition ratchet breach (deferred, #6760)
+        if: always() && env.STANDALONE_RAN == 'true' && steps.edition_ratchet.outcome == 'failure'
+        run: |
+          echo "::error::Per-edition conformance ratchet failed — a ratcheted edition lost ground or a COMPLETED edition has a non-passing row. See the 'Per-edition conformance ratchet' step for the edition and rows, and the '#1897' standalone regression guard for every moved row. Failing the required check here so those diagnostics run (#6760)."
           exit 1
 
       - name: Upload merged reports
