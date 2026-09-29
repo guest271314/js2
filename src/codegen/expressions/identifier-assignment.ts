@@ -89,6 +89,13 @@ export function tryConstSet(
  * catch parameter or loop binding (the block-scope machinery gives it its own
  * slot) is written normally instead of swallowed. An identifier the oracle
  * cannot resolve (inline-compiled eval code) keeps the frame's answer.
+ *
+ * (#6651 A11) A NESTED closure's write (`function* g(_ = (f = function () {
+ * g = null; })) {}`, the `scope-name-var-open` rows) runs in a frame without
+ * `readOnlyBindings`, so it overwrote the captured binding. When the oracle
+ * resolves `id` to the enclosing named function expression itself, the write
+ * targets the same immutable binding — unless a `with` or a direct `eval` in
+ * between could supply a different `g` the checker cannot see.
  */
 export function tryFunctionExpressionOwnNameWrite(
   ctx: CodegenContext,
@@ -96,10 +103,12 @@ export function tryFunctionExpressionOwnNameWrite(
   id: ts.Identifier,
   right: ts.Expression,
 ): ValType | null | undefined {
-  if (!fctx.readOnlyBindings?.has(id.text)) return undefined;
+  const liveFrame = fctx.readOnlyBindings?.has(id.text) === true;
+  if (!liveFrame && !writeMayTargetEnclosingFunctionName(id)) return undefined;
   const declaration = ctx.oracle.valueDeclarationOf(id);
-  const ownName =
-    declaration === undefined || (ts.isFunctionExpression(declaration) && declaration.name?.text === id.text);
+  const ownName = liveFrame
+    ? declaration === undefined || (ts.isFunctionExpression(declaration) && declaration.name?.text === id.text)
+    : declaration !== undefined && nestedWriteToOwnName(id, declaration);
   if (!ownName) return undefined;
   const rhsType = compileExpression(ctx, fctx, right);
   if (!isStrictContext(id, ctx.inferModuleStrictArguments)) return rhsType;
@@ -107,6 +116,37 @@ export function tryFunctionExpressionOwnNameWrite(
   emitThrowTypeError(ctx, fctx, "Assignment to constant variable.");
   fctx.body.push({ op: "unreachable" });
   return { kind: "f64" }; // unreachable, but the expression stack needs a type
+}
+
+/** Cheap pre-check before any oracle query: some enclosing function expression is named `id`. */
+function writeMayTargetEnclosingFunctionName(id: ts.Identifier): boolean {
+  for (let cur = id.parent; cur; cur = cur.parent) {
+    if (ts.isFunctionExpression(cur) && cur.name?.text === id.text) return true;
+  }
+  return false;
+}
+
+/**
+ * `declaration` (the oracle's resolution of `id`) is the named function
+ * expression enclosing the write, reached without a `with` or a call spelled
+ * `eval(…)` anywhere in it (conservative: either can bind the name at runtime).
+ */
+function nestedWriteToOwnName(id: ts.Identifier, declaration: ts.Node): boolean {
+  if (!ts.isFunctionExpression(declaration) || declaration.name?.text !== id.text) return false;
+  for (let cur: ts.Node | undefined = id.parent; cur && cur !== declaration; cur = cur.parent) {
+    if (ts.isWithStatement(cur)) return false;
+  }
+  let evalCall = false;
+  const visit = (node: ts.Node): void => {
+    if (evalCall) return;
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "eval") {
+      evalCall = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(declaration);
+  return !evalCall;
 }
 
 /**
