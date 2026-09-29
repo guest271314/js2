@@ -72,10 +72,12 @@ import {
   fillBuiltinCollectionDynConstruct,
 } from "./builtin-collection-dyn-construct.js"; // (#6720)
 import { standaloneLinkBoundaryPeerIndex } from "./standalone-link-boundary.js"; // (#5383 S2f R12)
+import { buildOrdinaryConstructCall, unwrapRuntimeEvalCarrierCallee } from "./construct-under-application.js"; // (#6738)
 import { CLASS_CONSTRUCT_DISPATCH, ensureStandaloneClassConstructDispatch } from "./standalone-class-construct.js"; // (#5383 S2g)
 import { RUNTIME_EVAL_INTERP_CALLBACK_BRAND_A, RUNTIME_EVAL_INTERP_CALLBACK_BRAND_B } from "./runtime-eval-boundary.js";
 
 const EXTERNREF: ValType = { kind: "externref" };
+const I32: ValType = { kind: "i32" };
 const DRIVER_PREFIX = "__native_construct_";
 const TYPED_DRIVER_PREFIX = "__native_typed_construct_";
 
@@ -351,7 +353,7 @@ function fillArgvConstructDriver(ctx: CodegenContext): void {
   const protoLocal = 4;
   const selfLocal = 5;
   const resultLocal = 6;
-  const body: Instr[] = [];
+  const body: Instr[] = unwrapRuntimeEvalCarrierCallee(ctx, 0); // (#6738)
 
   // (#5383 S2g twin) A class the CONSUMER owns (module-local candidates) is
   // constructed by its own trampoline, keyed by identity.
@@ -532,7 +534,7 @@ export function fillNativeConstructDrivers(ctx: CodegenContext): void {
       return instrs;
     };
 
-    const body: Instr[] = [];
+    const body: Instr[] = unwrapRuntimeEvalCarrierCallee(ctx, 0); // (#6738)
 
     // (#5196 R3-0) `Proxy` read as a VALUE — `var OProxy =
     // $262.createRealm().global.Proxy; new OProxy(t, h)` — materialises the
@@ -759,10 +761,12 @@ export function fillNativeConstructDrivers(ctx: CodegenContext): void {
       applyClosureIdx !== undefined &&
       objVecNewIdx !== undefined &&
       objVecPushIdx !== undefined;
+    const declaredArityLocal = argsVecLocal + 1; // (#6738) forces `__ctor_args` below so this index is fixed
+    let underApplied = false;
     if (methodCallIdx !== undefined) {
-      ordinaryCall.push({ op: "local.get", index: selfLocal }, { op: "local.get", index: 0 });
-      for (let arg = 0; arg < arity; arg++) ordinaryCall.push({ op: "local.get", index: arg + 2 });
-      ordinaryCall.push({ op: "call", funcIdx: methodCallIdx });
+      const call = buildOrdinaryConstructCall(ctx, arity, methodCallIdx, selfLocal, declaredArityLocal);
+      underApplied = call.underApplied;
+      ordinaryCall.push(...call.instrs);
     } else if (highArityApplyTail) {
       ordinaryCall.push(
         ...buildArgsVec(),
@@ -886,7 +890,10 @@ export function fillNativeConstructDrivers(ctx: CodegenContext): void {
       { name: "__ctor_result", type: EXTERNREF },
       ...(canApplyRuntimeMarker || canProxyConstruct || canBoundaryConstruct || canClassConstruct || highArityApplyTail
         ? [{ name: "__ctor_args", type: EXTERNREF }]
-        : []),
+        : underApplied
+          ? [{ name: "__ctor_args", type: EXTERNREF }]
+          : []),
+      ...(underApplied ? [{ name: "__ctor_declared_arity", type: I32 }] : []),
     ];
     driver.body = body;
   }
