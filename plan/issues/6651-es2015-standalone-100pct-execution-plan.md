@@ -169,6 +169,13 @@ assignee: "ttraenkler/fable-es2015-plan"
 #     `$__ta_ctor`, which the Int8Array `$Object` carrier is not). The first cut
 #     inlined the arm here and cost +68 / +65; extracting it left these 8.
 loc-budget-allow:
+  # 2026-09-29 — cluster A, slice A11 groups 3/4. `src/codegen/literals.ts` +2:
+  # one import and the `argumentsBeforeDefaults` call in the object-literal
+  # method path (the `arguments` object must exist before a parameter default
+  # that reads it runs). The mechanism is the NEW leaf
+  # `object-method-arguments-first.ts`; the static-setter twin is the NEW leaf
+  # `class-proto-set-arm.ts`.
+  - src/codegen/literals.ts
   # 2026-09-28 — cluster H, slice H1 (receipt under `## Cluster status`). Both
   # paths already listed below; restated per the stranded-grant rule. The
   # mechanism lives in the NEW leaves `spec-arg-coercion.ts` (the object-literal
@@ -1080,6 +1087,10 @@ loc-budget-allow:
   # `promise-subclass-cell-read.ts`; the hand-off cannot move, because it is the
   # arm that would otherwise emit the bare `global.get` of the cell.
 func-budget-allow:
+  # 2026-09-29 — cluster A, slice A11 groups 3/4. `compileObjectLiteralForStruct`
+  # +1: the `argumentsBeforeDefaults` call (same wiring as the literals.ts line
+  # grant above); the gate on the arguments-object setup changes in place.
+  - src/codegen/literals.ts::compileObjectLiteralForStruct
   # 2026-09-28 — cluster H, slice H1. `emitToPrimitiveMethodExports` +2 and its
   # nested `emitDispatchForMethod` +2 (the same two lines, counted once per
   # enclosing function): `boxResult`'s branded-i32 arm, which boxes a
