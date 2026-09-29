@@ -221,7 +221,7 @@ function isJsonObjectParseCall(ctx: CodegenContext, fctx: FunctionContext, expr:
  * Emit the compiler-owned intrinsic prototype singleton rather than asking the
  * host MOP for the prototype of an opaque Wasm closure/struct.
  */
-function emitEs5IntrinsicPrototype(
+export function emitEs5IntrinsicPrototype(
   ctx: CodegenContext,
   fctx: FunctionContext,
   anchor: ts.Node,

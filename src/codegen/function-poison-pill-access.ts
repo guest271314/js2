@@ -15,6 +15,7 @@ import {
   isStrictFunctionConstructorValue,
   sourceFunctionForValue,
 } from "./function-poison-pill.js";
+import { isDynamicGeneratorFunctionBinding } from "./generator-function-dynamic.js"; // (#6651 A14)
 import { isStrictFunction } from "./helpers/is-strict-function.js";
 import { buildThrowJsErrorInstrs } from "./js-errors.js";
 import { isStaticFunctionSelfName } from "./static-function-self-names.js";
@@ -120,6 +121,21 @@ function arrowValueStillCarriesRestrictedAccessors(receiver: ts.Expression): boo
   return identifierOnlyUsedCustodially(expr.getSourceFile(), expr.text);
 }
 
+/**
+ * (#6651 A14) `var g = GeneratorFunction(…)` — a generator function made by
+ * CreateDynamicFunction has no source declaration, but it is a generator all the
+ * same: no own `caller`/`arguments`, so both reads and writes reach the
+ * inherited %ThrowTypeError% accessors. Same custodial-use proof as the arrow arm.
+ */
+function isDynamicGeneratorFunctionReceiver(ctx: CodegenContext, receiver: ts.Expression): boolean {
+  const expr = skipTransparentExpressions(receiver);
+  return (
+    ts.isIdentifier(expr) &&
+    isDynamicGeneratorFunctionBinding(ctx, expr) &&
+    identifierOnlyUsedCustodially(expr.getSourceFile(), expr.text)
+  );
+}
+
 /** A sync or async generator declaration / expression / method. */
 function isGeneratorFunctionLike(fn: ts.FunctionLikeDeclaration): boolean {
   return (
@@ -179,7 +195,8 @@ export function tryCompileFunctionPoisonRead(
     isBoundFunctionValue(ctx, member.receiver) ||
     // (#4464) `var foo = Function("'use strict';")` — a strict function with no
     // source declaration for `sourceFunctionForValue` to find.
-    isStrictFunctionConstructorValue(ctx, member.receiver);
+    isStrictFunctionConstructorValue(ctx, member.receiver) ||
+    isDynamicGeneratorFunctionReceiver(ctx, member.receiver);
   const currentSloppyCallerRead =
     member.name === "caller" &&
     !strictFunction &&
@@ -234,7 +251,8 @@ export function tryCompileStrictFunctionPoisonAssignment(
     // (#4221) `boundFn.arguments = 12` hits the same [[ThrowTypeError]] setter.
     isBoundFunctionValue(ctx, member.receiver) ||
     // (#4464) …and so does the `Function("'use strict';")` product.
-    isStrictFunctionConstructorValue(ctx, member.receiver);
+    isStrictFunctionConstructorValue(ctx, member.receiver) ||
+    isDynamicGeneratorFunctionReceiver(ctx, member.receiver);
   if (!poisoned) return undefined;
 
   const receiverType = compileExpression(ctx, fctx, member.receiver);
