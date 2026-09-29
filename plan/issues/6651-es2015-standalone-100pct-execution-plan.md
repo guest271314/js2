@@ -169,6 +169,13 @@ assignee: "ttraenkler/fable-es2015-plan"
 #     `$__ta_ctor`, which the Int8Array `$Object` carrier is not). The first cut
 #     inlined the arm here and cost +68 / +65; extracting it left these 8.
 loc-budget-allow:
+  # 2026-09-29 — cluster A, slice A11 groups 3/4. `src/codegen/literals.ts` +2:
+  # one import and the `argumentsBeforeDefaults` call in the object-literal
+  # method path (the `arguments` object must exist before a parameter default
+  # that reads it runs). The mechanism is the NEW leaf
+  # `object-method-arguments-first.ts`; the static-setter twin is the NEW leaf
+  # `class-proto-set-arm.ts`.
+  - src/codegen/literals.ts
   # 2026-09-28 — cluster H, slice H1 (receipt under `## Cluster status`). Both
   # paths already listed below; restated per the stranded-grant rule. The
   # mechanism lives in the NEW leaves `spec-arg-coercion.ts` (the object-literal
@@ -1080,6 +1087,10 @@ loc-budget-allow:
   # `promise-subclass-cell-read.ts`; the hand-off cannot move, because it is the
   # arm that would otherwise emit the bare `global.get` of the cell.
 func-budget-allow:
+  # 2026-09-29 — cluster A, slice A11 groups 3/4. `compileObjectLiteralForStruct`
+  # +1: the `argumentsBeforeDefaults` call (same wiring as the literals.ts line
+  # grant above); the gate on the arguments-object setup changes in place.
+  - src/codegen/literals.ts::compileObjectLiteralForStruct
   # 2026-09-28 — cluster H, slice H1. `emitToPrimitiveMethodExports` +2 and its
   # nested `emitDispatchForMethod` +2 (the same two lines, counted once per
   # enclosing function): `boxResult`'s branded-i32 arm, which boxes a
@@ -9645,6 +9656,86 @@ either (`.tmp/a7/vsbl.mjs`).
 - The error-swallowing hazard (`hoistFunctionDeclarations` truncates
   `ctx.errors`) from the triage spec is unchanged and still deserves its own
   issue.
+
+### 2026-09-28 — Cluster A, slice A11: generator value semantics (claim)
+
+**Claimed 2026-09-28** by session `session_01FEGi3DmyPRPD5dx4kWU8hs`, branch
+`claude/es6-6651-a11-gen-values` (WIP PR opened before code). Generator rows
+that compile but compute the wrong value in standalone, in this order:
+
+1. The method-receiver model — `this` of an extracted method (triage group 5c;
+   A8 claimed it and did not take it). Rows:
+   `language/expressions/object/method-definition/generator-invoke-fn-{strict,no-strict}.js`,
+   `language/{expressions,statements}/class/gen-method/yield-spread-arr-{single,multiple}.js`
+   (4, the A6 residuals). **This group also moves cluster C's non-generator
+   twins** `language/expressions/object/method-definition/name-invoke-fn-{strict,no-strict}.js`
+   (54tooh lane): the mechanism is one, so A11 takes them.
+2. The resumption value of a bare `yield` coerced to f64 (#680 continuation,
+   triage G3b): `language/expressions/yield/iter-value-{unspecified,specified}.js`.
+3. A static computed accessor keyed by `yield`:
+   `language/{statements,expressions}/class/accessor-name-static-computed-yield-expr.js`.
+4. Singles, root-caused and fixed if local, recorded otherwise:
+   `object/method-definition/{name-prop-name-yield-expr,generator-property-desc,generator-super-prop-param,params-dflt-gen-meth-ref-arguments}.js`,
+   `statements/generators/has-instance.js`,
+   `expressions/yield/formal-parameters-after-reassignment-non-strict.js`,
+   `expressions/generators/scope-name-var-open-non-strict.js`.
+
+Out of scope: `scope-param-elem-var-open` ×3 (eval in a parameter default),
+`built-ins/GeneratorFunction/**` (A9, #6274), host-import leaks / rest-param
+bails / compile crashes / module-code generator declarations (A10), `with` and
+`eval` rows. The A11 record lands here, under this claim.
+
+#### A11 record — 2026-09-29
+
+The lane's agent died in a container restart after finishing its
+measurements, so the lead session committed its saved group 3/4 files and
+re-measured on the final tree. Commits:
+- `a9df59284` group 1: an extracted method binds the caller's receiver;
+- `5716b4247` group 2: a consumed `yield`'s resumption value picks the
+  boxed-any carrier (its own commit);
+- `21b5b67fd` groups 3/4:
+  - a static computed setter keyed by `yield` (new leaf `class-proto-set-arm.ts`,
+    the write twin of the `__class_proto_lookup` method arm);
+  - an object-literal method's `arguments` built before the parameter defaults
+    that read it (new leaf `object-method-arguments-first.ts`);
+  - a nested closure's write to a named function expression's own name
+    targets that immutable binding (no `with` or direct `eval` in between).
+
+**Target rows**, QuickJS, `--standalone --isolate`, `origin/main` @
+`d5821126cc` vs the branch merged onto it: **2 → 19 of 28 pass, 0 pass →
+non-pass.** Residuals, first-line errors:
+- `class/accessor-name-inst-computed-in` (instance twin of the static fix:
+  getter reads `undefined`);
+- `cpn-class-{expr,decl}-accessors-computed-property-name-from-assignment-expression-assignment`
+  (`0` vs `1`);
+- `object/method-definition/generator-property-desc` (descriptor not
+  configurable);
+- `object/method-definition/generator-super-prop-param` (`super.toString` in a
+  parameter default reads `null`);
+- `object/method-definition/name-prop-name-yield-expr` (`obj` still null after
+  resumption);
+- `yield/formal-parameters-after-reassignment-non-strict`: the second write to
+  a parameter is lost at suspension, which is A12's mechanism;
+- `class/definition/fn-name-accessor-set` (a null receiver);
+- `generators/has-instance` (`g() instanceof g`).
+
+**The lane's measurements**, base `base2` vs groups 1-4 `g4`, both from
+`origin/main` of 2026-09-28:
+- cluster-A manifest: 181 → 184 pass;
+- cluster-C manifest: 72 → 83 pass;
+- changed-row verdicts: group 1 standalone 496 → 506 and host 0 → 4; group 2
+  10 → 12; groups 3/4 standalone 56 → 63 and host 18 → 22;
+- **0 pass → non-pass in every one of these.**
+
+**Controls:**
+- the equivalence gate reports no new regressions, and the guard suite is
+  green;
+- 8 vitest files fail on `g4`, and all 8 fail identically on `base2` (A/B
+  re-run by the lead);
+- the pins `tests/issue-6651-a11-gen-values.test.ts` pass 23/23 on the tree
+  merged onto `origin/main`, and every gate passes, including host-import
+  policy and the compiler-boundaries inventory (both new leaves are
+  registered).
 
 ### 2026-09-28 — Cluster D, slice D5
 
