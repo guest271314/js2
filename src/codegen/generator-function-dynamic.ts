@@ -63,7 +63,7 @@ import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { ensureObjectRuntime, ensureObjVecBuilders, reserveApplyClosure } from "./object-runtime.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { emitRuntimeEvalInterpretedCallableAdapter } from "./runtime-eval-callable.js";
-import { coerceType, compileExpression } from "./shared.js";
+import { coerceType, compileExpression, skipTransparentExpressions } from "./shared.js";
 import { sourceBindingIsSingleAssignment } from "./single-assignment-binding.js";
 
 const EXTERNREF: ValType = { kind: "externref" };
@@ -88,14 +88,30 @@ function inventoryRecorded(ctx: CodegenContext, node: ts.Node): boolean {
   );
 }
 
-/** For an identifier callee: never reassigned, and its initializer precedes the read. */
+/** Never reassigned, and its initializer precedes the read. */
+function bindingPrecedesRead(ctx: CodegenContext, id: ts.Identifier): ts.Expression | undefined {
+  if (!sourceBindingIsSingleAssignment(ctx, id)) return undefined;
+  const init = ctx.oracle.variableInitializerOf(id);
+  return init !== undefined && init.getSourceFile() === id.getSourceFile() && init.end <= id.getStart()
+    ? init
+    : undefined;
+}
+
+/**
+ * Every binding the callee is read through is stable: an identifier callee, and
+ * (#6651 A14) the identifier receiver of `P.constructor` (`var Generator =
+ * Object.getPrototypeOf(function* () {}); Generator.constructor`).
+ */
 function calleeBindingIsStable(ctx: CodegenContext, callee: ts.Expression): boolean {
-  let e = callee;
-  while (ts.isParenthesizedExpression(e)) e = e.expression;
-  if (!ts.isIdentifier(e)) return true;
-  if (!sourceBindingIsSingleAssignment(ctx, e)) return false;
-  const init = ctx.oracle.variableInitializerOf(e);
-  return init !== undefined && init.getSourceFile() === e.getSourceFile() && init.end <= e.getStart();
+  let e = skipTransparentExpressions(callee);
+  if (ts.isIdentifier(e)) {
+    const init = bindingPrecedesRead(ctx, e);
+    if (init === undefined) return false;
+    e = skipTransparentExpressions(init);
+  }
+  if (!ts.isPropertyAccessExpression(e)) return true;
+  const receiver = skipTransparentExpressions(e.expression);
+  return !ts.isIdentifier(receiver) || bindingPrecedesRead(ctx, receiver) !== undefined;
 }
 
 /**

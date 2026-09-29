@@ -169,6 +169,15 @@ assignee: "ttraenkler/fable-es2015-plan"
 #     `$__ta_ctor`, which the Int8Array `$Object` carrier is not). The first cut
 #     inlined the arm here and cost +68 / +65; extracting it left these 8.
 loc-budget-allow:
+  # 2026-09-29 — cluster A, slice A14 (record under the A14 claim).
+  # `src/codegen/generators-native-consumer.ts` +3: after
+  # `ensureNativeDelegatedResultHelpers` in `reserveOpaqueNativeGeneratorDispatch`,
+  # re-read the dispatcher map — those helpers build the %GeneratorPrototype%
+  # next/return/throw closures, whose bodies reserve the SAME dispatcher, so
+  # minting again orphaned theirs as the `unreachable` placeholder (every
+  # `.next()` in a module that reified %GeneratorFunction.prototype% trapped).
+  # The check must sit at the re-entry point; there is no leaf to move it to.
+  - src/codegen/generators-native-consumer.ts
   # 2026-09-28 — cluster H, slice H1 (receipt under `## Cluster status`). Both
   # paths already listed below; restated per the stranded-grant rule. The
   # mechanism lives in the NEW leaves `spec-arg-coercion.ts` (the object-literal
