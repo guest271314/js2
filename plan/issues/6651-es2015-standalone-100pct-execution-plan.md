@@ -9845,12 +9845,12 @@ pre-A10 tree both sides were 184 / 197 with an identical non-pass set.
 - vitest, one process per file (`VITEST_FORK_MAX_OLD_SPACE_SIZE=4096`,
   QuickJS) over `issue-6651-*`, `*generator*`, `issue-2864-*`, the super /
   instanceof / nullish-receiver suites (149 files): 12 files fail on the
-  branch. 10 re-run on the base tree fail identically, same counts
+  branch. 11 re-run on the base tree fail identically, same counts
   (`issue-1965`, both `issue-2864` files, `issue-3526`, `issue-4623`,
-  `issue-6651-{rs1,sg1,sn1,sy1}`, and `issue-6651-b10`, whose "failure" is a
-  vitest worker RPC timeout with 6/6 tests passing on both). Not established:
-  `issue-6651-sc1` (the base process was killed, exit 143) and
-  `issue-680-generator-expression-continuations` (base run unfinished).
+  `issue-6651-{rs1,sg1,sn1,sy1}`, `issue-680-generator-expression-continuations`,
+  and `issue-6651-b10`, whose "failure" is a vitest worker RPC timeout with 6/6
+  tests passing on both). Not established: `issue-6651-sc1` (the base process
+  was killed, exit 143).
 - `node scripts/run-guard-suite.mjs`: 255 / 255.
 - `pnpm run check:ir-fallbacks`: OK (pre-merge tree).
 - Playground + benchmark programs (19 × host/standalone): 38 / 38
