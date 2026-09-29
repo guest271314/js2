@@ -62,6 +62,7 @@ import { type CodegenContext, hostFreeEnvironment } from "../context/types.js";
 import { registerImportCollectorDelegates } from "../registry/import-collector-delegates.js";
 import { expressionHasWidenedPropertyType } from "../strict-eq-stale-type.js";
 import { isConsoleValueIdentifier } from "../standalone-console-object.js";
+import { collectorReceiverType } from "../builtin-subclass-receiver.js"; // (#6651 C5) inherited builtin members
 
 /** Accumulated state for the single-pass collector */
 export interface UnifiedCollectorState {
@@ -518,8 +519,8 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
   // ── collectPrimitiveMethodImports ──
   if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
     const prop = node.expression;
-    const receiverType = ctx.checker.getTypeAtLocation(prop.expression);
     const methodName = prop.name.text;
+    const receiverType = collectorReceiverType(ctx, ctx.checker.getTypeAtLocation(prop.expression), methodName);
     // #1215: Array<number>.join() / Array<number>.toString() must coerce each
     // element to a string before concatenation. Without `number_toString` registered,
     // compileArrayJoin silently drops the f64→externref conversion and emits a Wasm

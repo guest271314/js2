@@ -169,6 +169,34 @@ assignee: "ttraenkler/fable-es2015-plan"
 #     `$__ta_ctor`, which the Int8Array `$Object` carrier is not). The first cut
 #     inlined the arm here and cost +68 / +65; extracting it left these 8.
 loc-budget-allow:
+  # 2026-09-29 — cluster C, slice C5 (record at the end of this file). The
+  # mechanisms live in leaves: `builtin-subclass-receiver.ts` (NEW — inherited
+  # builtin member routing), `builtin-subclass-new-site.ts` (NEW — a
+  # member-less Date/RegExp/DataView/Function subclass `new` site),
+  # `bound-class-construct-args.ts` (NEW — bound arguments of a bound class),
+  # `string-wrapper-dynamic-length.ts` (NEW — String-exotic `length` through
+  # `__extern_get`), `standalone-subclass-ctors.ts` (wrapper/String carriers),
+  # `class-heritage-check.ts` (Proxy prototype, Symbol heritage),
+  # `promise-executor.ts` (IsCallable). What stays in the god-files is the one
+  # call where each decision is taken:
+  #   - `import-collector.ts` +1: the import; the receiver-type line is
+  #     replaced in place by `collectorReceiverType`.
+  #   - `call-receiver-method.ts` +4 / `property-access.ts` +1: the import and
+  #     the one-line routed `receiverType` / `objType`.
+  #   - `class-bodies.ts` +18: the import, the two `classHeritageIsIntrinsicSymbol`
+  #     throws, and the implicit-derived-ctor `funcUsesArguments` marking (the
+  #     decision has to sit beside the explicit-ctor marking it mirrors).
+  #   - `new-super.ts` +27: the bound-args override of the class-construct
+  #     argument list, the `__extras_argv` publication for a ctor reading
+  #     `arguments` (the arm it replaces is inline there), and the new-site
+  #     dispatch (it must run after the class name is resolved and before
+  #     `C_new` is called — both only exist in `compileNewExpression`).
+  #   - `object-runtime.ts` +2: the import and the `length` arm splice inside
+  #     the String-exotic `__extern_get` arm.
+  #   - `new-builtin-globals.ts` +3: the Date and Function arms honour the
+  #     `builtinNameOverride` the new-site dispatch passes.
+  - src/codegen/declarations/import-collector.ts
+  - src/codegen/expressions/new-builtin-globals.ts
   # 2026-09-29 — cluster A, slice A13. Wiring only; each mechanism's logic sits
   # in a leaf (`object-literal-super-base.ts`, `generators-native-protocol.ts::
   # orNativeGeneratorCarrierInstrs`):
@@ -1142,6 +1170,21 @@ loc-budget-allow:
   # `promise-subclass-cell-read.ts`; the hand-off cannot move, because it is the
   # arm that would otherwise emit the bare `global.get` of the cell.
 func-budget-allow:
+  # 2026-09-29 — cluster C, slice C5 (see the loc-budget note). Restated per the
+  # stranded-grant rule where already listed: `compileClassBodiesInner` +4 and
+  # `compileSuperCall` +4 (the two `classHeritageIsIntrinsicSymbol` throws),
+  # `collectClassDeclaration` +9 (implicit-ctor `arguments` marking),
+  # `compileReceiverMethodCall` +3 (receiver routing), `compileNewExpression`
+  # +25 (bound args, `__extras_argv`, new-site dispatch). New:
+  # `tryCompileBuiltinGlobalNew` +3 (Date/Function honour the name override)
+  # and `tryCompileIndexedBuiltinNew` +1 (the zero-argument DataView TypeError).
+  - src/codegen/class-bodies.ts::compileClassBodiesInner
+  - src/codegen/class-bodies.ts::compileSuperCall
+  - src/codegen/class-bodies.ts::collectClassDeclaration
+  - src/codegen/expressions/call-receiver-method.ts::compileReceiverMethodCall
+  - src/codegen/expressions/new-super.ts::compileNewExpression
+  - src/codegen/expressions/new-builtin-globals.ts::tryCompileBuiltinGlobalNew
+  - src/codegen/expressions/new-indexed.ts::tryCompileIndexedBuiltinNew
   # 2026-09-29 — cluster A, slice A13. `emitTaDynCtorConstructInline` +2: one
   # spread (and its comment) in the §23.2.5.1 step 6 object-arm gate, which now
   # also admits a native generator object. The test itself is the NEW export
@@ -19439,3 +19482,231 @@ time (the adapter cache key hashes `src/` — never add `src/` files mid-run),
 byte differential on both targets in separate processes, zero pass→non-pass,
 full gate chain incl. host-import-policy (`src/runtime.ts` is at its cap),
 eval-free pin suite red on base, commit with ✓ and trailers, no push.
+
+### 2026-09-29 — Cluster C, slice C5: subclassing built-in constructors (claim)
+
+Claimed by the lead session (lane C5). Target: the 22 ES2015 standalone
+non-pass rows under `language/statements/class/subclass/**`, excluding
+`builtin-objects/GeneratorFunction/*` (lane A14). Measured on main `9ec7a78b0`
+(standalone baseline promoted 2026-09-29 11:55): `class X extends
+Number/String/Boolean/Date/RegExp/ArrayBuffer/DataView/TypedArray/Function/Proxy/Symbol/Promise`,
+the instance `length` / `name` own properties of a `Function` subclass
+instance, and the return-override / binding / default-constructor rows. The
+record follows when the lane reports.
+### C5 record — 2026-09-29 (cluster C: subclassing built-in constructors)
+
+**Branch** `claude/es6-6651-c5-builtin-subclass` (WIP PR #6321). Fix commits
+`e2a54df4c` and `a38c8db1b`, merged onto `origin/main` @ `8c727c39c` (after A14
+landed) as `c95e32dd1`, then onto `046f1eaa9`. Engine `JS2WASM_EVAL_ENGINE=quickjs`, `--isolate`, one
+runner at a time under the shared lock. "Base" rows below are my own runs:
+the 22-row base is main `3473dfed` (this branch before the first edit); the
+differential and the verdicts use a separate base TREE (`git archive
+origin/main src` + the runner's own `tests/test262-*.ts`), so the branch
+never had to be swapped under a running measurement.
+
+#### Rows (22 targets)
+
+| lane | base | branch |
+| --- | ---: | ---: |
+| standalone | 0 / 22 | 15 / 22 |
+| host (honest lane) | 10 / 22 | 13 / 22 |
+
+| row (`class/subclass/…`) | standalone base → branch | host base → branch |
+| --- | --- | --- |
+| `binding.js` | fail → **pass** | fail → fail |
+| `builtin-objects/ArrayBuffer/regular-subclassing.js` | fail → **fail** | pass → pass |
+| `builtin-objects/Boolean/regular-subclassing.js` | fail → **pass** | fail → fail |
+| `builtin-objects/DataView/regular-subclassing.js` | fail → **pass** | fail → fail |
+| `builtin-objects/Date/regular-subclassing.js` | fail → **pass** | pass → pass |
+| `builtin-objects/Function/instance-length.js` | fail → **pass** | pass → pass |
+| `builtin-objects/Function/instance-name.js` | fail → **pass** | pass → pass |
+| `builtin-objects/Function/regular-subclassing.js` | fail → **pass** | fail → fail |
+| `builtin-objects/Number/regular-subclassing.js` | fail → **pass** | pass → pass |
+| `builtin-objects/Promise/regular-subclassing.js` | fail → **pass** | pass → pass |
+| `builtin-objects/Proxy/no-prototype-throws.js` | fail → **pass** | fail → pass |
+| `builtin-objects/RegExp/lastIndex.js` | fail → **fail** | pass → pass |
+| `builtin-objects/RegExp/regular-subclassing.js` | fail → **pass** | pass → pass |
+| `builtin-objects/String/length.js` | fail → **pass** | fail → fail |
+| `builtin-objects/String/regular-subclassing.js` | fail → **pass** | pass → pass |
+| `builtin-objects/Symbol/new-symbol-with-super-throws.js` | fail → **pass** | fail → pass |
+| `builtin-objects/TypedArray/regular-subclassing.js` | fail → **fail** | fail → fail |
+| `builtins.js` | fail → **fail** | pass → pass |
+| `class-definition-evaluation-empty-constructor-heritage-present.js` | fail → **pass** | fail → pass |
+| `class-definition-null-proto-contains-return-override.js` | fail → **fail** | fail → fail |
+| `default-constructor-2.js` | fail → **fail** | fail → fail |
+| `derived-class-return-override-with-object.js` | fail → **fail** | fail → fail |
+
+Host "branch" is this code before the A14 merge (`a38c8db1b`); the
+standalone branch column is the merged tree (`c95e32dd1`), re-run after the
+merge with the QuickJS adapter rebuilt. No target row went pass → non-pass on
+either lane.
+
+#### Root causes and what landed, mechanism by mechanism
+
+1. **Promise — §27.2.3.1 step 2 was skipped** (1 row). The implicit
+   `constructor(...args) { super(...args) }` of `class P extends Promise {}`
+   builds the carrier through `emitStandalonePromiseFromExecutorValue`, whose
+   header recorded the gap as a deliberate "no-throw discipline": a
+   non-callable executor went to `__apply_closure` (a no-op) and the promise
+   stayed pending. It now throws the TypeError before the promise exists; the
+   test is `__typeof_function` (§13.5.3 — exactly IsCallable), not
+   `__is_callable`, which excludes classes. Cluster D ruled this row
+   out-of-scope as a realm / `@@toStringTag` issue — re-verified from the
+   source: the row checks only `new Prom()` throwing and the executor's two
+   function arguments; it was this missing check.
+2. **Proxy — §15.7.14 step 5.g.ii** (1 row, both lanes). `%Proxy%` has no
+   `prototype`, so `class P extends Proxy {}` throws at definition. Added to
+   `class-heritage-check.ts` as a compile-time proof (ambient `Proxy` only);
+   it is the one arm of that module that also runs on the host lane (which
+   resolves an identifier heritage statically too and never read
+   `Proxy.prototype`).
+3. **Symbol — §20.4.1.1 step 1** (1 row, both lanes). `class S extends
+   Symbol {}` is legal, but `super()` constructs `%Symbol%` with a NewTarget,
+   which throws. `Symbol` is not a host-constructible parent, so the class was
+   a root struct and both the implicit and the explicit `super()` completed.
+   Both now throw (`classHeritageIsIntrinsicSymbol`, class-bodies.ts).
+4. **Number / Boolean / String — the carrier was right, the dispatch was not**
+   (4 rows). The #3972 wrapper rung ignored its argument (`new N(42)` wrapped
+   `+0`), and every native Number/String/Boolean method lowering is gated on a
+   symbol-NAME test of the receiver type (`isNumberWrapperType` …), which a
+   subclass-typed receiver fails — so `n.toFixed(2)` fell to
+   `__extern_method_call`, whose `$Object` arm has no builtin prototype
+   methods ("called value is not a function"), and `b.valueOf()` took the
+   ordinary-class identity fold. Now: the wrapper carrier takes
+   `ToBoolean`/`ToNumber` of its argument through the coercion engine; a
+   String subclass wraps `""` for a missing argument (it wrapped `undefined`,
+   so there was no `length` at all); and `builtin-subclass-receiver.ts` routes
+   a subclass-typed receiver to the parent's instance type when the member
+   resolves to the parent's OWN lib declaration (a user override, or any
+   `Object.prototype` member, is declined) — in the method-call path, the
+   property-read path and the import collector (which registers
+   `number_toFixed` & co. by receiver type). `String/length.js` also needed
+   `o["length"]` through `__extern_get` on a String wrapper: gOPD and the
+   index keys answered, `"length"` read `undefined`. A `length` arm in the
+   String-exotic `__extern_get` arm (`string-wrapper-dynamic-length.ts`) is
+   emitted only in a module that constructs a String subclass.
+5. **Date / RegExp / DataView / Function — identity carriers** (6 rows). The
+   #3972 identity rung returns a plain object for these parents. Faithful
+   construction needs each parent's AST-driven lowering (Date's MakeDay/parse,
+   RegExp's pattern compile, DataView's buffer brand, Function's static body
+   compile), which the super-constructor forwarder — holding evaluated
+   externrefs — cannot reach. `builtin-subclass-new-site.ts`: for a class
+   whose constructor would do nothing but construct the parent (no own
+   constructor, no instance member, heritage naming the builtin), `new D(…)`
+   compiles as `new Parent(…)` on the same argument nodes, plus `D_new`'s
+   standalone `constructor` install. Inherited members route to the parent only
+   for such a class, so an instance built another way (a subclass of `D`,
+   `Reflect.construct`) keeps its previous behaviour. `new DataView()` with no
+   argument now throws (§25.3.2.1 step 2; it returned an empty buffer).
+6. **Bound class — §10.4.1.2 step 5** (1 row standalone). TypeScript types
+   `new (C.bind(o, 1))(8)` as `C`, so the static class path called `C_new(8)`
+   and dropped the bound arguments. `bound-class-construct-args.ts` prepends
+   them when both bindings are unique and never written and every bound
+   argument is a literal (re-evaluation is then unobservable).
+7. **Constructor `arguments`** (1 row, both lanes). The static `new C(…)`
+   site evaluated-and-dropped surplus arguments even when `C`'s constructor
+   reads `arguments` (the `__extras_argv` contract functions already honour),
+   and an implicit derived constructor was never marked as needing them. Both
+   fixed (new-super.ts, class-bodies.ts).
+
+#### Differential (compile-only, both targets, primary + strict variants)
+
+Bounded reach set (448 files): every test262 file with `extends
+<Number|Boolean|String|Symbol|Proxy|Promise|Date|RegExp|DataView|Function>`
+(119), every file with `new Promise(` (259 — the executor-value path), every
+file whose class constructor body reads `arguments` (15, TypeScript-AST scan of
+the 4,737 files mentioning both `class` and `arguments`), every file with
+`class` and `.bind(` (62), and `new DataView()` (1). Compiled on both targets,
+primary and strict variants, in a separate base tree (`origin/main`
+`51a70eb2c`) and a snapshot of this branch on the same base, fresh process per
+tree: **75 binaries changed** (68 standalone, 7 host) in 69 files; no compile
+status flipped (101 FAIL/THROW entries on each side, identical rows).
+Playground examples + benchmark suites (17 files × 2 targets): byte-identical.
+
+Verdicts for the changed rows (finished after the wrap-up report; base tree
+`origin/main` `8c727c39c` vs this branch, `--isolate`): standalone 68 rows,
+base 35 pass → branch 45 pass, **0 pass → non-pass**; host 7 rows, base 2 pass
+→ branch 6 pass, 0 pass → non-pass (the extra host flip is
+`language/statements/class/arguments/default-constructor.js`). The branch run
+first showed `subclass-builtins/subclass-Function.js` (both spellings) failing
+with "the quickjs provider is not built": the final `origin/main` merge changed
+`src/` mid-run, and the QuickJS adapter cache key hashes `src/`. With the
+adapter rebuilt, both rows pass.
+
+#### Controls
+
+- Pins `tests/issue-6651-c5-builtin-subclass.test.ts`: 28/28 on the branch
+  (also after the final `origin/main` merge); on the base tree 16 red, the 12
+  GUARD pins green.
+- `scripts/equivalence-gate.mjs`: 22 failing / 1,720 passing / 22 known — no new.
+- `scripts/run-guard-suite.mjs`: 20 files, 255/255.
+- `check:ir-fallbacks`: OK.
+- Gates, bare, on the final merge: loc, func, coercion-sites, oracle-ratchet
+  (`ctx.checker` −1), dead-exports, loc/func with `LOC_GATE_BASE=origin/main`,
+  host-import-policy, `check-compiler-boundaries --mode inventory` (four new
+  leaves registered), typecheck — all pass.
+- vitest controls (one file per process, `VITEST_FORK_MAX_OLD_SPACE_SIZE=4096`):
+  72 of the 198 planned suites ran before the wrap-up — the 66 reach suites
+  (subclass / bind / arguments / Promise executor / heritage) plus the first
+  `issue-6651-*` files; 58 pass. The 14 that fail were re-run on the base tree
+  (`origin/main` `8c727c39c`): identical failures (test names compared for
+  `issue-2710`, `4025`, `4491`, `4556`, `5195-es2015-class-r2`,
+  `5195-r3-review`, `5373-array-subclass-tostring`; counts for `2856`,
+  `2903-iter-helpers`, `2903-r3`, `3599`, `3633`, `3719`). `issue-3518-native-
+  prototype-seeder-bindings` (10 failing on the branch) timed out on the base
+  tree under load — parity NOT established. The remaining `issue-6651-*`,
+  `*generator*` and `issue-2864-*` suites were not run.
+- Final `origin/main` merge (`046f1eaa9`, #6323 compiler performance) came in
+  after the row measurements: pins, typecheck and gates re-run there; the 22
+  rows were not.
+
+#### Residuals and design questions
+
+- **Constructor return override with an object — design question** (3 rows:
+  `derived-class-return-override-with-object`,
+  `class-definition-null-proto-contains-return-override`, and the last assert
+  of `default-constructor-2`; both lanes). `C_new` / `C_init` return
+  `(ref $C)`, and the site types `new C()` as that struct, so a constructor
+  (or a parent reached through `super()`) returning a DIFFERENT object has
+  nowhere to put it: `new Base3() === obj` is false on both lanes even for a
+  base class. The fix is a value-representation decision — widen the
+  construct result (and every `C`-typed binding fed by it) to an open carrier
+  for the classes whose constructor chain can return an Object — not a local
+  patch. Evidence: probes `d-ro.js` (5 shapes, 0/5 both lanes on base and
+  branch).
+- **ArrayBuffer species — design question** (`ArrayBuffer/regular-subclassing`,
+  standalone only — the host passes with a real host object):
+  `ab.slice(0, 1)` must run SpeciesConstructor on the instance and build an
+  `AB`, and `sliced instanceof AB` must be answered at run time for a native
+  carrier (today `instanceof <subclass>` is folded statically). Both need a
+  subclass identity ON the native carrier — the `[[Prototype]]` slot question
+  A14 recorded for the runtime-eval carrier, here for the vec carriers.
+- **TypedArray — design question** (2 rows). `TypedArray/regular-subclassing`
+  (both lanes) extends a runtime VALUE (`testWithTypedArrayConstructors`' parameter), so
+  there is no builtin name to construct from; `builtins.js`' `class E extends
+  Uint8Array { constructor() { super(10); this[0] = 255; … } }` needs a
+  faithful TypedArray super-constructor (standalone only; the #3239 rung is an
+  empty vec),
+  element writes through the externref-backed `this`, `getPrototypeOf(eua) ===
+  E.prototype` and the `Uint8Array` tag. The new-site substitution does not
+  apply (explicit constructor with statements after `super`).
+- **RegExp/lastIndex** — the subclass part is fixed (the carrier is a real
+  RegExp, `exec` dispatches); the row now fails where the plain
+  `built-ins/RegExp/lastIndex.js` fails on main (`verifyProperty(re,
+  "lastIndex", …)` on a native RegExp: "Cannot access property on null or
+  undefined"). A RegExp-lane residual, not this cluster's.
+- **GeneratorFunction subclass rows (A14's 5)**: not covered. Their heritage is
+  a runtime value (`var GeneratorFunction = Object.getPrototypeOf(function*
+  () {}).constructor`), so the new-site substitution (which needs the builtin
+  NAME as heritage) cannot apply; they need the carrier-prototype slot A14
+  proposed.
+- **Host lane**: `binding.js` / `default-constructor-2` stay red on host — the
+  host harness source contains `eval`, and `bindingIsUniqueAndNeverWritten`
+  (shared with the heritage check) declines any file that does, so the
+  bound-args fold does not apply there. `Boolean`, `String/length`,
+  `DataView`, `Function/regular-subclassing` and the TypedArray/return-override
+  rows are host-lane gaps outside this standalone slice.
+- Observed, not investigated: `function make(ex) { return new Promise(ex); }
+  make(undefined)` still completes on standalone on this branch, so a plain
+  `new Promise(<param>)` does not reach the guarded executor-VALUE lowering in
+  that probe's module.
