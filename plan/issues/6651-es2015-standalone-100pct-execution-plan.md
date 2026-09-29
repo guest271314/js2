@@ -9695,6 +9695,143 @@ otherwise:
 Out of scope: A12's parameter writes, A14's `%GeneratorFunction%` residuals,
 `with`/`eval` rows, cluster C's non-generator accessor rows.
 
+#### A13 record — 2026-09-29
+
+Opus 5.5, high effort. Branch `claude/es6-6651-a13-gen-singles` (stacked on
+A11 #6285; `main` @ `c7901473a` merged in). Engine QuickJS, adapter rebuilt per
+tree state. "Base" is the branch with A13's `src` patch reverse-applied
+(`git diff f317dd32a -- src`, file swap in the same tree); "branch" is
+`d98b50e34`.
+
+**Four mechanisms, one commit each** (`3f921b866`, `fb56698a0`, `d98b50e34`):
+
+1. **`g() instanceof g`, `function*` declaration** (`native-user-instanceof.ts`).
+   The #3962 host-free fnctor arm walked the chain for the per-fnctor prototype
+   global `emitFnctorProtoGet` mints. No generator inherits from it — a generator
+   object inherits from the function's own `prototype` — so the answer was
+   `false`. The arm now declines for a `function*` binding; the dynamic path
+   reads the real `prototype` and stays host-free.
+2. **A `null`-initialised `var` written elsewhere** (`builtin-prototype-brand.ts`).
+   `var obj = null; function f() { obj = {…}; } f(); hasOwnProperty.call(obj, k)`:
+   TypeScript narrows the use to `null` from the initializer and keeps it across
+   the call, and the static nullish-receiver fold compiled a TypeError. Such a
+   binding (no annotation, nullish initializer, another write in the file) now
+   joins #5197's evolving-var decline, whose runtime path still throws when the
+   value IS nullish. An unwritten binding keeps the fold. In
+   `name-prop-name-yield-expr.js` the write runs in a resumed generator — the
+   row was never a generator defect (A5's record already said so).
+3. **`new TA(generatorObject)`** (`dataview-native.ts`, `generators-native-protocol.ts`).
+   §23.2.5.1 step 6's object arm was gated on `$Object` or a callable; a native
+   generator object is a state struct, so it fell to the count form (ToIndex → 0).
+   The gate also admits it now (the protocol lookup's first result is exactly
+   "is a native generator"). New `ctx.usesSourceGenerator` prescan flag: a module
+   that declares no generator keeps its bytes, i.e. the whole
+   `testWithTypedArrayConstructors` population.
+4. **`super.x` in a closed-struct object literal method** (new leaf
+   `object-literal-super-base.ts`, `expressions/new-super.ts`). The #4688 reader
+   gets `[[HomeObject]]` from a closure capture only the open-`$Object` literal
+   path installs, so a struct method declined and answered a typed default
+   (`null`). Such a literal's `[[Prototype]]` is %Object.prototype% by
+   construction — a colon `__proto__:` key and a #802-marked proto-mutation
+   receiver both build an open `$Object`, and both are excluded — so that
+   intrinsic is now GetSuperBase()'s answer.
+
+**Target rows** (`--isolate`):
+
+| row | standalone base → branch | host (unchanged) |
+| --- | --- | --- |
+| `statements/generators/has-instance` | fail → **pass** | fail |
+| `object/method-definition/name-prop-name-yield-expr` | fail → **pass** | fail |
+| `object/method-definition/generator-super-prop-param` | fail → **pass** | fail |
+| `TypedArrayConstructors/ctors/object-arg/as-generator-iterable-returns` | fail → **pass** | pass |
+| `object/method-definition/generator-property-desc` | fail | pass |
+| `GeneratorFunction/has-instance` | fail | fail |
+| `Object/prototype/toString/symbol-tag-generators-builtin` | fail | fail |
+| `generators/eval-body-proto-realm` | fail | pass |
+
+Standalone 0 → 4 of 8; host 3 → 3 (every A13 arm is standalone / no-host only).
+
+**Compile-only differential.** Reach bounded by an AST scan of every test file
+plus its includes (`.tmp/mkreach2.mjs`): `instanceof` whose right side names a
+`function*` binding (3 files), a `hasOwnProperty`/`propertyIsEnumerable`
+receiver declared `var x = null|undefined|void …` and written elsewhere (2), a
+generator plus a TypedArray (31), `super` inside an object-literal method (57):
+93 files, 97 with the targets. Added as a control: 60 random rows of the
+A/A2/C/E/G/H manifests outside the reach. One process per tree.
+
+| lane | rows | identical | bytes changed | compile status changed |
+| --- | ---: | ---: | ---: | ---: |
+| standalone | 157 | 131 (all 60 controls) | 26 | **0** |
+| host | 30 (targets + 22 reach) | 30 | 0 | **0** |
+
+**Verdicts** on the 97 reach rows, standalone: base 25 pass / 24 fail / 3 CE /
+45 runner skips → branch **33** / 16 / 3 / 45. Gained 8: the 4 targets above,
+`method-definition/name-super-prop-{body,param}` (cluster C's non-generator
+twins of mechanism 4) and `ctors{,-bigint}/object-arg/iterating-throws`
+(mechanism 3). **0 pass → non-pass.** The 26 changed rows: 8 gained; 12
+`staging/sm/**` (skipped by the runner on both trees — all 39 staging rows of
+the reach are); 3 `super/prop-expr-obj-{err,key-err,unresolvable}` pass on
+both; 3 non-pass on both — `ctors-bigint/object-arg/as-generator-iterable-returns`
+(length now 2; the BigInt element reads `0`),
+`super/prop-poisoned-underscore-proto` (`null` → `undefined`:
+`Object.prototype.constructor` read through `__reflect_get_receiver` on the
+native proto carrier; `Reflect.get(Object.prototype, "constructor") !== Object`
+on base too) and `method-definition/generator-super-prop-body` (host-import CE,
+A10's `super` leak).
+Cluster-A manifest, standalone: **184 / 197 on both trees, identical non-pass
+set** (one branch row hit ENOENT during the 10:09 test262 relink and passed on
+re-run).
+
+**Controls:** playground + benchmark programs (19 × host/standalone): **38 / 38
+byte-identical**. `pnpm run check:ir-fallbacks`: OK. Pins
+`tests/issue-6651-a13-gen-singles.test.ts`: 17 / 17 on the branch, 12 red on base
+(the 5 GUARDs green on both). Every source gate bare, loc/func again with
+`LOC_GATE_BASE=origin/main`, typecheck, biome, prettier, host-import policy,
+compiler-boundaries inventory (new leaf registered): green.
+
+**Residuals — design questions, not built:**
+
+- **`GeneratorFunction/has-instance` and `symbol-tag-generators-builtin`: a
+  closure has no `[[Prototype]]`.** `__getPrototypeOf` and the call-site
+  `tryEmitDynamicCallableGetPrototypeOf` answer %Function.prototype% for every
+  callable, `__closure_prop_get`'s miss path walks the Function/Object prototype
+  companions directly, and `Object.setPrototypeOf(fn, p)` is a no-op (probed:
+  `getPrototypeOf(fn) === p` false, `fn.x` undefined). So `gDecl instanceof
+  GeneratorFunction` is false and `genFn[@@toStringTag]` is `undefined`; only
+  the static `getPrototypeOf(<spelled generator>)` fold answers
+  %GeneratorFunction.prototype%. Proposal: keep a closure's `[[Prototype]]` in
+  its carrier bag's `$proto` (null ⇒ %Function.prototype%, the `NULL_PROTO` flag
+  ⇒ null), read by those three sites and written by `__object_setPrototypeOf`;
+  generator function values (`initializeNativeGeneratorFunctionValue`, and A9's
+  runtime-eval carrier) set it at creation. Asserts 3-4 of `has-instance` need
+  the runtime-eval carrier half, which A14 is not building.
+  `symbol-tag-generators-builtin` also needs a separate fix: once the module
+  defines a `Symbol.toStringTag` accessor on the generator prototype,
+  `toString.call(gen)` reaches the `Object.prototype.toString` builtin-VALUE
+  closure, whose standalone body is the generic "not yet implemented" TypeError
+  (`builtin-value-read.ts`; bisected, the same program without the
+  `defineProperty` passes).
+- **`generator-property-desc` (and cluster C's `name-property-desc`): a dynamic
+  `delete` on a closed-struct object literal does not hide the key.** Probed:
+  `function del(o,k){return delete o[k]}` + a dynamic `hasOwnProperty` leaves
+  data AND method keys own. The #4098 tombstone substrate covers user CLASS
+  instances only (`__is_class_instance_carrier`). Extending it to literal structs
+  is the #4098 ordering-law decision, and it would move ES5 delete rows — a
+  completed edition — so it is not taken here.
+- **`eval-body-proto-realm`: not a missing realm.** `$262.createRealm()` is the
+  same-realm shim (`scripts/test262-fyi-runtime.js`) whose `eval` is the QuickJS
+  provider. A provider generator function's `prototype` crosses the boundary with
+  `[[Prototype]]` null (probed: `Object.getPrototypeOf((0, eval)('(0,
+  function*(){})').prototype)` is `null` standalone; a plain provider object's is
+  not). It needs the runtime-eval boundary to reflect a realm object's
+  `[[Prototype]]`.
+- **Host lane:** the three rows A13 fixed in standalone still fail on host
+  (different lowerings; not measured further).
+- Noted in passing: the static nullish fold's ToPropertyKey is
+  `env::__to_property_key` in a standalone module that registers no native twin
+  (a leak, identical on base; mechanism 2 routes the written-binding case off
+  it).
+
 ### 2026-09-28 — Cluster A, slice A11: generator value semantics (claim)
 
 **Claimed 2026-09-28** by session `session_01FEGi3DmyPRPD5dx4kWU8hs`, branch
