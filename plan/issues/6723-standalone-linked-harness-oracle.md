@@ -2,7 +2,7 @@
 id: 6723
 title: "test262: give the standalone lane the linked-harness oracle — compile the harness prefix once per include-set on standalone too (standalone is ~82 % of merge_group test262 work)"
 status: in-progress
-assignee: ttraenkler/opus-6723-d4-print
+assignee: ttraenkler/opus-6723-d4-errors
 sprint: current
 priority: high
 horizon: l
@@ -15,10 +15,19 @@ related: [3451, 6486, 6492, 5383, 5407, 6722, 6676]
 # for standalone providers via one spread line in compileLinkedProject; the
 # rationale lives in the new helper `standaloneProviderRuntimeImports` (+12
 # lines of helper + doc, +1 line in the function).
+# 2026-09-29 (#6723 D4 errors): a linked standalone consumer must import the
+# provider's Error-family carrier cells BEFORE it defines its first global (an
+# import global's index sits below every defined one and nothing renumbers
+# globals), so the call has to sit right after createCodegenContext in both
+# drivers: +1 line in generateModule, +1 in generateMultiModule, +1 import line
+# in index.ts. The mechanism itself lives in standalone-link-error-ctor-cells.ts.
 loc-budget-allow:
   - src/package-linker.ts
+  - src/codegen/index.ts
 func-budget-allow:
   - src/package-linker.ts::compileLinkedProject
+  - src/codegen/index.ts::generateModule
+  - src/codegen/index.ts::generateMultiModule
 ---
 
 ## Problem
@@ -445,3 +454,162 @@ local only):
 - First attempt had every eval-using row fail with "quickjs provider is not
   built": the local QuickJS adapter is keyed on the compiler bundle; rebuilt
   with `node scripts/build-quickjs-eval-provider.mjs`. CI builds it per run.
+
+## P2 shadow run (2026-09-29) — gate NOT met
+
+First full-corpus measurement of the standalone linked lane in CI: dispatch run
+36527277756 (`standalone_linked=true`, head `473c25a18c`, i.e. P0 + print slice,
+**without** the D4 error-objects fix `41d1f40ecb`). Parity report from job
+`merge standalone-linked evidence` (109281638893), artifact
+`test262-standalone-linked-473c25a18cc6f99bbb4f416985a222125bfa563e`.
+
+| status | honest (today's standalone lane) | linked (shadow) |
+|---|---:|---:|
+| pass | 41,464 | 31,285 |
+| fail | 5,069 | 15,424 |
+| compile_error | 2,066 | 1,878 |
+| compile_timeout | 22 | 34 |
+
+- Agreement 37,990 / 48,735 (77.95 %). **pass → fail 10,401**, fail → pass 222,
+  other 122.
+- Linked-lane fallbacks 10,047 (20.62 %): 4,603 Temporal rows (compiled honestly
+  by design), the rest linked compile failures on body syntax
+  (`Expression expected` 284, native generator lowering 281, rest-element
+  diagnostics 555, dynamic array length fill 254, `__get_builtin` 186, …).
+- Largest difference buckets: `[object Object]` 8,155 (the error-rendering /
+  error-constructor class the D4 errors slice addresses), `undefined` 623,
+  async "Expected a ReferenceError" 324, `value is not iterable` 259,
+  provider-function call "Cannot access property on null or undefined" ~150,
+  `illegal cast` in `testPropertyOfStrings` 95 (a trap bucket).
+- Time: row-summed compile 174.7M ms honest vs 128.2M ms linked (**1.36×**);
+  `Run shard` median 859 s honest vs 666 s linked (**1.29×**), totals 47,072 s vs
+  35,612 s over 57 shards each.
+
+### Gate verdict
+
+The P2 gate (pass→fail no worse than the host flip, no trap bucket, median shard
+≥ 2× faster) fails on all three counts. The D4 error-objects slice recovered 58
+of 360 sampled rows (216 → 274, 0 pass→fail); extrapolated, the corpus still
+loses several thousand passes, and the achievable speed-up is capped near 1.4×
+while Temporal rows (8.45 of 38.8 core-hours) and body-syntax fallbacks compile
+honestly. P3 (authority flip) is not justified by these numbers. The matrix
+rebalance (#6722, merged) remains the standalone speed-up that is live.
+## D4 slice: cross-module error objects (2026-09-29)
+
+**Root cause — identity, not reading.** Provider-side probes on a
+consumer-thrown `TypeError` (linked pair, standalone): `message`, `name`,
+`String(e)` and `e instanceof TypeError` were all correct (the error struct is a
+canonical type, so field reads and the tag-based `instanceof` already cross the
+boundary). Only identity failed: `e.constructor` answers the module-local
+`__builtin_TypeError` carrier global (#3130), each module has its own, so the
+provider's answer was a different object from the body's `TypeError`
+(`thrown.constructor !== expectedErrorConstructor`). When the provider's arm ran
+before any provider-side bare `TypeError` read, it lazily minted a naked object
+(`typeof` "object", no `name`) — hence "…but got a undefined".
+`Test262Error` had a second, separate cause: the body binds it to the
+provider's constructor (`var Test262Error = <getter>()`) but lowers
+`new Test262Error(…)` to a body-local error struct (#2902), whose `constructor`
+neither module mapped back to that binding (body and provider both answered
+`Error`).
+
+**Is this D4 option 2?** Only for the eight Error-family constructors, and
+without an ABI beyond named globals: the fix shares the existing carrier
+CELLS rather than building a shared intrinsic realm. Reported here so the lead
+can object; no other intrinsic moves.
+
+**Fix.**
+- `src/codegen/standalone-link-error-ctor-cells.ts` (new): a wasm-consumed
+  standalone provider exports its eight `__builtin_<Name>` globals (mutable
+  externref) as `__js2wasm_link_error_ctor_<Name>`; a standalone consumer that
+  links a provider imports them as its own carriers, registered in
+  `builtinObjectGlobals` before its first defined global (called right after
+  `createCodegenContext` in both drivers; declines, i.e. keeps local carriers,
+  if the window has passed). Every reader in both modules — the bare-identifier
+  read and the `err.constructor` arm — already goes through that map with the
+  same lazy materialise-if-null guard, so one cell = one constructor object per
+  graph, first reader wins, nothing materialised eagerly. Consumer → provider
+  import direction for the #5383 S2m reason (provider is compiled and cached
+  first; no cyclic imports). Cost: every standalone provider (harness and npm
+  packages) now carries up to eight extra null-initialised globals + exports.
+- `Test262Error`: `userErrorCtorCarrierGlobal` returns the module global for a
+  standalone module with linked package bindings when no function declaration
+  exists (the body's prelude `var` IS the provider's constructor); the
+  provider's `$Error_struct` `constructor` arm is built in every wasm-consumed
+  standalone provider (`userErrorCtorArmApplies`), so it also answers for
+  structs its consumer minted.
+- `scripts/test262-worker.mjs`: a consumer render of exactly `[object Object]`
+  is treated as "not mine" when a linked peer renders the payload (a
+  provider-minted `Test262Error` has its `toString` on the provider's
+  prototype). Message-only; the verdict logic is untouched.
+- No host import: consumer `result.imports` stays `[]` (asserted in the test).
+
+Unit test `tests/issue-6723-standalone-linked-errors.test.ts` (6 cases; 5 fail
+on the base tree with exactly the messages above, all pass with the fix; also
+pass with `.test262-cache/runtime-eval-refusal-*.wasm` and the quickjs adapter
+moved away).
+
+### Measurement — same 360 rows, same procedure as P0 / the print slice
+
+Base = origin/main 3c9d85424a + the print slice (PR #6298, cherry-picked).
+Fresh harness cache per run, `COMPILER_POOL_SIZE=3`, quickjs eval (adapter
+rebuilt per compiler state), linked arm gated on by file copy, never
+committed. Result files (local only):
+`benchmarks/results/d4ebase2-{sa-linked,sa-honest,host-linked}-results-*.jsonl`
+(base), `d4efin2-*` (this slice, final code incl. the worker render change),
+`d4efin-*` (this slice before the render change — identical verdicts on all
+three arms).
+
+| arm | pass | fail | CE | timeout | rows linked |
+|---|---:|---:|---:|---:|---:|
+| standalone linked, base (`d4ebase2-sa-linked`) | 216 | 134 | 10 | 0 | 309 |
+| standalone linked, fix (`d4efin2-sa-linked`) | **274** | 75 | 10 | 1 | 309 |
+| standalone honest, base (`d4ebase2-sa-honest`) | 316 | 32 | 12 | 0 | — |
+| standalone honest, fix (`d4efin2-sa-honest`) | 316 | 32 | 12 | 0 | — |
+| host linked, base (`d4ebase2-host-linked`) | 302 | 57 | 1 | 0 | 316 |
+| host linked, fix (`d4efin2-host-linked`) | 302 | 57 | 1 | 0 | 316 |
+
+- Standalone linked: **58 fail→pass, 0 pass→fail**, 1 fail→compile_timeout
+  (`TypedArray/prototype/map/return-new-typedarray-from-positive-length.js`,
+  the run's first row, cold provider build while gate scripts were running on
+  the same 4 cores; it is `fail` in both `d4ebase2` and `d4efin`).
+- Standalone honest and host linked: **0 verdict diffs**.
+- Non-pass rows whose error still reads `[object Object]` because the payload
+  could not be rendered: 99 → 0 (the 3 remaining `[object Object]` strings
+  are genuine `sameValue` messages).
+
+Target rows (the P0 table's classes, re-derived as honest-pass ∧ P0-linked-fail
+from `p0new-sa-honest` / `p0b-sa-linked`: exactly 39 + 27; plus the print
+slice's 3 async rows):
+
+| class | rows | pass now | still failing |
+|---|---:|---:|---:|
+| `assert.throws` constructor → `undefined` | 39 | 37 | 2 |
+| payload not renderable (`[object Object]`) | 27 | 17 | 10 |
+| async "Expected a ReferenceError but got a undefined" | 3 | 3 | 0 |
+
+(57 of the 58 flips are these rows; the 58th is
+`class/dstr/async-gen-meth-dflt-obj-ptrn-prop-id-init-unresolvable.js`.)
+
+The 12 still failing now report their real cause, each another named class:
+
+| rows | now reports | class |
+|---:|---|---|
+| 4 | `…Expected a Test262Error but got a TypeError` (`assignment/dstr/array-empty-iter-close-err`, `class/dstr/gen-meth-static-ary-ptrn-elem-id-iter-val-err`, `object/dstr/async-gen-meth-dflt-ary-ptrn-elem-id-iter-val-err`, `variable/dstr/ary-ptrn-elem-id-iter-step-err`) | D4 iterator class: a body-local `g[Symbol.iterator]` object destructured in the linked body throws "value is not iterable" (probe: same with `RangeError`, so not error-related) |
+| 4 | `TypedArray/prototype/set/array-arg-return-abrupt-from-src-get-length`, `TypedArrayConstructors/{ctors/object-arg/throws-from-property,from/iter-access-error,internals/Set/key-is-not-numeric-index-set-throws}` | D4 TypedArray class: the provider's `TA` constructors used from the body (`sample.set` throws TypeError; the direct body-local repro passes) |
+| 2 | `Object/defineProperties/15.2.3.7-6-a-283`, `Object/defineProperty/15.2.3.6-4-538-6` (descriptor assertion messages) | D4 `verifyProperty` descriptor class |
+| 1 | `Map/iterator-items-are-not-object`: "no exception was thrown" | body-local: `new Map([Symbol("a")])` does not throw in the linked body (the other six sub-cases do) — not an error-object defect |
+| 1 | `annexB/.../indirect/global-if-decl-else-stmt-eval-global-skip-early-err-block`: thrown value renders `undefined` | indirect-eval global declaration under the linked lane; not diagnosed further (the unit harness has no eval engine) |
+
+### Still open (not this slice)
+
+- D4 iterator, TypedArray and `verifyProperty` classes (above).
+- Cross-module construct/call of a provider closure VALUE from the body
+  (`new MyCtor()` with `function MyCtor` in the provider throws; the print
+  slice saw the call twin). Not needed here — `new Test262Error` keeps the
+  body-local struct and only its `constructor` was re-pointed — but it is why
+  routing that `new` through the provider was not an option.
+- The naked-object lazy materialisation in the `err.constructor` arm (a
+  `constructor` read before any bare-identifier read yields an object without
+  `name`/`prototype`) is pre-existing and single-module too (#4262 "ordering
+  residual"); sharing the cells makes the body's `TypeError` argument, which
+  is evaluated first, the usual winner.
