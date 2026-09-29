@@ -12405,6 +12405,11 @@
       "layer": "legacy-host"
     },
     {
+      "path": "src/runtime/linked-closure-dispatch.ts",
+      "state": "unmigrated",
+      "layer": "legacy-host"
+    },
+    {
       "path": "src/runtime/linked-provider-mirror-ownership.ts",
       "state": "unmigrated",
       "layer": "legacy-host"
