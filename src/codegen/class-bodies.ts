@@ -70,6 +70,7 @@ import { compileSpreadCallArgsWithArguments } from "./expressions/spread-argumen
 import { findTdzViolatingParamRef, paramDefaultsReferenceArguments } from "./param-tdz.js";
 import { pushDefaultValue } from "./type-coercion.js";
 import { bodyNeedsArgumentsObject, needsImplicitArgumentsObject } from "./helpers/body-uses-arguments.js";
+import { classHeritageIsIntrinsicSymbol } from "./class-heritage-check.js"; // (#6651 C5)
 import {
   compileNativeGeneratorFunction,
   isNativeGeneratorCandidate,
@@ -1622,6 +1623,15 @@ export function collectClassDeclaration(
       ctx.funcUsesArguments.add(initName);
       ctx.funcUsesArguments.add(ctorName);
     }
+    // (#6651 C5) …and so does an IMPLICIT derived constructor whose parent's
+    // `_init` reads them: §15.7.14's `constructor(...args) { super(...args) }`
+    // hands every argument of `new B(…)` to the parent, and `B_init` forwards
+    // `__argc`/`__extras_argv` untouched. Parents register before children.
+    const implicitParent = ctor ? undefined : ctx.classParentMap.get(className);
+    if (implicitParent !== undefined && ctx.funcUsesArguments.has(`${implicitParent}_init`)) {
+      ctx.funcUsesArguments.add(initName);
+      ctx.funcUsesArguments.add(ctorName);
+    }
   }
 
   // Register method functions (own methods defined on this class).
@@ -2910,6 +2920,10 @@ function compileClassBodiesInner(
         fctx.body.push({ op: "local.get", index: selfLocal });
         fctx.body.push({ op: "call", funcIdx: implicitParentInitIdx });
         fctx.body.push({ op: "drop" });
+      } else if (classHeritageIsIntrinsicSymbol(ctx, className)) {
+        // (#6651 C5) The implicit `super(...args)` constructs `%Symbol%` with a
+        // NewTarget — §20.4.1.1 step 1 throws. See the predicate.
+        emitThrowTypeError(ctx, fctx, "Symbol is not a constructor");
       } else if (ctx.classParentMap.get(className) !== undefined) {
         // Legacy fallback (parent has no `_init` — should not happen for
         // user struct classes): keep prior behavior of replaying ancestor
@@ -4486,6 +4500,10 @@ export function compileSuperCall(
     // §13.3.7.1 ArgumentListEvaluation.
     for (const arg of args) {
       evaluateArgumentForSideEffects(ctx, fctx, arg);
+    }
+    // (#6651 C5) …then Construct(%Symbol%, args, NewTarget) throws (§20.4.1.1).
+    if (classHeritageIsIntrinsicSymbol(ctx, childClassName)) {
+      emitThrowTypeError(ctx, fctx, "Symbol is not a constructor");
     }
     return;
   }

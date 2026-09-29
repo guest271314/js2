@@ -48,9 +48,9 @@
   },
   {
     "edition": "ES2015",
-    "pass": 10263,
-    "fail": 1422,
-    "ce": 19,
+    "pass": 10267,
+    "fail": 1417,
+    "ce": 20,
     "skip": 0,
     "total": 11704,
     "pct": 88,
@@ -102,8 +102,8 @@
       },
       {
         "name": "Symbol",
-        "pass": 519,
-        "fail": 90,
+        "pass": 520,
+        "fail": 89,
         "ce": 0,
         "skip": 0,
         "total": 609,

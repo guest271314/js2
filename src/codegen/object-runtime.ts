@@ -294,6 +294,7 @@ import {
   captureReversePeerReadBinding,
   reverseMethodCallArmInstrs,
 } from "./standalone-link-reverse-peer.js"; // (#5383 S17 / #6600) the REVERSE hop
+import { stringWrapperLengthArm } from "./string-wrapper-dynamic-length.js"; // (#6651 C5)
 import { captureWrapperPrimitiveKey } from "./to-primitive-wrapper-slot.js"; // (#4492 wave-5) __to_primitive's [[PrimitiveValue]] arms
 import { buildToPrimitiveBody } from "../runtime/wasmgc/values/to-primitive-bodies.js";
 import type {
@@ -9707,6 +9708,7 @@ export function unshiftExternGetStringExoticArm(ctx: CodegenContext): void {
           op: "if",
           blockType: { kind: "empty" },
           then: [
+            ...stringWrapperLengthArm(ctx, 1, stringData), // (#6651 C5) `length`
             // n = ToNumber(key), then require Number::toString(n) to equal the
             // original key. This rejects 01, 1.0, NaN, and other non-canonical
             // numeric strings before the String-exotic arm runs.
