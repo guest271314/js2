@@ -176,6 +176,7 @@ import { ensureGetUndefined, ensureLateImport, flushLateImportShifts } from "./l
 import { holeToUndefinedInstrs } from "../array-holes.js";
 import { ensureCurrentThisGlobal } from "../statements/nested-declarations.js";
 import { SUPER_HOME_OBJECT_CAPTURE_NAME } from "../closures.js";
+import { emitClosedLiteralSuperBase } from "../object-literal-super-base.js"; // (#6651 A13)
 import { NEW_GLOBAL_FALLTHROUGH, tryCompileBuiltinGlobalNew } from "./new-builtin-globals.js"; // (#3281 slice 1) built-in global ctor dispatch
 import { tryCompileBuiltinPrototypeConstructorNew } from "./builtin-prototype-constructor.js";
 import {
@@ -1187,7 +1188,7 @@ function compileStandaloneObjectLiteralSuperMethodCall(
   if (expr.arguments.length > 0 && (objVecNewIdx === undefined || objVecPushIdx === undefined)) return undefined;
   const currentThisIdx = ensureCurrentThisGlobal(ctx);
 
-  const methodValueType = compileStandaloneObjectLiteralSuperPropertyRead(ctx, fctx, key, "externref");
+  const methodValueType = compileStandaloneObjectLiteralSuperPropertyRead(ctx, fctx, key, "externref", expr);
   if (methodValueType === undefined) return undefined;
   const methodLocal = allocLocal(fctx, `__super_call_m_${fctx.locals.length}`, externref);
   fctx.body.push({ op: "local.set", index: methodLocal });
@@ -1503,7 +1504,7 @@ function compileStandaloneSuperPropertyRead(
   fctx: FunctionContext,
   key: SuperReadKey,
   accessType: ts.Type | "externref",
-  emitHomeObject: () => boolean,
+  emitHomeObject: () => boolean | "base",
   emitReceiver: () => void,
 ): ValType | undefined {
   if (!ctx.standalone) return undefined;
@@ -1516,8 +1517,10 @@ function compileStandaloneSuperPropertyRead(
   const reflectGetReceiverIdx = ctx.funcMap.get("__reflect_get_receiver");
   if (getPrototypeOfIdx === undefined || reflectGetReceiverIdx === undefined) return undefined;
 
-  if (!emitHomeObject()) return undefined;
-  fctx.body.push({ op: "call", funcIdx: getPrototypeOfIdx });
+  const home = emitHomeObject();
+  if (home === false) return undefined;
+  // (#6651 A13) "base": the step pushed GetSuperBase()'s answer itself.
+  if (home === true) fctx.body.push({ op: "call", funcIdx: getPrototypeOfIdx });
   if (key.kind === "name") {
     // (#5153 C.1) §12.3.5.3 step 5: RequireObjectCoercible(GetSuperBase()).
     // With the home object's [[Prototype]] set to null the read must throw a
@@ -1542,7 +1545,7 @@ function compileStandaloneSuperPropertyRead(
   // The property receiver is the call-time `this`, not [[HomeObject]]. This
   // distinction is observable through an inherited accessor.
   emitReceiver();
-  fctx.body.push({ op: "call", funcIdx: reflectGetReceiverIdx });
+  fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__reflect_get_receiver") ?? reflectGetReceiverIdx });
 
   // (#5350 step 5) `"externref"` keeps the raw value — the method-call arm
   // invokes it and coerces the CALL's result, not the property's.
@@ -1906,6 +1909,7 @@ function compileStandaloneObjectLiteralSuperPropertyRead(
   fctx: FunctionContext,
   key: SuperReadKey,
   accessType: ts.Type | "externref",
+  anchor: ts.Node,
 ): ValType | undefined {
   if (!ctx.standalone) return undefined;
   const currentThisIdx = ensureCurrentThisGlobal(ctx);
@@ -1919,7 +1923,8 @@ function compileStandaloneObjectLiteralSuperPropertyRead(
       // [[HomeObject]]. Falling back to __current_this would make a borrowed
       // method resolve `super` against the call-time receiver.
       const homeObjectLocal = fctx.localMap.get(SUPER_HOME_OBJECT_CAPTURE_NAME);
-      if (homeObjectLocal === undefined) return false;
+      // (#6651 A13) No capture: a closed-struct literal's method, whose super base is static.
+      if (homeObjectLocal === undefined) return emitClosedLiteralSuperBase(ctx, fctx, anchor) && "base";
       fctx.body.push({ op: "local.get", index: homeObjectLocal });
       return true;
     },
@@ -2079,6 +2084,7 @@ export function compileSuperPropertyAccess(
       fctx,
       { kind: "name", name: propName },
       accessType,
+      expr,
     );
     if (runtimeReadType !== undefined) return runtimeReadType;
 
@@ -2276,7 +2282,7 @@ export function compileSuperElementAccess(
       const dynClassName = resolveEnclosingClassName(fctx);
       const dynRead =
         dynClassName === undefined
-          ? compileStandaloneObjectLiteralSuperPropertyRead(ctx, fctx, dynamicKey, accessType)
+          ? compileStandaloneObjectLiteralSuperPropertyRead(ctx, fctx, dynamicKey, accessType, expr)
           : compileStandaloneClassSuperPropertyRead(
               ctx,
               fctx,
@@ -2321,6 +2327,7 @@ export function compileSuperElementAccess(
       fctx,
       { kind: "name", name: propName },
       accessType,
+      expr,
     );
     if (runtimeReadType !== undefined) return runtimeReadType;
 

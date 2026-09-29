@@ -418,6 +418,9 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
   // `ctx`, not `state`, because the flag is per-MODULE while the collector state
   // is per-source-file: one throwing file in a multi-file compile is enough.
   if (ts.isThrowStatement(node)) ctx.usesSourceThrowStatement = true;
+  if (ts.isFunctionLike(node) && (node as ts.FunctionLikeDeclaration).asteriskToken !== undefined) {
+    ctx.usesSourceGenerator = true; // (#6651 A13) gates `orNativeGeneratorCarrierInstrs`
+  }
 
   // ── collectStringLiterals (skip computed property names) ──
   if (state.insideComputedPropertyName === 0) {

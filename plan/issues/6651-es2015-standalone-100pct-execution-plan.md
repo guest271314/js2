@@ -197,6 +197,21 @@ loc-budget-allow:
   #     `builtinNameOverride` the new-site dispatch passes.
   - src/codegen/declarations/import-collector.ts
   - src/codegen/expressions/new-builtin-globals.ts
+  # 2026-09-29 — cluster A, slice A13. Wiring only; each mechanism's logic sits
+  # in a leaf (`object-literal-super-base.ts`, `generators-native-protocol.ts::
+  # orNativeGeneratorCarrierInstrs`):
+  # - `dataview-native.ts` +3: an import and one spread (+ comment) in the
+  #   §23.2.5.1 step 6 object-arm gate (a native generator object);
+  # - `expressions/new-super.ts` +7: the object-literal super reader takes the
+  #   AST anchor (threaded through its four callers) and its home-object step
+  #   may push the base itself (closed-struct literal → %Object.prototype%);
+  # - `context/types.ts` +2 and `declarations/import-collector.ts` +3: the
+  #   `usesSourceGenerator` prescan flag, which keeps the new TypedArray arm out
+  #   of every module that declares no generator (byte-identical there).
+  - src/codegen/dataview-native.ts
+  - src/codegen/expressions/new-super.ts
+  - src/codegen/context/types.ts
+  - src/codegen/declarations/import-collector.ts
   # 2026-09-29 — cluster A, slice A14 (record under the A14 claim).
   # `src/codegen/generators-native-consumer.ts` +3: after
   # `ensureNativeDelegatedResultHelpers` in `reserveOpaqueNativeGeneratorDispatch`,
@@ -1170,6 +1185,15 @@ func-budget-allow:
   - src/codegen/expressions/new-super.ts::compileNewExpression
   - src/codegen/expressions/new-builtin-globals.ts::tryCompileBuiltinGlobalNew
   - src/codegen/expressions/new-indexed.ts::tryCompileIndexedBuiltinNew
+  # 2026-09-29 — cluster A, slice A13. `emitTaDynCtorConstructInline` +2: one
+  # spread (and its comment) in the §23.2.5.1 step 6 object-arm gate, which now
+  # also admits a native generator object. The test itself is the NEW export
+  # `generators-native-protocol.ts::orNativeGeneratorCarrierInstrs`.
+  - src/codegen/dataview-native.ts::emitTaDynCtorConstructInline
+  # 2026-09-29 — cluster A, slice A13. `unifiedVisitNode` +3: the
+  # `usesSourceGenerator` prescan flag (see the loc grant above) — one `if`
+  # beside the `usesSourceThrowStatement` flag it mirrors.
+  - src/codegen/declarations/import-collector.ts::unifiedVisitNode
   # 2026-09-28 — cluster A, slice A10 (paths already listed below, restated per
   # the stranded-grant rule). `buildNativeGeneratorPlan` +5: the one clause that
   # routes a `finally` holding a `return` to `lowerTryRegion` (its comment is 4
@@ -9753,6 +9777,177 @@ either (`.tmp/a7/vsbl.mjs`).
 - The error-swallowing hazard (`hoistFunctionDeclarations` truncates
   `ctx.errors`) from the triage spec is unchanged and still deserves its own
   issue.
+
+### 2026-09-29 — Cluster A, slice A13: generator singles (claim)
+
+**Claimed 2026-09-29** by session `session_01FEGi3DmyPRPD5dx4kWU8hs`, branch
+`claude/es6-6651-a13-gen-singles`, stacked on A11 (#6285). Single generator
+rows left open by A10/A11, each root-caused and fixed if local, recorded
+otherwise:
+`object/method-definition/{generator-property-desc,generator-super-prop-param,name-prop-name-yield-expr}.js`,
+`statements/generators/has-instance.js` and `built-ins/GeneratorFunction/has-instance.js`,
+`built-ins/Object/prototype/toString/symbol-tag-generators-builtin.js`,
+`built-ins/TypedArrayConstructors/ctors/object-arg/as-generator-iterable-returns.js`,
+`language/expressions/generators/eval-body-proto-realm.js`.
+Out of scope: A12's parameter writes, A14's `%GeneratorFunction%` residuals,
+`with`/`eval` rows, cluster C's non-generator accessor rows.
+
+#### A13 record — 2026-09-29
+
+Opus 5.5, high effort. Branch `claude/es6-6651-a13-gen-singles`. Engine
+QuickJS, adapter rebuilt per tree state. **Final numbers** are on the branch
+merged with `main` @ `bd332a9ff` (A10, A11, A12 and A14 all landed) against a
+base tree whose `src` is exactly that `main` (a `git archive` of
+`src`/`tests`/`scripts` under `.tmp/basetree`, every other entry linked). The
+branch was merged once more with `main` @ `046f1eaa9` (a perf PR touching none
+of A13's files) before landing; the measurements were not re-run on that merge.
+
+**Four mechanisms in three commits** (`3f921b866`: 1–3; `fb56698a0`: 4; `d98b50e34`: the prescan gate for 3):
+
+1. **`g() instanceof g`, `function*` declaration** (`native-user-instanceof.ts`).
+   The #3962 host-free fnctor arm walked the chain for the per-fnctor prototype
+   global `emitFnctorProtoGet` mints. No generator inherits from it — a generator
+   object inherits from the function's own `prototype` — so the answer was
+   `false`. The arm now declines for a `function*` binding; the dynamic path
+   reads the real `prototype` and stays host-free.
+2. **A `null`-initialised `var` written elsewhere** (`builtin-prototype-brand.ts`).
+   `var obj = null; function f() { obj = {…}; } f(); hasOwnProperty.call(obj, k)`:
+   TypeScript narrows the use to `null` from the initializer and keeps it across
+   the call, and the static nullish-receiver fold compiled a TypeError. Such a
+   binding (no annotation, nullish initializer, another write in the file) now
+   joins #5197's evolving-var decline, whose runtime path still throws when the
+   value IS nullish. An unwritten binding keeps the fold. In
+   `name-prop-name-yield-expr.js` the write runs in a resumed generator — the
+   row was never a generator defect (A5's record already said so).
+3. **`new TA(generatorObject)`** (`dataview-native.ts`, `generators-native-protocol.ts`).
+   §23.2.5.1 step 6's object arm was gated on `$Object` or a callable; a native
+   generator object is a state struct, so it fell to the count form (ToIndex → 0).
+   The gate also admits it now (the protocol lookup's first result is exactly
+   "is a native generator"). New `ctx.usesSourceGenerator` prescan flag: a module
+   that declares no generator keeps its bytes, i.e. the whole
+   `testWithTypedArrayConstructors` population.
+4. **`super.x` in a closed-struct object literal method** (new leaf
+   `object-literal-super-base.ts`, `expressions/new-super.ts`). The #4688 reader
+   gets `[[HomeObject]]` from a closure capture only the open-`$Object` literal
+   path installs, so a struct method declined and answered a typed default
+   (`null`). Such a literal's `[[Prototype]]` is %Object.prototype% by
+   construction — a colon `__proto__:` key and a #802-marked proto-mutation
+   receiver both build an open `$Object`, and both are excluded — so that
+   intrinsic is now GetSuperBase()'s answer.
+
+**Target rows** (`--isolate`, final tree):
+
+| row | standalone base → branch | host (unchanged) |
+| --- | --- | --- |
+| `statements/generators/has-instance` | fail → **pass** | fail |
+| `object/method-definition/name-prop-name-yield-expr` | fail → **pass** | fail |
+| `object/method-definition/generator-super-prop-param` | fail → **pass** | fail |
+| `TypedArrayConstructors/ctors/object-arg/as-generator-iterable-returns` | fail → **pass** | pass |
+| `object/method-definition/generator-property-desc` | fail | pass |
+| `GeneratorFunction/has-instance` | fail | fail |
+| `Object/prototype/toString/symbol-tag-generators-builtin` | fail | fail |
+| `generators/eval-body-proto-realm` | fail | pass |
+
+Standalone 0 → 4 of 8; host 3 → 3 (every A13 arm is standalone / no-host
+only). Identical on the pre-A10 tree measured first.
+
+**Compile-only differential.** Reach bounded by an AST scan of every test file
+plus its includes (`.tmp/mkreach2.mjs`): `instanceof` whose right side names a
+`function*` binding (3 files), a `hasOwnProperty`/`propertyIsEnumerable`
+receiver declared `var x = null|undefined|void …` and written elsewhere (2), a
+generator plus a TypedArray (31), `super` inside an object-literal method (57):
+93 files, 97 with the targets. Added as a control: 60 random rows of the
+A/A2/C/E/G/H manifests outside the reach. One process per tree.
+
+| lane | rows | identical | bytes changed | compile status changed |
+| --- | ---: | ---: | ---: | ---: |
+| standalone | 157 | 130 (all 60 controls) | 27 | **0** |
+| host | 30 (targets + 22 reach) | 30 | 0 | **0** |
+
+**Verdicts** on the 97 reach rows, standalone: base 26 pass / 26 fail / 45
+runner skips → branch **36** / 16 / 45. **Gained 10, 0 pass → non-pass:** the
+4 targets; `method-definition/name-super-prop-{body,param}` (cluster C's
+non-generator twins of mechanism 4); `generator-super-prop-body` (A10 made the
+literal-method `super` native, this supplies its base);
+`generator-prop-name-yield-expr` (mechanism 2's twin); and
+`ctors{,-bigint}/object-arg/iterating-throws` (mechanism 3). The 27 changed
+rows: those 10; 12 `staging/sm/**` (skipped by the runner on both trees — all
+39 staging rows of the reach are); 3 `super/prop-expr-obj-{err,key-err,unresolvable}`
+pass on both; 2 fail on both — `ctors-bigint/object-arg/as-generator-iterable-returns`
+(length now 2; the BigInt element reads `0`) and
+`super/prop-poisoned-underscore-proto` (`null` → `undefined`:
+`Object.prototype.constructor` read through `__reflect_get_receiver` on the
+native proto carrier; `Reflect.get(Object.prototype, "constructor") !== Object`
+on base too).
+
+**Cluster-A manifest, standalone:** final branch **188 / 197** (6 fail, 3 CE).
+The base run on the final tree did not finish before the wrap-up; on the
+pre-A10 tree both sides were 184 / 197 with an identical non-pass set.
+
+**Controls** (final tree unless noted):
+- vitest, one process per file (`VITEST_FORK_MAX_OLD_SPACE_SIZE=4096`,
+  QuickJS) over `issue-6651-*`, `*generator*`, `issue-2864-*`, the super /
+  instanceof / nullish-receiver suites (149 files): 12 files fail on the
+  branch. 11 re-run on the base tree fail identically, same counts
+  (`issue-1965`, both `issue-2864` files, `issue-3526`, `issue-4623`,
+  `issue-6651-{rs1,sg1,sn1,sy1}`, `issue-680-generator-expression-continuations`,
+  and `issue-6651-b10`, whose "failure" is a vitest worker RPC timeout with 6/6
+  tests passing on both). Not established: `issue-6651-sc1` (the base process
+  was killed, exit 143).
+- `node scripts/run-guard-suite.mjs`: 255 / 255.
+- `pnpm run check:ir-fallbacks`: OK (pre-merge tree).
+- Playground + benchmark programs (19 × host/standalone): 38 / 38
+  byte-identical (pre-merge tree).
+- **`node scripts/equivalence-gate.mjs` was not run to completion** (started
+  twice, stopped by the two `main` merges).
+- Pins `tests/issue-6651-a13-gen-singles.test.ts`: 17 / 17 on the branch, 12
+  red on base, the 5 GUARDs green on both.
+- Every source gate bare, loc/func again with `LOC_GATE_BASE` = the merged
+  `main`, typecheck, biome, prettier, host-import policy, compiler-boundaries
+  inventory (new leaf registered): green.
+
+**Residuals — design questions, not built:**
+
+- **`GeneratorFunction/has-instance` and `symbol-tag-generators-builtin`: a
+  closure has no `[[Prototype]]`.** `__getPrototypeOf` and the call-site
+  `tryEmitDynamicCallableGetPrototypeOf` answer %Function.prototype% for every
+  callable, `__closure_prop_get`'s miss path walks the Function/Object prototype
+  companions directly, and `Object.setPrototypeOf(fn, p)` is a no-op (probed:
+  `getPrototypeOf(fn) === p` false, `fn.x` undefined). So `gDecl instanceof
+  GeneratorFunction` is false and `genFn[@@toStringTag]` is `undefined`; only
+  the static `getPrototypeOf(<spelled generator>)` fold answers
+  %GeneratorFunction.prototype%. Proposal: keep a closure's `[[Prototype]]` in
+  its carrier bag's `$proto` (null ⇒ %Function.prototype%, the `NULL_PROTO` flag
+  ⇒ null), read by those three sites and written by `__object_setPrototypeOf`;
+  generator function values (`initializeNativeGeneratorFunctionValue`, and A9's
+  runtime-eval carrier) set it at creation. Asserts 3-4 of `has-instance` need
+  the runtime-eval carrier half, which A14 is not building.
+  `symbol-tag-generators-builtin` also needs a separate fix: once the module
+  defines a `Symbol.toStringTag` accessor on the generator prototype,
+  `toString.call(gen)` reaches the `Object.prototype.toString` builtin-VALUE
+  closure, whose standalone body is the generic "not yet implemented" TypeError
+  (`builtin-value-read.ts`; bisected, the same program without the
+  `defineProperty` passes).
+- **`generator-property-desc` (and cluster C's `name-property-desc`): a dynamic
+  `delete` on a closed-struct object literal does not hide the key.** Probed:
+  `function del(o,k){return delete o[k]}` + a dynamic `hasOwnProperty` leaves
+  data AND method keys own. The #4098 tombstone substrate covers user CLASS
+  instances only (`__is_class_instance_carrier`). Extending it to literal structs
+  is the #4098 ordering-law decision, and it would move ES5 delete rows — a
+  completed edition — so it is not taken here.
+- **`eval-body-proto-realm`: not a missing realm.** `$262.createRealm()` is the
+  same-realm shim (`scripts/test262-fyi-runtime.js`) whose `eval` is the QuickJS
+  provider. A provider generator function's `prototype` crosses the boundary with
+  `[[Prototype]]` null (probed: `Object.getPrototypeOf((0, eval)('(0,
+  function*(){})').prototype)` is `null` standalone; a plain provider object's is
+  not). It needs the runtime-eval boundary to reflect a realm object's
+  `[[Prototype]]`.
+- **Host lane:** the three rows A13 fixed in standalone still fail on host
+  (different lowerings; not measured further).
+- Noted in passing: the static nullish fold's ToPropertyKey is
+  `env::__to_property_key` in a standalone module that registers no native twin
+  (a leak, identical on base; mechanism 2 routes the written-binding case off
+  it).
 
 ### 2026-09-28 — Cluster A, slice A11: generator value semantics (claim)
 

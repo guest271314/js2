@@ -3498,6 +3498,8 @@ export interface CodegenContext extends StandaloneCapabilityDemandState, BodyRou
    * chain is already live, so publishing the renderer costs ~150 B.
    */
   usesSourceThrowStatement: boolean;
+  /** (#6651 A13) The source declares a `function*` or a generator method (prescan). */
+  usesSourceGenerator?: boolean;
   /**
    * (#2866) Type index of the native `$Symbol` carrier struct
    * `(struct (field $id i32) (field $desc (ref null $AnyString)))`, used in

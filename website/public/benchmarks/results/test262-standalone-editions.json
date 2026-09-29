@@ -48,8 +48,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11154,
-    "fail": 521,
+    "pass": 11163,
+    "fail": 512,
     "ce": 29,
     "skip": 0,
     "total": 11704,
@@ -66,8 +66,8 @@
       },
       {
         "name": "generators",
-        "pass": 2451,
-        "fail": 28,
+        "pass": 2457,
+        "fail": 22,
         "ce": 7,
         "skip": 0,
         "total": 2486,
@@ -75,8 +75,8 @@
       },
       {
         "name": "default-parameters",
-        "pass": 1551,
-        "fail": 1,
+        "pass": 1552,
+        "fail": 0,
         "ce": 0,
         "skip": 0,
         "total": 1552,
@@ -84,8 +84,8 @@
       },
       {
         "name": "TypedArray",
-        "pass": 1005,
-        "fail": 45,
+        "pass": 1007,
+        "fail": 43,
         "ce": 0,
         "skip": 0,
         "total": 1050,
@@ -426,12 +426,12 @@
       },
       {
         "name": "super",
-        "pass": 15,
-        "fail": 4,
+        "pass": 18,
+        "fail": 1,
         "ce": 0,
         "skip": 0,
         "total": 19,
-        "pct": 79
+        "pct": 95
       },
       {
         "name": "Symbol.unscopables",
@@ -1507,8 +1507,8 @@
   },
   {
     "edition": "ES2020",
-    "pass": 1136,
-    "fail": 725,
+    "pass": 1137,
+    "fail": 724,
     "ce": 156,
     "skip": 18,
     "total": 2035,
@@ -1516,8 +1516,8 @@
     "features": [
       {
         "name": "BigInt",
-        "pass": 631,
-        "fail": 340,
+        "pass": 632,
+        "fail": 339,
         "ce": 77,
         "skip": 0,
         "total": 1048,
@@ -1525,8 +1525,8 @@
       },
       {
         "name": "TypedArray",
-        "pass": 415,
-        "fail": 218,
+        "pass": 416,
+        "fail": 217,
         "ce": 75,
         "skip": 0,
         "total": 708,
@@ -3571,21 +3571,21 @@
   },
   {
     "edition": "ES2026",
-    "pass": 4593,
+    "pass": 4595,
     "fail": 192,
-    "ce": 136,
+    "ce": 134,
     "skip": 0,
     "total": 4921,
     "pct": 93,
     "features": [
       {
         "name": "Temporal",
-        "pass": 4494,
+        "pass": 4496,
         "fail": 107,
-        "ce": 10,
+        "ce": 8,
         "skip": 0,
         "total": 4611,
-        "pct": 97
+        "pct": 98
       },
       {
         "name": "Symbol",
@@ -4305,8 +4305,8 @@
   {
     "edition": "Unclassified (untagged)",
     "pass": 4538,
-    "fail": 835,
-    "ce": 72,
+    "fail": 836,
+    "ce": 71,
     "skip": 0,
     "total": 5445,
     "pct": 83
