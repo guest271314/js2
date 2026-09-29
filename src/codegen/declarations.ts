@@ -1818,6 +1818,7 @@ function registerBodylessFunctionDeclaration(
       const param = stmt.parameters[i]!;
       params.push(lowerParamType(ctx, param, name, i, stmt, sourceFile));
     }
+    if (noJsHost(ctx)) registerResolvedRestParam(ctx, name, stmt, params); // (#6651 A10) rest packs like a plain function
     const nativeGenerator = registerNativeGenerator(ctx, stmt, name, params);
     results = nativeGenerator ? [{ kind: "ref", typeIdx: nativeGenerator.stateTypeIdx }] : [{ kind: "externref" }];
   } else if (resolved) {
@@ -2941,6 +2942,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
           const param = stmt.parameters[i]!;
           params.push(lowerParamType(ctx, param, name, i, stmt, sourceFile));
         }
+        if (noJsHost(ctx)) registerResolvedRestParam(ctx, name, stmt, params); // (#6651 A10) rest packs like a plain function
         const nativeGenerator = registerNativeGenerator(ctx, stmt, name, params);
         results = nativeGenerator ? [{ kind: "ref", typeIdx: nativeGenerator.stateTypeIdx }] : [{ kind: "externref" }]; // JS-host fallback returns a Generator object
       } else if (resolved) {

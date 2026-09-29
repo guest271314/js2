@@ -178,6 +178,25 @@ loc-budget-allow:
   # `.next()` in a module that reified %GeneratorFunction.prototype% trapped).
   # The check must sit at the re-entry point; there is no leaf to move it to.
   - src/codegen/generators-native-consumer.ts
+  # 2026-09-28 — cluster A, slice A10 (record under the A10 claim). Four
+  # god-files, every path already listed below and restated per the
+  # stranded-grant rule; about half of each is the comment recording why a bail
+  # was lifted. The delegation-slot cast lives in the NEW leaf
+  # `generator-delegation-slot.ts`, the new predicates in
+  # `generators-native-ast-scan.ts` / `generator-yield-nested.ts`.
+  #   - `src/codegen/generators-native.ts` +44: the candidate gate's four A10
+  #     admissions (standalone literal-method `super`, runtime-keyed class
+  #     members, static-vs-instance uniqueness, rest params without a JS host)
+  #     and the returning-`finally` routing — each is a clause inside a gate
+  #     that already exists here, so it cannot move.
+  #   - `src/codegen/expressions/new-super.ts` +12: `objectLiteralSuperReceiver`
+  #     and its three call sites — the §12.3.5.3 receiver inside a generator
+  #     resume function is the frame's `this`, not `__current_this`.
+  #   - `src/codegen/closures.ts` +4: `computeClosureWrapperSig` no longer asks
+  #     the checker for a yield-keyed generator method's signature (TypeScript
+  #     recursed without bound).
+  #   - `src/codegen/declarations.ts` +2: the top-level generator branches
+  #     register the rest vec (`registerResolvedRestParam`) in no-host lanes.
   # 2026-09-29 — cluster A, slice A11 groups 3/4. `src/codegen/literals.ts` +2:
   # one import and the `argumentsBeforeDefaults` call in the object-literal
   # method path (the `arguments` object must exist before a parameter default
@@ -1108,6 +1127,12 @@ loc-budget-allow:
   # `promise-subclass-cell-read.ts`; the hand-off cannot move, because it is the
   # arm that would otherwise emit the bare `global.get` of the cell.
 func-budget-allow:
+  # 2026-09-28 — cluster A, slice A10 (paths already listed below, restated per
+  # the stranded-grant rule). `buildNativeGeneratorPlan` +5: the one clause that
+  # routes a `finally` holding a `return` to `lowerTryRegion` (its comment is 4
+  # of the 5 lines). `registerNativeGenerator` +1: `capturesDynamicThis` also
+  # snapshots the receiver for a `super`-using literal method.
+  # `collectDeclarations` +1: the rest-vec registration in the generator branch.
   # 2026-09-29 — cluster A, slice A11 groups 3/4. `compileObjectLiteralForStruct`
   # +1: the `argumentsBeforeDefaults` call (same wiring as the literals.ts line
   # grant above); the gate on the arguments-object setup changes in place.
@@ -10440,6 +10465,185 @@ them. Only the two rest-parameter rows were still open.
   the eval-dependent `scope-param-rest-elem-var-*` rows (5, both lanes) together with eval.
 - **gc only:** a contextually-typed IIFE rest lowers to a tuple struct whose dynamic `.length`
   reads NaN (`rest-parameters/rest-index.js`, `arrow-function.js` on gc).
+
+### A10 claimed — 2026-09-28 (generator rows that fail to compile or leak host imports, standalone)
+
+Cluster A (claimed above under `## Cluster status`), same session. Branch
+`claude/es6-6651-a10-gen-host-leaks`, cut from `origin/main` @ `d7e1d646c8`; WIP
+PR opened before code. The fix admits these shapes to the native lowering; it
+adds no host import. Rows (all non-pass standalone on `fd02938f8d`):
+
+| group | rows |
+| --- | --- |
+| (a) module-code generator declaration leaks `env::<fn name>` (#2961) | `language/module-code/{eval-export-dflt-expr-gen-named,eval-export-dflt-expr-gen-anon,instn-named-bndng-dflt-gen-named,instn-named-bndng-dflt-gen-anon,instn-named-bndng-gen,instn-iee-bndng-gen}.js` |
+| (b) object/class generator method falls back to the host generator runtime | `expressions/object/concise-generator.js`, `statements/class/definition/fn-name-gen-method.js`, `expressions/object/method-definition/generator-super-prop-body.js` |
+| (c) rest-parameter generator bails (#680 "sequential numeric yields") or leaks | `scope-param-rest-elem-var-{open,close}.js` under `statements/generators/`, `expressions/generators/`, and `expressions/object/scope-gen-meth-param-rest-elem-var-{open,close}.js` |
+| (d) crash / invalid Wasm / residual bail | `expressions/object/method-definition/generator-prop-name-yield-expr.js` (stack overflow), `statements/generators/yield-star-before-newline.js` (invalid Wasm, #2170), `built-ins/GeneratorPrototype/return/try-finally-set-property-within-try.js` (A5 target 3) |
+
+Out of scope: `module-code/namespace/internals/` and `yield/from-with.js`
+(project-thread lane), `built-ins/GeneratorFunction/**` (A9, PR #6274), and the
+value-semantics rows left for A11. The A10 record lands under this heading.
+
+**Group (a) released — 2026-09-28**, same day, before any code. The leak is
+not generator lowering: the rows self-import their own module, and the
+non-generator twins leak identically (`eval-export-dflt-expr-fn-named` →
+`env::f`). The cause is module linkage plus import-binding immutability, which
+belongs to cluster I (project-thread lane). The finding is recorded in the A10
+record below so the owner can act without redoing it.
+
+#### A10 record — 2026-09-28
+
+PR #6282, branch `claude/es6-6651-a10-gen-host-leaks`. Every number below was
+measured in this session, and the artifact each came from is named. Base =
+`origin/main` @ `adb4856530` (I7 included), branch = `8b957a7f3f`; both measured
+as frozen copies (`git archive` base, `cp -r` branch snapshot, md5 recorded),
+each with its own QuickJS adapter (base `f0509dc78d8536c9`, branch
+`e7ca8eb342e85ee4`). Runner lane `scripts/run-test262-paths.mts --isolate`,
+`JS2WASM_EVAL_ENGINE=quickjs`, `COMPILER_POOL_SIZE=1`, `nice -n 10` (the
+coordinator's ≤50-path rule for running outside the shared lock).
+
+| row | standalone base → branch | host base → branch |
+| --- | --- | --- |
+| `expressions/object/concise-generator` | CE (leak `__gen_result_value`) → **pass** | fail → fail |
+| `statements/class/definition/fn-name-gen-method` | CE (leak `__create_generator`) → **pass** | fail → fail |
+| `statements/generators/yield-star-before-newline` | fail (invalid Wasm) → **pass** | pass → pass |
+| `expressions/object/method-definition/generator-super-prop-body` | CE (leak) → fail | fail → fail |
+| `expressions/object/method-definition/generator-prop-name-yield-expr` | CE (TS stack overflow) → fail | fail → fail |
+| `{statements,expressions}/generators/scope-param-rest-elem-var-{open,close}` (4) | CE (#680 / leak) → fail | fail → fail |
+| `expressions/object/scope-gen-meth-param-rest-elem-var-close` | CE (leak) → fail | pass → pass |
+| `expressions/object/scope-gen-meth-param-rest-elem-var-open` | CE (leak) → fail | fail → fail |
+| `built-ins/GeneratorPrototype/return/try-finally-set-property-within-try` | CE (#680) → CE (#680) | fail → fail |
+
+Standalone **+3 pass**, 8 CE → fail (every one now reaches its assertion,
+host-free), 1 CE → CE, **0 pass → non-pass**; host unchanged (its bytes are
+identical, below). Logs: `.tmp/a10/m4-{base3,r4}-{sa,host}.log` (12 targets plus
+`staging/sm/generators/return-finally.js`, the one other row whose standalone
+bytes move; `skip` on every leg). Group (a) is not in the table — released.
+
+**What changed, and why.** No host import is added; every change admits a
+shape to the native lowering or fixes what the native path emitted.
+
+- **(b) `super` in an object-literal generator method** (`concise-generator`,
+  `generator-super-prop-body`). The candidate gate refused any method body with
+  `super`. A standalone literal method already runs through the closure lane
+  (`emitObjectLiteralMethodFn`, #4688), whose closure carries the
+  [[HomeObject]] as the `__js2_super_home_object` capture; the native resume
+  function rehydrates captures by name, so the home object is there. What was
+  missing is the receiver: the body runs in the RESUME function, after the call
+  that bound `this` has returned, so `__current_this` belongs to whoever called
+  `.next()`. `capturesDynamicThis` now also snapshots the receiver for a
+  `super`-using literal method, and `new-super.ts` reads the super receiver from
+  the resume function's `this` local (`objectLiteralSuperReceiver`). Class
+  methods keep the bail: their resume function has neither. Pinned with a
+  borrowed receiver (`other.g = object.g` → `super.who()` reads `other.tag`).
+- **(b) runtime-keyed class generator methods** (`fn-name-gen-method`). A
+  standalone class keys an unfoldable computed member by its synthetic
+  `__cmdyn$<ordinal>` name (#5195); the gate now accepts that key instead of
+  bailing. The #2938 uniqueness bail also counted `static *id()` against
+  `*id()`; `classMemberFuncKey` has since given the static member its own
+  funcMap key, so only same-placement members count now.
+- **(c) rest parameters.** Lifted from both shape gates when there is no JS
+  host. The fn-expr, literal-method, class-method and nested-declaration emit
+  sites already pass the packed rest vec as an ordinary param; the top-level
+  declaration branch now registers it (`registerResolvedRestParam`) so call
+  sites pack trailing arguments. Host keeps the bail (bytes identical, below).
+- **(d) `*[yield]() {}` inside a generator** (`generator-prop-name-yield-expr`):
+  `computeClosureWrapperSig` asked the checker for the method's signature, and
+  TypeScript recursed without bound (`checkYieldExpression` → the method's
+  contextual return type → the literal's contextual type → the same yield). A
+  generator's wrapper returns externref anyway, so the question is no longer
+  asked for that shape (`isGeneratorMethodWithYieldKey`).
+- **(d) `yield* g2()` with `g2` declared after the outer generator**
+  (`yield-star-before-newline`, #2170): the delegation slot is typed `eqref`
+  when the inner is not registered yet, and both readers narrowed it with
+  `ref.as_non_null`, which V8 rejects. An `eqref` slot is now cast to the inner
+  state (new leaf `generator-delegation-slot.ts`); typed slots keep their bytes.
+- **(d) A5's target 3, two of its three pieces.** (1) A yield-free `finally`
+  that `return`s went down the legacy replay, which compiles the `return` raw in
+  the resume function — `.return(v)` at the suspension trapped on a null
+  dereference, on both lanes. Such a `try` now takes `lowerTryRegion`, whose
+  finally makes the return a completion. (2) A top-level `<member> = yield`
+  statement (`bodyHasMemberTargetYield`) joins A6's nested-yield gate and is
+  ordered by A5's walker. (3), a continuation INSIDE a try region, is not done —
+  see residuals — so the target row itself stays a #680 refusal.
+
+**Group (a), released** (the finding, for the module-code owner). The six
+module-code rows self-import their own module (`import g from
+'./<own-file>.js'`). The single-source `compile()` has no module record for that
+edge: `preprocessImports` rewrites the import as a declared binding, which
+becomes the host import `env::g`. Nothing generator-specific: the function twins
+`eval-export-dflt-expr-fn-{named,anon}`, `instn-named-bndng-dflt-fun-{anon,named}`
+and `instn-named-bndng-fun` leak identically (standalone baseline), and all 31
+`module-code/{eval-export-dflt-expr,instn-named-bndng,instn-iee-bndng}*` rows
+fail on host (host baseline 2026-09-28). The runner already routes
+self-importing tests through `compileMulti` — scoped on purpose to
+`language/module-code/namespace/` (`tests/test262-shared.ts:842`,
+`tests/test262-runner.ts:4497`, #4759); `compileMulti` on
+`eval-export-dflt-expr-gen-named` emits no import (verdict not measured).
+`instn-iee-bndng-gen` differs by lane: it imports a `_FIXTURE`, so CI compiles
+the fixture graph (standalone `fail`, host "Expected a TypeError" — the `B =
+null` write to an import binding must throw), while the in-process
+`run-test262-paths` lane has no fixture-graph branch and reports a leak
+(`env::B`).
+
+**Controls.**
+
+| control | result |
+| --- | --- |
+| compile-only differential, base `adb4856530` vs branch `8b957a7f3f`, one fresh process per tree and lane (`.tmp/a10/diffcomp.mts`, the runner's original-harness assembly and options): the 113-row reach set (every test262 file with a generator shape any A10 change touches, TS-parser selected — yield-keyed method 1, `yield* f()` 45, literal-method `super` 3, class computed / same-name generator methods 7, rest param 54, returning `finally` 4, member-target yield 1; no harness file matches) plus the 182 cluster-A manifest rows outside it | **host 295/295 byte-identical**; standalone 283 identical, 12 changed — the target rows above minus `try-finally-…`, plus `staging/sm/generators/return-finally.js` (leak → leak; `skip` in the runner) |
+| the same differential one merge earlier (`c8b4f0ef36` vs `2994524b90`, 113 rows) | identical outcome |
+| 17 playground + benchmark programs × {gc, standalone} (`.tmp/a10/pgbytes.mts`) | **34/34 byte-identical** |
+| pin suite `tests/issue-6651-a10-gen-host-leaks.test.ts` (11) | 11/11 green; on base 10 red, and the 11th (yield-keyed method) crashes the vitest worker (the TS recursion, then OOM) |
+| gates | `check-loc-budget`, `check-func-budget` (both also with `LOC_GATE_BASE` = origin/main), `check-coercion-sites`, `check:oracle-ratchet` (+0 / +0), `check:dead-exports`, `typecheck`, `biome lint --diagnostic-level=error`, `check-host-import-policy`, prettier, `check-compiler-boundaries --mode inventory` (`inventoryValid: true`, new leaf registered), `check:ir-fallbacks` — all green |
+| **not run** | the manifest runner sweep before/after, `equivalence-gate`, `run-guard-suite`, and vitest over `issue-6651-*` / `*generator*` / `issue-2864-*`. All four were queued under the shared lock behind a two-hour run; then the container's disk began returning I/O errors (`EXT4-fs error … reading directory block`, git reads dying with SIGBUS) and they were stopped. The manifest rows' binaries are covered by the differential above: an unchanged binary cannot change verdict. |
+
+**Residuals (measured, not taken).**
+
+- **`try-finally-set-property-within-try` (d, CE → CE).** Needs a
+  continuation INSIDE a try region. Every structured region (`if`, loops,
+  `try` blocks, `lowerTryRegion`'s three `lowerStatements` calls) lowers its
+  statements with `allowExpressionContinuations = false`, and
+  `lowerNestedOrRefuse` also demands `unwind.length === 0`. A10 fixed the other
+  two pieces A5 named (returning `finally`; top-level `obj.foo = yield`). The
+  design question: admit A5's nested walker inside a region by threading the
+  region's unwind chain into each suspension (`NestedYieldHost.suspend` already
+  takes `unwind`) and proving the deferred statement's successor state compiles
+  inside the region's try/finally structure — `.return(45)` at that suspension
+  must run the finally's `return 1` and never reach the PutValue.
+- **`generator-prop-name-yield-expr` (d, CE → fail).** Not a generator question:
+  `var obj = null` assigned only inside another function is read as the
+  checker-narrowed `null` by `Object.prototype.hasOwnProperty.call(obj, k)`,
+  which then throws "called on null or undefined" (the message the #5197
+  evolving-var receiver guard emits; the path was not traced further). Reproduced with no generator at all
+  (`var o = null; function s() { o = {a: 1} } s(); hasOwnProperty.call(o, 'a')`,
+  same TypeError on base). The literal itself is right:
+  `getOwnPropertyNames(obj)` is `["propNameViaExpression"]` (pinned).
+- **`generator-super-prop-body` (b, CE → fail).** Fails exactly as its
+  non-generator twin `method-definition/name-super-prop-body.js` does on both
+  lanes: `super.toString` after `obj.toString = null` reads `null`.
+- **The six rest rows (c, CE → fail).** Past the bail, each fails as its host
+  twin does. The shared cause is not generator lowering: a rest parameter with
+  a BINDING PATTERN receives `null` instead of an empty array when called with
+  no trailing arguments — `function f(...[a = 5]) { return a } f()` throws
+  "Cannot destructure 'null' or 'undefined'" on base, no generator involved
+  (identifier rests are fine: `function* e(...a) {}; e()` has `a.length === 0`,
+  pinned). The rows call `g()` / `.m()` with no arguments. The `-open` rows
+  additionally need I7/SC1's parameter-scope ordering (a closure built before
+  the eval must see its `var`). Recorded against I7's residual 3.
+- **Runtime-keyed class generator methods called on an INSTANCE.**
+  `new A()[sym]()` throws "Cannot read properties of undefined (reading a class
+  field)" — the method trampoline's null-receiver TypeError. A generator
+  factory always reads its receiver (it stores it in the frame), and the
+  non-generator `[sym]() { return this.v }` throws the same TypeError on base,
+  so the receiver does not reach a runtime-keyed class method on this call
+  path. Not diagnosed further. The static form works (pinned);
+  `fn-name-gen-method` reads only `.name`.
+- **Pre-existing, seen while probing (not introduced, base-verified):** a
+  literal `*m()` and a class `*m()` of the same name mis-dispatch
+  (`illegal cast` on base; I7 records the rest-param twin); two nested
+  generator declarations of the same name in different functions, one
+  capturing, fail with "Missing native generator factory identity"
+  (`staging/sm/generators/iteration.js` is that shape, CE on base and branch).
 
 ## Handoff — 2026-09-21 (round 1 closed, round 2 ready to dispatch)
 
