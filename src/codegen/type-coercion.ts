@@ -18,7 +18,6 @@ import { canonicalUndefinedExternInstrs, ensureAnyFromExternHelper, undefinedExt
 import { anyValueElemFromExternInstrs } from "./anyvalue-elem-materialize.js"; // (#2717)
 import { ensureAnyToStringHelper, stringConstantExternrefInstrs } from "./native-strings.js";
 import { buildThrowJsErrorInstrs } from "./expressions/helpers.js";
-import { arrayLikeLengthLimitGuard } from "./proxy-array-like.js"; // (#6651 H6)
 import { ensureWrapperStringValueHelper } from "./object-runtime.js";
 import { ensureNativeArrayFromIterN } from "./iterator-native.js";
 import { markNoBrandSiblingShapes } from "./shape-brand.js";
@@ -963,7 +962,6 @@ export function buildVecFromExternref(
       [{ kind: "externref" }],
     );
   }
-  const lengthGuard = arrayLikeLengthLimitGuard(ctx, fctx); // (#6651 H6) before the flush
   flushLateImportShifts(ctx, fctx);
   const lenIdx = ctx.funcMap.get("__extern_length");
   const getIdx = ctx.funcMap.get("__extern_get");
@@ -1175,7 +1173,6 @@ export function buildVecFromExternref(
     ...matInstrs,
     { op: "local.get", index: matLocal },
     { op: "call", funcIdx: lenIdx },
-    ...lengthGuard,
     { op: "i32.trunc_sat_f64_s" },
     { op: "local.set", index: lenLocal },
     { op: "local.get", index: lenLocal },
