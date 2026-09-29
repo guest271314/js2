@@ -46,6 +46,7 @@ import { observeHostDynamicMethodCallArity } from "../dynamic-method-call-arity.
 import { NATIVE_HOF_METHODS } from "../hof-native.js";
 import { ensureTaMapFilterHelper } from "../ta-hof-map-filter.js";
 import { LAZY_ITER_METHODS } from "../iter-lazy-native.js"; // (#2903 R3b) flatMap closure-path exemption
+import { prepareBuiltinCtorValueInvoke } from "../builtin-ctor-value-invoke.js"; // (#6713)
 import {
   ensureBoundaryCallableKind,
   ensureObjVecBuilders,
@@ -4760,6 +4761,7 @@ export function tryEmitInlineDynamicCall(
   if (wantIsCallableGuard) {
     ensureBoundaryCallableKind(ctx); // (#6686) admitted JS functions are callable
     ensureLateImport(ctx, "__is_callable", [{ kind: "externref" }], [{ kind: "i32" }]);
+    prepareBuiltinCtorValueInvoke(ctx, fctx, expr.expression); // (#6713) RegExp/Error carrier [[Call]]
   }
   if (allCandidates.length === 0 && !wantProxyArm && !wantBoundArm && !wantTaCtorArm && !wantApplyFallback) return null;
 
