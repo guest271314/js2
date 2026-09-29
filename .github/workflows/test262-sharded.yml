@@ -1726,7 +1726,7 @@ jobs:
           ./node_modules/.bin/esbuild scripts/runtime-bundle-entry.ts --bundle --platform=node --format=esm \
             --outfile=scripts/runtime-bundle.mjs --external:typescript --external:binaryen
 
-      - name: Download compiled Temporal provider (#5353)
+      - name: Download compiled Temporal provider for the standalone linked shadow (#5353, #6723)
         uses: actions/download-artifact@v7
         with:
           name: temporal-provider-${{ github.run_id }}
