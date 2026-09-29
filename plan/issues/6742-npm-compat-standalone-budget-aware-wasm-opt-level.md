@@ -14,7 +14,7 @@ task_type: bug
 area: npm-compat, optimizer
 goal: standalone
 requested_by: ttraenkler/sendev-standalone
-related: [4157, 4586, 6732, 6737]
+related: [4157, 4586, 6732, 6737, 6746]
 files:
   - src/optimize.ts
   - scripts/lib/npm-compat-opt-budget.mjs
@@ -56,7 +56,7 @@ the aborted first `-O4` run cost another 3.7 / 13.5 / 9.5 / 13.4 CPU-s.
 | hono | 1,198,739 B | 9.2 s · 700,287 B | 19.4 s · 628,989 B | 28.7 s · 605,863 B | 30.0 s · 604,406 B |
 | moment | 2,688,019 B | 16.7 s · 1,906,795 B | 51.1 s · 1,840,535 B | 66.6 s · 1,819,542 B | 68.3 s · 1,816,804 B |
 | lodash-es | 5,822,763 B | 38.4 s · 4,233,275 B | 122.1 s · 3,842,673 B | 233.9 s · 3,632,177 B | 251.8 s · 3,627,787 B |
-| axios | 9,260,766 B | 56.8 s · 5,565,338 B | 140.8 s · 4,196,091 B | (see Resolution) | ≈38 min wall (#6732) · 3,820,273 B |
+| axios | 9,260,766 B | 56.8 s · 5,565,338 B | 140.8 s · 4,196,091 B | not measured | ≈38 min wall (#6732) · 3,820,273 B |
 
 Runtime speed (wasm-only, interleaved rounds, same seed, median µs/op, all
 checksums equal):
@@ -121,8 +121,11 @@ Lanes are `standalone-dynamic`, run locally one at a time at the same load.
 
 | lane | before (`c8b4f0ef36`) | after |
 |---|---|---|
-| axios | `optimization-error` after 837,661 ms: `wasm-opt -O4 failed: unexpected expr type … Flatten.cpp:231! Aborted() … var Module=typeof Module…` (retry reason cut off) | see PR body (filled from the lane record) |
-| lodash-es | `optimization-error` after 902,967 ms: same Flatten text; the retry was killed at 600 s under load | see PR body (filled from the lane record) |
+| axios | `optimization-error` after 837,661 ms: `wasm-opt -O4 failed: unexpected expr type … Flatten.cpp:231! Aborted() … var Module=typeof Module…` (retry reason cut off) | **no optimizer error.** Planned `-O2` (raw 9,260,766 B > the 7 MB O4 ceiling). `-O2` timed out at 600 s under load, and `-O1` produced 5,565,338 B, recorded `optimizationLevel: 1`. Next gate: `host-import-error: standalone binary retained 57 host import(s)` (23 at `-O2`) → [#6746](https://js2wasm.loopdive.com/dashboard/issue.html?slug=6746-standalone-axios-retained-host-imports) |
+| lodash-es | `optimization-error` after 902,967 ms: same Flatten text; the retry was killed at 600 s under load | **`measured`**, checksum 54 = 54, 0 imports. `-O4` timed out at 600 s under load, and `-O2` produced 3,842,673 B, recorded `optimizationLevel: 2`, `optimizationLevelReason: "-O4 timed out"`. On an unloaded box, `-O4` (251.8 CPU-s) is expected to finish. |
+
+Both "after" runs were at load 30–390 on 8 cores. That is why both lanes
+stepped down a rung. The attempt log records each step.
 
 Tests: `tests/issue-6742-wasm-opt-budget.test.ts`.
 
@@ -130,7 +133,7 @@ Tests: `tests/issue-6742-wasm-opt-budget.test.ts`.
   test and the retry-text test).
 - Parent tree: the whole file fails, because the new module does not exist
   there.
-- Fix: 11 / 11 pass. This includes a real `try_table` fixture through the
+- Fix: 10 / 10 pass. This includes a real `try_table` fixture through the
   lane optimizer at O4 (Flatten omitted), and the same fixture at a
   budget-lowered O2. Both run correctly.
 
