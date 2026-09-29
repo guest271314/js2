@@ -379,3 +379,69 @@ moved; the comparison above is against a base run executed today.)
   function (`$DONE()`) works — cross-module closure-value call, same family as
   the other D4 classes. Rare in test262 (async rows go through `$DONE`).
 - D4 classes 1, 2, 5, 6, 7 unchanged.
+
+## P1/P2 wiring (2026-09-29)
+
+Scripts + workflow only; no `src/` change.
+
+**Cache key (P1).** `test262HarnessProviderCacheDir()`
+(`scripts/test262-harness-cache.mjs`) now returns
+`<root>/bundle-<compiler bundle hash>`, where `<root>` is
+`JS2WASM_TEST262_HARNESS_CACHE` (still the override) or the tmpdir default. The
+hash is `test262CompilerBundleHash()` — the worker's #1521 `BUNDLE_HASH` rule
+moved into that module (`TEST262_BUNDLE_HASH`, else sha256 of
+`scripts/compiler-bundle.mjs` / `index.js`), and the worker now imports it, so
+the result-row stamp and the cache key cannot disagree. A cache built by a
+different compiler is a miss, never a stale provider. The prewarm's
+`--cache-dir` is a root too. Why the directory and not the provider key:
+the key lives in `src/test262-harness-provider.ts` (out of scope for this
+lane) and a directory split also retires the whole stale set at once.
+
+**Runtime opt-in (P2).** The oracle-lane choice moved from an inline ternary in
+`tests/test262-shared.ts` to `test262OracleLane()` in the same module. With
+`TEST262_STANDALONE_LINKED` unset it is the old gate exactly
+(`TEST262_ORACLE_MODE === "linked" && IS_HOST_LANE`; asserted over every
+mode x target in `tests/issue-6723-p1-harness-cache-lane.test.ts`). With it
+`=1`, `linked` is admitted on `TEST262_TARGET=standalone` only (not wasi/linear).
+
+**Workflow (`test262-sharded.yml`).** New `workflow_dispatch` input
+`standalone_linked` (default false) and three jobs, all
+`if: github.event_name == 'workflow_dispatch' && inputs.standalone_linked`:
+
+| job | does |
+|---|---|
+| `standalone-harness-provider` | builds the compiler bundle, runs `node --import tsx scripts/prewarm-test262-harness-providers.mjs --target standalone` (soft), uploads `.test262-cache/harness` as `standalone-harness-provider-<run_id>` |
+| `test262-standalone-linked` (57 chunks) | the standalone cells' env + `TEST262_ORACLE_MODE=linked`, `TEST262_STANDALONE_LINKED=1`, `TEST262_RESULT_PREFIX=test262-standalone-linked`; downloads Temporal, runtime-eval and harness providers |
+| `merge-standalone-linked-report` | validates 57/57, builds a report, runs `scripts/test262-linked-parity.mjs` vs the promoted standalone baseline (`fetch-baseline-jsonl.mjs --standalone`) and vs the same run's honest standalone cells; uploads `test262-standalone-linked-<sha>` |
+
+A separate matrix rather than flipping the standalone cells of `test262-shard`:
+renaming those cells' prefix would leave `merge-report` with no standalone rows.
+`promote-baseline` gains `!(workflow_dispatch && inputs.standalone_linked)`, so a
+shadow dispatch never promotes. With the input off: no new job is scheduled on
+any event, no existing job's steps or env changed, nothing required `needs:` the
+new jobs. `merge-report`'s `test262-*-shard-*` download may pick up the shadow
+artifacts on a dispatch, but every merge step globs
+`test262-{js-host,standalone}-shard-*` only (same as the honest-audit ones).
+
+**Dispatch the shadow run:** Actions -> Test262 Sharded -> Run workflow on
+`main`, check `standalone_linked`. Evidence: artifact
+`test262-standalone-linked-<sha>` (`*-parity-vs-baseline.json`,
+`*-parity-same-run.json`, merged jsonl/report).
+
+**Local proof** (4-core box, `COMPILER_POOL_SIZE=3`, quickjs, 20 rows drawn
+with `random.seed(6723)` from the P0 360-row sample; script `.tmp/proof.sh`,
+local only):
+
+- `prewarm --target standalone --limit 8` into a fresh dir: 8 providers, 0
+  failed, 32.5 s (2.6-5.4 s each, all `cacheHit=false`), cache
+  `.tmp/hc/bundle-7366cd118fa1a6d8`.
+- prewarm over the 20 rows' dir: 5 prefixes, 4 `cacheHit=true`, 1 new
+  (`asyncHelpers` set) built.
+- linked run (`TEST262_STANDALONE_LINKED=1`, no file edit): 9/9 provider loads
+  `cacheHit=true`, **0 cold builds, 0 timeouts**; 16 linked + 4 fallback rows;
+  10 pass / 9 fail / 1 CE; **20/20 verdicts identical** to P0's
+  `p0b-sa-linked` rows (the fails are the known D4 classes). Result file
+  `benchmarks/results/p1proof-sa-linked-results-p1proof.jsonl` (local only).
+- First attempt had every eval-using row fail with "quickjs provider is not
+  built": the local QuickJS adapter is keyed on the compiler bundle; rebuilt
+  with `node scripts/build-quickjs-eval-provider.mjs`. CI builds it per run.

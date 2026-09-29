@@ -10,10 +10,8 @@ import { parseTest262SemanticProviders } from "./test262-lane.mjs";
  * When execute=false: compile only, write to disk (for cache warming).
  * When execute=true: compile + instantiate + run test(), return full result.
  */
-import { readFileSync, writeFileSync } from "node:fs";
-import { createHash } from "node:crypto";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { createContext, runInContext } from "node:vm";
 import { compile, compileMulti, createIncrementalCompiler } from "./compiler-bundle.mjs";
 // (#5353) NAMESPACE imports, deliberately, for the two symbol sets this worker
@@ -58,7 +56,7 @@ import {
   temporalProviderDisabled,
   test262TemporalLaneEnabled,
 } from "./test262-temporal.mjs";
-import { test262HarnessProviderCacheDir } from "./test262-harness-cache.mjs";
+import { test262CompilerBundleHash, test262HarnessProviderCacheDir } from "./test262-harness-cache.mjs";
 
 // ── Bundle hash (#1521) ────────────────────────────────────────────────
 // Each cache entry written below carries a `bundle_hash` field. When the
@@ -72,19 +70,8 @@ import { test262HarnessProviderCacheDir } from "./test262-harness-cache.mjs";
 //   2. sha256 of the source-runner compiler bundle or packaged compiler entry
 //
 // Computed once per worker startup — cheap (a few MB read + sha256).
-const _workerDir = dirname(fileURLToPath(import.meta.url));
-function computeBundleHash() {
-  const fromEnv = process.env.TEST262_BUNDLE_HASH;
-  if (fromEnv && fromEnv.length > 0) return fromEnv;
-  for (const file of ["compiler-bundle.mjs", "index.js"]) {
-    try {
-      const buf = readFileSync(join(_workerDir, file));
-      return createHash("sha256").update(buf).digest("hex").slice(0, 16);
-    } catch {}
-  }
-  return "no-bundle";
-}
-const BUNDLE_HASH = computeBundleHash();
+// (#6723 P1) One implementation, shared with the harness-provider cache key.
+const BUNDLE_HASH = test262CompilerBundleHash();
 
 // ── Standalone runtime-eval provider (#2928 E6/E7, now shared — #4162) ──
 // A standalone module whose ONLY dynamic-code dependency is the core-Wasm
