@@ -169,6 +169,21 @@ assignee: "ttraenkler/fable-es2015-plan"
 #     `$__ta_ctor`, which the Int8Array `$Object` carrier is not). The first cut
 #     inlined the arm here and cost +68 / +65; extracting it left these 8.
 loc-budget-allow:
+  # 2026-09-29 — cluster A, slice A13. Wiring only; each mechanism's logic sits
+  # in a leaf (`object-literal-super-base.ts`, `generators-native-protocol.ts::
+  # orNativeGeneratorCarrierInstrs`):
+  # - `dataview-native.ts` +3: an import and one spread (+ comment) in the
+  #   §23.2.5.1 step 6 object-arm gate (a native generator object);
+  # - `expressions/new-super.ts` +7: the object-literal super reader takes the
+  #   AST anchor (threaded through its four callers) and its home-object step
+  #   may push the base itself (closed-struct literal → %Object.prototype%);
+  # - `context/types.ts` +2 and `declarations/import-collector.ts` +3: the
+  #   `usesSourceGenerator` prescan flag, which keeps the new TypedArray arm out
+  #   of every module that declares no generator (byte-identical there).
+  - src/codegen/dataview-native.ts
+  - src/codegen/expressions/new-super.ts
+  - src/codegen/context/types.ts
+  - src/codegen/declarations/import-collector.ts
   # 2026-09-29 — cluster A, slice A11 groups 3/4. `src/codegen/literals.ts` +2:
   # one import and the `argumentsBeforeDefaults` call in the object-literal
   # method path (the `arguments` object must exist before a parameter default
@@ -1092,6 +1107,10 @@ func-budget-allow:
   # also admits a native generator object. The test itself is the NEW export
   # `generators-native-protocol.ts::orNativeGeneratorCarrierInstrs`.
   - src/codegen/dataview-native.ts::emitTaDynCtorConstructInline
+  # 2026-09-29 — cluster A, slice A13. `unifiedVisitNode` +3: the
+  # `usesSourceGenerator` prescan flag (see the loc grant above) — one `if`
+  # beside the `usesSourceThrowStatement` flag it mirrors.
+  - src/codegen/declarations/import-collector.ts::unifiedVisitNode
   # 2026-09-29 — cluster A, slice A11 groups 3/4. `compileObjectLiteralForStruct`
   # +1: the `argumentsBeforeDefaults` call (same wiring as the literals.ts line
   # grant above); the gate on the arguments-object setup changes in place.
