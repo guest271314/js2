@@ -107,6 +107,7 @@ import {
   reserveBuiltinCollectionDynConstruct,
 } from "../builtin-collection-dyn-construct.js"; // (#6720)
 import { resolveDefaultExpressionImportGlobal } from "../default-expression-import-global.js";
+import { isValueSelectingNewCallee, isValueSelectingNewSite } from "./new-value-selecting-callee.js"; // (#6738)
 import { emitNativeNumberFormat } from "../number-format-native.js";
 import { compileStandaloneRegExpConstructor, isGlobalRegExpConstructorExpression } from "../regexp-standalone.js";
 import { singleReturnExpressionOfCall, tracesToProxyConstructorValue } from "../proxy-value-provenance.js"; // (#5196 R3-0); (#6651 F4)
@@ -3992,11 +3993,13 @@ function tryCompileNativeConstructFromValue(
   // NULL. `resolvesToDynamicAnyCtorValue` is the same admission the host lane
   // uses, and it declines an UNDECLARED base (#4728) — so the host-global
   // `new Temporal.X(…)` lane is untouched.
-  const dynamicMemberCtorValue =
+  // (#6738) …and a callee that SELECTS a ctor value at run time, `new (a || B)()`.
+  const dynamicCtorValue =
     noJsHost(ctx) &&
-    (ts.isPropertyAccessExpression(calleeExpr) || ts.isElementAccessExpression(calleeExpr)) &&
-    resolvesToDynamicAnyCtorValue(ctx, calleeExpr);
-  if (!ts.isIdentifier(calleeExpr) && !runtimeEvalCallableResult && !dynamicMemberCtorValue) return undefined;
+    (((ts.isPropertyAccessExpression(calleeExpr) || ts.isElementAccessExpression(calleeExpr)) &&
+      resolvesToDynamicAnyCtorValue(ctx, calleeExpr)) ||
+      isValueSelectingNewCallee(calleeExpr));
+  if (!ts.isIdentifier(calleeExpr) && !runtimeEvalCallableResult && !dynamicCtorValue) return undefined;
   // A compiled fnctor for this binding means the typed-struct path owns it.
   if (ts.isIdentifier(calleeExpr) && ctx.funcConstructorMap.has(calleeExpr.text)) return undefined;
   const runtimeFunctionAlias =
@@ -4012,7 +4015,7 @@ function tryCompileNativeConstructFromValue(
     !runtimeEvalCallableResult &&
     !proxyValue &&
     !proxyCtorValue &&
-    !dynamicMemberCtorValue &&
+    !dynamicCtorValue &&
     !resolvesToConstructableFunctionValue(ctx, calleeExpr) &&
     !resolvesToLateAssignedConstructSignatureValue(ctx, calleeExpr) &&
     !(noJsHost(ctx) && isDefaultExpressionImport(ctx, calleeExpr)) // (#6720) the snapshot cell's VALUE
@@ -7573,7 +7576,8 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     // admission itself, so this only opens the door.
     (noJsHost(ctx) &&
       (ts.isPropertyAccessExpression(expr.expression) || ts.isElementAccessExpression(expr.expression)) &&
-      resolvesToDynamicAnyCtorValue(ctx, expr.expression))
+      resolvesToDynamicAnyCtorValue(ctx, expr.expression)) ||
+    isValueSelectingNewSite(ctx, expr.expression, className) // (#6738)
   ) {
     const nativeCtor = tryCompileNativeConstructFromValue(ctx, fctx, expr.expression, expr.arguments ?? []);
     if (nativeCtor) return nativeCtor;
