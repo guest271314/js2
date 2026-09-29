@@ -169,6 +169,17 @@ assignee: "ttraenkler/fable-es2015-plan"
 #     `$__ta_ctor`, which the Int8Array `$Object` carrier is not). The first cut
 #     inlined the arm here and cost +68 / +65; extracting it left these 8.
 loc-budget-allow:
+  # 2026-09-29 — cluster H, slice H6 (record under the H6 claim).
+  # `src/codegen/object-runtime-enumeration.ts` +4: one import and three
+  # one-line `$Proxy` widenings of the array-like `$Object` arms of
+  # `__extern_length` / `__extern_get_idx` / `__extern_has_idx`. The predicate
+  # and its rationale live in the NEW leaf `proxy-array-like.ts`, the
+  # slice/splice routing in the NEW leaf `array-proxy-receiver.ts`.
+  # `array-methods.ts` +9, `context/types.ts` +7, `object-runtime.ts` +9
+  # (paths already listed below): the concat gate's fourth disjunct, the
+  # `proxyDirty` pre-scan flag, and the `$Proxy` test in the shared
+  # `__extern_get_idx` body builder.
+  - src/codegen/object-runtime-enumeration.ts
   # 2026-09-28 — cluster A, slice A10 (record under the A10 claim). Four
   # god-files, every path already listed below and restated per the
   # stranded-grant rule; about half of each is the comment recording why a bail
@@ -1118,6 +1129,10 @@ loc-budget-allow:
   # `promise-subclass-cell-read.ts`; the hand-off cannot move, because it is the
   # arm that would otherwise emit the bare `global.get` of the cell.
 func-budget-allow:
+  # 2026-09-29 — cluster H, slice H6. `buildObjectEnumerationHelpers` +2: the
+  # `$Proxy` widening of the `__extern_get_idx` / `__extern_has_idx`
+  # array-like arms (one line each; the predicate is `proxy-array-like.ts`).
+  - src/codegen/object-runtime-enumeration.ts::buildObjectEnumerationHelpers
   # 2026-09-28 — cluster A, slice A10 (paths already listed below, restated per
   # the stranded-grant rule). `buildNativeGeneratorPlan` +5: the one clause that
   # routes a `finally` holding a `return` to `lowerTryRegion` (its comment is 4

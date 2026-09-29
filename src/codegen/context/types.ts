@@ -1951,6 +1951,13 @@ export interface CodegenContext extends StandaloneCapabilityDemandState, BodyRou
    */
   arraySpeciesDirty: boolean;
   /**
+   * (#6651 H6) The module may hold a Proxy VALUE — the identifier `Proxy`
+   * occurs anywhere, or it contains dynamic code (`scanForArrayHoles`). Gates
+   * the `$Proxy` arm of the standalone `__extern_length` (§7.3.18), so a
+   * Proxy-free module keeps its bytes.
+   */
+  proxyDirty?: boolean;
+  /**
    * (#6485) The module can make `@@isConcatSpreadable` OBSERVABLE — it mentions
    * `isConcatSpreadable` anywhere (identifier, string literal, property name),
    * lets the `Symbol` intrinsic escape as a VALUE (`var S = Symbol`,

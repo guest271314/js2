@@ -182,6 +182,8 @@ export function scanForArrayHoles(ctx: CodegenContext, root: ts.Node): void {
     if (!ctx.isConcatSpreadableDirty && isIsConcatSpreadableObservable(node)) {
       ctx.isConcatSpreadableDirty = true;
     }
+    // (#6651 H6) Every Proxy VALUE starts at the identifier `Proxy`.
+    if (!ctx.proxyDirty && ts.isIdentifier(node) && node.text === "Proxy") ctx.proxyDirty = true;
     if (isOwnKeysOrDescriptorDefineUse(node)) {
       ctx.vecOwnKeysDirty = true;
       // ArraySetLength can expose absent f64 indices even when every literal
@@ -205,6 +207,7 @@ export function scanForArrayHoles(ctx: CodegenContext, root: ts.Node): void {
       ctx.vecIndexDeleteDirty = true;
       ctx.vecOwnKeysDirty = true;
       ctx.isConcatSpreadableDirty = true;
+      ctx.proxyDirty = true;
     }
     forEachChild(node, visit);
   };
