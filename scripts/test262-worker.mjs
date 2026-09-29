@@ -1763,14 +1763,21 @@ function extractWasmExceptionMessage(err, instance) {
       const t = typeof payload;
       if (t === "object" || t === "function") {
         const native = tryNativeExnRender(instance, payload);
-        if (native != null) return native;
+        // (#6723 D4) The consumer renders a PROVIDER-minted `Test262Error`
+        // (a provider fnctor instance) as the generic "[object Object]": its
+        // `toString` lives on the provider's prototype. Treat that answer as
+        // "not mine" when a linked peer can do better.
+        if (native != null && (native !== "[object Object]" || currentLinkedPeers.length === 0)) return native;
         // (#6723) A STANDALONE linked row: the payload may be minted by the
         // harness provider (a `Test262Error` thrown by `assert.*`), whose GC
         // layout only the provider's own `__exn_render_*` exports can read.
+        let generic = native;
         for (const peer of currentLinkedPeers) {
           const viaPeer = tryNativeExnRender({ exports: peer }, payload);
-          if (viaPeer != null) return viaPeer;
+          if (viaPeer != null && viaPeer !== "[object Object]") return viaPeer;
+          generic ??= viaPeer;
         }
+        if (generic != null) return generic;
       }
       return safeStringifyThrown(payload);
     }
