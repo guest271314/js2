@@ -115,12 +115,34 @@ import {
   bodyHasPatternYield,
   emitLinearOpStatement,
   emitLinearUnwindClose,
+  linearOpSourceNode,
   type LinearCloseEntry,
   type LinearizeHost,
   lowerLinearForOfBinding,
   lowerLinearizedStatement,
 } from "./generator-yield-linearize.js";
-import { desugarYieldExpressionStatement } from "./generators-native-general.js";
+import {
+  desugarYieldExpressionStatement,
+  isSelfContainedNestedFunction,
+  splitYieldingIfCondition,
+} from "./generators-native-general.js";
+import {
+  type LexicalRename,
+  planLexicalRenames,
+  setResumeLexicalRenames,
+  withLexicalRenames,
+} from "./generator-lexical-renames.js";
+import {
+  bindingPatternIdentifiers,
+  forOfNeedsLinearDrive,
+  isAnyArrayFact,
+  type JumpTarget,
+  lowerJumpStatement,
+  lowerLabeledStatement,
+  lowerPlannedSwitch,
+  statementHasEscapingJump,
+  type StructuredJumpHost,
+} from "./generator-structured-jumps.js";
 import {
   bodyHasComputedKeyYield,
   bodyHasNestedYield,
@@ -440,6 +462,8 @@ interface NativeGeneratorPlan {
    * in the resume fctx so identifier reads keep undefined observable.
    */
   undefWidenedPatternBindings: Set<string>;
+  /** (#6731) Block-scoped shadows spilled under their own names (generator-lexical-renames.ts). */
+  lexicalRenames?: readonly LexicalRename[];
 }
 
 function noJsHostTarget(ctx: CodegenContext): boolean {
@@ -637,6 +661,16 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   // (#3315/#3386) Pattern-bound names whose spill was undefined-preservation-
   // widened to externref; the resume fctx marks them `undefWidenedLocals`.
   const undefWidenedPatternBindings = new Set<string>();
+  // (#6731) Standalone: block-scoped shadows get their own spill (generator-lexical-renames.ts).
+  const lexical = noJsHostTarget(ctx)
+    ? planLexicalRenames(
+        decl,
+        (n) =>
+          (decl.body !== undefined && bodyDeclaresBinding(decl.body, n)) ||
+          decl.parameters.some((p) => ts.isIdentifier(p.name) && p.name.text === n),
+      )
+    : undefined;
+  const spillNameOf = (id: ts.Identifier): string => lexical?.variants.get(id) ?? id.text;
   const addSpill = (name: string, decl?: ts.VariableDeclaration): void => {
     if (decl !== undefined && !spillDecls.has(name)) spillDecls.set(name, decl);
     if (spillSet.has(name)) return;
@@ -745,7 +779,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     const declStmt = stmt.declarationList.declarations[0]!;
     if (!ts.isIdentifier(declStmt.name)) return null;
     if (!declStmt.initializer || !ts.isYieldExpression(declStmt.initializer)) return null;
-    return { name: declStmt.name.text, yieldExpr: declStmt.initializer };
+    return { name: spillNameOf(declStmt.name), yieldExpr: declStmt.initializer };
   };
 
   const statementsAreYieldFree = (statements: readonly ts.Statement[]): boolean =>
@@ -786,8 +820,108 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     enter: (id) => resetCursor(id),
     branch: (flag, thenState, elseState) => finishState(curId, { kind: "branch-flag", flag, thenState, elseState }),
     jump: (next) => finishState(curId, { kind: "jump", next }),
-    lowerBody: (statements, unwind) => lowerStatements(statements, unwind, false),
+    lowerBody: (statements, unwind, loop) =>
+      loop === undefined
+        ? lowerStatements(statements, unwind, false)
+        : withJumpTarget({ labels: takeLabels(), isLoop: true, unlabelledBreak: true, ...loop }, () =>
+            lowerStatements(statements, unwind, false),
+          ),
     closeEntry: (entry) => ({ kind: "dstr-close", ...entry }),
+  };
+
+  // (#6731) Structured jumps — see generator-structured-jumps.ts. `jumpTargets`
+  // is the stack of structurally lowered loops / switches / labelled blocks;
+  // `pendingLabels` carries a LabeledStatement's labels to the loop it labels.
+  const jumpTargets: JumpTarget[] = [];
+  let pendingLabels: string[] = [];
+  const takeLabels = (): string[] => {
+    const labels = pendingLabels;
+    pendingLabels = [];
+    return labels;
+  };
+  function withJumpTarget(target: JumpTarget, lower: () => boolean): boolean {
+    jumpTargets.push(target);
+    try {
+      return lower();
+    } finally {
+      jumpTargets.pop();
+    }
+  }
+  /**
+   * (#6731) Straight-line (a state prelude statement). Standalone: a
+   * self-contained nested function DECLARATION is, even when its own body
+   * returns / yields (those belong to it); a statement holding a `break` /
+   * `continue` that leaves it is not — its wasm `br` would have no target.
+   */
+  const isStraightLineStatement = (stmt: ts.Statement): boolean =>
+    noJsHostTarget(ctx)
+      ? isSelfContainedNestedFunction(stmt, decl) ||
+        (!statementNeedsStructuralLowering(stmt) && !(jumpTargets.length > 0 && statementHasEscapingJump(stmt)))
+      : !statementNeedsStructuralLowering(stmt);
+  /** (#6731) Standalone `break` / `continue`, `switch` and labelled statements. */
+  function lowerStructuredJump(
+    stmt: ts.Statement,
+    unwind: readonly UnwindEntry[],
+  ): "jumped" | "lowered" | "failed" | "not-applicable" {
+    if (!noJsHostTarget(ctx)) return "not-applicable";
+    if (ts.isBreakStatement(stmt) || ts.isContinueStatement(stmt)) {
+      return lowerJumpStatement(jumpHost, stmt, unwind) ? "jumped" : "failed";
+    }
+    if (ts.isSwitchStatement(stmt) && stateFinallyDepth === 0) {
+      return lowerPlannedSwitch(jumpHost, stmt, unwind) ? "lowered" : "failed";
+    }
+    if (!ts.isLabeledStatement(stmt)) return "not-applicable";
+    const lowered = lowerLabeledStatement(jumpHost, stmt, unwind, (inner, labels) => {
+      pendingLabels = labels;
+      const innerOk = lowerStatements([inner], unwind, false);
+      pendingLabels = [];
+      return innerOk;
+    });
+    return lowered ? "lowered" : "failed";
+  }
+  /** A structurally lowered while / do / for body: `break` → exit, `continue` → header / update. */
+  const lowerLoopBody = (
+    loop: ts.IterationStatement,
+    unwind: readonly UnwindEntry[],
+    labels: string[],
+    breakState: number,
+    continueState: number,
+  ): boolean =>
+    withJumpTarget(
+      {
+        labels,
+        isLoop: true,
+        unlabelledBreak: true,
+        breakState,
+        continueState,
+        breakDepth: unwind.length,
+        continueDepth: unwind.length,
+      },
+      () => lowerStatements(thenBody(loop.statement), unwind, false),
+    );
+  const jumpHost: StructuredJumpHost<UnwindEntry> = {
+    linear: linearHost,
+    targets: jumpTargets,
+    classify: (entry) =>
+      entry.kind === "replay"
+        ? { kind: "replay", statements: entry.statements }
+        : entry.kind === "catch"
+          ? { kind: "pass" }
+          : entry.kind === "dstr-close"
+            ? { kind: "close", entry: { iter: entry.iter, done: entry.done } }
+            : { kind: "refuse" },
+    finish: (next) => {
+      finishState(curId, { kind: "jump", next });
+      curId = startState();
+    },
+    replay: (statements) => {
+      for (const s of statements) {
+        collectSpillsIn(s);
+        curStatements.push(s);
+      }
+    },
+    lowerBody: (statements, unwind, target) => withJumpTarget(target, () => lowerStatements(statements, unwind, false)),
+    takeLabels,
   };
 
   /** (#6651 A5) The nested-yield planner's handle: A4's externref suspension + #680's capture / replacement map. */
@@ -900,8 +1034,20 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
         // rather than silently skip the finally. (Catch entries never intercept
         // returns, and legacy replay entries keep today's behavior.)
         if (unwind.some((e) => e.kind === "finally")) return fail();
+        // (#6731) A `return` inside a linearised for-of closes the loop's record
+        // (§14.7.5.7 step 6, a return completion) AFTER its value is evaluated:
+        // the delegated-return terminator's unwind walk (above) does exactly
+        // that. Its tail reads the value back from the f64/any `abrupt` field,
+        // which a string carrier does not have.
+        const closesRecords = noJsHostTarget(ctx) && unwind.some((e) => e.kind === "dstr-close");
+        if (closesRecords && elemIsString) return fail();
         collectSpillsIn(stmt);
-        finishState(curId, { kind: "return", expr: stmt.expression });
+        finishState(
+          curId,
+          closesRecords
+            ? { kind: "return", expr: stmt.expression, unwind: [...unwind].reverse() }
+            : { kind: "return", expr: stmt.expression },
+        );
         // Unreachable tail — start a fresh (dead) state so the cursor stays
         // valid; it will simply never be entered.
         curId = startState();
@@ -911,7 +1057,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
 
       // Straight-line statement (no yield, no nested return): append to the
       // current state's prelude and let compileStatement emit it verbatim.
-      if (!statementNeedsStructuralLowering(stmt)) {
+      if (isStraightLineStatement(stmt)) {
         collectSpillsIn(stmt);
         curStatements.push(stmt);
         continue;
@@ -1013,10 +1159,17 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
       // 2e) (#6651 A4) A yield inside a destructuring-assignment pattern or a
       // for-of pattern head — planned as spec-ordered ops over frame spills.
       if (linearizeYields && stateFinallyDepth === 0) {
-        const linear = lowerLinearizedStatement(linearHost, stmt, unwind, (b) => !loopBodyHasUnsupportedJump(b));
+        const linear = lowerLinearizedStatement(linearHost, stmt, unwind);
         if (linear === "lowered") continue;
         if (linear === "failed") return fail();
       }
+
+      // 2f) (#6731) Standalone: `break` / `continue` (statements after it in
+      // this list are dead, as after `return`), `switch`, labelled statements.
+      const structured = lowerStructuredJump(stmt, unwind);
+      if (structured === "jumped") return ok;
+      if (structured === "lowered") continue;
+      if (structured === "failed") return fail();
 
       // 3) try statements wrapping yields.
       if (ts.isTryStatement(stmt)) {
@@ -1085,12 +1238,17 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
         // array, string, Set, or untyped JS value) is driven through the native
         // `__iterator` protocol by the linearised loop skeleton instead of
         // A2's `__gen_delegate_*` step, which traps on those carriers.
-        if (noJsHostTarget(ctx) && stateFinallyDepth === 0 && !isGenericIterableDelegate(ctx, stmt.expression, true)) {
-          const generic = lowerLinearForOfBinding(linearHost, stmt, unwind, (b) => !loopBodyHasUnsupportedJump(b));
-          if (generic === "lowered") {
-            registerLinearForOfBinding(stmt);
-            continue;
-          }
+        // (#6731) So is every loop A2 cannot carry — a binding-pattern head, or a
+        // body that `return`s / `break`s out of it (the linear loop's record is
+        // an ordinary `dstr-close` entry those paths close).
+        if (
+          noJsHostTarget(ctx) &&
+          stateFinallyDepth === 0 &&
+          (!isGenericIterableDelegate(ctx, stmt.expression, true) || forOfNeedsLinearDrive(stmt))
+        ) {
+          if (!registerLinearForOfBinding(stmt)) return fail();
+          const generic = lowerLinearForOfBinding(linearHost, stmt, unwind);
+          if (generic === "lowered") continue;
           if (generic === "failed") return fail();
         }
         if (!lowerForOf(stmt, unwind)) return false;
@@ -2285,8 +2443,11 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
 
   /** if (cond) thenBlock [else elseBlock] — at least one branch yields. */
   function lowerIf(stmt: ts.IfStatement, unwind: readonly UnwindEntry[]): boolean {
+    // (#6731) Standalone: `if (A, yield B, C) S` runs `A; yield B;` first.
+    const split = noJsHostTarget(ctx) ? splitYieldingIfCondition(stmt) : undefined;
+    if (split && !lowerStatements(split.prefix, unwind, false)) return false;
     return lowerIfParts(
-      stmt.expression,
+      split?.condition ?? stmt.expression,
       false,
       thenBody(stmt.thenStatement),
       stmt.elseStatement ? thenBody(stmt.elseStatement) : undefined,
@@ -2367,8 +2528,9 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   function lowerWhile(stmt: ts.WhileStatement, unwind: readonly UnwindEntry[]): boolean {
     const flavour = branchConditionFlavour(stmt.expression);
     if (!flavour) return fail();
-    if (loopBodyHasUnsupportedJump(stmt.statement)) return fail();
+    if (!noJsHostTarget(ctx) && loopBodyHasUnsupportedJump(stmt.statement)) return fail();
     collectSpillsIn(stmt.expression);
+    const labels = takeLabels();
 
     // Current state jumps to the header.
     const headerId = reserveState();
@@ -2396,7 +2558,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     curResumeBindings = [];
     curAbrupt = undefined;
     curUnwind = undefined;
-    if (!lowerStatements(thenBody(stmt.statement), unwind, false)) return false;
+    if (!lowerLoopBody(stmt, unwind, labels, exitId, headerId)) return false;
     finishState(curId, { kind: "jump", next: headerId });
 
     // continue at exit.
@@ -2412,8 +2574,9 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   function lowerDoWhile(stmt: ts.DoStatement, unwind: readonly UnwindEntry[]): boolean {
     const flavour = branchConditionFlavour(stmt.expression);
     if (!flavour) return fail();
-    if (loopBodyHasUnsupportedJump(stmt.statement)) return fail();
+    if (!noJsHostTarget(ctx) && loopBodyHasUnsupportedJump(stmt.statement)) return fail();
     collectSpillsIn(stmt.expression);
+    const labels = takeLabels();
 
     const bodyEntry = reserveState();
     finishState(curId, { kind: "jump", next: bodyEntry });
@@ -2427,7 +2590,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     curResumeBindings = [];
     curAbrupt = undefined;
     curUnwind = undefined;
-    if (!lowerStatements(thenBody(stmt.statement), unwind, false)) return false;
+    if (!lowerLoopBody(stmt, unwind, labels, exitId, headerId)) return false;
     finishState(curId, { kind: "jump", next: headerId });
 
     // header: cond ? bodyEntry : exit
@@ -2454,7 +2617,8 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
 
   /** for (init; cond; update) body — body yields. */
   function lowerFor(stmt: ts.ForStatement, unwind: readonly UnwindEntry[]): boolean {
-    if (loopBodyHasUnsupportedJump(stmt.statement)) return fail();
+    if (!noJsHostTarget(ctx) && loopBodyHasUnsupportedJump(stmt.statement)) return fail();
+    const labels = takeLabels();
     // init: a yield-free var-decl list or expression; append to current state.
     if (stmt.initializer) {
       if (ts.isVariableDeclarationList(stmt.initializer)) {
@@ -2462,7 +2626,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
         for (const d of stmt.initializer.declarations) {
           if (!ts.isIdentifier(d.name)) return fail();
           if (d.initializer && statementContainsYield(d.initializer as unknown as ts.Statement)) return fail();
-          addSpill(d.name.text);
+          addSpill(spillNameOf(d.name));
         }
         // Wrap into a synthetic VariableStatement so compileStatement handles it.
         const vs = ts.factory.createVariableStatement(undefined, stmt.initializer);
@@ -2499,7 +2663,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     curResumeBindings = [];
     curAbrupt = undefined;
     curUnwind = undefined;
-    if (!lowerStatements(thenBody(stmt.statement), unwind, false)) return false;
+    if (!lowerLoopBody(stmt, unwind, labels, exitId, updateId)) return false;
     finishState(curId, { kind: "jump", next: updateId });
 
     // update → header
@@ -2567,6 +2731,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
    */
   function lowerForOf(stmt: ts.ForOfStatement, unwind: readonly UnwindEntry[]): boolean {
     if (!noJsHostTarget(ctx)) return fail();
+    takeLabels(); // (#6731) a jump to this loop routed it to the linear drive (forOfNeedsLinearDrive)
     if (stmt.awaitModifier) return fail();
     if (loopBodyHasUnsupportedJump(stmt.statement)) return fail();
     if (nodeContainsYield(stmt.expression)) return fail();
@@ -2579,7 +2744,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     if (init.declarations.length !== 1) return fail();
     const declarator = init.declarations[0]!;
     if (!ts.isIdentifier(declarator.name)) return fail();
-    const bindingName = declarator.name.text;
+    const bindingName = spillNameOf(declarator.name);
     const body = thenBody(stmt.statement);
     if (body.some((s) => statementContainsReturn(s))) return fail();
     // (#6651 A5) A `yield*` in the body is no longer refused here: each
@@ -2630,11 +2795,21 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
    * representation (the PutValue coerces the stepped externref into it), exactly
    * as A2's `lowerForOf` types its loop variable.
    */
-  function registerLinearForOfBinding(stmt: ts.ForOfStatement): void {
-    const declarator = (stmt.initializer as ts.VariableDeclarationList).declarations[0]!;
-    const name = (declarator.name as ts.Identifier).text;
+  function registerLinearForOfBinding(stmt: ts.ForOfStatement): boolean {
+    const init = stmt.initializer;
+    if (!ts.isVariableDeclarationList(init) || init.declarations.length !== 1) return true;
+    const declarator = init.declarations[0]!;
+    // (#6731) A binding-pattern head's names were typed and spilled by the
+    // pre-scan (`addPatternDeclarationSpills`); one it had to leave unspilled
+    // (a rest element, a type that does not round-trip the frame) would lose
+    // its value at the next suspension, so the loop is refused.
+    if (!ts.isIdentifier(declarator.name)) {
+      return bindingPatternIdentifiers(declarator.name).every((id) => spillSet.has(spillNameOf(id)));
+    }
+    const name = spillNameOf(declarator.name);
     addSpill(name);
     forOfBindingSpillTypes.set(name, resolveSpillLocalValType(ctx, declarator) ?? { kind: "externref" });
+    return true;
   }
 
   // Conservatively spill every simple numeric local declared / assigned in the
@@ -2646,7 +2821,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
       // (#3050) A catch clause's binding IS a ts.VariableDeclaration — catch
       // params are registered (externref-typed) by lowerTryRegion, not here.
       if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && !ts.isCatchClause(n.parent)) {
-        addSpill(n.name.text, n);
+        addSpill(spillNameOf(n.name), n);
       } else if (ts.isVariableDeclaration(n) && !ts.isIdentifier(n.name) && noJsHostTarget(ctx)) {
         addPatternDeclarationSpills(n.name);
       }
@@ -2685,7 +2860,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
         addPatternDeclarationSpills(el.name);
         continue;
       }
-      const name = el.name.text;
+      const name = spillNameOf(el.name);
       if (spillSet.has(name)) continue;
       const elemTsType = bindingElementTsType(el);
       const safe = spillSafeValType(resolveBindingElementType(el, elemTsType, (t) => resolveWasmType(ctx, t)));
@@ -2929,7 +3104,13 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     addSpill(name);
   }
 
-  if (!lowerStatements(decl.body.statements, [], true)) return null;
+  // (#6731) Standalone: self-contained nested function declarations are
+  // instantiated first (hoisting), so a call before the declaration resolves.
+  const hoisted = noJsHostTarget(ctx) ? decl.body.statements.filter((s) => isSelfContainedNestedFunction(s, decl)) : [];
+  const bodyStatements = hoisted.length
+    ? [...hoisted, ...decl.body.statements.filter((s) => !hoisted.includes(s))]
+    : decl.body.statements;
+  if (!lowerStatements(bodyStatements, [], true)) return null;
   if (!ok) return null;
 
   // Final fallthrough state completes the generator.
@@ -3060,11 +3241,13 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     // (#680) The same holds for any standalone generator: only the linearised
     // pattern used to reach this with such a declaration (everything else
     // refused the generator here), and the reconcile is lane-independent.
+    // (#6731) So does any other `any[]` binding (`let n = Array.from(set).sort(…)`
+    // — the resolver defers every `Array<any>` for the same reason).
     if (
       !resolved &&
       noJsHostTarget(ctx) &&
       declNode?.initializer &&
-      ts.isArrayLiteralExpression(declNode.initializer)
+      (ts.isArrayLiteralExpression(declNode.initializer) || isAnyArrayFact(ctx.oracle.typeFactOf(declNode.name)))
     ) {
       spillTypes.set(name, { kind: "externref" });
       continue;
@@ -3086,6 +3269,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     hasThrowRoutes,
     patternParamBindings: new Set(patternParamSpillTypes.keys()),
     undefWidenedPatternBindings,
+    lexicalRenames: lexical?.scopes,
   };
 }
 
@@ -5201,7 +5385,7 @@ function compileState(
     // (#2864 D2) Delegation abrupt forwarding (see `emitDelegateCloseForward`).
     emitDelegateCloseForward(ctx, fctx, info, state, selfLocal, getCaughtExnIdx);
     for (const finalizer of state.abruptResume.finalizers) {
-      for (const stmt of finalizer) compileStatement(ctx, fctx, stmt);
+      for (const stmt of finalizer) withLexicalRenames(fctx, stmt, () => compileStatement(ctx, fctx, stmt));
     }
     abruptBody.push(...storeSpills(info, fctx, selfLocal));
     abruptBody.push(...setStateInstrs(info, selfLocal, info.doneState));
@@ -5266,9 +5450,13 @@ function compileState(
   // Prelude statements (straight-line, yield-free).
   for (const stmt of state.statements) {
     // (#6651 A4) A linearised-pattern op marker compiles to its op, not as source.
-    if (emitLinearOpStatement(ctx, fctx, stmt)) continue;
+    const linearSource = linearOpSourceNode(stmt);
+    if (linearSource !== null) {
+      withLexicalRenames(fctx, linearSource, () => emitLinearOpStatement(ctx, fctx, stmt));
+      continue;
+    }
     withNativeGeneratorContinuationLocals(ctx, fctx, state.continuationReplacements, () => {
-      compileStatement(ctx, fctx, stmt);
+      withLexicalRenames(fctx, stmt, () => compileStatement(ctx, fctx, stmt));
     });
   }
 
@@ -5285,7 +5473,7 @@ function compileState(
   switch (term.kind) {
     case "yield": {
       const tmp = withNativeGeneratorContinuationLocals(ctx, fctx, state.continuationReplacements, () =>
-        emitYieldValueAsElem(ctx, fctx, term.expr, info),
+        withLexicalRenames(fctx, term.expr, () => emitYieldValueAsElem(ctx, fctx, term.expr, info)),
       );
       body.push(...storeSpills(info, fctx, selfLocal));
       body.push(...setStateInstrs(info, selfLocal, term.next));
@@ -5299,7 +5487,7 @@ function compileState(
     }
     case "return": {
       const tmp = withNativeGeneratorContinuationLocals(ctx, fctx, state.continuationReplacements, () =>
-        emitYieldValueAsElem(ctx, fctx, term.expr, info),
+        withLexicalRenames(fctx, term.expr, () => emitYieldValueAsElem(ctx, fctx, term.expr, info)),
       );
       body.push(...storeSpills(info, fctx, selfLocal));
       if (term.unwind?.length) {
@@ -5372,8 +5560,10 @@ function compileState(
     case "branch": {
       body.push(...storeSpills(info, fctx, selfLocal));
       withNativeGeneratorContinuationLocals(ctx, fctx, state.continuationReplacements, () => {
-        if (term.canonical) emitCanonicalConditionAsI32(ctx, fctx, term.cond);
-        else emitConditionAsI32(ctx, fctx, term.cond);
+        withLexicalRenames(fctx, term.cond, () => {
+          if (term.canonical) emitCanonicalConditionAsI32(ctx, fctx, term.cond);
+          else emitConditionAsI32(ctx, fctx, term.cond);
+        });
       });
       if (term.negate) body.push({ op: "i32.eqz" });
       body.push({
@@ -5449,7 +5639,7 @@ function compileState(
         {
           const savedC = fctx.body;
           fctx.body = materialize;
-          compileExpression(ctx, fctx, term.subject, vecRefType);
+          withLexicalRenames(fctx, term.subject, () => compileExpression(ctx, fctx, term.subject, vecRefType));
           fctx.body = savedC;
         }
         body.push({ op: "local.get", index: selfLocal });
@@ -5584,7 +5774,9 @@ function compileState(
         {
           const savedC = fctx.body;
           fctx.body = materialize;
-          const st = compileExpression(ctx, fctx, term.subject, { kind: "externref" });
+          const st = withLexicalRenames(fctx, term.subject, () =>
+            compileExpression(ctx, fctx, term.subject, { kind: "externref" }),
+          );
           if (st && st.kind !== "externref") coerceType(ctx, fctx, st, { kind: "externref" });
           fctx.body.push({ op: "call", funcIdx: iteratorIdx });
           fctx.body = savedC;
@@ -5958,7 +6150,9 @@ function emitGenericDelegationState(
   );
   const materialize: Instr[] = [];
   fctx.body = materialize;
-  const type = compileExpression(ctx, fctx, term.subject, { kind: "externref" });
+  const type = withLexicalRenames(fctx, term.subject, () =>
+    compileExpression(ctx, fctx, term.subject, { kind: "externref" }),
+  );
   if (!type) throw new Error("Unable to compile generic delegation operand");
   if (type.kind !== "externref") coerceType(ctx, fctx, type, { kind: "externref" });
   materialize.push({ op: "call", funcIdx: ctx.funcMap.get(startName)! });
@@ -6094,7 +6288,9 @@ function emitForOfStepState(
   {
     const savedFo = fctx.body;
     fctx.body = materialize;
-    const subjectType = compileExpression(ctx, fctx, term.subject, { kind: "externref" });
+    const subjectType = withLexicalRenames(fctx, term.subject, () =>
+      compileExpression(ctx, fctx, term.subject, { kind: "externref" }),
+    );
     if (!subjectType) throw new Error("Unable to compile for-of subject");
     if (subjectType.kind !== "externref") coerceType(ctx, fctx, subjectType, { kind: "externref" });
     materialize.push({ op: "call", funcIdx: ctx.funcMap.get("__gen_delegate_start")! });
@@ -6201,7 +6397,7 @@ function emitUnwindWalk(
   ];
   for (const entry of entries) {
     if (entry.kind === "replay") {
-      for (const stmt of entry.statements) compileStatement(ctx, fctx, stmt);
+      for (const stmt of entry.statements) withLexicalRenames(fctx, stmt, () => compileStatement(ctx, fctx, stmt));
       continue;
     }
     if (entry.kind === "iter-close") {
@@ -6584,6 +6780,7 @@ export function ensureNativeGeneratorResumeFunction(ctx: CodegenContext, info: N
   const resultLocal = allocLocal(resumeFctx, "__gen_result", { kind: "ref", typeIdx: info.resultTypeIdx });
 
   const plan = buildNativeGeneratorPlan(ctx, info.decl);
+  if (plan?.lexicalRenames) setResumeLexicalRenames(resumeFctx, plan.lexicalRenames);
   if (!plan) {
     reportError(ctx, info.decl, "Internal error: native generator plan disappeared during emission");
     resumeFctx.body.push(...emptyResult(ctx, info));
@@ -6844,9 +7041,13 @@ export function compileNativeGeneratorFunction(
       fctx.body.push({ op: "local.get", index: fctx.localMap.get("__self")! }, { op: "extern.convert_any" });
       fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get(NATIVE_GENERATOR_FACTORY_PROTO)! });
     } else {
-      const factory = ctx.funcMap.get(info.functionName);
+      // (#6731) A re-declared generator (`function* f` nested in two functions)
+      // is registered under an internal `f__redecl<n>` name (#3505) that has no
+      // funcMap entry; its factory is the function being compiled.
+      const factoryName = ctx.funcMap.has(info.functionName) ? info.functionName : fctx.name;
+      const factory = ctx.funcMap.get(factoryName);
       if (factory === undefined) throw new Error("Missing native generator factory identity");
-      const type = emitCachedFuncClosureAccess(ctx, fctx, info.functionName, factory, false);
+      const type = emitCachedFuncClosureAccess(ctx, fctx, factoryName, factory, false);
       if (!type) throw new Error("Unable to materialize native generator factory identity");
       if (type.kind !== "externref") fctx.body.push({ op: "extern.convert_any" });
       fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get(NATIVE_GENERATOR_FACTORY_PROTO)! });
