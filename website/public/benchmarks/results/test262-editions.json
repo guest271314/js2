@@ -1,8 +1,8 @@
 [
   {
     "edition": "ES5",
-    "pass": 7998,
-    "fail": 1006,
+    "pass": 7999,
+    "fail": 1005,
     "ce": 25,
     "skip": 0,
     "total": 9029,
@@ -48,8 +48,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 10255,
-    "fail": 1430,
+    "pass": 10263,
+    "fail": 1422,
     "ce": 19,
     "skip": 0,
     "total": 11704,
@@ -66,8 +66,8 @@
       },
       {
         "name": "generators",
-        "pass": 2184,
-        "fail": 302,
+        "pass": 2189,
+        "fail": 297,
         "ce": 0,
         "skip": 0,
         "total": 2486,
@@ -75,8 +75,8 @@
       },
       {
         "name": "default-parameters",
-        "pass": 1487,
-        "fail": 65,
+        "pass": 1489,
+        "fail": 63,
         "ce": 0,
         "skip": 0,
         "total": 1552,
@@ -4304,9 +4304,9 @@
   },
   {
     "edition": "Unclassified (untagged)",
-    "pass": 4508,
+    "pass": 4510,
     "fail": 793,
-    "ce": 144,
+    "ce": 142,
     "skip": 0,
     "total": 5445,
     "pct": 83
