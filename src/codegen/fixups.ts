@@ -13,7 +13,13 @@ import type { FuncTypeDef, Instr, ValType, WasmFunction, WasmModule } from "../i
 import type { CodegenContext, CodegenError } from "./context/types.js";
 import { absoluteFuncIndexCached } from "../emit/resolve-layout.js"; // (#1916 S3)
 // (#4077) The exact forward stack model now lives beside its second consumer.
-import { callTargetFuncType, crossFunctionInstrArrays, locateCallArgProducers } from "./call-arg-producers.js";
+import {
+  callTargetFuncType,
+  crossFunctionInstrArrays,
+  instrArraySharing,
+  locateCallArgProducers,
+  ownsInstrArrays,
+} from "./call-arg-producers.js";
 
 function recordContextBlockedFixup(
   mod: WasmModule,
@@ -149,8 +155,8 @@ export function markLeafStructsFinal(
  */
 export function repairStructTypeMismatches(mod: WasmModule, diagnostics?: CodegenError[]): number {
   let totalFixed = 0;
-  const contextBlocked = crossFunctionInstrArrays(mod);
-  const visited = new WeakSet<Instr[]>();
+  // (#6759) A tree-shaped module (the norm) needs no visited-set at all.
+  const { shared: contextBlocked, visited } = instrArraySharing(mod);
   const reportedBlocked = new WeakSet<Instr[]>();
 
   for (const func of mod.functions) {
@@ -916,6 +922,19 @@ export function fixupStructNewResultCoercion(ctx: CodegenContext): void {
   }
 }
 
+const CONVERT_ANY_SEED = 1;
+const NULL_EXTERN_SEED = 2;
+
+/** (#6759) Which rewrite seeds of `fixupExternConvertAny` a list contains. */
+function externRewriteSeeds(instrs: readonly Instr[]): number {
+  let present = 0;
+  for (const instr of instrs) {
+    if (instr.op === "extern.convert_any") present |= CONVERT_ANY_SEED;
+    else if (instr.op === "ref.null.extern") present |= NULL_EXTERN_SEED;
+  }
+  return present;
+}
+
 /**
  * Late-stage fixup: repair extern.convert_any applied to non-anyref values.
  * extern.convert_any expects anyref input, but various passes can produce
@@ -972,6 +991,7 @@ export function fixupExternConvertAny(ctx: CodegenContext): void {
     // catchAll). `Array.isArray(x.k)` is exactly `"k" in x && Array.isArray(x.k)`
     // for these plain-data instructions, without the `in` probes (#6759).
     for (const instr of instrs) {
+      if (!ownsInstrArrays(instr.op)) continue;
       const n = instr as {
         body?: Instr[];
         then?: Instr[];
@@ -989,6 +1009,11 @@ export function fixupExternConvertAny(ctx: CodegenContext): void {
       }
       if (Array.isArray(n.catchAll)) fixupInstrs(func, n.catchAll, visited, contextBlocked, reportedBlocked);
     }
+
+    // (#6759) Every rewrite below starts at a seed op in this list and none adds
+    // or removes a `ref.null.extern`: one scan decides which can fire at all.
+    const present = externRewriteSeeds(instrs);
+    if (present === 0) return;
 
     // Scan for extern.convert_any with non-anyref inputs
     for (let j = instrs.length - 1; j > 0; j--) {
@@ -1075,7 +1100,7 @@ export function fixupExternConvertAny(ctx: CodegenContext): void {
     // runs after them. A list without one is therefore a guaranteed no-op, and
     // skipping it avoids the forward stack model plus the per-call walk — the
     // bulk of this pass's cost, since almost no list carries one.
-    if (!instrs.some((instr) => instr.op === "ref.null.extern")) return;
+    if ((present & NULL_EXTERN_SEED) === 0) return;
     const exactProducers = locateCallArgProducers(instrs, ctx.mod);
 
     for (let j = 0; j < instrs.length; j++) {
@@ -1207,8 +1232,8 @@ export function fixupExternConvertAny(ctx: CodegenContext): void {
     }
   }
 
-  const contextBlocked = crossFunctionInstrArrays(ctx.mod);
-  const visited = new WeakSet<Instr[]>();
+  // (#6759) A tree-shaped module (the norm) needs no visited-set at all.
+  const { shared: contextBlocked, visited } = instrArraySharing(ctx.mod);
   const reportedBlocked = new WeakSet<Instr[]>();
   for (const func of ctx.mod.functions) {
     if (func.body.length > 0) {

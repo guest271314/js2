@@ -77,30 +77,7 @@
  */
 import type { Instr, ValType, WasmModule } from "../ir/types.js";
 import { walkChildren } from "./walk-instructions.js";
-
-/**
- * Find instruction arrays reachable from more than one function root.
- * Pattern 5 consults the enclosing function's local types, so it must not
- * rewrite such an array (or an arm stored in one) using either owner's view.
- */
-function crossFunctionBodies(mod: WasmModule): WeakSet<Instr[]> {
-  const owners = new WeakMap<Instr[], (typeof mod.functions)[number]>();
-  const shared = new WeakSet<Instr[]>();
-  for (const fn of mod.functions) {
-    const seen = new WeakSet<Instr[]>();
-    const pending = [fn.body];
-    while (pending.length > 0) {
-      const body = pending.pop()!;
-      if (seen.has(body)) continue;
-      seen.add(body);
-      const owner = owners.get(body);
-      if (owner && owner !== fn) shared.add(body);
-      else if (!owner) owners.set(body, fn);
-      for (const instr of body) walkChildren(instr, (children) => pending.push(children));
-    }
-  }
-  return shared;
-}
+import { instrArraySharing } from "./call-arg-producers.js";
 
 /**
  * Remove redundant ref.as_non_null after ref.cast in a single instruction list.
@@ -129,11 +106,11 @@ function optimizeBody(
   // enumerator means peephole automatically covers every nested buffer
   // (`then`/`else`/`body`/`catches[].body`/`catchAll`) and any future Instr
   // child field, with no chance of the walkers drifting apart again.
-  for (const instr of body) {
-    walkChildren(instr, (children) => {
-      removed += optimizeBody(children, localTypes, visited, contextBlocked);
-    });
-  }
+  // (#6759) One descent callback per list, not one closure per instruction.
+  const descend = (children: Instr[]): void => {
+    removed += optimizeBody(children, localTypes, visited, contextBlocked);
+  };
+  for (const instr of body) walkChildren(instr, descend);
 
   // Scan for peephole patterns
   let i = 0;
@@ -308,10 +285,14 @@ function getFuncParamTypes(mod: WasmModule, typeIdx: number): ValType[] {
  */
 export function peepholeOptimize(mod: WasmModule): number {
   let totalRemoved = 0;
-  const contextBlocked = crossFunctionBodies(mod);
+  // Pattern 5 consults the enclosing function's local types, so it must not
+  // rewrite an array reachable from more than one function root (or an arm
+  // stored in one) using either owner's view.
   // Context-invariant patterns may safely mutate a physical array once for all
   // of its owners. Sharing one visited set across function roots enforces that.
-  const visited = new WeakSet<Instr[]>();
+  // (#6759) The patterns only remove or replace leaf instructions, so a module
+  // whose arrays form a tree (the norm) needs no visited-set at all.
+  const { shared: contextBlocked, visited } = instrArraySharing(mod);
   for (const func of mod.functions) {
     // Build flat local-type array: params first, then declared locals
     const paramTypes = getFuncParamTypes(mod, func.typeIdx);

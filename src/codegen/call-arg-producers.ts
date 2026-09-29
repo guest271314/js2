@@ -61,6 +61,52 @@ const OPCODE_EFFECT_CACHE = new Map<string, { readonly pops: number; readonly pu
 function computeInstrPopsPushes(instr: Instr, mod: WasmModule): { pops: number; pushes: number } | null {
   const op = instr.op as string;
 
+  // (#6759) Operand-dependent ops first — `instrPopsPushes` caches every other
+  // op, so these are the per-instruction path. Every test here is an exact
+  // opcode match that no later pattern can also match, so order is immaterial.
+  if (op === "struct.new") {
+    const typeIdx = (instr as { typeIdx: number }).typeIdx;
+    const t = mod.types[typeIdx];
+    if (!t || t.kind !== "struct") return null;
+    return { pops: t.fields.length, pushes: 1 };
+  }
+  if (op === "array.new_fixed") {
+    const len = (instr as { length?: number }).length;
+    if (typeof len !== "number") return null;
+    return { pops: len, pushes: 1 };
+  }
+
+  if (op === "call") {
+    const ft = callTargetFuncType(instr, mod);
+    if (!ft) return null;
+    return { pops: ft.params.length, pushes: ft.results.length };
+  }
+  if (op === "call_ref" || op === "call_indirect") {
+    const typeIdx = (instr as { typeIdx?: number }).typeIdx;
+    if (typeIdx === undefined) return null;
+    const ft = mod.types[typeIdx];
+    if (!ft || ft.kind !== "func") return null;
+    // call_ref pops the funcref, call_indirect pops the table index.
+    return { pops: ft.params.length + 1, pushes: ft.results.length };
+  }
+
+  // Structured blocks: exact, from the block type. `if` additionally pops the
+  // condition. The nested bodies are separate instruction lists and are walked
+  // on their own, so from this list's point of view the block is one opaque
+  // instruction with a known signature.
+  if (op === "block" || op === "loop" || op === "try" || op === "try_table" || op === "if") {
+    const condPop = op === "if" ? 1 : 0;
+    const bt = (instr as { blockType?: { kind: string; typeIdx?: number } }).blockType;
+    if (!bt || bt.kind === "empty") return { pops: condPop, pushes: 0 };
+    if (bt.kind === "val") return { pops: condPop, pushes: 1 };
+    if (bt.kind === "type" && bt.typeIdx !== undefined) {
+      const ft = mod.types[bt.typeIdx];
+      if (!ft || ft.kind !== "func") return null;
+      return { pops: condPop + ft.params.length, pushes: ft.results.length };
+    }
+    return null;
+  }
+
   // Pure pushers.
   if (
     op === "i32.const" ||
@@ -152,49 +198,6 @@ function computeInstrPopsPushes(instr: Instr, mod: WasmModule): { pops: number; 
     return { pops: 2, pushes: 1 };
   }
 
-  if (op === "struct.new") {
-    const typeIdx = (instr as { typeIdx: number }).typeIdx;
-    const t = mod.types[typeIdx];
-    if (!t || t.kind !== "struct") return null;
-    return { pops: t.fields.length, pushes: 1 };
-  }
-  if (op === "array.new_fixed") {
-    const len = (instr as { length?: number }).length;
-    if (typeof len !== "number") return null;
-    return { pops: len, pushes: 1 };
-  }
-
-  if (op === "call") {
-    const ft = callTargetFuncType(instr, mod);
-    if (!ft) return null;
-    return { pops: ft.params.length, pushes: ft.results.length };
-  }
-  if (op === "call_ref" || op === "call_indirect") {
-    const typeIdx = (instr as { typeIdx?: number }).typeIdx;
-    if (typeIdx === undefined) return null;
-    const ft = mod.types[typeIdx];
-    if (!ft || ft.kind !== "func") return null;
-    // call_ref pops the funcref, call_indirect pops the table index.
-    return { pops: ft.params.length + 1, pushes: ft.results.length };
-  }
-
-  // Structured blocks: exact, from the block type. `if` additionally pops the
-  // condition. The nested bodies are separate instruction lists and are walked
-  // on their own, so from this list's point of view the block is one opaque
-  // instruction with a known signature.
-  if (op === "block" || op === "loop" || op === "try" || op === "try_table" || op === "if") {
-    const condPop = op === "if" ? 1 : 0;
-    const bt = (instr as { blockType?: { kind: string; typeIdx?: number } }).blockType;
-    if (!bt || bt.kind === "empty") return { pops: condPop, pushes: 0 };
-    if (bt.kind === "val") return { pops: condPop, pushes: 1 };
-    if (bt.kind === "type" && bt.typeIdx !== undefined) {
-      const ft = mod.types[bt.typeIdx];
-      if (!ft || ft.kind !== "func") return null;
-      return { pops: condPop + ft.params.length, pushes: ft.results.length };
-    }
-    return null;
-  }
-
   // Terminators, `end`, and anything unrecognised: refuse to model.
   return null;
 }
@@ -280,13 +283,11 @@ export function callTargetFuncType(instr: Instr, mod: WasmModule): FuncTypeDef |
  * this pass can never rewrite fewer call sites than it did before.
  */
 export function locateCallArgProducers(instrs: Instr[], mod: WasmModule): Map<number, number[]> {
-  const all = locateOperandProducers(instrs, mod);
-  const out = new Map<number, number[]>();
-  for (const [i, args] of all) {
-    const op = instrs[i]!.op as string;
-    if (op === "call" || op === "return_call") out.set(i, args);
-  }
-  return out;
+  return locateOperandProducers(instrs, mod, isCallConsumer);
+}
+
+function isCallConsumer(op: string): boolean {
+  return op === "call" || op === "return_call";
 }
 
 /**
@@ -310,7 +311,11 @@ export function locateCallArgProducers(instrs: Instr[], mod: WasmModule): Map<nu
  * rule as the call-only view: it stops at the first instruction it refuses to
  * model, and everything recorded up to there is exact.
  */
-export function locateOperandProducers(instrs: Instr[], mod: WasmModule): Map<number, number[]> {
+export function locateOperandProducers(
+  instrs: Instr[],
+  mod: WasmModule,
+  record?: (op: string) => boolean,
+): Map<number, number[]> {
   const producers: number[] = []; // one entry per live stack slot
   const out = new Map<number, number[]>();
   for (let i = 0; i < instrs.length; i++) {
@@ -322,17 +327,35 @@ export function locateOperandProducers(instrs: Instr[], mod: WasmModule): Map<nu
       // per-argument backward walk, which mis-pairs across a `global.set` and
       // retyped an unrelated `ref.null extern` (lodash `baseUpdate`).
       const ft = callTargetFuncType(instr, mod);
-      if (ft && ft.params.length <= producers.length) out.set(i, producers.slice(producers.length - ft.params.length));
+      if (ft && ft.params.length <= producers.length && (!record || record(instr.op)))
+        out.set(i, producers.slice(producers.length - ft.params.length));
       break;
     }
     const eff = instrPopsPushes(instr, mod);
     if (!eff) break;
     if (eff.pops > producers.length) break; // underflow — cannot model
-    if (eff.pops > 0) out.set(i, producers.slice(producers.length - eff.pops));
+    // (#6759) `record` only filters which consumers are REPORTED; the walk
+    // itself (and so where it stops) is identical for every caller.
+    if (eff.pops > 0 && (!record || record(instr.op))) out.set(i, producers.slice(producers.length - eff.pops));
     producers.length -= eff.pops;
     for (let p = 0; p < eff.pushes; p++) producers.push(i);
   }
   return out;
+}
+
+/**
+ * (#6759) Whether an instruction of this opcode can own nested instruction
+ * lists — exactly the structured members of the `Instr` union (`block`,
+ * `loop`, `if`, `try`, `try_table`). The whole-module repair walks test
+ * this before probing `body`/`then`/`else`/`catches`/`catchAll`: on the
+ * hundreds of distinct instruction shapes those probes are megamorphic misses,
+ * and they were the largest single cost of the walks. The repairs only ever
+ * edit lists the binary emitter encodes, and it encodes nested lists for these
+ * opcodes only, so a stray list under any other opcode could not reach the
+ * output anyway.
+ */
+export function ownsInstrArrays(op: string): boolean {
+  return op === "block" || op === "loop" || op === "if" || op === "try" || op === "try_table";
 }
 
 /**
@@ -341,7 +364,7 @@ export function locateOperandProducers(instrs: Instr[], mod: WasmModule): Map<nu
  * whole-module repair passes call this once per instruction, so returning a
  * fresh array (plus a temporary arm array) per call was measurable GC load.
  */
-export function pushNestedInstrArrays(instr: Instr, out: Instr[][]): void {
+function pushNestedInstrArrays(instr: Instr, out: Instr[][]): void {
   const a = instr as {
     body?: Instr[];
     then?: Instr[];
@@ -362,22 +385,60 @@ export function pushNestedInstrArrays(instr: Instr, out: Instr[][]): void {
  * The result does not depend on traversal order: an array is shared iff two
  * distinct functions reach it.
  */
-export function crossFunctionInstrArrays(mod: WasmModule): WeakSet<Instr[]> {
-  const owners = new WeakMap<Instr[], WasmModule["functions"][number]>();
-  const shared = new WeakSet<Instr[]>();
+export function crossFunctionInstrArrays(mod: WasmModule): Set<Instr[]> {
+  return instrArraySharing(mod).shared;
+}
+
+/**
+ * (#6759) A visited-set for a walk over a module whose instruction arrays form
+ * a TREE (see {@link instrArraySharing}): no array is ever reached twice, so
+ * membership is always false and recording it is pointless. Stateless and
+ * shared; it never holds a reference.
+ */
+export const TREE_VISITED: WeakSet<Instr[]> = {
+  has: () => false,
+  add(): WeakSet<Instr[]> {
+    return TREE_VISITED;
+  },
+  delete: () => false,
+  [Symbol.toStringTag]: "WeakSet",
+};
+
+/**
+ * (#6759) The cross-function {@link crossFunctionInstrArrays} set, plus a
+ * visited-set suited to the module's shape: {@link TREE_VISITED} when no
+ * array is reached twice by any path (within or across functions), else a
+ * fresh set. Only valid for a walk that visits the arrays present NOW and adds
+ * no array reachable from two places — true of every repair that inserts or
+ * replaces leaf instructions only.
+ */
+export function instrArraySharing(mod: WasmModule): { shared: Set<Instr[]>; visited: WeakSet<Instr[]> } {
+  type Func = WasmModule["functions"][number];
+  // `owners` doubles as the per-function "seen" set: an array owned by the
+  // function being walked was necessarily first reached by this walk, so
+  // reaching it again is a revisit. Only foreign-owned (i.e. shared) arrays
+  // need a separate per-function seen set, allocated on first need — the
+  // common tree-shaped module allocates none.
+  const owners = new WeakMap<Instr[], Func>();
+  const shared = new Set<Instr[]>();
   const pending: Instr[][] = [];
+  let tree = true;
   for (const func of mod.functions) {
-    const seen = new WeakSet<Instr[]>();
+    let seenForeign: Set<Instr[]> | undefined;
     pending.push(func.body);
     while (pending.length > 0) {
       const body = pending.pop()!;
-      if (seen.has(body)) continue;
-      seen.add(body);
       const owner = owners.get(body);
-      if (owner && owner !== func) shared.add(body);
-      else if (!owner) owners.set(body, func);
-      for (const instr of body) pushNestedInstrArrays(instr, pending);
+      if (owner === undefined) owners.set(body, func);
+      else {
+        tree = false;
+        if (owner === func) continue;
+        if (seenForeign?.has(body)) continue;
+        (seenForeign ??= new Set()).add(body);
+        shared.add(body);
+      }
+      for (const instr of body) if (ownsInstrArrays(instr.op)) pushNestedInstrArrays(instr, pending);
     }
   }
-  return shared;
+  return { shared, visited: tree ? TREE_VISITED : new WeakSet() };
 }

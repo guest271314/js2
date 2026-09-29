@@ -11,6 +11,18 @@ assignee: ttraenkler/opus-standalone-repair-passes
 requested_by: ttraenkler/opus-lead
 created: 2026-09-29
 related: [6480, 6722, 6723, 2710]
+# 2026-09-29 (#6759): stack-balance.ts grows by the opcode-delta cache, the
+# lazily compared branch contexts and the per-function tree flag (+58 lines);
+# ir-inline.ts by the fused call-graph/hotness helper, the fused callee-facts
+# walk and the specialisation-size memo (1500 -> ~1572). Both are pass-local
+# fast paths whose invariants live next to the code they skip.
+loc-budget-allow:
+  - src/codegen/stack-balance.ts
+  - src/codegen/ir-inline.ts
+# 2026-09-29 (#6759): computeInstrDelta is the former instrDelta ladder
+# (318 lines on main, unchanged in length) renamed behind a cached wrapper.
+func-budget-allow:
+  - src/codegen/stack-balance.ts::computeInstrDelta
 ---
 
 ## Problem
