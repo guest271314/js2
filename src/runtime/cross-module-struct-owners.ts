@@ -197,6 +197,18 @@ export function createCrossModuleStructOwners(canBeWeakKey: (value: unknown) => 
     },
 
     /**
+     * The OTHER live modules of the project, for a caller that must retry an
+     * operation through each of them (linked-closure-dispatch.ts). Empty when
+     * no linked project is live, so the single-module lane never retries.
+     */
+    peersOf(local: Record<string, Function> | undefined): Record<string, Function>[] {
+      if (!enabled) return [];
+      const peers: Record<string, Function>[] = [];
+      for (const peer of modules) if (peer !== local) peers.push(peer);
+      return peers;
+    },
+
+    /**
      * A `callbackState` view of a foreign module's exports, so a read path that
      * threads state (rather than exports) can be redirected with one
      * substitution. One allocation per module, not per call.

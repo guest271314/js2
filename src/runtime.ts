@@ -52,6 +52,7 @@ import {
 } from "./runtime/init-marshal-registry.js"; // (#5193, #5202)
 import { createLinkedProviderMirrorOwnership } from "./runtime/linked-provider-mirror-ownership.js";
 import { createCrossModuleStructOwners } from "./runtime/cross-module-struct-owners.js";
+import { createLinkedClosureDispatch } from "./runtime/linked-closure-dispatch.js";
 import { decodeCompiledEntryPair } from "./runtime/compiled-entry-pair.js";
 import { rawExportsStructDecodeError } from "./runtime/raw-exports-struct-authority.js"; // (#6438)
 import { isHostStringSymbolDispatch, makeHostStringPredicateAdapter } from "./runtime/string-predicate-adapter.js";
@@ -2087,6 +2088,7 @@ function _wrapWasmClosureUnknownArity(
   // (#4618) true = the class-ctor mirror's own construct/apply dispatch —
   // must get the RAW bridge, not the mirror (infinite recursion otherwise).
   rawDispatch = false,
+  linkedPeer = false, // a per-module retry bridge (linked-closure-dispatch.ts): uncached, no retry of its own
 ): ((...args: any[]) => any) | null {
   if (closure != null && typeof closure === "object") {
     // (#4618) A registered class ctor VALUE presents as the constructible
@@ -2096,7 +2098,7 @@ function _wrapWasmClosureUnknownArity(
       const mirror = _wrapForHost(closure, callbackState?.getExports());
       if (typeof mirror === "function") return mirror;
     }
-    const cached = _wasmClosureDynamicWrapperCache.get(closure);
+    const cached = linkedPeer ? undefined : _wasmClosureDynamicWrapperCache.get(closure);
     if (cached) return cached as (...args: any[]) => any;
   }
   if (!callbackState) return null;
@@ -2255,10 +2257,24 @@ function _wrapWasmClosureUnknownArity(
   };
   const wrapped = function wasmClosureDynamicBridge(this: any, ...args: any[]): any {
     try {
-      const result =
+      const run = (via: Function): any =>
         new.target === undefined
-          ? _intrinsicReflectApply(dispatch, this, args)
-          : _intrinsicReflectConstruct(dispatch, args, new.target);
+          ? _intrinsicReflectApply(via, this, args)
+          : _intrinsicReflectConstruct(via, args, new.target);
+      const peers =
+        linkedPeer || closure == null || typeof closure !== "object" ? [] : _crossModuleStructs.peersOf(exports);
+      const result =
+        peers.length === 0
+          ? run(dispatch)
+          : _linkedClosureDispatch.invoke(closure, exports, peers, (via) =>
+              via === exports
+                ? run(dispatch)
+                : run(
+                    _linkedClosureDispatch.bridgeFor(closure, via, () =>
+                      _wrapWasmClosureUnknownArity(closure, _crossModuleStructs.stateFor(via), rawDispatch, true),
+                    ) ?? dispatch,
+                  ),
+            );
       _drainNativePromiseBoundary(callbackState);
       return result;
     } catch (error) {
@@ -2311,7 +2327,7 @@ function _wrapWasmClosureUnknownArity(
   _wasmClosureWrapperSource.set(wrapped, { closure, arity: -1 });
   wsh.recordCallableOwner(wrapped, callbackState);
   if (closure != null && typeof closure === "object") {
-    _wasmClosureDynamicWrapperCache.set(closure, wrapped);
+    if (!linkedPeer) _wasmClosureDynamicWrapperCache.set(closure, wrapped);
     _wasmClosureWrapperTargets.set(wrapped, closure);
     _linkedProviderMirrors.recordMirrorOwner(wrapped, callbackState?.getExports()); // (#5222)
     // (#4618) Surface the closure's OWN sidecar props on the bridge as live
@@ -6365,6 +6381,7 @@ const _hostProxyExportSlots = new WeakMap<object, { current: Record<string, Func
 const _linkedProviderMirrors = createLinkedProviderMirrorOwnership(_canBeWeakKey);
 // (#5225) Inbound twin: which module of a linked project can DECODE a struct.
 const _crossModuleStructs = createCrossModuleStructOwners(_canBeWeakKey);
+const _linkedClosureDispatch = createLinkedClosureDispatch(); // owner retry for a foreign closure
 
 /**
  * (#6492 r20) Mirror a COMPILED thenable for the keyed-combinator polyfill.
@@ -16152,6 +16169,7 @@ assert._isSameValue = isSameValue;
           maybeWrapCallable: _maybeWrapCallableUnknownArity,
           wrapForHost: _wrapForHost,
           unwrapForHost: _unwrapForHost,
+          claimDispatchBounce: _linkedClosureDispatch.claimBounce,
         });
       }
       // (#4394) The `_newtarget` twin is the same operation with the third

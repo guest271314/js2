@@ -8,6 +8,8 @@ type HostCallAdapters = {
   maybeWrapCallable: (value: any, callbackState: CallbackState) => any;
   wrapForHost: (value: any, exports: Record<string, Function> | undefined) => any;
   unwrapForHost: (value: any) => any;
+  /** True when `fn` is this module's dispatcher bouncing a foreign closure (linked-closure-dispatch.ts). */
+  claimDispatchBounce?: (fn: any, exports: Record<string, Function> | undefined) => boolean;
 };
 type InvokeHostFunction = (fn: any, thisArg: any, args: any[]) => any;
 
@@ -17,6 +19,9 @@ export function isHostCallImportName(name: string): boolean {
 
 export function createHostCallImport(name: string, callbackState: CallbackState, adapters: HostCallAdapters): Function {
   const invoke: InvokeHostFunction = (fn, thisArg, args) => {
+    // A dispatcher that matched no arm for a closure of another linked module
+    // gives it back here; calling it would re-enter that same dispatcher.
+    if (adapters.claimDispatchBounce?.(fn, callbackState?.getExports())) return undefined;
     if (typeof fn !== "function" && adapters.isWasmStruct(fn)) {
       const wrapped = adapters.maybeWrapCallable(fn, callbackState);
       if (typeof wrapped === "function") fn = wrapped;
