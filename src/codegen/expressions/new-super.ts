@@ -2,6 +2,7 @@ import type { FieldDef, Instr, ValType } from "../../ir/types.js";
 import { widenJsDefaultGuessSlot } from "../js-default-param-type-guess.js";
 import { materializeFnctorTwinCaptures } from "../fnctor-twin-captures.js";
 import { resolveStaticSpreadArgs } from "../static-spread-arity.js"; // (#6460)
+import { isDynamicGeneratorFunctionBinding, tryEmitDynamicGeneratorFunction } from "../generator-function-dynamic.js"; // (#6651 A9)
 import { emitLayoutSelectingStructNew, maybeEmitLayoutHint } from "../fnctor-layout-emit.js"; // (#3927) per-type layouts
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
@@ -6584,6 +6585,10 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
   ) {
     return { kind: "externref" };
   }
+  {
+    const r = tryEmitDynamicGeneratorFunction(ctx, fctx, expr); // (#6651 A9) `new %GeneratorFunction%(…)`
+    if (r !== undefined) return r;
+  }
 
   // (#1528b) Unwrap parens AND `as`/`!`/type-assertion wrappers so the static
   // non-constructor guards below still fire on `new ((() => {}) as any)()` etc.
@@ -6637,7 +6642,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       const init = ctx.oracle.variableInitializerOf(id);
       if (init === undefined) return false;
       if (ts.isFunctionExpression(init) && init.asteriskToken !== undefined) return true;
-      return objectLiteralMethodWithoutConstruct(init);
+      return objectLiteralMethodWithoutConstruct(init) || isDynamicGeneratorFunctionBinding(ctx, id); // (#6651 A9)
     };
     const namedGenerator =
       ts.isIdentifier(gen) &&

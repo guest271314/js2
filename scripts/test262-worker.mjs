@@ -1434,7 +1434,17 @@ function harnessProviderWiringAvailable() {
 function harnessProviderCompileOptions(target) {
   // Must match `compileHarnessLinkedBody`'s option set on the consumer side, or
   // the provider and the body disagree about the ABI they share.
-  return { allowJs: true, emitWat: false, skipSemanticDiagnostics: true, ...(target ? { target } : {}) };
+  // (#6723 D4) Both sides carry the harness's `hostBridge: "always"`, like
+  // every other worker compile site (HARNESS_HOST_BRIDGE): on standalone the
+  // default strips `__stdout_*`, so the provider's `print` (hence `$DONE`'s
+  // completion marker) wrote to a sink nothing could read.
+  return {
+    ...HARNESS_HOST_BRIDGE,
+    allowJs: true,
+    emitWat: false,
+    skipSemanticDiagnostics: true,
+    ...(target ? { target } : {}),
+  };
 }
 
 async function getWorkerHarnessProvider(harnessPrefix, target) {
@@ -1638,6 +1648,7 @@ async function doCompile(
     // measurement, which is the one thing a shadow oracle must never do. So
     // the caller is told, and the row is stamped `linked-harness-fallback`.
     const bodyOptions = {
+      ...HARNESS_HOST_BRIDGE, // (#6723 D4) same bridge as the provider and the honest lane
       allowJs: true,
       fileName: "test.js",
       sourceMap: true,

@@ -34,7 +34,11 @@ import { recordFnMetaMemberDeclaration } from "./function-instance-meta-methods.
 import { resolveClassHeritageAlias } from "./class-expression-identity.js";
 import { installAstFreeClassConstructorNewWrapper } from "./class-constructor-wrapper.js";
 import { commitClassStructLayout } from "./class-layout-registration.js";
-import { mintDefinedFunc, pushProgramAbiClassCallable } from "./program-abi-class-callable-planning.js";
+import {
+  mintDefinedFunc,
+  pushProgramAbiClassCallable,
+  retypeProgramAbiClassCallable,
+} from "./program-abi-class-callable-planning.js";
 import { setProgramAbiInheritedClassCallableAlias } from "./program-abi-class-callable-planning.js";
 import { absoluteFuncIndex } from "../emit/resolve-layout.js"; // (#1916 S3b) resolve handles for order-stable declaredFuncRefs sort
 import { definedFuncAt } from "./func-space.js";
@@ -3325,10 +3329,7 @@ function compileClassBodiesInner(
       {
         const resolvedParams = params.map((p) => p.type);
         const resolvedResults: ValType[] = fctx.returnType ? [fctx.returnType] : [];
-        const updatedTypeIdx = addFuncType(ctx, resolvedParams, resolvedResults, `${fullName}_type`);
-        if (updatedTypeIdx !== func.typeIdx) {
-          func.typeIdx = updatedTypeIdx;
-        }
+        retypeProgramAbiClassCallable(ctx, func, addFuncType(ctx, resolvedParams, resolvedResults, `${fullName}_type`));
       }
 
       for (let i = 0; i < params.length; i++) {
@@ -3728,9 +3729,7 @@ function compileClassBodiesInner(
         const resolvedParams = params.map((p) => p.type);
         const resolvedResults: ValType[] = fctx.returnType ? [fctx.returnType] : [];
         const updatedTypeIdx = addFuncType(ctx, resolvedParams, resolvedResults, `${getterName}_type`);
-        if (updatedTypeIdx !== func.typeIdx) {
-          func.typeIdx = updatedTypeIdx;
-        }
+        retypeProgramAbiClassCallable(ctx, func, updatedTypeIdx);
       }
 
       for (let i = 0; i < params.length; i++) {
@@ -3845,9 +3844,7 @@ function compileClassBodiesInner(
         const resolvedParams = params.map((p) => p.type);
         const resolvedResults: ValType[] = [];
         const updatedTypeIdx = addFuncType(ctx, resolvedParams, resolvedResults, `${setterName}_type`);
-        if (updatedTypeIdx !== func.typeIdx) {
-          func.typeIdx = updatedTypeIdx;
-        }
+        retypeProgramAbiClassCallable(ctx, func, updatedTypeIdx);
       }
 
       for (let i = 0; i < params.length; i++) {
