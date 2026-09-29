@@ -12,6 +12,8 @@
  *  3. CARRIER META: `length` / `name` of a realm function reached through the
  *     runtime-eval carrier are configurable own data properties — a real
  *     descriptor, a refused write, and a `delete` that takes effect.
+ *  4. PROTOTYPE: `Object.getPrototypeOf(g)` for `var g = GeneratorFunction()`
+ *     answers %GeneratorFunction.prototype% (static, like A7's expression arm).
  *
  * Each mechanism has a GUARD: the neighbouring behaviour that must not move.
  */
@@ -183,6 +185,15 @@ const SOURCE = `
   var protoDesc = d(h, "prototype");
   var absent = d(h, "foo");
 
+  // (4) [[Prototype]] of the product is %GeneratorFunction.prototype%.
+  var inst: any = GeneratorFunction();
+  var protoLink = (Object.getPrototypeOf(inst) === GeneratorFunction.prototype ? 1 : 0) +
+    (Object.getPrototypeOf(inst.prototype) === Object.getPrototypeOf(inst).prototype ? 10 : 0);
+  // GUARD: a binding handed to setPrototypeOf is not folded.
+  var moved: any = GeneratorFunction();
+  Object.setPrototypeOf(moved, {});
+  var movedFolded = Object.getPrototypeOf(moved) === GeneratorFunction.prototype ? 1 : 0;
+
   export function ownCallerProbe(): number { return ownCaller; }
   export function poisonProbe(): number { return poison; }
   export function sloppyCallerProbe(): number { return sloppyCaller; }
@@ -194,6 +205,8 @@ const SOURCE = `
   export function deletedNameProbe(): number { return deletedName; }
   export function protoDescProbe(): number { return protoDesc; }
   export function absentProbe(): number { return absent; }
+  export function protoLinkProbe(): number { return protoLink; }
+  export function movedFoldedProbe(): number { return movedFolded; }
 `;
 
 const availableArtifactDir = quickjsProviderAvailable();
@@ -259,5 +272,11 @@ describe.skipIf(!enabled)("#6651 A14 — %GeneratorFunction% products through th
   });
   it("GUARD: a key the function does not own stays absent", () => {
     expect(probe.absentProbe!()).toBe(-1);
+  });
+  it("`Object.getPrototypeOf(GeneratorFunction())` is %GeneratorFunction.prototype%", () => {
+    expect(probe.protoLinkProbe!()).toBe(11);
+  });
+  it("GUARD: a binding passed to `Object.setPrototypeOf` is not folded", () => {
+    expect(probe.movedFoldedProbe!()).toBe(0);
   });
 });

@@ -29,7 +29,7 @@ import { ensureObjectRuntime, ensureObjVecBuilders, reserveApplyClosure } from "
 import { collectClosureBaseWrapperTypeIdxs } from "./closure-classifier.js";
 import { ensureNativeStringHelpers, nativeStringLiteralInstrs } from "./native-strings.js";
 import { FNINST_BAG_OWNS } from "./function-instance-props.js";
-import { fillRuntimeEvalCarrierFnMeta } from "./runtime-eval-carrier-fn-meta.js";
+import { carrierFnMetaEnabled, fillRuntimeEvalCarrierFnMeta } from "./runtime-eval-carrier-fn-meta.js";
 import {
   buildRuntimeEvalCallResultWrap,
   ensureRuntimeEvalCallResultUnwrapHelper,
@@ -1090,7 +1090,7 @@ export function fillRuntimeEvalCallablePropertyGetArm(ctx: CodegenContext): void
   }
   // (#6651 A14) Once the carrier's bag holds an entry for the key (a `delete`
   // tombstone or a redefinition), the bag answers, not the hard-coded arm below.
-  const bagOwnsIdx = ctx.funcMap.get(FNINST_BAG_OWNS);
+  const bagOwnsIdx = carrierFnMetaEnabled(ctx) ? ctx.funcMap.get(FNINST_BAG_OWNS) : undefined;
   const bagFree = (): Instr[] =>
     bagOwnsIdx === undefined
       ? []

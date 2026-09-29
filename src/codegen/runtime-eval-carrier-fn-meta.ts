@@ -44,6 +44,16 @@
  * A key whose trampoline read is `undefined` is not claimed: a caller closure
  * with no name metadata keeps its previous answers.
  *
+ * ## Bounded to modules with a `%GeneratorFunction%` site
+ *
+ * The surfaces are right for EVERY realm function behind the carrier (an
+ * eval-returned function answers `gOPD(f, "length")` `undefined` today for the
+ * same reason), but widening them to every provider-linked module — and to the
+ * QuickJS adapter, which this compiler also builds — is a reach this slice did
+ * not measure. So the arms are emitted only where the runtime-eval inventory
+ * recorded a `generator-function-constructor` site; everywhere else the module
+ * is byte-identical. Recorded in #6651 (A14) as the follow-up.
+ *
  * Standalone only; byte-inert in a module that never minted the carrier.
  */
 import type { Instr, ValType } from "../ir/types.js";
@@ -131,9 +141,17 @@ function carrierClaimsKey(
   ];
 }
 
+/** Did the runtime-eval inventory record a `%GeneratorFunction%(…)` site in this module? */
+export function carrierFnMetaEnabled(ctx: CodegenContext): boolean {
+  return (
+    ctx.standalone &&
+    (ctx.runtimeEvalBoundaryPlan?.sites.some((site) => site.kind === "generator-function-constructor") ?? false)
+  );
+}
+
 /** Splice the carrier arms into `__builtinfn_get_meta` and `__builtinfn_delete`. */
 export function fillRuntimeEvalCarrierFnMeta(ctx: CodegenContext, carrier: RuntimeEvalAotCallableCarrier): void {
-  if (!ctx.standalone || carrier.propertyGetTrampolineFuncIdx === undefined) return;
+  if (!carrierFnMetaEnabled(ctx) || carrier.propertyGetTrampolineFuncIdx === undefined) return;
   const bagOwnsIdx = ctx.funcMap.get(FNINST_BAG_OWNS);
   const tombstoneIdx = ctx.funcMap.get(FNINST_TOMBSTONE);
   const isUndefinedIdx = ctx.funcMap.get("__extern_is_undefined");

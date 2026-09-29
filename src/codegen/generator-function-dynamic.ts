@@ -131,6 +131,41 @@ export function isDynamicGeneratorFunctionBinding(ctx: CodegenContext, id: ts.Id
   );
 }
 
+/**
+ * (#6651 A14) `Object.getPrototypeOf(g)` for `var g = GeneratorFunction(…)`.
+ * §20.2.1.1.1 gives the product %GeneratorFunction.prototype% as its
+ * `[[Prototype]]`, but the runtime-eval carrier has no `[[Prototype]]` slot, so
+ * the answer is static — the A7 rule for a generator-expression binding: the
+ * read follows the initializer in the text, and no `setPrototypeOf` /
+ * `__proto__` in the file names the binding.
+ */
+export function isDynamicGeneratorFunctionValue(ctx: CodegenContext, expr: ts.Expression): boolean {
+  const e = skipTransparentExpressions(expr);
+  if (!ts.isIdentifier(e) || !isDynamicGeneratorFunctionBinding(ctx, e)) return false;
+  const init = ctx.oracle.variableInitializerOf(e);
+  if (init === undefined || init.getSourceFile() !== e.getSourceFile() || init.end > e.getStart()) return false;
+  let replaced = false;
+  const visit = (node: ts.Node): void => {
+    if (replaced) return;
+    const parent = node.parent as ts.Node | undefined;
+    if (ts.isIdentifier(node) && node.text === e.text && parent !== undefined) {
+      const key =
+        ts.isPropertyAccessExpression(parent) && parent.expression === node
+          ? parent.name.text
+          : ts.isElementAccessExpression(parent) && ts.isStringLiteralLike(parent.argumentExpression)
+            ? parent.argumentExpression.text
+            : undefined;
+      const callee = ts.isCallExpression(parent) ? skipTransparentExpressions(parent.expression) : undefined;
+      replaced =
+        key === "__proto__" ||
+        (callee !== undefined && ts.isPropertyAccessExpression(callee) && callee.name.text === "setPrototypeOf");
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(e.getSourceFile());
+  return !replaced;
+}
+
 function isClaimedSite(ctx: CodegenContext, node: ts.CallExpression | ts.NewExpression): boolean {
   if (!ctx.standalone || isRuntimeEvalProviderAbsent(ctx)) return false;
   if ((node.arguments ?? []).some(ts.isSpreadElement)) return false;
