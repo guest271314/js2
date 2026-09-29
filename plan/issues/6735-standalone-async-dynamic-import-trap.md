@@ -16,6 +16,7 @@ goal: standalone
 requested_by: ttraenkler/sendev-standalone
 related: [3494, 3509, 6725, 6747]
 files:
+  - src/codegen/async-scheduler.ts
   - src/codegen/async-value-sink-unwrap.ts
   - src/codegen/expressions.ts
   - src/codegen/expressions/standalone-dynamic-import.ts
@@ -25,7 +26,10 @@ files:
   - tests/issue-6735-standalone-async-dynamic-import.test.ts
 # 2026-09-29 — the IR `await` arm must stay in lockstep with the codegen
 # unwrap (#1373b C-1): one optional resolver hook + its call, +5 / +2 LOC.
+# The shared builder (~30 LOC) lives in async-scheduler.ts so the IR reaches it
+# through its existing edge — a new ir -> codegen import fails #3113.
 loc-budget-allow:
+  - src/codegen/async-scheduler.ts
   - src/ir/integration.ts
   - src/ir/lower-generic.ts
 func-budget-allow:
@@ -109,7 +113,9 @@ Steps (executed):
    promise's rejection. The #6428 value sink keeps the plain read.
 2. IR lockstep: the `await` arm of `lower-generic.ts` calls a new optional
    resolver hook `rejectedAwaitThrow` that `integration.ts` implements with the
-   same builder, so the two lowerings cannot drift.
+   same builder (`async-scheduler.ts::rejectedAwaitThrow`, reached through the
+   IR's existing async-scheduler import — no new ir -> codegen edge, #3113), so
+   the two lowerings cannot drift.
 3. `standalone-dynamic-import.ts`: a non-literal first argument whose ToString
    can run user code (externref / object literal) is kept in a local after all
    arguments are evaluated (GetValue stays a synchronous throw), then

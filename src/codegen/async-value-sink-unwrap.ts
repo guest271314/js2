@@ -10,16 +10,9 @@
  */
 import type { AsyncConsumerKind } from "./async-cps.js";
 import type { Instr, ValType } from "../ir/types.js";
-import {
-  getOrInitState,
-  getOrRegisterPromiseType,
-  isStandalonePromiseActive,
-  PROMISE_STATE_REJECTED,
-  type CodegenContextWithScheduler,
-} from "./async-scheduler.js";
+import { getOrRegisterPromiseType, isStandalonePromiseActive, rejectedAwaitThrow } from "./async-scheduler.js";
 import { allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { ensureExnTag } from "./registry/imports.js";
 import type { InnerResult } from "./shared.js";
 import { VOID_RESULT } from "./shared.js";
 
@@ -76,37 +69,6 @@ export function emitStandaloneAwaitUnwrap(ctx: CodegenContext, fctx: FunctionCon
     else: elseBody,
   });
   releaseTempLocal(fctx, tmp);
-}
-
-/**
- * `if (p.state === REJECTED) { markHandled(p); throw p.value }` for the
- * `$Promise` held (as externref) in `local`. Shared with the IR `await` arm
- * (`resolver.rejectedAwaitThrow`) so the two lowerings stay identical.
- */
-export function rejectedAwaitThrow(ctx: CodegenContext, promiseTypeIdx: number, local: number): Instr[] {
-  const markHandled = getOrInitState(ctx as CodegenContextWithScheduler).markRejectionHandledFuncIdx;
-  const promise: Instr[] = [
-    { op: "local.get", index: local },
-    { op: "any.convert_extern" },
-    { op: "ref.cast", typeIdx: promiseTypeIdx },
-  ];
-  return [
-    ...promise,
-    { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 },
-    { op: "i32.const", value: PROMISE_STATE_REJECTED },
-    { op: "i32.eq" },
-    {
-      op: "if",
-      blockType: { kind: "empty" },
-      then: [
-        // (#2958, wasi) awaiting it is a reaction: the exit reporter skips it.
-        ...(markHandled >= 0 ? [...promise, { op: "call", funcIdx: markHandled } satisfies Instr] : []),
-        ...promise,
-        { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 },
-        { op: "throw", tagIdx: ensureExnTag(ctx) },
-      ],
-    },
-  ];
 }
 
 /**
