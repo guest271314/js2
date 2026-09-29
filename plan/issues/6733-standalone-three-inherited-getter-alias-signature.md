@@ -95,6 +95,25 @@ Fixed as planned. Regression test
 getter/setter/methods naming a later class through child + grandchild, and
 the three.js JSDoc getter shape): parent 0/2, fix 2/2.
 
+Scoped standalone test262 (129 files: `language/statements/class/{subclass,super,accessor-name-inst}`
+plus the getter/setter/accessor/inherit/super/prototype files of `class/definition`
+and `class/`): parent 100 pass / 28 fail / 1 compile_error, fix identical, same
+non-pass set — no losses.
+
+JS-host control: compiles that succeeded on the parent are byte-identical with
+the fix (playground `benchmarks.ts` and two class fixtures, `gc` and
+`standalone`); the reduced fixtures and `three.core.js` under `gc`, which threw
+this same invariant on the parent, now compile. three upstream MathUtils suite
+(JS host) 17/18, unchanged.
+
+three 0.185.1 standalone-dynamic lane (2026-09-29):
+
+- before: `compile-error` — this invariant
+  (`... declaration:0000000000000010 / ... declaration:0000000000000009:class-instance-getter:0000000000000001 disagrees with its exact canonical signature`).
+- after: compiles; next blocker is `optimization-error`, filed as
+  [#6752](https://js2wasm.loopdive.com/dashboard/issue.html?slug=6752-standalone-three-wasm-opt-popping-from-empty-stack):
+  `wasm-opt -O4 did not produce the measured artifact: wasm-opt -O4 failed: [parse exception: popping from empty stack (at 0:8674212)]`
+
 ## Acceptance criteria
 
 - The reduced fixture compiles standalone and the getter returns the base
