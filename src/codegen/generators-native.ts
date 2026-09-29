@@ -61,6 +61,7 @@ import {
   valTypesMatch,
 } from "./shared.js";
 import { UNDEF_F64_BITS } from "./value-tags.js";
+import { yieldResumptionNeedsAnyCarrier } from "./generator-resumption-carrier.js"; // (#6651 A11)
 import { canonicalUndefinedExternInstrs } from "./any-helpers.js"; // (#2864 wave-2 S1)
 import { addUnionImports, ensureI32Condition, resolveWasmType } from "./index.js";
 import { bodyNeedsArgumentsObject } from "./helpers/body-uses-arguments.js";
@@ -512,6 +513,8 @@ function generatorElemValType(ctx: CodegenContext, decl: GeneratorDecl): ValType
       return; // a yield here belongs to an inner generator
     }
     if (ts.isYieldExpression(node)) {
+      // (#6651 A11) A consumed resumption value (`x = yield`) is any value `next(v)` sends.
+      if (noJsHostTarget(ctx) && yieldResumptionNeedsAnyCarrier(ctx, node)) sawOther = true;
       // A direct `yield* "abc"` is lowered by the generic iterable cursor,
       // whose values are native strings in the standalone iterator runtime.
       // Include that operand in the carrier decision; otherwise the generator

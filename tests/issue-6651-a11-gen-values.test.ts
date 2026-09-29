@@ -15,6 +15,10 @@
  *    generator FACTORY stores param 0 into its frame even when the body never
  *    reads `this` (`class/gen-method/yield-spread-arr-*.js`).
  *
+ * Group 2, a consumed yield's resumption value. `function* g() { actual =
+ * yield; }` had no non-numeric operand, so it took the f64 carrier and
+ * `next({})` stored NaN (`yield/iter-value-{specified,unspecified}.js`).
+ *
  * Every case is RED on the base commit except the ones marked GUARD, which pin
  * that the new arms do not fire where they must not (green on base too). All
  * run standalone and assert the binary imports NOTHING.
@@ -122,5 +126,59 @@ var gen: any = C.prototype.gen;`;
   it("GUARD: the same method called through an instance still yields", async () => {
     const prelude = `class C { *gen() { yield 1; } }`;
     expect(await run("return new C().gen().next().value === 1 ? 1 : 0;", prelude)).toBe(1);
+  });
+});
+
+/** The `sent` field type of `$__GenState_<name>` in the standalone WAT. */
+async function sentCarrier(src: string, name: string): Promise<string | undefined> {
+  const r = (await compile(src, {
+    fileName: "t.ts",
+    target: "standalone",
+    skipSemanticDiagnostics: true,
+    emitWat: true,
+  })) as unknown as Compiled & { wat?: string };
+  expect(r.success, `compile failed: ${JSON.stringify(r.errors).slice(0, 300)}`).toBe(true);
+  const m = new RegExp(`\\$__GenState_${name} [^\\n]*\\(field \\$sent \\(mut (\\w+)\\)\\)`).exec(r.wat ?? "");
+  return m?.[1];
+}
+
+describe("#6651 A11 · group 2 · a consumed yield carries whatever `next(v)` sends", () => {
+  it("`actual = yield` stores the object `next(obj)` sent (it stored NaN)", async () => {
+    const prelude = `var actual: any;
+function* g(): any { actual = yield; }
+var expected: any = {};`;
+    const body = `var iter = g();
+var r1 = iter.next();
+if (r1.done !== false || actual !== undefined) return 2;
+var r2 = iter.next(expected);
+return r2.done === true && actual === expected ? 1 : 0;`;
+    expect(await run(body, prelude)).toBe(1);
+  });
+
+  it("a bare yield yields undefined and a no-argument `next()` resumes it with undefined", async () => {
+    const prelude = `var actual: any = 7;
+function* g(): any { actual = yield; }`;
+    const body = `var iter = g();
+var r1: any = iter.next();
+var r2: any = iter.next();
+return Object.is(r1.value, undefined) && Object.is(r2.value, undefined) && Object.is(actual, undefined) ? 1 : 0;`;
+    expect(await run(body, prelude)).toBe(1);
+  });
+
+  it("a yield consumed inside a larger expression keeps a sent string", async () => {
+    const prelude = "var t: any;\nfunction* g(): any { t = (yield 1) + '!'; }";
+    const body = "var iter = g(); iter.next(); var r: any = iter.next('a'); return t === 'a!' && r.done ? 1 : 0;";
+    expect(await run(body, prelude)).toBe(1);
+  });
+
+  it("GUARD: a `Generator<number, void, number>` keeps the f64 carrier and its answer", async () => {
+    const prelude = "var total = 0;\nfunction* g(): Generator<number, void, number> { total = (yield 1) + 1; }";
+    expect(await sentCarrier(`${prelude}\nexport function test(): number { return 0; }`, "g")).toBe("f64");
+    expect(await run("var it = g(); it.next(); it.next(41); return total;", prelude)).toBe(42);
+  });
+
+  it("GUARD: a statement-position `yield;` does not move the carrier", async () => {
+    const src = "function* g() { yield; yield 1; }\nexport function test(): number { return 0; }";
+    expect(await sentCarrier(src, "g")).toBe("f64");
   });
 });
