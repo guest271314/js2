@@ -110,3 +110,20 @@ member on a dynamic class value (`NaN` vs 8, pre-existing on main).
 4. Re-evaluate the S6 evidence bar after the nightly that carries those
    fixes; then implement #6708 (default flip, per-family accelerators,
    rollback alias); then S7 deletion per the plan.
+
+## Addendum — session stopped 2026-09-29 ~06:50Z on stakeholder instruction
+
+Two implementers had been dispatched minutes earlier and were stopped
+mid-flight; nothing is lost, nothing is pushed beyond the branch base:
+
+- **#6749 S3-h** — worktree `/Users/thomas/Code/js2/.claude/worktrees/agent-a89d656222829ab11`,
+  branch `issue-6749-s3h-npm-regime-parity` at main `46776c8864`, pushed to
+  the fork at that base. Four uncommitted edits in that worktree (its first
+  moves on part A); treat them as scratch — re-derive from the spec.
+  Claim `ttraenkler/opus-6749` still held.
+- **#6748 S3-g** — worktree `agent-acb2c9456fc2eddec`, branch
+  `issue-6748-s3g-temporal-init` at `46776c8864`, clean, pushed at base.
+  Claim `ttraenkler/opus-6748` still held.
+
+Resume by re-dispatching from the specs; release or re-point the claims with
+`claim-issue.mjs` if a different agent picks them up.
