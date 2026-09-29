@@ -22,6 +22,13 @@
  *    nullish initializer that is written anywhere else now takes the #5197
  *    runtime path (which still throws when the value IS nullish).
  *
+ * 4. `super.x` in a method of an object literal that stays a CLOSED STRUCT
+ *    (`method-definition/{generator,name}-super-prop-param.js`,
+ *    `name-super-prop-body.js`). The #4688 lowering reads the home object from
+ *    a closure capture only the open-`$Object` literal path installs, so a
+ *    struct method declined and answered `null`. Such a literal's [[Prototype]]
+ *    is statically %Object.prototype%, which is now the super base.
+ *
  * 3. `new TA(generatorObject)` through a dynamic constructor
  *    (`TypedArrayConstructors/ctors/object-arg/as-generator-iterable-returns.js`).
  *    §23.2.5.1 step 6 consults `@@iterator` for every Object argument; the arm
@@ -153,5 +160,47 @@ export function test(): any { return build(Int8Array); }`;
 }
 export function test(): any { return build(Float64Array); }`;
     expect(await run(src)).toBe(237);
+  });
+});
+
+// JavaScript, unannotated: an `any`-typed binding sends the literal down the
+// open-`$Object` path, which already carries the home object.
+describe("#6651 A13 · 4 · `super` in a closed-struct object literal method", () => {
+  it("`super.toString` in a method body", async () => {
+    const src = `var obj = { m() { return super.toString; } };
+export function test() { return obj.m() === Object.prototype.toString ? 1 : 0; }`;
+    expect(await run(src, true)).toBe(1);
+  });
+
+  it("`super.toString` in a generator method's parameter default ignores an own override", async () => {
+    const src = `var obj = { *foo(a = super.toString) { return a; } };
+obj.toString = null;
+export function test() { return obj.foo().next().value === Object.prototype.toString ? 1 : 0; }`;
+    expect(await run(src, true)).toBe(1);
+  });
+
+  it("`super[key]` with a computed key", async () => {
+    const src = `var obj = { m() { var k = "toStr" + "ing"; return super[k]; } };
+export function test() { return obj.m() === Object.prototype.toString ? 1 : 0; }`;
+    expect(await run(src, true)).toBe(1);
+  });
+
+  it("an arrow inside the method sees the same super base", async () => {
+    const src = `var obj = { m() { return (() => super.valueOf)(); } };
+export function test() { return obj.m() === Object.prototype.valueOf ? 1 : 0; }`;
+    expect(await run(src, true)).toBe(1);
+  });
+
+  it("an absent key reads undefined, not a TypeError", async () => {
+    const src = `var obj = { m() { return super.nope; } };
+export function test() { return obj.m() === undefined ? 1 : 0; }`;
+    expect(await run(src, true)).toBe(1);
+  });
+
+  it("GUARD: a `__proto__:` literal keeps its home-object read", async () => {
+    const src = `var proto = { x: 1 };
+var obj = { __proto__: proto, m() { return super.x; } };
+export function test() { return obj.m(); }`;
+    expect(await run(src, true)).toBe(1);
   });
 });
