@@ -76,6 +76,7 @@ import {
 } from "../codegen/dyn-ops.js";
 import { ensureLateImport, flushLateImportShifts } from "../codegen/shared.js"; // (#2949 S5.2) host __host_eq / __host_loose_eq registration; (#3143) flush the __extern_is_undefined batch pre-Phase-3
 import { getOrRegisterPromiseType, isStandalonePromiseActive } from "../codegen/async-scheduler.js";
+import { rejectedAwaitThrow } from "../codegen/async-value-sink-unwrap.js";
 import {
   addGeneratorImports,
   addForInImports,
@@ -8156,6 +8157,10 @@ function makeResolver(
     // `$Promise` carrier (wasi) → one-level unwrap; JS-host → identity.
     nativePromiseCarrierActive(): boolean {
       return isStandalonePromiseActive(ctx);
+    },
+    // (#6735) Await of an already-rejected `$Promise` throws its reason.
+    rejectedAwaitThrow(promiseTypeIdx: number, promiseLocal: number): Instr[] {
+      return rejectedAwaitThrow(ctx, promiseTypeIdx, promiseLocal);
     },
   };
   return resolver;

@@ -10,9 +10,16 @@
  */
 import type { AsyncConsumerKind } from "./async-cps.js";
 import type { Instr, ValType } from "../ir/types.js";
-import { getOrRegisterPromiseType, isStandalonePromiseActive } from "./async-scheduler.js";
+import {
+  getOrInitState,
+  getOrRegisterPromiseType,
+  isStandalonePromiseActive,
+  PROMISE_STATE_REJECTED,
+  type CodegenContextWithScheduler,
+} from "./async-scheduler.js";
 import { allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
+import { ensureExnTag } from "./registry/imports.js";
 import type { InnerResult } from "./shared.js";
 import { VOID_RESULT } from "./shared.js";
 
@@ -32,10 +39,20 @@ import { VOID_RESULT } from "./shared.js";
  * f64 → NaN). Genuinely-pending awaits (a promise that only settles on a later
  * microtask) need true frame suspension — deferred to #2865 AG1 (PATH B).
  *
+ * (#6735) With `rejectedThrows` (the `await` consumer), an ALREADY-REJECTED
+ * `$Promise` throws its reason instead of yielding it (§27.7.5.3 Await: the
+ * rejected continuation resumes the body with a throw completion). This is the
+ * synchronous pass-through population — async closures / methods the frame
+ * engine does not claim — so the throw reaches the body's own `try`, or the
+ * async call-site repair that turns it into the returned promise's rejection.
+ * Without it `await import(x)` (a rejected promise in standalone when `x` is
+ * not in the compiled graph, #3494) continued with `undefined`. The value sink
+ * keeps the plain read (a raw value sink is not an await).
+ *
  * `src/ir/lower-generic.ts`'s `await` arm mirrors this EXACTLY — keep the two in
  * lockstep (see `ir/backend/lower-contracts.ts` L272).
  */
-export function emitStandaloneAwaitUnwrap(ctx: CodegenContext, fctx: FunctionContext): void {
+export function emitStandaloneAwaitUnwrap(ctx: CodegenContext, fctx: FunctionContext, rejectedThrows = false): void {
   const promiseTypeIdx = getOrRegisterPromiseType(ctx);
   const tmp = allocTempLocal(fctx, { kind: "externref" });
   // stack: externref(operand) → stash, then test the stashed copy.
@@ -44,6 +61,7 @@ export function emitStandaloneAwaitUnwrap(ctx: CodegenContext, fctx: FunctionCon
   fctx.body.push({ op: "any.convert_extern" });
   fctx.body.push({ op: "ref.test", typeIdx: promiseTypeIdx });
   const thenBody: Instr[] = [
+    ...(rejectedThrows ? rejectedAwaitThrow(ctx, promiseTypeIdx, tmp) : []),
     { op: "local.get", index: tmp },
     { op: "any.convert_extern" },
     { op: "ref.cast", typeIdx: promiseTypeIdx },
@@ -58,6 +76,37 @@ export function emitStandaloneAwaitUnwrap(ctx: CodegenContext, fctx: FunctionCon
     else: elseBody,
   });
   releaseTempLocal(fctx, tmp);
+}
+
+/**
+ * `if (p.state === REJECTED) { markHandled(p); throw p.value }` for the
+ * `$Promise` held (as externref) in `local`. Shared with the IR `await` arm
+ * (`resolver.rejectedAwaitThrow`) so the two lowerings stay identical.
+ */
+export function rejectedAwaitThrow(ctx: CodegenContext, promiseTypeIdx: number, local: number): Instr[] {
+  const markHandled = getOrInitState(ctx as CodegenContextWithScheduler).markRejectionHandledFuncIdx;
+  const promise: Instr[] = [
+    { op: "local.get", index: local },
+    { op: "any.convert_extern" },
+    { op: "ref.cast", typeIdx: promiseTypeIdx },
+  ];
+  return [
+    ...promise,
+    { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 },
+    { op: "i32.const", value: PROMISE_STATE_REJECTED },
+    { op: "i32.eq" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        // (#2958, wasi) awaiting it is a reaction: the exit reporter skips it.
+        ...(markHandled >= 0 ? [...promise, { op: "call", funcIdx: markHandled } satisfies Instr] : []),
+        ...promise,
+        { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 },
+        { op: "throw", tagIdx: ensureExnTag(ctx) },
+      ],
+    },
+  ];
 }
 
 /**
