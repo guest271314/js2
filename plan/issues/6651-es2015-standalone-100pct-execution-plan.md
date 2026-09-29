@@ -169,6 +169,17 @@ assignee: "ttraenkler/fable-es2015-plan"
 #     `$__ta_ctor`, which the Int8Array `$Object` carrier is not). The first cut
 #     inlined the arm here and cost +68 / +65; extracting it left these 8.
 loc-budget-allow:
+  # 2026-09-29 — cluster H, slice H6 (record under the H6 claim).
+  # `src/codegen/object-runtime-enumeration.ts` +4: one import and three
+  # one-line `$Proxy` widenings of the array-like `$Object` arms of
+  # `__extern_length` / `__extern_get_idx` / `__extern_has_idx`. The predicate
+  # and its rationale live in the NEW leaf `proxy-array-like.ts`, the
+  # slice/splice routing in the NEW leaf `array-proxy-receiver.ts`.
+  # `array-methods.ts` +9, `context/types.ts` +7, `object-runtime.ts` +9
+  # (paths already listed below): the concat gate's fourth disjunct, the
+  # `proxyDirty` pre-scan flag, and the `$Proxy` test in the shared
+  # `__extern_get_idx` body builder.
+  - src/codegen/object-runtime-enumeration.ts
   # 2026-09-29 — cluster C, slice C5 (record at the end of this file). The
   # mechanisms live in leaves: `builtin-subclass-receiver.ts` (NEW — inherited
   # builtin member routing), `builtin-subclass-new-site.ts` (NEW — a
@@ -1170,6 +1181,10 @@ loc-budget-allow:
   # `promise-subclass-cell-read.ts`; the hand-off cannot move, because it is the
   # arm that would otherwise emit the bare `global.get` of the cell.
 func-budget-allow:
+  # 2026-09-29 — cluster H, slice H6. `buildObjectEnumerationHelpers` +2: the
+  # `$Proxy` widening of the `__extern_get_idx` / `__extern_has_idx`
+  # array-like arms (one line each; the predicate is `proxy-array-like.ts`).
+  - src/codegen/object-runtime-enumeration.ts::buildObjectEnumerationHelpers
   # 2026-09-29 — cluster C, slice C5 (see the loc-budget note). Restated per the
   # stranded-grant rule where already listed: `compileClassBodiesInner` +4 and
   # `compileSuperCall` +4 (the two `classHeritageIsIntrinsicSymbol` throws),
@@ -19482,6 +19497,147 @@ time (the adapter cache key hashes `src/` — never add `src/` files mid-run),
 byte differential on both targets in separate processes, zero pass→non-pass,
 full gate chain incl. host-import-policy (`src/runtime.ts` is at its cap),
 eval-free pin suite red on base, commit with ✓ and trailers, no push.
+
+### 2026-09-29 — Cluster H, slice H6: Array methods over a proxy — IsArray, ArraySpeciesCreate, revocation (claim)
+
+Claimed by the lead session (lane H6). Target: the 15 ES2015 standalone
+non-pass rows under `built-ins/Array/prototype/**` whose names match
+`proxy`, `species` or `invalid-len`, excluding the `*-realm*` rows. Measured
+on main `ee50a5a7a` (standalone baseline promoted 2026-09-29 13:43):
+`{map,filter,slice,splice,concat}/create-proxy.js`,
+`{map,filter,slice,splice}/create-revoked-proxy.js`,
+`concat/is-concat-spreadable-proxy-revoked.js`, the three
+`*-invalid-len.js` RangeError rows, `splice/property-traps-order-with-species.js`
+and `copyWithin/return-abrupt-from-delete-proxy-target.js`. The 2026-09-26
+root-cause table lists `*/create-proxy.js` as "shared front-end, 5 rows, 0
+standalone-only" and revoked-proxy reachability as "not root-caused". The
+record follows when the lane reports.
+
+### H6 record — 2026-09-29
+
+Lane H6 (Array methods over a Proxy receiver, standalone). Branch
+`claude/es6-6651-h6-array-species-proxy`, base `885a45051` (main `ee50a5a7a`
+plus the claim). Wrapped up on the lead's order before every measurement
+finished; what was and was not run is stated per item.
+
+**Rows (the 15 claimed rows, `--isolate`, runner `run-test262-paths.mts`).**
+
+| lane | base `885a45051` (own run) | after (own run) | moved |
+| --- | ---: | ---: | --- |
+| standalone | 0 / 15 | **5 / 15** | +5, 0 lost |
+| host (default target) | 5 / 15 | not re-run | — |
+
+The five: `{map,filter,slice,splice}/create-revoked-proxy.js` and
+`concat/is-concat-spreadable-proxy-revoked.js`. The "after" run is of the
+working tree that became commit `854b5d2ab`; the commit only moved the
+`$Proxy` predicate into the leaf `proxy-array-like.ts` (same instructions).
+The host lane was not re-run: every change is gated on `ctx.standalone` /
+`native-first` / the `objArrayLikeArms` standalone trio, so the host
+binaries should be unchanged, but that is a construction argument, not a
+measurement.
+
+#### Root causes that landed
+
+1. **The array-like trio had no `$Proxy` arm.** `__extern_length`,
+   `__extern_get_idx` and `__extern_has_idx` (§7.3.18 LengthOfArrayLike and
+   the `Get` / `HasProperty` of every §23.1.3 generic) answered `0` /
+   `undefined` / `false` for EVERY proxy, because a `$Proxy` is not an
+   `$Object`. Measured on base: `Array.prototype.map.call(<revoked proxy>, f)`
+   returned an empty array (no TypeError), `[1].concat(new Proxy([7, 8], {}))`
+   had length 1. A `$Proxy` now takes the `$Object` arm — `__extern_get` /
+   `__extern_has` already own the §10.5 dispatch — gated on a new pre-scan
+   flag `proxyDirty` (the identifier `Proxy` occurs), so Proxy-free modules
+   keep their bytes. Moves map/filter revoked.
+2. **Typed lowerings `ref.cast` a Proxy VALUE to its target's vec.**
+   TypeScript types a proxy as its target, so `Array.prototype.slice.call(p)`
+   trapped with `illegal cast`, `splice.call(p)` ran on a copy, and
+   `[].concat(handle.proxy)` trapped. A receiver/operand that traces to a
+   Proxy value (`tracesToProxyValue`, the F-cluster predicate) now takes the
+   array-like `__arrprod_slice` / `__arrprod_splice` (#6683/#6701) through
+   the new leaf `array-proxy-receiver.ts`, and a fourth concat routing gate
+   (`concatOperandMayBeProxy`) sends such a concat to the §23.1.3.1 spec loop.
+   Moves slice/splice revoked and the concat IsConcatSpreadable row.
+
+Pins: `tests/issue-6651-h6-array-proxy-receiver.test.ts`, 9 tests — 6 RED on
+the base sources (file-copy A/B), 3 guards green on both.
+
+#### Built, measured only by pins, and REVERTED from this branch
+
+Commits `e7cd6a20a` / `501bcd9b0` carried a second change set, reverted
+forward here because its row runs and controls did not finish before the
+wrap-up (queued behind the shared test262 lock). It stays in the branch
+history for the next lane; its pins were 13/13 on the branch and 9 RED on
+base:
+
+- the #2615/#4754 escape gate treats `Array.prototype.{map,filter,slice,
+  splice,concat,copyWithin}.call(p, …)` receivers (and concat operands) as
+  non-escaping in standalone, so the binding keeps its proxy instead of being
+  materialized into a copy of the target at the declaration;
+- the map/filter species prologue reads the ORIGINAL receiver, not the
+  materialized vec; the slice/splice proxy route applies ArraySpeciesCreate
+  after the helper (an ordering under-approximation);
+- ArrayCreate's RangeError for a trapped length above 2^32 − 1 in the
+  externref→vec materializer and the array-like `map` loop;
+- `Object.getPrototypeOf(<Array-typed>)` read at run time in a module that
+  can observe ArraySpeciesCreate or hold a Proxy;
+- a §23.1.3.4 `__arrprod_copyWithin` array-like body for a Proxy receiver.
+
+That set targets the remaining 9 non-design rows (create-proxy ×5,
+invalid-len ×3, copyWithin delete-proxy-target) plus the unclaimed ES2015 row
+`copyWithin/return-abrupt-from-has-start.js`. None of those rows was measured
+on it.
+
+#### Residuals (10 rows)
+
+- `{map,filter,slice,splice,concat}/create-proxy.js`,
+  `{map,splice}/create-species-undef-invalid-len.js`,
+  `slice/create-proxied-array-invalid-len.js`: the proxy binding is
+  materialized into a copy of its target at the declaration (the escape gate
+  above), the species prologue reads that copy, and `Object.getPrototypeOf`
+  of the result is folded to `%Array.prototype%` from the checker's array
+  type. Fix built in `e7cd6a20a`, unmeasured.
+- `copyWithin/return-abrupt-from-delete-proxy-target.js`: standalone has no
+  array-like `copyWithin` (the `.call` form throws "not yet callable"); body
+  built in `e7cd6a20a`, unmeasured.
+- `splice/property-traps-order-with-species.js` — **design question, not
+  built.** ProxyCreate (`__proxy_create`, `object-runtime-proxy.ts` ~L1540)
+  snapshots all 13 traps off the handler into `$ProxyTraps`, so a handler
+  that is itself a proxy logs every trap name at creation; §10.5 requires
+  `GetMethod(handler, name)` at each operation. Independently, the species
+  result swap (`emitArraySpeciesResultSwap`) does a define AND a `Set` per
+  element, which adds `set` entries to the expected
+  `defineProperty, defineProperty, set, getOwnPropertyDescriptor,
+  defineProperty` log. Both are runtime-wide changes.
+
+#### Newly root-caused, not taken
+
+- **Proxy traps receive NUMBER keys.** Measured on this branch (and the
+  behaviour predates it): compiled `p[0]`, `delete p[1]` and `0 in p` hand the
+  `get` / `deleteProperty` / `has` traps the number, and `__arrprod_splice`'s
+  boxed index keys do the same; §10.5 traps must see `ToPropertyKey` strings.
+  The fix belongs in the proxy dispatch front-guards and reaches every proxy
+  row with a numeric key.
+
+#### Controls
+
+- Gates, run bare on the reverted tree before the last commit: loc, func,
+  coercion-sites, oracle-ratchet, dead-exports, loc/func with
+  `LOC_GATE_BASE=origin/main`, host-import-policy, compiler-boundaries
+  `--mode inventory`, typecheck — all green.
+- Related suites (one vitest process each, QuickJS provider): `issue-2615`
+  (1 fail), `issue-4754-module-global-proxy-escape` (6 fail),
+  `issue-5122-es2015-proxy-symbol-targets` (2 fail),
+  `issue-5268-es2015-array-object-r2` (4 fail) fail on this tree with exactly
+  the same test names on the BASE sources (file-copy A/B, same session) — a
+  pre-existing state, not this lane's. `issue-2984-species`,
+  `issue-3420-species-result-store`, `issue-4449-species-{controls,producers}`
+  and `issue-5196-es2015-proxy-r2` passed on the second change set; they were
+  not re-run on the reverted tree.
+- NOT run: the compile-only differential's new side (the base side over the
+  783 Proxy-mentioning files × 2 targets and the 558-file species/Temporal
+  set is in `.tmp/h6-bytes{,2}-base.tsv` of the lane tree), ES5 control rows,
+  `equivalence-gate`, `check:ir-fallbacks`, the guard suite and
+  playground/benchmark byte identity.
 
 ### 2026-09-29 — Cluster C, slice C5: subclassing built-in constructors (claim)
 

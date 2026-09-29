@@ -7455,6 +7455,8 @@ interface ExternGetIdxBodyParams {
   numberToStringIdx: number;
   /** funcIdx of `__extern_get` (only used when objArrayLikeArms). */
   externGetIdx: number;
+  /** (#6651 H6) `$Proxy` type: its indexed read is the same `Get(O, ToString(i))`. */
+  proxyTypeIdx?: number;
   /** Pre-built per-`__vec_<k>` dispatch arms (empty at registration time). */
   vecArms: Instr[];
   /** (#2106 S1) Factory for the miss ("index absent") result instrs. A FACTORY
@@ -7484,6 +7486,13 @@ export function buildExternGetIdxBody(p: ExternGetIdxBodyParams): Instr[] {
     ? [
         { op: "local.get", index: 2 },
         { op: "ref.test", typeIdx: objectTypeIdx },
+        ...(p.proxyTypeIdx === undefined
+          ? []
+          : ([
+              { op: "local.get", index: 2 },
+              { op: "ref.test", typeIdx: p.proxyTypeIdx },
+              { op: "i32.or" },
+            ] satisfies Instr[])),
         {
           op: "if",
           blockType: { kind: "empty" },

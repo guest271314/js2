@@ -120,7 +120,11 @@ import { isHostTypedArrayCarrierExpression } from "./expressions/typed-array-hos
 // (#4446) The §23.1.3.1 host-free concat loop for dynamic operands.
 import { compileArrayConcatNativeSpec } from "./array-concat-spec.js";
 // (#4655) Shared concat carrier/dispatch predicate — see array-concat-carrier.ts.
-import { concatMustConsultIsConcatSpreadable, concatMustConsultPrototypeChain } from "./array-concat-carrier.js";
+import {
+  concatMustConsultIsConcatSpreadable,
+  concatMustConsultPrototypeChain,
+  concatOperandMayBeProxy,
+} from "./array-concat-carrier.js";
 import { ensureJoinProtoHoleLocal, joinProtoHoleFallbackInstrs } from "./array-join-proto-hole.js";
 // (#5317 r4) join/toLocaleString separator coercion (§23.1.3.15 step 3).
 import { buildJoinSeparatorToString } from "./join-separator.js";
@@ -5389,7 +5393,12 @@ function compileArrayConcat(
   // THIS gate is not reached (the spec loop's own step-1 fix is ungated and
   // does move bytes for modules the two gates above already route there).
   // See array-concat-carrier.ts.
-  if (concatMustConsultPrototypeChain(ctx) || arraySpeciesActive(ctx) || concatMustConsultIsConcatSpreadable(ctx)) {
+  if (
+    concatMustConsultPrototypeChain(ctx) ||
+    arraySpeciesActive(ctx) ||
+    concatMustConsultIsConcatSpreadable(ctx) ||
+    concatOperandMayBeProxy(ctx, callExpr) // (#6651 H6)
+  ) {
     const spec = compileArrayConcatNativeSpec(ctx, fctx, propAccess, callExpr);
     if (spec !== undefined) return spec;
   }

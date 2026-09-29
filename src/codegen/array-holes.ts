@@ -182,6 +182,11 @@ export function scanForArrayHoles(ctx: CodegenContext, root: ts.Node): void {
     if (!ctx.isConcatSpreadableDirty && isIsConcatSpreadableObservable(node)) {
       ctx.isConcatSpreadableDirty = true;
     }
+    // (#6651 H6) Every Proxy VALUE this module can make starts at the identifier
+    // `Proxy`. Deliberately NOT in the dynamic-code cascade below: a proxy built
+    // by eval'd code keeps the pre-H6 array-like answers, and eval-using
+    // modules (most of ES5) keep their bytes.
+    if (!ctx.proxyDirty && ts.isIdentifier(node) && node.text === "Proxy") ctx.proxyDirty = true;
     if (isOwnKeysOrDescriptorDefineUse(node)) {
       ctx.vecOwnKeysDirty = true;
       // ArraySetLength can expose absent f64 indices even when every literal
