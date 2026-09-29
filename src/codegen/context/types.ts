@@ -491,6 +491,10 @@ export interface NativeGeneratorInfo {
   paramTypes: ValType[];
   /** Field index where captured params start in the state struct. */
   paramFieldOffset: number;
+  /** (#6651 A12) `paramNames` indices the body can write: mutable fields, stored back at each suspension. */
+  writableParamIdxs?: ReadonlySet<number>;
+  /** (#6651 A12) Resume-function locals of `writableParamIdxs` and their fields (frame-core `storeSpills`). */
+  paramWriteBack?: readonly { local: number; field: number }[];
   /**
    * (#2864 C02) Field carrying the eagerly-created `arguments` vec across
    * generator suspension. Present only for generators whose body observes the

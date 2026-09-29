@@ -145,7 +145,7 @@ import {
   isNativeGeneratorCandidate,
   registerNativeGenerator,
 } from "./generators-native.js";
-import { namedFunctionOwnNameShadow } from "./generators-native-ast-scan.js"; // (#6651 A7)
+import { isGeneratorMethodWithYieldKey, namedFunctionOwnNameShadow } from "./generators-native-ast-scan.js"; // (#6651 A7, A10)
 import type { NativeGeneratorInfo } from "./context/types.js";
 // (#3270) Extracted closure subsystems. Re-exported below so external importers
 // that reference these symbols via `./closures.js` are unaffected.
@@ -2193,10 +2193,14 @@ export function computeClosureWrapperSig(
 
   // 2. Return type (mirrors compileArrowAsClosure).
   const isAsync = arrow.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) ?? false;
-  const sig = ctx.checker.getSignatureFromDeclaration(arrow);
+  // (#6651 A10) `*[yield]() {}` inside another generator sends TypeScript's
+  // checker into unbounded recursion on this query; a generator returns its
+  // iterator object, so the answer is externref without asking.
+  const yieldKeyedGenerator = isGeneratorMethodWithYieldKey(arrow);
+  const sig = yieldKeyedGenerator ? undefined : ctx.checker.getSignatureFromDeclaration(arrow);
   let closureReturnType: ValType | null = null;
   let checkerReturnWasNever = false;
-  if (isGenerator) {
+  if (isGenerator || yieldKeyedGenerator) {
     closureReturnType = { kind: "externref" };
   } else if (sig) {
     let retType = ctx.checker.getReturnTypeOfSignature(sig);

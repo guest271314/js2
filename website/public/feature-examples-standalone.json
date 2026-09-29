@@ -423,17 +423,17 @@
     {
       "name": "Functions & closures",
       "testCategories": ["language/statements/function", "language/function-code", "built-ins/Function"],
-      "passCount": 1115,
+      "passCount": 1117,
       "totalCount": 1177,
       "editionSpread": [
         {
           "edition": "ES5",
-          "pass": 794,
+          "pass": 795,
           "total": 795
         },
         {
           "edition": "ES2015",
-          "pass": 233,
+          "pass": 234,
           "total": 262
         },
         {
@@ -574,7 +574,7 @@
     {
       "name": "Objects",
       "testCategories": ["language/expressions/object", "built-ins/Object"],
-      "passCount": 4389,
+      "passCount": 4396,
       "totalCount": 4581,
       "editionSpread": [
         {
@@ -584,7 +584,7 @@
         },
         {
           "edition": "ES2015",
-          "pass": 688,
+          "pass": 695,
           "total": 752
         },
         {
@@ -839,12 +839,12 @@
     {
       "name": "Arrays",
       "testCategories": ["built-ins/Array", "built-ins/ArrayIteratorPrototype", "language/expressions/array"],
-      "passCount": 2328,
+      "passCount": 2330,
       "totalCount": 3161,
       "editionSpread": [
         {
           "edition": "ES5",
-          "pass": 221,
+          "pass": 222,
           "total": 223
         },
         {
@@ -889,7 +889,7 @@
         },
         {
           "edition": "Unclassified (untagged)",
-          "pass": 1719,
+          "pass": 1720,
           "total": 2250
         }
       ]
@@ -950,12 +950,12 @@
     {
       "name": "Property accessors (get / set)",
       "testCategories": ["language/expressions/property-accessors"],
-      "passCount": 20,
+      "passCount": 21,
       "totalCount": 21,
       "editionSpread": [
         {
           "edition": "ES5",
-          "pass": 19,
+          "pass": 20,
           "total": 20
         },
         {
@@ -1025,7 +1025,7 @@
     {
       "name": "Default parameters",
       "testCategories": ["language/statements/function/default-parameter"],
-      "passCount": 1549,
+      "passCount": 1551,
       "totalCount": 1552
     },
     {
@@ -1049,7 +1049,7 @@
         "built-ins/GeneratorFunction",
         "built-ins/GeneratorPrototype"
       ],
-      "passCount": 2424,
+      "passCount": 2446,
       "totalCount": 2486
     },
     {
@@ -1080,7 +1080,7 @@
     {
       "name": "Symbol",
       "testCategories": ["built-ins/Symbol"],
-      "passCount": 1818,
+      "passCount": 1819,
       "totalCount": 1955
     },
     {
@@ -1258,7 +1258,7 @@
     {
       "name": "Class fields (public, private, static)",
       "testCategories": ["language/statements/class/fields"],
-      "passCount": 3819,
+      "passCount": 3821,
       "totalCount": 4979
     },
     {
@@ -1564,12 +1564,12 @@
     {
       "name": "Temporal",
       "testCategories": ["built-ins/Temporal"],
-      "passCount": 4493,
+      "passCount": 4494,
       "totalCount": 4603,
       "editionSpread": [
         {
           "edition": "ES2026",
-          "pass": 4493,
+          "pass": 4494,
           "total": 4603
         }
       ]
