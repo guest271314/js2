@@ -268,3 +268,24 @@ function isInsideFunction(node: ts.Node): boolean {
   }
   return false;
 }
+
+/**
+ * (#6651 A9) {@link bindingIsSingleAssignment} for a SOURCE binding whose name
+ * may also name an ambient lib declaration. A script-level
+ * `var GeneratorFunction = …` merges with lib's `interface GeneratorFunction`,
+ * so the checker reports two declarations and the plain predicate declines.
+ * Only declarations outside `.d.ts` files are counted: an ambient interface
+ * declares a type, never a value, and cannot be written.
+ */
+export function sourceBindingIsSingleAssignment(ctx: CodegenContext, id: ts.Identifier): boolean {
+  const decls = ctx.oracle.declarationsOf(id).filter((d) => !d.getSourceFile().isDeclarationFile);
+  if (decls.length !== 1 || !ts.isVariableDeclaration(decls[0]!)) return false;
+  const decl = decls[0];
+  const writes = writingOccurrences(id.getSourceFile()).get(id.text);
+  if (writes === undefined) return true;
+  for (const write of writes) {
+    const target = ctx.oracle.valueDeclarationOf(write);
+    if (target === undefined || target === decl) return false;
+  }
+  return true;
+}
