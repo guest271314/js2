@@ -18641,3 +18641,14 @@ time (the adapter cache key hashes `src/` — never add `src/` files mid-run),
 byte differential on both targets in separate processes, zero pass→non-pass,
 full gate chain incl. host-import-policy (`src/runtime.ts` is at its cap),
 eval-free pin suite red on base, commit with ✓ and trailers, no push.
+
+### 2026-09-29 — Cluster C, slice C5: subclassing built-in constructors (claim)
+
+Claimed by the lead session (lane C5). Target: the 22 ES2015 standalone
+non-pass rows under `language/statements/class/subclass/**`, excluding
+`builtin-objects/GeneratorFunction/*` (lane A14). Measured on main `9ec7a78b0`
+(standalone baseline promoted 2026-09-29 11:55): `class X extends
+Number/String/Boolean/Date/RegExp/ArrayBuffer/DataView/TypedArray/Function/Proxy/Symbol/Promise`,
+the instance `length` / `name` own properties of a `Function` subclass
+instance, and the return-override / binding / default-constructor rows. The
+record follows when the lane reports.
