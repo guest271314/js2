@@ -404,10 +404,12 @@ fails `merge shard reports` and parks the PR. There is no tolerance, no
 - `--update` sets `completed` the first time a full run measures pass == total,
   and never clears it. It also refuses to bank while a completed edition has a
   failing row.
-- The only escape is a per-row `exceptions` entry with a `reason`, for a row
-  that cannot pass on this target **by construction** — never for a regression.
-  Adding one, or clearing `completed`, is a hand edit reviewed like lowering a
-  floor.
+- The only escape is a per-row `exceptions` entry with a `reason`: a row that
+  cannot pass on this target **by construction**, or a known failure that has
+  **never passed** since the floor was seeded — never a regression. Adding one,
+  or clearing `completed`, is a hand edit reviewed like lowering a floor.
+- ES5 is marked `completed` with one exception, `Array/prototype/toString/
+  S15.4.4.2_A1_T4.js`, which has failed since the floor was seeded.
 - ES5 is the first completed edition. It lost 7 rows between 2026-09-23 and
   09-28 while this gate reported OK: the `merge shard reports` job had no test262
   checkout, so every row classified as "Unclassified (legacy)" and ES5 read as

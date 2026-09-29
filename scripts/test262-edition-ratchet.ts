@@ -110,9 +110,10 @@ interface EditionEntry {
    */
   completed?: boolean;
   /**
-   * Rows of a completed edition that may be non-pass, each with its reason.
-   * For a row that cannot pass on this target by construction — never for a
-   * regression.
+   * Rows of a completed edition that may be non-pass, each with its reason:
+   * a row that cannot pass on this target by construction, or a known failure
+   * that has never passed since the floor was seeded. Never a regression — a
+   * row that passed and stopped passing is exactly what this gate refuses.
    */
   exceptions?: { file: string; reason: string }[];
 }
