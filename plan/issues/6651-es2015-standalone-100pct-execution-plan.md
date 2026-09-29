@@ -430,7 +430,7 @@ loc-budget-allow:
   #     `fillClassToPrimitive` calls they twin. Finalize ordering lives in the
   #     driver, which is the whole reason the fill exists there.
   # 2026-09-29 — cluster A, slice A12 (a parameter write survives a
-  # suspension). `generators-native.ts` +15 and `context/types.ts` +4 (both
+  # suspension). `generators-native.ts` +11 and `context/types.ts` +4 (both
   # paths already listed, restated per the stranded-grant rule). The MECHANISM
   # — which parameters the body can write, and the post-body reconcile for a
   # re-typed parameter local — is the NEW leaf `generator-param-writeback.ts`;
@@ -1144,9 +1144,9 @@ func-budget-allow:
   # `registerNativeGenerator` +4 (the writable-parameter scan and the field's
   # `mutable:` flag). Both functions own the data they write — the frame
   # struct and the resume prelude; the scan and the reconcile are the leaf
-  # `generator-param-writeback.ts`.
+  # `generator-param-writeback.ts`. (`registerNativeGenerator` is already
+  # listed further down.)
   - src/codegen/generators-native.ts::ensureNativeGeneratorResumeFunction
-  - src/codegen/generators-native.ts::registerNativeGenerator
   # 2026-09-28 — cluster A, slice A5: `buildNativeGeneratorPlan` +40 as the gate
   # measures it (path already listed below, restated per the stranded-grant
   # rule). Four pieces, each writing this function's own closure state and so
@@ -9772,8 +9772,12 @@ in a parameter default) and rest-binding rows (cluster I, I7 residual 3).
 
 ### A12 record — 2026-09-29 (cluster A: a generator parameter write survives a suspension)
 
-**Branch** `claude/es6-6651-a12-gen-param-writes`, fix commit `bd3b64f17`, on
-`origin/main` @ `c7901473a` + A11 (stacked). Engine
+**Branch** `claude/es6-6651-a12-gen-param-writes`, fix commit `bd3b64f17`.
+Rows and the byte differential were measured on `origin/main` @ `c7901473a` +
+A11 (stacked); the controls on that tree merged with `origin/main` @
+`ec0d337d1`. After A11 landed, the branch was merged onto `origin/main` @
+`a4e5b800a` — a plain child of main now, 7 files — and the pins (17/17),
+typecheck and every gate were re-run there. Engine
 `JS2WASM_EVAL_ENGINE=quickjs`, `--isolate`, one runner at a time under the
 shared lock. Every "base" figure below is a file-copy A/B of the four touched
 source files against `.tmp/base/` (captured before the first edit), not an
