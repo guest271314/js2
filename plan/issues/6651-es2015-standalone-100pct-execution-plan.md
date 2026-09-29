@@ -9911,8 +9911,13 @@ fields.
 - Byte identity, `website/playground/examples/**` + `benchmarks/suites/**` +
   `benchmarks/*.bench.ts` (19 programs × gc + standalone): **38/38 identical**
   (none of them has a generator that writes a parameter).
-- vitest on `tests/issue-6651-*`, `tests/*generator*`, `tests/issue-2864-*` and the
-  frame / async-frame / `arguments` suites the change reaches: run queued behind the shared lock when this record was committed; the result follows in the next commit.
+- vitest on `tests/issue-6651-*`, `tests/*generator*`, `tests/issue-2864-*`
+  and the frame / async-frame / `arguments` suites the change reaches (140
+  files, 1,288 tests, merged tree, the A12 pins included): 1,257 pass, 8
+  skipped, 23 fail in 11 files; the same 11 files on base fail the **identical
+  23 tests** (by name), none of them a generator-parameter case (#680
+  delegation refusals, source-preservation receipts, policy lists, eval-RegExp
+  rows).
 - Pins `tests/issue-6651-a12-gen-param-writes.test.ts`: 17/17 on the branch;
   on base 12 fail and the 5 GUARDs pass.
 - Gates, bare: loc-budget, func-budget (also with `LOC_GATE_BASE` = `origin/main`),
