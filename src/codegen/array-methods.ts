@@ -6849,6 +6849,8 @@ function setupArrayCallback(
 /** Common locals for array iteration loops. */
 interface ArrayLoopLocals {
   vecTmp: number;
+  /** (#6651 H6) The receiver BEFORE an externref→vec materialization, if any. */
+  recvExternTmp?: number;
   dataTmp: number;
   /**
    * (#3215) The loop bound — CLAMPED to the physical backing
@@ -6925,10 +6927,12 @@ function setupArrayLoop(
   // that host array to a vec traps before the first callback. Materialize the
   // cross-representation receiver once through the same externref→vec path
   // used by assignments and destructuring.
+  let recvExternTmp: number | undefined;
   if (receiverIsExternref && receiverType?.kind === "externref") {
     const externTmp = allocLocal(fctx, `__arr_${tag}_extern_${fctx.locals.length}`, { kind: "externref" });
     fctx.body.push({ op: "local.set", index: externTmp });
     fctx.body.push(...buildVecFromExternref(ctx, fctx, externTmp, vecTypeIdx, { arrTypeIdx, elemType }));
+    recvExternTmp = externTmp;
   }
 
   const vecTmp = allocLocal(fctx, `__arr_${tag}_vec_${fctx.locals.length}`, {
@@ -6969,7 +6973,19 @@ function setupArrayLoop(
   fctx.body.push({ op: "local.set", index: iTmp });
 
   const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
-  return { vecTmp, dataTmp, lenTmp, logicalLenTmp, iTmp, getOp };
+  return { vecTmp, recvExternTmp, dataTmp, lenTmp, logicalLenTmp, iTmp, getOp };
+}
+
+/**
+ * (#6651 H6) The §10.4.2.3 `originalArray` for a species prologue: the receiver
+ * the program passed, not the vec an externref receiver was materialized into.
+ * A Proxy's `constructor` (and its IsArray answer) lives on the proxy; the copy
+ * has neither (`{map,filter}/create-proxy.js`).
+ */
+function speciesOriginalArrayInstrs(loop: ArrayLoopLocals): Instr[] {
+  return loop.recvExternTmp === undefined
+    ? [{ op: "local.get", index: loop.vecTmp }, { op: "extern.convert_any" }]
+    : [{ op: "local.get", index: loop.recvExternTmp }];
 }
 
 /**
@@ -7597,13 +7613,9 @@ function compileArrayFilter(
   const speciesLocal =
     speciesDeps === undefined
       ? undefined
-      : emitArraySpeciesCreate(
-          ctx,
-          fctx,
-          speciesDeps,
-          [{ op: "local.get", index: loop.vecTmp }, { op: "extern.convert_any" }],
-          [{ op: "f64.const", value: 0 }],
-        );
+      : emitArraySpeciesCreate(ctx, fctx, speciesDeps, speciesOriginalArrayInstrs(loop), [
+          { op: "f64.const", value: 0 },
+        ]);
   fctx.body.push({ op: "local.get", index: boundTmp });
   fctx.body.push({ op: "array.new_default", typeIdx: resultArrTypeIdx });
   fctx.body.push({ op: "local.set", index: resData });
@@ -7763,13 +7775,10 @@ function compileArrayMap(
   const speciesLocal =
     speciesDeps === undefined
       ? undefined
-      : emitArraySpeciesCreate(
-          ctx,
-          fctx,
-          speciesDeps,
-          [{ op: "local.get", index: loop.vecTmp }, { op: "extern.convert_any" }],
-          [{ op: "local.get", index: loop.logicalLenTmp }, { op: "f64.convert_i32_s" }],
-        );
+      : emitArraySpeciesCreate(ctx, fctx, speciesDeps, speciesOriginalArrayInstrs(loop), [
+          { op: "local.get", index: loop.logicalLenTmp },
+          { op: "f64.convert_i32_s" },
+        ]);
 
   const resData = allocLocal(fctx, `__arr_map_rd_${fctx.locals.length}`, { kind: "ref_null", typeIdx: mapArrTypeIdx });
 

@@ -179,7 +179,14 @@ loc-budget-allow:
   # (paths already listed below): the concat gate's fourth disjunct, the
   # `proxyDirty` pre-scan flag, and the `$Proxy` test in the shared
   # `__extern_get_idx` body builder.
+  # `src/codegen/type-coercion.ts` +3: one import and the two-line use of
+  # `arrayLikeLengthLimitGuard` in `buildVecFromExternref` (ArrayCreate's
+  # RangeError for a trapped length above 2^32 − 1, where the saturating
+  # truncation used to trap on `array.new_default`). The guard lives in
+  # `proxy-array-like.ts`; the use cannot move, it sits between the length read
+  # and the allocation.
   - src/codegen/object-runtime-enumeration.ts
+  - src/codegen/type-coercion.ts
   # 2026-09-28 — cluster A, slice A10 (record under the A10 claim). Four
   # god-files, every path already listed below and restated per the
   # stranded-grant rule; about half of each is the comment recording why a bail
@@ -1132,7 +1139,12 @@ func-budget-allow:
   # 2026-09-29 — cluster H, slice H6. `buildObjectEnumerationHelpers` +2: the
   # `$Proxy` widening of the `__extern_get_idx` / `__extern_has_idx`
   # array-like arms (one line each; the predicate is `proxy-array-like.ts`).
+  # `buildVecFromExternref` +2 and `compileArrayLikePrototypeCall` +2: the
+  # ArrayCreate length guard (built before each function's late-import flush,
+  # spliced between its length read and the allocation / the `map` loop).
   - src/codegen/object-runtime-enumeration.ts::buildObjectEnumerationHelpers
+  - src/codegen/type-coercion.ts::buildVecFromExternref
+  - src/codegen/array-prototype-borrow.ts::compileArrayLikePrototypeCall
   # 2026-09-28 — cluster A, slice A10 (paths already listed below, restated per
   # the stranded-grant rule). `buildNativeGeneratorPlan` +5: the one clause that
   # routes a `finally` holding a `return` to `lowerTryRegion` (its comment is 4
@@ -1611,6 +1623,12 @@ func-budget-allow:
   # deps it builds, and passing each rebuilt function's own `locals`.
   - src/codegen/iterator-native.ts::buildIteratorNextBody
 coercion-sites-allow:
+# 2026-09-29 — cluster H, slice H6: `array-copywithin-native.ts` is a NEW file
+# (baseline 0). Its one `number_toString` is §23.1.3.4's `ToString(k)` for the
+# `toKey` a Proxy's `set` / `deleteProperty` trap observes — the same primitive
+# the `__extern_get_idx` / `__extern_has_idx` array-like arms already call for
+# `fromKey`; a boxed-number key reaches a trap as a NUMBER (measured).
+  - src/codegen/array-copywithin-native.ts
 # 2026-09-26 — lane TA1: `to-locale-string-element.ts` is a NEW file, so its
 # baseline is 0 and every textual mention of a native name counts as growth
 # (the gate is a name scan, and most of these 8 occurrences are in the module
