@@ -9685,6 +9685,58 @@ Out of scope: `scope-param-elem-var-open` ×3 (eval in a parameter default),
 bails / compile crashes / module-code generator declarations (A10), `with` and
 `eval` rows. The A11 record lands here, under this claim.
 
+#### A11 record — 2026-09-29
+
+The lane's agent died in a container restart after finishing its
+measurements, so the lead session committed its saved group 3/4 files and
+re-measured on the final tree. Commits:
+- `a9df59284` group 1: an extracted method binds the caller's receiver;
+- `5716b4247` group 2: a consumed `yield`'s resumption value picks the
+  boxed-any carrier (its own commit);
+- `21b5b67fd` groups 3/4:
+  - a static computed setter keyed by `yield` (new leaf `class-proto-set-arm.ts`,
+    the write twin of the `__class_proto_lookup` method arm);
+  - an object-literal method's `arguments` built before the parameter defaults
+    that read it (new leaf `object-method-arguments-first.ts`);
+  - a nested closure's write to a named function expression's own name
+    targets that immutable binding (no `with` or direct `eval` in between).
+
+**Target rows**, QuickJS, `--standalone --isolate`, `origin/main` @
+`d5821126cc` vs the branch merged onto it: **2 → 19 of 28 pass, 0 pass →
+non-pass.** Residuals, first-line errors:
+- `class/accessor-name-inst-computed-in` (instance twin of the static fix:
+  getter reads `undefined`);
+- `cpn-class-{expr,decl}-accessors-computed-property-name-from-assignment-expression-assignment`
+  (`0` vs `1`);
+- `object/method-definition/generator-property-desc` (descriptor not
+  configurable);
+- `object/method-definition/generator-super-prop-param` (`super.toString` in a
+  parameter default reads `null`);
+- `object/method-definition/name-prop-name-yield-expr` (`obj` still null after
+  resumption);
+- `yield/formal-parameters-after-reassignment-non-strict`: the second write to
+  a parameter is lost at suspension, which is A12's mechanism;
+- `class/definition/fn-name-accessor-set` (a null receiver);
+- `generators/has-instance` (`g() instanceof g`).
+
+**The lane's measurements**, base `base2` vs groups 1-4 `g4`, both from
+`origin/main` of 2026-09-28:
+- cluster-A manifest: 181 → 184 pass;
+- cluster-C manifest: 72 → 83 pass;
+- changed-row verdicts: group 1 standalone 496 → 506 and host 0 → 4; group 2
+  10 → 12; groups 3/4 standalone 56 → 63 and host 18 → 22;
+- **0 pass → non-pass in every one of these.**
+
+**Controls:**
+- the equivalence gate reports no new regressions, and the guard suite is
+  green;
+- 8 vitest files fail on `g4`, and all 8 fail identically on `base2` (A/B
+  re-run by the lead);
+- the pins `tests/issue-6651-a11-gen-values.test.ts` pass 23/23 on the tree
+  merged onto `origin/main`, and every gate passes, including host-import
+  policy and the compiler-boundaries inventory (both new leaves are
+  registered).
+
 ### 2026-09-28 — Cluster D, slice D5
 
 Target: #5197 R3-7 — a native `$Promise` has no readable `then`. A dynamic `p.then` read (through
