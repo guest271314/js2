@@ -30,6 +30,7 @@ import {
   emitGeneratorFunctionPrototypeSingleton,
   isStaticSyncGeneratorFunctionValue,
 } from "../generator-function-intrinsic.js";
+import { isDynamicGeneratorFunctionValue } from "../generator-function-dynamic.js"; // (#6651 A14)
 import { isAnyValue, undefinedExternInstrs, undefinedSingletonActive } from "../any-helpers.js";
 import { BUILTIN_STATIC_METHOD_ARITY, pushBuiltinFnSingletonValueInstrs } from "../builtin-fn-meta.js";
 import {
@@ -2447,7 +2448,10 @@ export function compileBuiltinStaticCall(
     // `built-ins/GeneratorFunction/**` row uses — and for a provably unchanged
     // object-literal generator METHOD (`o.m`, see the predicate). Neither
     // operand evaluation is observable, so neither is compiled.
-    if ((ctx.standalone || ctx.wasi) && isStaticSyncGeneratorFunctionValue(ctx, arg0)) {
+    if (
+      (ctx.standalone || ctx.wasi) &&
+      (isStaticSyncGeneratorFunctionValue(ctx, arg0) || isDynamicGeneratorFunctionValue(ctx, arg0))
+    ) {
       const t = emitGeneratorFunctionPrototypeSingleton(ctx, fctx);
       if (t) return t;
     }

@@ -184,6 +184,15 @@ loc-budget-allow:
   - src/codegen/expressions/new-super.ts
   - src/codegen/context/types.ts
   - src/codegen/declarations/import-collector.ts
+  # 2026-09-29 — cluster A, slice A14 (record under the A14 claim).
+  # `src/codegen/generators-native-consumer.ts` +3: after
+  # `ensureNativeDelegatedResultHelpers` in `reserveOpaqueNativeGeneratorDispatch`,
+  # re-read the dispatcher map — those helpers build the %GeneratorPrototype%
+  # next/return/throw closures, whose bodies reserve the SAME dispatcher, so
+  # minting again orphaned theirs as the `unreachable` placeholder (every
+  # `.next()` in a module that reified %GeneratorFunction.prototype% trapped).
+  # The check must sit at the re-entry point; there is no leaf to move it to.
+  - src/codegen/generators-native-consumer.ts
   # 2026-09-28 — cluster A, slice A10 (record under the A10 claim). Four
   # god-files, every path already listed below and restated per the
   # stranded-grant rule; about half of each is the comment recording why a bail
@@ -12179,6 +12188,186 @@ returns the undecoded envelope (generic, predates A9); on a realm generator,
 and spread do not depend on it); a `%GeneratorFunction%` call with constant
 string arguments could be compiled away the way #2924 does it for `Function`,
 which would reach zero imports.
+
+**A14 — claimed 2026-09-29** by session `session_01FEGi3DmyPRPD5dx4kWU8hs`,
+branch `claude/es6-6651-a14-genfn-residuals` (from `origin/main`, after A9
+#6274 merged). The `%GeneratorFunction%` rows A9 left open, each root-caused and
+fixed if local: `built-ins/GeneratorFunction/{instance-length,instance-name,instance-prototype,instance-restricted-properties,instance-yield-expr-in-param,is-a-constructor}.js`,
+`built-ins/AsyncGeneratorFunction/is-a-constructor.js`, and
+`language/statements/class/subclass/builtin-objects/GeneratorFunction/*` (`class
+extends GeneratorFunction`). Out of scope: `proto-from-ctor-realm*` (needs a
+second realm), A13's `has-instance` rows.
+
+#### A14 record — 2026-09-29: `%GeneratorFunction%` residuals
+
+Branch `claude/es6-6651-a14-genfn-residuals`, WIP PR #6312. Opus 5.5, high
+effort. Engine `JS2WASM_EVAL_ENGINE=quickjs`, adapter rebuilt per tree, rows
+run with `run-test262-paths.mts --isolate`, every measurement on a `git archive`
+of the commit it names. **The authoritative pair is the merged one:** main
+`c9d7d2069` (`.tmp/a14/tb2`) against branch `ba67c0530` (`.tmp/a14/tn2`). The
+pre-merge pair — main `c7901473a` against `1fa664e9f` — gave the same answer on
+every measurement below (same 32 changed rows, same verdicts, same target
+transitions). After A11 (#6285) and #6303 landed, the 34 rows that matter (the
+12 targets ∪ the 32 changed rows) were re-run on main `5e189561e` against branch
+`199cf3dbb`: the same 5 fail → pass, 0 pass → non-pass
+(`.tmp/a14/f3-sa-{base,new}.log`).
+
+**What changed — four mechanisms.**
+
+1. *Generator resume dispatch (the `instance-yield-expr-in-param` trap).*
+   `reserveOpaqueNativeGeneratorDispatch` calls `ensureNativeDelegatedResultHelpers`
+   before it registers its dispatcher; the first such call builds the
+   %GeneratorPrototype% `next`/`return`/`throw` protocol closures, whose bodies
+   reserve the SAME dispatcher. The outer call then minted a second one and
+   overwrote the map entry, so the protocol closure kept the `unreachable`
+   placeholder. Reachable whenever %GeneratorFunction.prototype% is reified
+   before any generator value is materialised — e.g.
+   `var GP = Object.getPrototypeOf(function* () {}); function* w() { yield 1; }
+   w().next()` traps on main (no provider involved; A9's "hits a trap main has
+   without A9" was this). The reserve now re-reads its map after the helpers
+   (`generators-native-consumer.ts`, +3, LOC grant in the frontmatter).
+2. *`Generator.constructor` is `%GeneratorFunction%` too; its products are
+   poisoned.* The inventory's syntax predicate accepts `P.constructor` where `P`'s
+   initializer is `Object.getPrototypeOf(function* () {})` (the
+   `instance-restricted-properties` spelling); codegen proves `P` stable as well
+   as the callee binding. `hasRestrictedProperties`'s family gains a
+   dynamic-generator arm: `g.caller`/`g.arguments` reads and writes on a binding
+   initialised by a claimed site throw %ThrowTypeError%, under the same
+   custodial-use proof as the arrow arm.
+3. *`length` / `name` of the carrier.* The runtime-eval callable carrier answers
+   the two keys through `__builtinfn_get_meta` (so `gOPD` gives
+   `{w:F, e:F, c:T}` and a write is refused) and `__builtinfn_delete` (a #4098
+   bag tombstone), the `proxy-revoker-meta.ts` shape, in the new leaf
+   `runtime-eval-carrier-fn-meta.ts`. The value is the carrier's own `get`
+   trampoline, i.e. the realm's. The hard-coded `__hasOwnProperty` /
+   `__object_hasOwn` arm in `runtime-eval-callable.ts` stands down once the bag
+   owns the key, which is what makes `delete` observable (A9's blocker). **Bounded
+   rollout:** emitted only in modules whose inventory recorded a
+   `generator-function-constructor` site, so every other provider-linked module
+   and the QuickJS adapter (re-measured: byte-identical to main's, 623,218
+   bytes) are unchanged.
+4. *`[[Prototype]]` of the product.* `Object.getPrototypeOf(g)` for a
+   never-reassigned `var g = GeneratorFunction(…)`, read after its initializer,
+   with no `setPrototypeOf` / `__proto__` naming `g`, folds to the reified
+   %GeneratorFunction.prototype% (A7's rule for a generator-expression binding;
+   the carrier has no `[[Prototype]]` slot).
+
+**Rows moved — the 12 target rows** (`.tmp/a14/t2-{sa,host}-{base,new}.log`):
+
+| lane | main `c9d7d2069` | branch `ba67c0530` | gained | lost |
+| --- | ---: | ---: | --- | ---: |
+| standalone | 0 | **5** | `GeneratorFunction/instance-{length,name,prototype,restricted-properties,yield-expr-in-param}` | **0** |
+| host | 2 | 2 | — (host binaries identical, below) | **0** |
+
+The 7 standalone rows still failing fail with the SAME first-line reason as on
+main: `GeneratorFunction/is-a-constructor`, `AsyncGeneratorFunction/is-a-constructor`
+and the five `class/subclass/builtin-objects/GeneratorFunction/*` (design
+questions below).
+
+**Compile-only differential** (`.tmp/a14/cdiff.mts`: each row assembled and
+compiled exactly as `runTest262File` does — original harness, same options,
+strict rerun included — hashed; one process per tree; `.tmp/a14/cd2-*.tsv`).
+Reach bound
+(`.tmp/a14/mkreach.mts`, comments stripped, test source plus its includes):
+every row with `getPrototypeOf` AND generator syntax (mechanisms 1 and 4 fire
+only where %GeneratorFunction.prototype% is reified, which only the
+`getPrototypeOf` folds do; 294 rows), plus every row with `constructor` AND
+`function*` (the inventory's text gate for mechanism 2, and so every module
+where mechanisms 3 and 4 can fire; 376 rows) — 589 rows, both targets.
+
+| lane | rows | identical | bytes changed | compile status changed |
+| --- | ---: | ---: | ---: | ---: |
+| standalone | 589 | 557 | 32 | **0** (the same 100 rows fail to compile on both) |
+| host | 589 | 589 | 0 | **0** |
+
+The 32 by cause: 29 `GeneratorFunction` / `GeneratorPrototype`-reifying rows
+(the dispatcher de-duplication — one fewer `__native_gen_dispatch_*` — plus the
+carrier arms where a site is claimed) and the 3
+`AsyncGeneratorPrototype/*/this-val-not-object.js` rows (the async
+`getPrototypeOf` fold reifies %GeneratorPrototype% too; WAT: 4 → 3 dispatchers).
+
+**Runtime verdicts on the 32 changed rows**, `--isolate`, both trees
+(`.tmp/a14/v2-sa-{base,new}.log`): 5 fail → pass (the five above), 17 pass →
+pass, 7 fail → fail with identical first-line reasons, 3 compile_error →
+compile_error (the pre-existing `env::__get_async_generator_function_prototype`
+host-import leak). **0 pass → non-pass.** Manifest overlap of the changed rows:
+G 18, C 6, H 1, A 0 — so those verdicts are the C/G/H manifest deltas. The whole
+cluster-A manifest (197 rows, pre-merge pair, `.tmp/a14/manA-{base,new}.log`):
+181 → 181 pass, every row the same status and first-line reason (none of its
+binaries changed).
+
+**Controls** (branch `ba67c0530` unless named):
+
+- Pins `tests/issue-6651-a14-genfn-residuals.test.ts` — 18 / 18 on the branch
+  (and A9's 11 / 11 beside it);
+  on main (same file copied into the main archive) 11 fail and 7 pass: the six
+  GUARD pins and "a dynamic generator has no own `caller`", which already holds
+  on main.
+- Playground + benchmarks (pre-merge pair) — the 32 `.ts` files under
+  `website/playground/examples` and `benchmarks`, host and standalone: 64 / 64
+  identical to main.
+- QuickJS adapter — rebuilt from each tree of the merged pair: 623,218 bytes,
+  byte-identical (mechanism 3 is gated off in the adapter).
+- `pnpm run check:ir-fallbacks` — OK.
+- Vitest (pre-merge pair) — `tests/issue-6651-*`, `tests/*generator*`, `tests/issue-2864-*` and
+  the suites the carrier / poison changes reach (#4438, #4307, #4436, #4437,
+  #4464, #4491, #4624, #4010, #5196 R3-4, the runtime-eval files): 149 files,
+  1,339 pass, 16 fail in 11 files; the same 11 files on main fail the same 16
+  tests with the same assertion messages (#2864 D2/R1, #3526, #4491 T12 /
+  wave-4 / wave-7, #5196 R3-4, E7, I7, RS1, SN1, SY1).
+- `node scripts/equivalence-gate.mjs` — 22 failing / 1,720 passing, all 22
+  known failures in its baseline; no new regressions.
+- `node scripts/run-guard-suite.mjs` — 255 / 255.
+- Gates: loc, func, coercion-sites, oracle-ratchet, dead-exports bare, loc/func
+  again with `LOC_GATE_BASE=origin/main`, host-import-policy — green.
+  Typecheck green, biome and prettier clean,
+  `check-compiler-boundaries --mode inventory` valid
+  (`runtime-eval-carrier-fn-meta.ts` registered).
+
+Seen on the way, not fixed: in a module that ALSO compiles a native generator,
+`var g = GeneratorFunction("yield 5"); g().next()` throws (probe
+`.tmp/a14/p/l7.ts`; the same call returns 5 in a module without one,
+`.tmp/a14/p/l22.ts`). Identical on main; not root-caused — the likely seam is the
+native `.next()` dispatch meeting a realm generator object.
+
+**Design questions recorded (not built).**
+
+- *`is-a-constructor` (GeneratorFunction, AsyncGeneratorFunction; `Function` and
+  `AsyncFunction` fail identically).* The harness fetches the intrinsic by
+  evaluating `(function* () {}).constructor` inside the realm, so the value is a
+  runtime-eval callable. `__reflect_is_constructor` has no arm for it (probe:
+  `Reflect.construct(function () {}, [], GF)` → TypeError, while the realm's
+  `Function` reached the same way constructs), and `new GF("yield 3")` goes
+  through #4438's `__construct_runtime_eval` — `OrdinaryCreate` + `[[Call]]` —
+  which is not `[[Construct]]` for a built-in and throws. Both halves need the
+  realm: a construct entry on `js2wasm:runtime-eval`
+  (`__runtime_construct_interpreted(fn, args, newTarget)`) and an IsConstructor
+  answer (an entry, or a constructor bit in the marker's `kind` word set by
+  `qjsPublish` from `JS_IsConstructor`). That widens an ABI three engines
+  implement (QuickJS, the bytecode interpreter, the refusal provider) — the
+  decision A9 deliberately avoided.
+- *`class extends GeneratorFunction` (5 rows) — how is a subclass instance
+  represented?* Measured on this branch (`.tmp/a14/p/l18.ts`): the module links
+  no provider, `new GFn("a", "yield a;")` is not callable, and even the class
+  links are absent — `getPrototypeOf(GFn.prototype) !== GeneratorFunction.prototype`,
+  `getPrototypeOf(GFn) !== GeneratorFunction`; `new GFn2() instanceof GFn2` holds
+  only by class tag. The instance must be the realm's generator function (route
+  `super(…)` with a `%GeneratorFunction%` heritage to the A9 call) AND carry
+  `[[Prototype]] = newTarget.prototype`. The carrier struct is shared
+  structurally with the provider and has no prototype field, so this needs a
+  caller-side `[[Prototype]]` slot for carriers (e.g. the closure bag's `$proto`,
+  consulted by `__getPrototypeOf`, `instanceof` and the get trampoline's miss
+  path). The same slot would replace mechanism 4's static fold, make
+  `GeneratorFunction() instanceof GeneratorFunction` (the last two asserts of
+  `has-instance.js`, A13's row) dynamic, and serve `class extends Function`
+  (`subclass/builtin-objects/Function/{instance-length,instance-name,regular-subclassing}`
+  fail the same way on main).
+- *Widening mechanism 3 to every realm function* (eval-returned functions answer
+  `gOPD(f, "length")` `undefined` today) — needs its own reach measurement over
+  every provider-linked row plus the adapter.
+
+Out of scope, unchanged: `proto-from-ctor-realm*` (second realm), A13's
+`has-instance` rows.
 
 **Cluster A claimed — 2026-09-28** by session `session_01FEGi3DmyPRPD5dx4kWU8hs`
 (the lane that rebuilt A5). The claim covers generator lowering residuals, in
