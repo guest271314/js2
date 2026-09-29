@@ -48,9 +48,9 @@
   },
   {
     "edition": "ES2015",
-    "pass": 10254,
-    "fail": 1432,
-    "ce": 18,
+    "pass": 10255,
+    "fail": 1430,
+    "ce": 19,
     "skip": 0,
     "total": 11704,
     "pct": 88,
@@ -94,8 +94,8 @@
       {
         "name": "Symbol.iterator",
         "pass": 615,
-        "fail": 180,
-        "ce": 0,
+        "fail": 179,
+        "ce": 1,
         "skip": 0,
         "total": 795,
         "pct": 77
@@ -3263,12 +3263,12 @@
   },
   {
     "edition": "ES2025",
-    "pass": 845,
-    "fail": 135,
+    "pass": 846,
+    "fail": 134,
     "ce": 21,
     "skip": 0,
     "total": 1001,
-    "pct": 84,
+    "pct": 85,
     "features": [
       {
         "name": "iterator-helpers",
@@ -3344,12 +3344,12 @@
       },
       {
         "name": "regexp-duplicate-named-groups",
-        "pass": 15,
-        "fail": 1,
+        "pass": 16,
+        "fail": 0,
         "ce": 0,
         "skip": 0,
         "total": 16,
-        "pct": 94
+        "pct": 100
       },
       {
         "name": "Symbol",
@@ -4305,8 +4305,8 @@
   {
     "edition": "Unclassified (untagged)",
     "pass": 4508,
-    "fail": 799,
-    "ce": 138,
+    "fail": 793,
+    "ce": 144,
     "skip": 0,
     "total": 5445,
     "pct": 83

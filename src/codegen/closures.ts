@@ -2707,12 +2707,8 @@ function emitLiftedClosureArgumentsObject(
   // closure sees the TRUE call-site argument count (from __argc/__extras_argv
   // set by the closure call site, #1511) — not just its declared arity.
   // paramOffset is 1 because lifted closures carry __self at local index 0.
-  emitArgumentsVecBody(ctx, liftedFctx, arrowParams, 1, {
-    vecTypeIdx: vti,
-    arrTypeIdx: ati,
-    argsLocalIdx: argsLocal,
-    arrTmpIdx: arrTmp,
-  });
+  const locals = { vecTypeIdx: vti, arrTypeIdx: ati, argsLocalIdx: argsLocal, arrTmpIdx: arrTmp };
+  emitArgumentsVecBody(ctx, liftedFctx, arrowParams, 1, locals, true, argsParams);
 
   // (#4243) §10.6 step 13.a — `callee` on a non-strict arguments object.
   seedLiftedClosureArgumentsCallee(ctx, liftedFctx, arrow, argsLocal);
@@ -2785,7 +2781,6 @@ export function compileLiftedClosureBody(
     // class-object singleton rather than `undefined`.
     isStaticContext: fctx.isStaticContext,
     isGenerator,
-    deferredDynamicImportTrap: !isAsync && !isGenerator,
     // (#1636-S1) This lifted closure body can be dispatched from the host via
     // `__call_fn_method_N` (e.g. as a `JSON.stringify` replacer / `toJSON`),
     // which installs the host receiver into `__current_this`. Allow `this`
