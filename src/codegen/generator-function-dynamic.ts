@@ -63,7 +63,7 @@ import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { ensureObjectRuntime, ensureObjVecBuilders, reserveApplyClosure } from "./object-runtime.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { emitRuntimeEvalInterpretedCallableAdapter } from "./runtime-eval-callable.js";
-import { coerceType, compileExpression } from "./shared.js";
+import { coerceType, compileExpression, skipTransparentExpressions } from "./shared.js";
 import { sourceBindingIsSingleAssignment } from "./single-assignment-binding.js";
 
 const EXTERNREF: ValType = { kind: "externref" };
@@ -88,14 +88,30 @@ function inventoryRecorded(ctx: CodegenContext, node: ts.Node): boolean {
   );
 }
 
-/** For an identifier callee: never reassigned, and its initializer precedes the read. */
+/** Never reassigned, and its initializer precedes the read. */
+function bindingPrecedesRead(ctx: CodegenContext, id: ts.Identifier): ts.Expression | undefined {
+  if (!sourceBindingIsSingleAssignment(ctx, id)) return undefined;
+  const init = ctx.oracle.variableInitializerOf(id);
+  return init !== undefined && init.getSourceFile() === id.getSourceFile() && init.end <= id.getStart()
+    ? init
+    : undefined;
+}
+
+/**
+ * Every binding the callee is read through is stable: an identifier callee, and
+ * (#6651 A14) the identifier receiver of `P.constructor` (`var Generator =
+ * Object.getPrototypeOf(function* () {}); Generator.constructor`).
+ */
 function calleeBindingIsStable(ctx: CodegenContext, callee: ts.Expression): boolean {
-  let e = callee;
-  while (ts.isParenthesizedExpression(e)) e = e.expression;
-  if (!ts.isIdentifier(e)) return true;
-  if (!sourceBindingIsSingleAssignment(ctx, e)) return false;
-  const init = ctx.oracle.variableInitializerOf(e);
-  return init !== undefined && init.getSourceFile() === e.getSourceFile() && init.end <= e.getStart();
+  let e = skipTransparentExpressions(callee);
+  if (ts.isIdentifier(e)) {
+    const init = bindingPrecedesRead(ctx, e);
+    if (init === undefined) return false;
+    e = skipTransparentExpressions(init);
+  }
+  if (!ts.isPropertyAccessExpression(e)) return true;
+  const receiver = skipTransparentExpressions(e.expression);
+  return !ts.isIdentifier(receiver) || bindingPrecedesRead(ctx, receiver) !== undefined;
 }
 
 /**
@@ -113,6 +129,41 @@ export function isDynamicGeneratorFunctionBinding(ctx: CodegenContext, id: ts.Id
     isClaimedSite(ctx, init) &&
     sourceBindingIsSingleAssignment(ctx, id)
   );
+}
+
+/**
+ * (#6651 A14) `Object.getPrototypeOf(g)` for `var g = GeneratorFunction(…)`.
+ * §20.2.1.1.1 gives the product %GeneratorFunction.prototype% as its
+ * `[[Prototype]]`, but the runtime-eval carrier has no `[[Prototype]]` slot, so
+ * the answer is static — the A7 rule for a generator-expression binding: the
+ * read follows the initializer in the text, and no `setPrototypeOf` /
+ * `__proto__` in the file names the binding.
+ */
+export function isDynamicGeneratorFunctionValue(ctx: CodegenContext, expr: ts.Expression): boolean {
+  const e = skipTransparentExpressions(expr);
+  if (!ts.isIdentifier(e) || !isDynamicGeneratorFunctionBinding(ctx, e)) return false;
+  const init = ctx.oracle.variableInitializerOf(e);
+  if (init === undefined || init.getSourceFile() !== e.getSourceFile() || init.end > e.getStart()) return false;
+  let replaced = false;
+  const visit = (node: ts.Node): void => {
+    if (replaced) return;
+    const parent = node.parent as ts.Node | undefined;
+    if (ts.isIdentifier(node) && node.text === e.text && parent !== undefined) {
+      const key =
+        ts.isPropertyAccessExpression(parent) && parent.expression === node
+          ? parent.name.text
+          : ts.isElementAccessExpression(parent) && ts.isStringLiteralLike(parent.argumentExpression)
+            ? parent.argumentExpression.text
+            : undefined;
+      const callee = ts.isCallExpression(parent) ? skipTransparentExpressions(parent.expression) : undefined;
+      replaced =
+        key === "__proto__" ||
+        (callee !== undefined && ts.isPropertyAccessExpression(callee) && callee.name.text === "setPrototypeOf");
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(e.getSourceFile());
+  return !replaced;
 }
 
 function isClaimedSite(ctx: CodegenContext, node: ts.CallExpression | ts.NewExpression): boolean {

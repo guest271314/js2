@@ -122,7 +122,9 @@ const GENERATOR_FUNCTION_KEYWORD = /function\s*\*/;
  *    owns (§27.3.3.1). The shorter `(G).constructor` reads the same property
  *    but is NOT claimed: standalone routes only the `getPrototypeOf` spelling
  *    to the reified intrinsic (A3), so the run-time guard would reject it;
- *  - an identifier whose variable initializer is that expression (one hop).
+ *  - an identifier whose variable initializer is that expression (one hop);
+ *  - (#6651 A14) `P.constructor`, where `P`'s initializer is that
+ *    `Object.getPrototypeOf(G)` call (the test262 `Generator.constructor` form).
  *
  * This is the inventory's half of the claim. The codegen half
  * (`generator-function-dynamic.ts`) additionally proves the binding is never
@@ -142,7 +144,14 @@ export function isStaticGeneratorFunctionConstructorSyntax(
     return init !== undefined && isStaticGeneratorFunctionConstructorSyntax(init, oracle, true);
   }
   if (!ts.isPropertyAccessExpression(e) || e.name.text !== "constructor") return false;
-  const call = unwrapExpression(e.expression);
+  let call = unwrapExpression(e.expression);
+  // (#6651 A14) `var Generator = Object.getPrototypeOf(G); Generator.constructor`
+  // — the receiver through one binding hop (codegen proves that binding stable).
+  if (ts.isIdentifier(call)) {
+    const init = oracle.variableInitializerOf(call);
+    if (init === undefined) return false;
+    call = unwrapExpression(init);
+  }
   if (!ts.isCallExpression(call) || call.arguments.length !== 1) return false;
   const callee = unwrapExpression(call.expression);
   if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== "getPrototypeOf") return false;
