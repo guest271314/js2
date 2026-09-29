@@ -394,6 +394,30 @@ Five properties worth knowing before you touch it:
 - **An edition present in the run but absent from the baseline reports
   `UNGATED`** with a CI warning, rather than sitting silently unprotected.
 
+**An edition that has reached 100 % allows NO regression (project-lead rule,
+2026-09-29).** Such an edition carries `completed: true` in the baseline, and
+from then on every one of its rows must pass in every run that contains it —
+full or partial, with or without a `--compare` baseline. One non-passing row
+fails `merge shard reports` and parks the PR. There is no tolerance, no
+"net-positive" argument, and no re-baselining around it:
+
+- `--update` sets `completed` the first time a full run measures pass == total,
+  and never clears it. It also refuses to bank while a completed edition has a
+  failing row.
+- The only escape is a per-row `exceptions` entry with a `reason`: a row that
+  cannot pass on this target **by construction**, or a known failure that has
+  **never passed** since the floor was seeded — never a regression. Adding one,
+  or clearing `completed`, is a hand edit reviewed like lowering a floor.
+- ES5 is marked `completed` with one exception, `Array/prototype/toString/
+  S15.4.4.2_A1_T4.js`, which has failed since the floor was seeded.
+- ES5 is the first completed edition. It lost 7 rows between 2026-09-23 and
+  09-28 while this gate reported OK: the `merge shard reports` job had no test262
+  checkout, so every row classified as "Unclassified (legacy)" and ES5 read as
+  NOT COVERED. The job now checks out the submodule, and the script **refuses**
+  (exit 2) to run without it rather than scoring nothing. The standalone
+  regression guard's 15-row tolerance (`STANDALONE_REGRESSION_TOLERANCE`) does
+  not apply inside a completed edition.
+
 The baseline records the `eval_engine` it was measured under, because a
 refusal-only runtime-eval provider fails every eval-dependent test by
 construction (~667 in ES5 alone) and its counts are not comparable to a QuickJS
@@ -812,7 +836,7 @@ The issue frontmatter `status:` field tracks where an issue is, set by whichever
 
 <!-- AUTO:conformance-start -->
 
-**test262 conformance**: 39,212 / 48,232 (81.3 %)
+**test262 conformance**: 39,214 / 48,232 (81.3 %)
 
 <!-- AUTO:conformance-end -->
 
