@@ -1170,7 +1170,7 @@ function compileExpressionInner(
   }
 
   if (expr.kind === ts.SyntaxKind.ThisKeyword) {
-    return compileThisKeyword(ctx, fctx, expr);
+    return compileThisKeyword(ctx, fctx, expr, expectedType);
   }
 
   if (ts.isIdentifier(expr)) {
@@ -1556,7 +1556,7 @@ function compileExpressionInner(
     if (isStandalonePromiseActive(ctx)) {
       const operandType = compileExpressionInner(ctx, fctx, expr.expression);
       if (operandType !== null && operandType !== VOID_RESULT && operandType.kind === "externref") {
-        emitStandaloneAwaitUnwrap(ctx, fctx, /*rejectedThrows*/ true);
+        emitStandaloneAwaitUnwrap(ctx, fctx);
         return { kind: "externref" };
       }
       return operandType;
