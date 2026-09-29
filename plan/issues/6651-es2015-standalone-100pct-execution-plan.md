@@ -1087,6 +1087,11 @@ loc-budget-allow:
   # `promise-subclass-cell-read.ts`; the hand-off cannot move, because it is the
   # arm that would otherwise emit the bare `global.get` of the cell.
 func-budget-allow:
+  # 2026-09-29 — cluster A, slice A13. `emitTaDynCtorConstructInline` +2: one
+  # spread (and its comment) in the §23.2.5.1 step 6 object-arm gate, which now
+  # also admits a native generator object. The test itself is the NEW export
+  # `generators-native-protocol.ts::orNativeGeneratorCarrierInstrs`.
+  - src/codegen/dataview-native.ts::emitTaDynCtorConstructInline
   # 2026-09-29 — cluster A, slice A11 groups 3/4. `compileObjectLiteralForStruct`
   # +1: the `argumentsBeforeDefaults` call (same wiring as the literals.ts line
   # grant above); the gate on the arguments-object setup changes in place.

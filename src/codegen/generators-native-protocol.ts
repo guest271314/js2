@@ -250,6 +250,27 @@ export function fillNativeGeneratorProtocol(ctx: CodegenContext): void {
   definedFuncAt(ctx, ctx.funcMap.get(NATIVE_GENERATOR_PROTO_VIEW)!)!.body = viewBody;
 }
 
+/**
+ * (#6651 A13) `<i32 on the stack> || isNativeGeneratorObject(anyLocal)`, for a
+ * dispatch whose other arms test `$Object` / callables. The protocol lookup's
+ * first result is exactly that flag (0 for every other value), so this asks it
+ * for `@@iterator` and drops the value. `[]` when the lookup is not reserved.
+ */
+export function orNativeGeneratorCarrierInstrs(ctx: CodegenContext, anyLocal: number): Instr[] {
+  const getIdx = ctx.funcMap.get(NATIVE_GENERATOR_PROTOCOL_GET);
+  const boxSymbolIdx = ctx.funcMap.get("__box_symbol");
+  if (getIdx === undefined || boxSymbolIdx === undefined) return [];
+  return [
+    load(anyLocal),
+    { op: "extern.convert_any" },
+    { op: "i32.const", value: 1 },
+    { op: "call", funcIdx: boxSymbolIdx },
+    { op: "call", funcIdx: getIdx },
+    { op: "drop" },
+    { op: "i32.or" },
+  ];
+}
+
 /** Canonical property-get prefix. Requires the caller's ER scratch local. */
 export function captureGeneratorReadBinding(ctx: CodegenContext, valueLocal: number): GeneratorReadBinding | undefined {
   const funcIdx = ctx.funcMap.get(NATIVE_GENERATOR_PROTOCOL_GET);
