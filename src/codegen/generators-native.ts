@@ -33,6 +33,8 @@ import {
  */
 import { ts } from "../ts-api.js";
 import { resolveComputedKeyExpression } from "./literals.js";
+import { hasStaticModifier } from "./ast-modifiers.js";
+import { delegationSlotToInner } from "./generator-delegation-slot.js"; // (#6651 A10)
 import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3b) stable-regime minting
 import {
   isBooleanType,
@@ -96,6 +98,7 @@ import {
 // (#3271) Pure AST-scan predicate primitives now live in
 // generators-native-ast-scan.ts; imported back for the planner + candidacy gates.
 import {
+  statementContainsReturn,
   statementContainsYield,
   statementNeedsStructuralLowering,
   nodeContainsYield,
@@ -146,7 +149,7 @@ import {
 } from "./generator-structured-jumps.js";
 import {
   bodyHasComputedKeyYield,
-  bodyHasNestedYield,
+  bodyHasNestedYieldShape,
   lowerNestedYieldStatement,
   type NestedYieldHost,
 } from "./generator-yield-nested.js";
@@ -519,7 +522,7 @@ function generatorElemValType(ctx: CodegenContext, decl: GeneratorDecl): ValType
   if (
     decl.body &&
     noJsHostTarget(ctx) &&
-    (bodyHasPatternYield(decl.body) || bodyHasComputedKeyYield(decl.body) || bodyHasNestedYield(decl.body))
+    (bodyHasPatternYield(decl.body) || bodyHasComputedKeyYield(decl.body) || bodyHasNestedYieldShape(decl.body))
   ) {
     return { kind: "externref" };
   }
@@ -723,7 +726,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   // argument / member target (`generator-yield-nested.ts`). Same gate shape as A4.
   // (#6651 A6) Also a yield nested in a yield operand or a return value.
   const nestedYields =
-    elemIsAny && noJsHostTarget(ctx) && (bodyHasComputedKeyYield(decl.body) || bodyHasNestedYield(decl.body));
+    elemIsAny && noJsHostTarget(ctx) && (bodyHasComputedKeyYield(decl.body) || bodyHasNestedYieldShape(decl.body));
   // (#6651 A5) Inner-generator bodies by delegation name, for the for-of chain's close-transparency gate.
   const delegationInnerBodies = new Map<string, ts.Block>();
 
@@ -1179,6 +1182,11 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
           !stmt.catchClause &&
           stmt.finallyBlock &&
           finallyYieldFree &&
+          // (#6651 A10) A `return` in the finally overrides the completion
+          // (§14.15.3); the replay compiles it raw in the resume function —
+          // `.return(v)` at the suspension then trapped on a null deref. The
+          // region lowering below makes it a completion instead.
+          !statementContainsReturn(stmt.finallyBlock) &&
           !(
             (ctx.standalone || ctx.wasi) &&
             containsDelegatedYield(
@@ -3317,7 +3325,8 @@ function isNativeGeneratorExpressionShape(ctx: CodegenContext, decl: ts.Function
     // values into spill fields; pattern legality is decided by
     // `buildNativeGeneratorPlan`. (#3893) Whole-param defaults are admitted in
     // the no-JS-host lane too — closures.ts emits them in the lifted body =
-    // the factory, again where §10.2.11 wants them. Optional/rest still bail.
+    // the factory, again where §10.2.11 wants them. Optional still bails; rest
+    // is admitted without a JS host (#6651 A10 — the closure ABI packs its vec).
     if (
       !ts.isIdentifier(param.name) &&
       !ts.isArrayBindingPattern(param.name) &&
@@ -3325,7 +3334,12 @@ function isNativeGeneratorExpressionShape(ctx: CodegenContext, decl: ts.Function
     ) {
       return false;
     }
-    if (param.questionToken || param.dotDotDotToken || (param.initializer && !noJsHostTarget(ctx))) return false;
+    if (
+      param.questionToken ||
+      (param.dotDotDotToken && !noJsHostTarget(ctx)) ||
+      (param.initializer && !noJsHostTarget(ctx))
+    )
+      return false;
   }
   // (#6651 A1) A `this` in the body no longer bails in the no-JS-host lane.
   // The receiver is snapshotted into the frame's `dynamic_this` field by the
@@ -3992,10 +4006,15 @@ export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorD
   // sites already key the method by the FOLDED name (`resolveClassMemberName` /
   // `resolveAccessorPropName` -> `${owner}_${key}`), so the funcMap key threads
   // exactly like an identifier's. An unfoldable computed key still bails.
+  // (#6651 A10) …except a standalone CLASS member: the class lowering keys an
+  // unfoldable computed member by its synthetic `__cmdyn$<ordinal>` name
+  // (`resolveInstallableClassMemberName`, #5195), unique per member.
+  const dynamicClassMember = isStandaloneDynamicClassMethod(ctx, decl);
   if (
     ts.isMethodDeclaration(decl) &&
     !ts.isIdentifier(decl.name) &&
     !ts.isPrivateIdentifier(decl.name) &&
+    !dynamicClassMember &&
     foldedMethodKey(ctx, decl.name) === undefined
   ) {
     return false;
@@ -4018,14 +4037,17 @@ export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorD
     return false;
   }
   for (const param of decl.parameters) {
-    // (#2920/#3386) Rest params (`...args`) still bail — a separate follow-up.
+    // (#6651 A10) Rest params (`...args`) lower natively without a JS host: every
+    // emit site passes the packed rest vec as an ordinary param (the top-level
+    // declaration registers it via `registerResolvedRestParam`). The host lane
+    // keeps the bail — its eager/lazy-thunk paths are unchanged.
     // Array / object binding-pattern params are natively lowered: the emit
     // site destructures the raw arg EAGERLY (call time, §10.2.11) into factory
     // locals and `compileNativeGeneratorFunction` packs the bound values into
     // spill fields; the plan builder decides pattern legality (rest elements /
     // unstorable binding types bail there). Identifier params stay
     // byte-identical.
-    if (param.dotDotDotToken) return false;
+    if (param.dotDotDotToken && !noJsHostTarget(ctx)) return false;
     if (
       !ts.isIdentifier(param.name) &&
       !ts.isArrayBindingPattern(param.name) &&
@@ -4088,16 +4110,20 @@ export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorD
     // (#6651 A3) Uniqueness is decided on the FOLDED key — the one the emit
     // sites key by — so `*['a']()` and `*a()` in one body collide, as they do
     // at the funcMap. An unfoldable computed name bailed above.
-    const ownName = foldedMethodKey(ctx, decl.name);
-    if (ownName === undefined) return false;
+    const ownName = dynamicClassMember ? undefined : foldedMethodKey(ctx, decl.name);
+    if (ownName === undefined && !dynamicClassMember) return false;
     const parent = decl.parent;
-    if (ts.isClassLike(parent) || ts.isObjectLiteralExpression(parent)) {
+    if (ownName !== undefined && (ts.isClassLike(parent) || ts.isObjectLiteralExpression(parent))) {
       const members: readonly ts.Node[] = ts.isObjectLiteralExpression(parent) ? parent.properties : parent.members;
+      // (#6651 A10) In a class, `static *m()` beside `*m()` no longer collides:
+      // `classMemberFuncKey` gives the static member its own funcMap key, so
+      // only members of the SAME placement count.
+      const ownStatic = ts.isClassLike(parent) && hasStaticModifier(decl);
       let sameName = 0;
       for (const m of members) {
-        if (ts.isMethodDeclaration(m) && m.asteriskToken && foldedMethodKey(ctx, m.name) === ownName) {
-          sameName++;
-        }
+        if (!ts.isMethodDeclaration(m) || !m.asteriskToken || foldedMethodKey(ctx, m.name) !== ownName) continue;
+        if (ts.isClassLike(parent) && hasStaticModifier(m) !== ownStatic) continue;
+        sameName++;
       }
       if (sameName > 1) return false;
     }
@@ -4107,10 +4133,16 @@ export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorD
   // `arguments` is the bounded C02 exception: its vec is now carried by the
   // native frame, while the remaining unsupported method cases stay on the
   // host path / clean standalone refusal.
+  // (#6651 A10) `super` is admitted in a standalone OBJECT-LITERAL method: its
+  // closure carries the [[HomeObject]] capture (`emitObjectLiteralMethodFn`,
+  // #4688), which the resume function rehydrates by name, and its receiver is
+  // the frame's `dynamic_this` snapshot. A class method has neither in the
+  // resume function, so it keeps the bail.
+  const literalSuper = ctx.standalone && ts.isObjectLiteralExpression(decl.parent);
   if (
     ts.isMethodDeclaration(decl) &&
     decl.body &&
-    (methodBodyUsesSuper(decl.body) ||
+    ((methodBodyUsesSuper(decl.body) && !literalSuper) ||
       // (#3032 W4) Outer-scope captures are ADMITTED for method generators in
       // the standalone/wasi lane: a class / object-literal method body never
       // receives captures as params — it resolves them through the
@@ -4166,6 +4198,17 @@ function foldedMethodKey(ctx: CodegenContext, name: ts.PropertyName): string | u
   if (ts.isNumericLiteral(name)) return String(Number(name.text));
   if (ts.isComputedPropertyName(name)) return resolveComputedKeyExpression(ctx, name.expression);
   return undefined;
+}
+
+/** (#6651 A10) A standalone class generator method keyed by an unfoldable computed name. */
+function isStandaloneDynamicClassMethod(ctx: CodegenContext, decl: GeneratorDecl): boolean {
+  return (
+    ctx.standalone &&
+    ts.isMethodDeclaration(decl) &&
+    ts.isClassLike(decl.parent) &&
+    ts.isComputedPropertyName(decl.name) &&
+    foldedMethodKey(ctx, decl.name) === undefined
+  );
 }
 
 /**
@@ -4444,7 +4487,8 @@ export function registerNativeGenerator(
       ts.isFunctionExpression(decl) ||
       (ts.isMethodDeclaration(decl) && ts.isObjectLiteralExpression(decl.parent))) &&
     decl.body !== undefined &&
-    bodyReferencesOwnThis(decl.body);
+    // (#6651 A10) A `super` reference reads the receiver too (§12.3.5.3).
+    (bodyReferencesOwnThis(decl.body) || (ts.isMethodDeclaration(decl) && methodBodyUsesSuper(decl.body)));
   // (#2571) The synthetic `this` (when present) is the FIRST param name, aligned
   // with the caller's `paramTypes[0] === receiverType`. User params follow.
   // (#2920) A binding-pattern param has no source identifier; mint a unique
@@ -5269,7 +5313,7 @@ function emitDelegateCloseForward(
           then: [
             { op: "local.get", index: selfLocal },
             { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: closeSlot.fieldIdx },
-            { op: "ref.as_non_null" },
+            delegationSlotToInner(ctx, info, closeSlot.fieldIdx, closeInner),
             { op: "local.set", index: closeDelegLocal },
             // inner.mode = outer.mode; inner.abrupt = payload; inner.error = outer.error
             { op: "local.get", index: closeDelegLocal },
@@ -5928,7 +5972,7 @@ function compileState(
       // deleg (non-null) → local; drive its resume once.
       body.push({ op: "local.get", index: selfLocal });
       body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: slot.fieldIdx });
-      body.push({ op: "ref.as_non_null" });
+      body.push(delegationSlotToInner(ctx, info, slot.fieldIdx, innerInfo));
       body.push({ op: "local.set", index: delegLocal });
       body.push({ op: "local.get", index: delegLocal });
       body.push({ op: "call", funcIdx: innerResumeIdx });

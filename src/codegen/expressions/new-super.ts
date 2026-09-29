@@ -1249,7 +1249,7 @@ function compileStandaloneObjectLiteralSuperMethodCall(
       }
     }
     fctx.body.push({ op: "local.get", index: methodLocal });
-    fctx.body.push({ op: "global.get", index: currentThisIdx });
+    fctx.body.push(objectLiteralSuperReceiver(fctx, currentThisIdx));
     fctx.body.push({ op: "local.get", index: argsLocal });
     fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__apply_closure") ?? applyIdx });
   } else {
@@ -1261,7 +1261,7 @@ function compileStandaloneObjectLiteralSuperMethodCall(
       then: [{ op: "ref.null.extern" }],
       else: [
         { op: "local.get", index: methodLocal },
-        { op: "global.get", index: currentThisIdx },
+        objectLiteralSuperReceiver(fctx, currentThisIdx),
         { op: "local.get", index: argsLocal },
         { op: "call", funcIdx: applyIdx },
       ],
@@ -1921,10 +1921,22 @@ function compileStandaloneObjectLiteralSuperPropertyRead(
       fctx.body.push({ op: "local.get", index: homeObjectLocal });
       return true;
     },
-    () => {
-      fctx.body.push({ op: "global.get", index: currentThisIdx });
-    },
+    () => fctx.body.push(objectLiteralSuperReceiver(fctx, currentThisIdx)),
   );
+}
+
+/**
+ * (#6651 A10) The §12.3.5.3 `actualThis` of an object-literal method's `super`
+ * reference. A native generator method's body runs in its RESUME function,
+ * long after the call that bound `this` returned; its receiver is the one the
+ * factory snapshotted into the frame (`capturesDynamicThis`), rehydrated as the
+ * resume function's `this` local. Everywhere else it is `__current_this`.
+ */
+function objectLiteralSuperReceiver(fctx: FunctionContext, currentThisIdx: number): Instr {
+  const resumeThis = fctx.localMap.has("__gen_self") ? fctx.localMap.get("this") : undefined;
+  return resumeThis !== undefined
+    ? { op: "local.get", index: resumeThis }
+    : { op: "global.get", index: currentThisIdx };
 }
 
 /**
