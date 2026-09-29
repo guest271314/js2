@@ -1,7 +1,7 @@
 {
   "generated": "2026-09-28",
   "threshold": 1500,
-  "totalCeiling": 964870,
+  "totalCeiling": 965479,
   "files": {
     "src/codegen-linear/index.ts": 5791,
     "src/codegen-linear/runtime.ts": 4444,
@@ -35,11 +35,11 @@
     "src/codegen/expressions/call-receiver-method.ts": 4881,
     "src/codegen/expressions/call-tail-dispatch.ts": 2338,
     "src/codegen/expressions/calls-closures.ts": 2734,
-    "src/codegen/expressions/calls.ts": 10895,
+    "src/codegen/expressions/calls.ts": 10897,
     "src/codegen/expressions/eval-inline.ts": 2532,
     "src/codegen/expressions/identifiers.ts": 3371,
     "src/codegen/expressions/new-builtin-globals.ts": 2567,
-    "src/codegen/expressions/new-super.ts": 8545,
+    "src/codegen/expressions/new-super.ts": 8551,
     "src/codegen/expressions/operator-assignment.ts": 3752,
     "src/codegen/expressions/unary-updates.ts": 1906,
     "src/codegen/extern-declarations.ts": 2220,
