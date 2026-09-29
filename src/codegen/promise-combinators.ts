@@ -105,6 +105,7 @@ import { emitBuiltinConstructorIdentity } from "./builtin-static-globals.js";
 import { ensureStandaloneBuiltinStaticMethodClosure } from "./builtin-value-read.js";
 import { reserveCarrierBagVisibility } from "./carrier-bag-visibility.js";
 import { buildTargetTaggedTry } from "../ir/try-table.js";
+import { promiseProtoThenMayBeReplaced } from "./promise-dynamic-member-read.js"; // (#6651 D5)
 import {
   buildPromiseSettleClosureInstrs,
   ensureAsyncDriveRuntime,
@@ -860,7 +861,7 @@ type SettledAnyCombinatorRuntime = CombinatorRuntime &
  * COMBINATOR_FUNC_IDX_KEYS (async-scheduler.ts) for the #2918 late-import
  * lockstep shift.
  */
-function ensureSettledAnyCombinators(ctx: CodegenContext): SettledAnyCombinatorRuntime {
+export function ensureSettledAnyCombinators(ctx: CodegenContext): SettledAnyCombinatorRuntime {
   const ids = ensureCombinatorFunctions(ctx);
   if (ids.allSettledFulfillFuncIdx !== undefined && ids.anyRejectFuncIdx !== undefined) {
     return ids as SettledAnyCombinatorRuntime;
@@ -1563,6 +1564,7 @@ export function emitObservableCombinatorElement(
     buildAllResolveClosure: (elemCapsLocal) => buildObservableAllResolveClosureInstrs(ctx, observable, elemCapsLocal),
   },
 ): void {
+  const protoThenReplaceable = promiseProtoThenMayBeReplaced(ctx, fctx);
   const inputLocal = allocLocal(fctx, `__comb_observable_input_${fctx.locals.length}`, EXTERNREF);
   const resolveArgsLocal = allocLocal(fctx, `__comb_observable_resolve_args_${fctx.locals.length}`, EXTERNREF);
   const thenArgsLocal = allocLocal(fctx, `__comb_observable_then_args_${fctx.locals.length}`, EXTERNREF);
@@ -1622,6 +1624,8 @@ export function emitObservableCombinatorElement(
     { op: "call", funcIdx: carrier.subscribeFuncIdx },
   ];
   const buildNativeInvoke = (): Instr[] => {
+    // (#6651 D5) A replaceable `%Promise.prototype%.then` must be Got, not bypassed.
+    if (protoThenReplaceable) return buildNonNativeInvoke();
     const carrierBagHasIdx = ctx.funcMap.get("__carrier_bag_has");
     if (carrierBagHasIdx === undefined) return buildLegacySubscribe();
     return [

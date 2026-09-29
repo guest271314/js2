@@ -175,6 +175,7 @@ import {
   directObjectMethodFuncIdx,
   emitKnownRestMethodArguments,
   knownMethodRestInfo,
+  knownStaticMethodRestInfo,
 } from "./object-method-rest-abi.js";
 import { objectLiteralMethodNeedsCallReceiver } from "../object-literal-method-receiver.js";
 import { emitHostMethodCallArgs } from "../host-method-args.js"; // (#5361)
@@ -2058,7 +2059,7 @@ export function compileReceiverMethodCall(
         const paramTypes = getFuncParamTypes(ctx, resolvedStaticIdx);
         const paramCount = paramTypes ? paramTypes.length : expr.arguments.length;
         const calleeReadsArgsStatic = ctx.funcUsesArguments.has(fullName);
-        const restInfoStatic = knownMethodRestInfo(ctx, expr, fullName, paramTypes, 0);
+        const restInfoStatic = knownStaticMethodRestInfo(ctx, expr, fullName, paramTypes); // (#6699)
         const handledRestStatic =
           restInfoStatic !== undefined && emitKnownRestMethodArguments(ctx, fctx, expr, paramTypes, restInfoStatic, 0);
         // (#6616) A STATIC method reached through its class object is the same
@@ -4753,7 +4754,7 @@ export function compileReceiverMethodCall(
           [{ kind: "externref" }],
         );
         // For built-in class identifiers, import __get_builtin to resolve real JS object
-        const receiverIsBuiltin = isHostResolvedBuiltinReceiver(ctx, propAccess.expression); // (#1472)
+        const receiverIsBuiltin = isHostResolvedBuiltinReceiver(ctx, propAccess.expression, methodName); // (#1472)
         const getBuiltinIdx = receiverIsBuiltin
           ? ensureLateImport(ctx, "__get_builtin", [{ kind: "externref" }], [{ kind: "externref" }])
           : undefined;

@@ -65,6 +65,7 @@ import {
 import { emitTaDynViewElementSet, emitTaViewElementSet } from "../dataview-native.js"; // (#3054 B1) shared-backing TA view write; (#3057) dynamic view element write
 import { buildDestructureNullThrow, emitNativeObjectRest, patternIteratorStepCount } from "../destructuring-params.js";
 import { tryEmitSpecOrderedArrayAssignDrive } from "../dstr-assign-iterator-drive.js"; // (#6651 G1) §13.15.5.2 lazy drive
+import { isProvablyNonIterableStructSource } from "../dstr-non-iterable-guard.js"; // (#6651 G4)
 import { resolveComputedKeyExpression } from "../literals.js";
 import { resolveReceiverStruct } from "../fnctor-escape-gate.js"; // (#2681/#2686 A3) pinned-struct write dispatch
 import { presenceSetInstrs, presenceSlotOf } from "../fnctor-presence-bits.js"; // (#3780) packed own-presence flags
@@ -146,6 +147,7 @@ import {
   emitResolvedIdentifierWriteFromStack,
   resolveModuleAwareIdentifierWriteTarget,
   tryConstSet,
+  tryFunctionExpressionOwnNameWrite,
 } from "./identifier-assignment.js";
 import { currentSourceModuleGlobalIndex, identifierHasOnlyAmbientDeclarations } from "./identifier-module-storage.js";
 import { tryCompileStandaloneDetachedWrite } from "../dataview-native.js"; // (#3173) $DETACHBUFFER marker write
@@ -456,13 +458,10 @@ export function compileAssignment(ctx: CodegenContext, fctx: FunctionContext, ex
       fctx.body.push({ op: "unreachable" });
       return { kind: "f64" }; // unreachable, but the expression stack needs a type
     }
-    // Named function expression name binding is read-only — assignments are
-    // silently ignored in sloppy mode (the RHS is still evaluated for side effects)
-    if (fctx.readOnlyBindings?.has(name)) {
-      const rhsType = compileExpression(ctx, fctx, expr.right);
-      // The assignment is a no-op, but the expression evaluates to the RHS value
-      return rhsType;
-    }
+    // A named function expression's own name is an immutable binding — ignored
+    // in sloppy code, a TypeError in strict code (#6651 A7).
+    const ownNameWrite = tryFunctionExpressionOwnNameWrite(ctx, fctx, expr.left, expr.right);
+    if (ownNameWrite !== undefined) return ownNameWrite;
     const localIdx = fctx.localMap.get(name);
     if (localIdx !== undefined) {
       // (#2897) Reassigning the materialized `arguments` binding. In non-strict
@@ -2067,6 +2066,13 @@ function compileArrayDestructuringAssignment(
   // §13.15.5.2 calls GetIterator on it. Reading its fields positionally bound
   // `[a, b] = { [Symbol.iterator]() {…}, next() {…} }` to the struct's FIELDS.
   if (!isVecStruct && !isTupleShapedStruct(ctx, typeIdx, typeDef.fields)) {
+    // (#6651 G4) …unless it provably has no `@@iterator`: GetIterator throws.
+    if (isProvablyNonIterableStructSource(ctx, value)) {
+      fctx.body.push({ op: "drop" });
+      emitThrowTypeError(ctx, fctx, "value is not iterable");
+      fctx.body.push({ op: "ref.null.extern" });
+      return { kind: "externref" };
+    }
     fctx.body.push({ op: "extern.convert_any" });
     return compileExternrefArrayDestructuringAssignment(ctx, fctx, target, { kind: "externref" }, true);
   }

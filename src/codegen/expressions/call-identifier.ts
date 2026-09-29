@@ -8,6 +8,7 @@
 // via funcMap. It returns `undefined` when the callee is not one of these
 // identifier cases, so the caller in calls.ts continues its dispatch chain.
 // Moved verbatim: the emitted Wasm is byte-identical.
+import { guardedExternRefResultBridge } from "./dispatch-extern-result-bridge.js";
 import { ts } from "../../ts-api.js";
 import { widenJsDefaultGuessSlot } from "../js-default-param-type-guess.js";
 import {
@@ -3501,8 +3502,10 @@ function compileBoundIdentifierCall(
                     true,
                     canExportCandidateReferenceResult(fc.funcTypeIdx),
                   );
-                  if (bridge !== null) {
-                    fcCallBody.push(...bridge);
+                  const guardedRefBridge =
+                    bridge ?? guardedExternRefResultBridge(ctx, fctx, fc.returnType!, expectedReturn!);
+                  if (guardedRefBridge !== null) {
+                    fcCallBody.push(...guardedRefBridge);
                   } else {
                     fcCallBody.push({ op: "drop" });
                     fcCallBody.push(...defaultValueInstrs(expectedReturn!));
@@ -4286,6 +4289,8 @@ function compileBoundIdentifierCall(
       });
       // Wrap in vec struct: { length, data }
       fctx.body.push({ op: "struct.new", typeIdx: restInfo.vecTypeIdx });
+      // (#6651 I7) After every operand: `f(1)` for `f(x, y, ...a)` pads `y`; argc says it was absent.
+      maybeSetArgcForKnownCall(ctx, fctx, funcName, expr.arguments.length, restInfo.restIndex);
     } else if (hasSpreadArg && calleeReadsArgsEarly && !restInfo && !hasLinearParamsForCall && paramCountEarly <= 0) {
       // (#2202) Direct call to an `arguments`-reading function where the callee
       // has zero user params, so EVERY argument (spread or not) is an "extra".

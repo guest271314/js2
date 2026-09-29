@@ -39,6 +39,7 @@ import { dynamicReadCrossesStandaloneLink, isAdmissibleDynamicReadNarrowing } fr
 import { emitDynGet, widenBooleanDynamicAccess } from "./dyn-read.js";
 import { expectedArgumentCountOfSignature } from "./function-expected-argument-count.js"; // (#4436) §15.1.5
 import { functionPrototypeMemberSpecLength } from "./function-prototype-callable.js"; // (§20.2.3)
+import { promiseProtoMemberSpecLength } from "./promise-dynamic-member-read.js"; // (#6651 D5)
 import { emitSymbolDescLoad, ensureNativeSymbolBoundaryBridge, usesNativeSymbolProvider } from "./symbol-native.js";
 import { ensureObjectRuntime, ensureWrapperStringValueHelper } from "./object-runtime.js";
 import { rollbackSpeculative, snapshotSpeculative } from "./context/speculative.js";
@@ -226,6 +227,7 @@ import { isInlineTaggedTemplateParameter } from "./tagged-template-parameter.js"
 import { linkBrandRoleOf } from "./shape-brand.js";
 import { emitDynamicTemplateRawRead, isDynamicTemplateRawRead } from "./template-raw-dynamic.js";
 import { emitLinkedStaticMemberRead, linkedStaticParentHeritage } from "./standalone-linked-static-inheritance.js"; // (#6644) §15.7.14 step 6 across the link
+import { tryEmitPromiseSubclassCellRead } from "./promise-subclass-cell-read.js";
 
 /**
  * Sentinel returned by every dispatch helper to mean "this guard band did not
@@ -2310,6 +2312,8 @@ function emitClassStaticMemberRead(
   // statics still shadow because the own lookup runs first.
   const globalIdx = ctx.staticProps.get(fullName) ?? resolveInheritedStaticProp(ctx, resolvedClass, propName);
   if (globalIdx !== undefined) {
+    const inheritedCell = tryEmitPromiseSubclassCellRead(ctx, fctx, resolvedClass, propName, globalIdx); // (#6651 D6)
+    if (inheritedCell !== undefined) return inheritedCell;
     fctx.body.push({ op: "global.get", index: globalIdx });
     const globalDef = ctx.mod.globals[localGlobalIdx(ctx, globalIdx)];
     return globalDef?.type ?? { kind: "f64" };
@@ -3108,7 +3112,8 @@ export function tryLengthAndNameReads(
     // there, so the §15.1.5 prefix walk answers 1 for a member the spec pins
     // at 2). Table + gate live in function-prototype-callable.ts.
     if (!isBindResult) {
-      const specLength = functionPrototypeMemberSpecLength(ctx, expr.expression);
+      const specLength =
+        functionPrototypeMemberSpecLength(ctx, expr.expression) ?? promiseProtoMemberSpecLength(ctx, expr.expression);
       if (specLength !== undefined) {
         fctx.body.push({ op: "f64.const", value: specLength });
         return { kind: "f64" };

@@ -51,6 +51,7 @@ import { emitScriptGlobalVarBindings } from "./global-var-bindings.js"; // (#449
 import { isHoistedTopLevelVarName } from "./top-level-hoisted-var-names.js"; // (#4491 T3) pre-declaration writes
 import { isAssignmentOverTopLevelFunctionName } from "./top-level-assigned-function-names.js"; // (#4491 T12)
 import { moduleVarDirectPreInitValueIsObserved } from "./declarations/hoisted-var-preinit-read.js";
+import { isExpressionRootedAssignmentTarget } from "./declarations/expression-rooted-assignment-target.js"; // (#6651) `f(o).p = v`
 import {
   ASYNC_CPS_ENABLED,
   asyncFnNeedsCps,
@@ -165,6 +166,7 @@ import {
 } from "./registry/types.js";
 import { isArrayProtoIteratorAssignTarget } from "./expressions/proto-override.js";
 import { isFnctorPrototypeAssignTarget } from "./expressions/fnctor-prototype.js";
+import { isGeneratorDeclarationPrototypeWrite } from "./generators-factory-prototype.js"; // (#6651 A8)
 import {
   isStandaloneIntrinsicPromiseResolveWriteTarget,
   shouldKeepBuiltinReceiverWrite,
@@ -203,6 +205,7 @@ import {
 } from "./module-init-chunks.js";
 import { emitModuleVarUndefinedSeeds } from "./declarations/module-var-undefined-seed.js";
 import { inferStandaloneRegExpMatchGlobalType } from "./regexp-standalone.js";
+import { mintUntypedRegExpReceiverMembers } from "./regexp-untyped-receiver.js";
 import {
   prepareModuleTdzGlobals,
   registerModuleGlobal,
@@ -2518,7 +2521,8 @@ function shouldCollectTopLevelAssignment(ctx: CodegenContext, target: ts.Express
     isAssignmentOverTopLevelFunctionName(target) ||
     (operator === ts.SyntaxKind.EqualsToken && isExactTopLevelClassAccessorWrite(ctx, target)) ||
     (operator === ts.SyntaxKind.EqualsToken && isTopLevelClassAccessorPropertyWrite(ctx, target)) ||
-    createsGlobalObjectBinding(target, ctx.sloppyImplicitGlobals)
+    createsGlobalObjectBinding(target, ctx.sloppyImplicitGlobals) ||
+    isExpressionRootedAssignmentTarget(target)
   );
 }
 
@@ -4355,7 +4359,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         // interception and the host lane's `_getOrVivifyFnPrototype` path use
         // the same source-level assignment; dropping it only in the host lane
         // leaves `new F().method()` with an empty prototype.
-        if (isFnctorPrototypeAssignTarget(ctx, expr.left)) {
+        if (isFnctorPrototypeAssignTarget(ctx, expr.left) || isGeneratorDeclarationPrototypeWrite(ctx, expr.left)) {
           ctx.moduleInitStatements.push(stmt);
           continue;
         }
@@ -6107,6 +6111,7 @@ export function compileDeclarations(
     const initFctx: FunctionContext = targetFctx ?? createModuleInitFunctionContext();
     const previousFunc = ctx.currentFunc;
     ctx.currentFunc = initFctx;
+    mintUntypedRegExpReceiverMembers(ctx, initFctx, sourceFile); // (#6651 B10) untyped-RegExp proto reads
 
     // (#5271 step 8) §16.1.7 GlobalDeclarationInstantiation step 5.d — a
     // top-level lexical declaration whose name is a RESTRICTED GLOBAL

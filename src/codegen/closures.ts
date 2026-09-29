@@ -145,6 +145,7 @@ import {
   isNativeGeneratorCandidate,
   registerNativeGenerator,
 } from "./generators-native.js";
+import { namedFunctionOwnNameShadow } from "./generators-native-ast-scan.js"; // (#6651 A7)
 import type { NativeGeneratorInfo } from "./context/types.js";
 // (#3270) Extracted closure subsystems. Re-exported below so external importers
 // that reference these symbols via `./closures.js` are unaffected.
@@ -2706,12 +2707,8 @@ function emitLiftedClosureArgumentsObject(
   // closure sees the TRUE call-site argument count (from __argc/__extras_argv
   // set by the closure call site, #1511) — not just its declared arity.
   // paramOffset is 1 because lifted closures carry __self at local index 0.
-  emitArgumentsVecBody(ctx, liftedFctx, arrowParams, 1, {
-    vecTypeIdx: vti,
-    arrTypeIdx: ati,
-    argsLocalIdx: argsLocal,
-    arrTmpIdx: arrTmp,
-  });
+  const locals = { vecTypeIdx: vti, arrTypeIdx: ati, argsLocalIdx: argsLocal, arrTmpIdx: arrTmp };
+  emitArgumentsVecBody(ctx, liftedFctx, arrowParams, 1, locals, true, argsParams);
 
   // (#4243) §10.6 step 13.a — `callee` on a non-strict arguments object.
   seedLiftedClosureArgumentsCallee(ctx, liftedFctx, arrow, argsLocal);
@@ -2784,7 +2781,6 @@ export function compileLiftedClosureBody(
     // class-object singleton rather than `undefined`.
     isStaticContext: fctx.isStaticContext,
     isGenerator,
-    deferredDynamicImportTrap: !isAsync && !isGenerator,
     // (#1636-S1) This lifted closure body can be dispatched from the host via
     // `__call_fn_method_N` (e.g. as a `JSON.stringify` replacer / `toJSON`),
     // which installs the host receiver into `__current_this`. Allow `this`
@@ -2993,7 +2989,11 @@ export function compileLiftedClosureBody(
   // closure struct).  Also register in closureMap so the call-site
   // compiler emits call_ref instead of a direct call.
   let funcExprName: string | undefined;
-  if (ts.isFunctionExpression(arrow) && arrow.name) {
+  // (#6651 A7) A parameter of the same name shadows the self binding in the
+  // parameters AND the body, so it is never registered; a body declaration
+  // shadows it only after the parameter prologue (see the var hoist below).
+  const ownNameShadow = ts.isFunctionExpression(arrow) ? namedFunctionOwnNameShadow(arrow) : undefined;
+  if (ts.isFunctionExpression(arrow) && arrow.name && ownNameShadow !== "params") {
     funcExprName = arrow.name.text;
     // Map the name to the __self param (index 0) inside the lifted body
     liftedFctx.localMap.set(funcExprName, 0);
@@ -3105,6 +3105,13 @@ export function compileLiftedClosureBody(
     if (presize.size > 0) liftedFctx.stringBuilderPresize = presize; // #1761
   }
 
+  // (#6651 A7) The parameter prologue above saw the fn-expr's self binding; a
+  // body var/function/lexical declaration of that name wins from here on.
+  if (funcExprName !== undefined && ownNameShadow === "body") {
+    liftedFctx.localMap.delete(funcExprName);
+    liftedFctx.readOnlyBindings?.delete(funcExprName);
+    ctx.closureMap.delete(funcExprName);
+  }
   // Pre-hoist function-scoped `var` declarations into the closure's localMap
   // (#1745). Regular functions run this in function-body.ts; closures/arrows
   // previously skipped it, so a `var x` inside a closure body that collided

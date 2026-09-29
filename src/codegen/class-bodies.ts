@@ -22,12 +22,13 @@ import { irPreparedNestedOrdinaryClass, type IrNestedClassFieldCallAdmission, ty
 import { isHostConstructibleBuiltin, isNativeCollectionBuiltin } from "./builtin-tags.js";
 import { isStandalonePromiseActive } from "./async-scheduler.js"; // (#2637 B2) host-only Promise-subclass ctor gate
 import { emitStandalonePromiseFromExecutorValue } from "./promise-executor.js"; // native standalone Promise-subclass super(executor)
+import { emitPromiseSubclassProtoLink, isStandalonePromiseSuperForwarder } from "./promise-subclass-proto-link.js"; // (#6651 D4)
 // (#3132 S2a) Bounded async-generator METHOD drive: no-`this`/`super`/
 // `arguments` methods route through the same native producer as fn
 // declarations/expressions (the drive gate self-limits to standalone/wasi).
 import { emitAsyncGenerator, isAsyncGenDriveCandidate } from "./async-frame.js";
 import { genBodyReferencesThis, genBodyReferencesSuper, emitCachedFuncClosureAccess } from "./closures.js"; // (#3132 / #3123 fnctor parent closure)
-import { classMemberFuncKey, fnctorAncestorOfClass } from "./class-member-keys.js"; // (#1983 / #3123)
+import { classMemberFuncKey, classMemberRestParamKey, fnctorAncestorOfClass } from "./class-member-keys.js"; // (#1983 / #3123 / #6699)
 import { dynamicClassKeyGlobalKey, dynamicClassMemberName, isDynamicClassMemberName } from "./class-dynamic-keys.js"; // (#5195 Step 1 / F1)
 import { recordFnMetaMemberDeclaration } from "./function-instance-meta-methods.js"; // (#4440)
 import { resolveClassHeritageAlias } from "./class-expression-identity.js";
@@ -1697,8 +1698,8 @@ export function collectClassDeclaration(
           const vecTypeIdx = getOrRegisterVecType(ctx, elemKey, elemType);
           const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
           methodParams.push({ kind: "ref_null", typeIdx: vecTypeIdx });
-          ctx.funcRestParams.set(fullName, {
-            restIndex: isStatic ? member.parameters.indexOf(param) : member.parameters.indexOf(param),
+          ctx.funcRestParams.set(classMemberRestParamKey(ctx, fullName, memberKind), {
+            restIndex: member.parameters.indexOf(param),
             elemType,
             arrayTypeIdx: arrTypeIdx,
             vecTypeIdx,
@@ -2699,6 +2700,7 @@ function compileClassBodiesInner(
         params.map((p) => p.type),
         0,
         /* unmapped */ true,
+        ctor.parameters,
       );
     }
 
@@ -2830,6 +2832,22 @@ function compileClassBodiesInner(
       );
       if (!built) fctx.body.push({ op: "ref.null.extern" });
       fctx.body.push({ op: "local.set", index: selfLocal });
+    } else if (
+      !ctor &&
+      isExternrefBacked &&
+      isStandalonePromiseSuperForwarder(ctx, className, implicitForwarderArity)
+    ) {
+      // (#6651 D4) The implicit `constructor(...args) { super(...args) }` of a
+      // `class X extends Promise {}` builds the real `$Promise` from `args[0]`,
+      // exactly as the explicit `super(executor)` branch does — not the
+      // identity-only plain object, which ignores the executor.
+      const built = emitStandalonePromiseFromExecutorValue(ctx, fctx, () =>
+        fctx.body.push({ op: "local.get", index: 0 }),
+      );
+      if (!built) fctx.body.push({ op: "ref.null.extern" });
+      fctx.body.push({ op: "local.set", index: selfLocal });
+      emitSetSubclassProto(ctx, fctx, selfLocal, className, "Promise");
+      emitPromiseSubclassProtoLink(ctx, fctx, selfLocal, className);
     } else if (!ctor && isExternrefBacked) {
       const parentName = ctx.classBuiltinParentMap.get(className);
       if (parentName) {
@@ -3335,6 +3353,7 @@ function compileClassBodiesInner(
           params.slice(isStatic ? 0 : 1).map((p) => p.type),
           isStatic ? 0 : 1,
           true,
+          member.parameters,
         );
       }
 
@@ -3466,7 +3485,7 @@ function compileClassBodiesInner(
         const methodParamTypes = params.slice(isStatic ? 0 : 1).map((p) => p.type);
         const paramOffset = isStatic ? 0 : 1; // skip 'this' param for instance methods
         // Class bodies are always strict code → unmapped arguments (#779e).
-        emitArgumentsObject(ctx, fctx, methodParamTypes, paramOffset, true);
+        emitArgumentsObject(ctx, fctx, methodParamTypes, paramOffset, true, member.parameters);
       }
 
       if (isGeneratorMethod && member.body && nativeGenInfo) {
@@ -4017,6 +4036,7 @@ function emitPromiseSubclassOnHostCtor(
       params.map((param) => param.type),
       0,
       /* unmapped */ true,
+      ctor.parameters,
     );
   }
 
@@ -4308,6 +4328,7 @@ export function compileSuperCall(
       fctx.body.push({ op: "local.set", index: selfLocal });
       emitSetSubclassProto(ctx, fctx, selfLocal, childClassName, builtinParent);
       emitSetSubclassUserBrand(ctx, fctx, selfLocal, childClassName);
+      emitPromiseSubclassProtoLink(ctx, fctx, selfLocal, childClassName); // (#6651 D4)
       return;
     }
     const hasSpread = args.some((a) => ts.isSpreadElement(a));

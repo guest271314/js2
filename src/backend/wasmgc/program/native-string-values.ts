@@ -1,8 +1,16 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import type { AllocSiteId } from "../../../ir/core/nodes.js";
+import {
+  IR_CLOSURE_VECTOR_APPLY,
+  IR_CLOSURE_UNDEFINED,
+  closureMethodArity,
+} from "../../../ir/core/closure-invocation-callables.js";
 import type { IrStringEncoding, IrStringConcatMode } from "../../../ir/core/string-types.js";
 import type { IrFuncRef, IrGlobalRef } from "../../../ir/core/value-references.js";
 import type { IrUnitId } from "../../../shared/contracts/ir-identity.js";
+import type { NativeInvocationRequirements } from "../../../ir/program/native-invocation-requirements.js";
+import { nativeStringInvocationRequirements } from "./native-invocation-abi.js";
+import { selectNativeBooleans, type NativeBooleanSelection } from "./native-primitive-boundary-abi.js";
 import type { PreparedIrProgramFailure } from "../../../ir/program/prepared-contracts.js";
 import {
   collectNativeStringValueDemands,
@@ -58,7 +66,19 @@ import {
   fillNativeValueResources,
   requireCompletedNativeValues,
   type NativeValueReservations,
+  type NativeValueDependencies,
 } from "../resources/native-values.js";
+import {
+  declareNativeBooleanResources,
+  reserveNativeBooleanResources,
+  reserveNativeBooleanBoxResources,
+  fillNativeBooleanResources,
+  fillNativeBooleanBoxResources,
+  requireCompletedNativeBooleans,
+  requireCompletedNativeBooleanBoxes,
+  type NativeBooleanReservations,
+  type NativeBooleanBoxReservations,
+} from "../resources/native-booleans.js";
 
 import {
   deriveNativeStringOutputRequirements,
@@ -83,6 +103,7 @@ export interface NativeStringValueOptions {
 export interface NativeStringValuePhysicalPlan {
   readonly key: string;
   readonly mode: "literals" | "number-boundary";
+  readonly booleans?: NativeBooleanSelection;
   readonly output?: NativeStringOutputPhysicalPlan;
   readonly literalRequirements: NativeStringLiteralRequirements;
   readonly literalUses: readonly { readonly demandIndex: number; readonly cacheKey: string }[];
@@ -91,13 +112,18 @@ export interface NativeStringValuePhysicalPlan {
 }
 export type NativeStringValuePlanningOutcome =
   | { readonly kind: "none" }
-  | { readonly kind: "planned"; readonly plan: NativeStringValuePhysicalPlan }
+  | {
+      readonly kind: "planned";
+      readonly plan: NativeStringValuePhysicalPlan;
+      readonly invocationRequirements?: NativeInvocationRequirements;
+    }
   | PreparedIrProgramFailure;
 export interface NativeStringValueReservationInput {
   readonly demands: NativeStringValueDemands;
   readonly plan: NativeStringValuePhysicalPlan;
   readonly valueRequirements?: NativeValueResourcePlan;
   readonly outputRequirements?: NativeStringOutputRequirements;
+  readonly invocationRequirements?: NativeInvocationRequirements;
 }
 export type NativeStringValueResourceRow =
   | { readonly key: string; readonly space: "type"; readonly reservation: TypeReservation }
@@ -111,6 +137,9 @@ export interface NativeStringValueReservations {
     readonly flatten: NativeStringFlattenReservations;
     readonly scanner: NativeStringNumberReservations;
     readonly values: NativeValueReservations;
+    readonly dependencies: NativeValueDependencies;
+    readonly booleans?: NativeBooleanReservations;
+    readonly booleanBoxes?: NativeBooleanBoxReservations;
   };
 }
 function fail(detail: string): never {
@@ -167,6 +196,7 @@ function demandTuple(demands: NativeStringValueDemands, index: number) {
 export function planNativeStringValuePhysical(
   demands: NativeStringValueDemands,
   options: NativeStringValueOptions,
+  expectedInvocation?: NativeInvocationRequirements,
 ): NativeStringValuePlanningOutcome {
   if (options.representation !== "native-string" || typeof options.utf8Storage !== "boolean")
     fail("invalid representation options");
@@ -177,13 +207,38 @@ export function planNativeStringValuePhysical(
   );
   const executable = (occurrence: number) =>
     demands.buffers[demands.occurrences[occurrence]!.bufferIndex]!.view === "projection";
+  const invocationRequirements = nativeStringInvocationRequirements(demands, options.utf8Storage, expectedInvocation);
+  const boolean = selectNativeBooleans(demands, invocationRequirements);
+  if (boolean.gap) return located(demands, boolean.gap.occurrence, boolean.gap.detail);
   const outputRequirements = deriveNativeStringOutputRequirements(demands, {
     emptyIdentity: options.stringConcatEmptyIdentity ?? true,
   });
   if ("kind" in outputRequirements) return outputRequirements;
-  const numeric = demands.intrinsics.some(
-    (row) => executable(row.occurrence) && row.instruction.id === "js.number.unbox",
-  );
+  const invocation =
+    !!invocationRequirements ||
+    demands.occurrences.some((row, index) => {
+      const instruction = row.instruction;
+      return (
+        executable(index) &&
+        instruction.kind === "call" &&
+        instruction.target.binding.kind === "intrinsic" &&
+        (instruction.target.binding.symbol === IR_CLOSURE_VECTOR_APPLY ||
+          instruction.target.binding.symbol === IR_CLOSURE_UNDEFINED ||
+          closureMethodArity(instruction.target.binding.symbol) !== undefined)
+      );
+    });
+  const numeric =
+    invocation ||
+    !!boolean.selection ||
+    demands.intrinsics.some(
+      (row) =>
+        executable(row.occurrence) &&
+        (row.instruction.id === "js.number.unbox" ||
+          (row.instruction.id === "js.number.box" &&
+            row.instruction.provider?.kind === "callable" &&
+            row.instruction.provider.target.binding.kind === "runtime" &&
+            row.instruction.provider.target.binding.symbol === "__box_number")),
+    );
   const literals: { value: string; encoding?: IrStringEncoding }[] = [];
   const uses: { demandIndex: number; cacheKey: string }[] = [];
   const references: { reference: IrGlobalRef | IrFuncRef; key: string }[] = [];
@@ -247,22 +302,30 @@ export function planNativeStringValuePhysical(
       })
     : undefined;
   if (numeric || output) literals.push({ value: "", encoding: "wtf16" });
+  if (invocation) literals.push({ value: "TypeError" }, { value: "Value is not callable" });
   if (outputRequirements.batchArities.length) literals.push({ value: "undefined" });
   const literalRequirements = { key, utf8Storage: options.utf8Storage, literals };
+  const values = numeric ? declareNativeValueResources(entry.id) : undefined;
+  const booleanType = values?.declarations.find((row) => row.role[0] === "values" && row.role[1] === "boolean");
   // Acceptance describes the same recipes the producers later execute. No
   // physical indices, scratch ledger, or post-reservation ABI additions.
   const recipes = [
     declareNativeStringLiteralTypes(key, options.utf8Storage),
     declareNativeStringLiteralResources(literalRequirements),
     ...(numeric || output ? [declareNativeStringFlattenResources(key + ":flatten", key, options.utf8Storage)] : []),
-    ...(numeric ? [declareNativeStringNumberResources(entry.id), declareNativeValueResources(entry.id)] : []),
+    ...(values ? [declareNativeStringNumberResources(entry.id), values] : []),
+    ...(boolean.selection && booleanType
+      ? [declareNativeBooleanResources(key + ":booleans", booleanType.key, boolean.selection)]
+      : []),
     ...(output ? [output] : []),
   ];
   return {
     kind: "planned",
+    ...(invocationRequirements ? { invocationRequirements } : {}),
     plan: freezePreparedIrValue({
       key,
       mode: numeric ? "number-boundary" : "literals",
+      ...(boolean.selection ? { booleans: boolean.selection } : {}),
       ...(output ? { output } : {}),
       literalRequirements,
       literalUses: uses,
@@ -281,12 +344,18 @@ interface Owner {
 }
 const owners = new WeakMap<NativeStringValueReservations, Owner>();
 function checkInput(input: NativeStringValueReservationInput) {
-  const outcome = planNativeStringValuePhysical(input.demands, {
-    representation: "native-string",
-    utf8Storage: input.plan.literalRequirements.utf8Storage,
-    stringConcatEmptyIdentity: input.plan.output?.options.emptyIdentity,
-  });
+  const outcome = planNativeStringValuePhysical(
+    input.demands,
+    {
+      representation: "native-string",
+      utf8Storage: input.plan.literalRequirements.utf8Storage,
+      stringConcatEmptyIdentity: input.plan.output?.options.emptyIdentity,
+    },
+    input.invocationRequirements,
+  );
   if (outcome.kind !== "planned") fail("input no longer has a materializable string plan");
+  if (outcome.invocationRequirements !== input.invocationRequirements)
+    fail("missing exact issued invocation requirements");
   same(input.plan, outcome.plan, "demand/plan mismatch");
   if (input.plan.output) {
     if (!input.outputRequirements || input.outputRequirements.demands !== input.demands)
@@ -336,10 +405,32 @@ export function reserveNativeStringValueResources(
   if (input.plan.mode === "number-boundary") {
     if (!flatten) fail("number resources require flatten");
     const scanner = reserveNativeStringNumberResources(tx, input.valueRequirements!, flatten);
-    const values = reserveNativeValueResources(tx, input.valueRequirements!, {
-      strings: { kind: "native-string", stringPack: strings, scanner },
+    const dependencies: NativeValueDependencies = Object.freeze({
+      strings: { kind: "native-string" as const, stringPack: strings, scanner },
     });
-    number = Object.freeze({ flatten, scanner, values });
+    const values = reserveNativeValueResources(tx, input.valueRequirements!, dependencies);
+    const key = input.plan.key + ":booleans";
+    const booleanBoxes = input.plan.booleans?.boxMode
+      ? reserveNativeBooleanBoxResources(
+          tx,
+          key,
+          values,
+          input.valueRequirements!,
+          dependencies,
+          input.plan.booleans.boxMode,
+        )
+      : undefined;
+    const booleans = input.plan.booleans?.unbox
+      ? reserveNativeBooleanResources(tx, key, values, input.valueRequirements!, dependencies)
+      : undefined;
+    number = Object.freeze({
+      flatten,
+      scanner,
+      values,
+      dependencies,
+      ...(booleanBoxes ? { booleanBoxes } : {}),
+      ...(booleans ? { booleans } : {}),
+    });
   }
   const output =
     input.plan.output && input.outputRequirements && flatten
@@ -379,6 +470,14 @@ export function reserveNativeStringValueResources(
     fn(number.values.functions.boxNumber);
     fn(number.values.functions.unboxNumber);
     fn(number.values.functions.isNumber);
+    if (number.booleanBoxes) {
+      fn(number.booleanBoxes.boxBoolean);
+      number.booleanBoxes.globals.forEach(global);
+    }
+    if (number.booleans) {
+      fn(number.booleans.isBoolean);
+      fn(number.booleans.unboxBoolean);
+    }
   }
   if (output) {
     for (const row of nativeStringOutputReservationInventory(tx, output, input.plan.output!)) {
@@ -429,6 +528,8 @@ export function fillNativeStringValueResources(
     fillNativeValueResources(tx, pack.number.values, {
       strings: { kind: "native-string", stringPack: pack.strings, scanner: pack.number.scanner },
     });
+    if (pack.number.booleanBoxes) fillNativeBooleanBoxResources(tx, pack.number.booleanBoxes);
+    if (pack.number.booleans) fillNativeBooleanResources(tx, pack.number.booleans);
   }
   if (pack.output) fillNativeStringOutputResources(tx, pack.output);
   owner.filled = true;
@@ -455,6 +556,22 @@ export function requireCompletedNativeStringValues(
     requireCompletedNativeValues(tx, pack.number.values, owner.input.valueRequirements, {
       strings: { kind: "native-string", stringPack: pack.strings, scanner: pack.number.scanner },
     });
+    if (pack.number.booleanBoxes)
+      requireCompletedNativeBooleanBoxes(
+        tx,
+        pack.number.booleanBoxes,
+        pack.number.values,
+        owner.input.valueRequirements,
+        pack.number.dependencies,
+      );
+    if (pack.number.booleans)
+      requireCompletedNativeBooleans(
+        tx,
+        pack.number.booleans,
+        pack.number.values,
+        owner.input.valueRequirements,
+        pack.number.dependencies,
+      );
   }
   for (const row of owner.rows) tx.physicalIndex(row.reservation);
   return pack;

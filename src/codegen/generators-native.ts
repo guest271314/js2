@@ -99,12 +99,14 @@ import {
   nodeContainsYield,
   spillSafeValType,
   bodyDeclaresBinding,
+  namedFunctionOwnNameShadow,
   loopBodyHasUnsupportedJump,
   thenBody,
   methodBodyUsesSuper,
   fnExprBodyReferencesThis,
   bodyReferencesOwnName,
   isFunctionLikeScope,
+  isCloseTransparentGenerator,
 } from "./generators-native-ast-scan.js";
 
 import { ensureNativeDelegatedResultHelpers, nativeGeneratorExecutingCheck } from "./generators-delegation-runtime.js";
@@ -114,8 +116,16 @@ import {
   emitLinearUnwindClose,
   type LinearCloseEntry,
   type LinearizeHost,
+  lowerLinearForOfBinding,
   lowerLinearizedStatement,
 } from "./generator-yield-linearize.js";
+import { desugarYieldExpressionStatement } from "./generators-native-general.js";
+import {
+  bodyHasComputedKeyYield,
+  bodyHasNestedYield,
+  lowerNestedYieldStatement,
+  type NestedYieldHost,
+} from "./generator-yield-nested.js";
 
 const MAX_NATIVE_GENERATOR_STATES = 256;
 
@@ -435,10 +445,10 @@ function noJsHostTarget(ctx: CodegenContext): boolean {
   return ctx.standalone || ctx.wasi;
 }
 
-function isNumericExpression(ctx: CodegenContext, expr: ts.Expression | undefined): boolean {
+function isNumericExpression(ctx: CodegenContext, expr: ts.Expression | undefined, allowBoolean = true): boolean {
   if (!expr) return true;
   const t = ctx.checker.getTypeAtLocation(expr);
-  return isNumberType(t) || isBooleanType(t);
+  return isNumberType(t) || (allowBoolean && isBooleanType(t));
 }
 
 // (#2171) Native-string yield support. A yield expression qualifies for the
@@ -475,7 +485,25 @@ function generatorElemValType(ctx: CodegenContext, decl: GeneratorDecl): ValType
   // TARGET (`[x = yield]`, `x[yield]`), so the sent value must keep its JS
   // identity — the boxed-any carrier's `sent` field. Only such generators, which
   // had no native plan before (see `bodyHasPatternYield`), move carrier.
-  if (decl.body && noJsHostTarget(ctx) && bodyHasPatternYield(decl.body)) return { kind: "externref" };
+  // (#6651 A5) Likewise a yield inside a computed property NAME: the resumed
+  // value becomes a KEY (`iter.next('first')` names an accessor). (#6651 A6) And
+  // a yield inside a yield operand / a return value: the resumed value IS the
+  // next yielded or returned value (`yield yield 1` re-yields what `.next(v)`
+  // sent), whatever its type.
+  if (
+    decl.body &&
+    noJsHostTarget(ctx) &&
+    (bodyHasPatternYield(decl.body) || bodyHasComputedKeyYield(decl.body) || bodyHasNestedYield(decl.body))
+  ) {
+    return { kind: "externref" };
+  }
+  // (#6651 A6 G3a) Standalone/WASI: a BOOLEAN operand is not carrier-numeric.
+  // The f64 carrier turned `yield true` into the Number 1 (and a string sent back
+  // through it into NaN); booleans now take the boxed-any carrier. The JS-host
+  // lane keeps the historical rule — byte-identical, and its eager fallback owns
+  // the shapes the boxed-any plan refuses.
+  const numericOperand = (expr: ts.Expression | undefined): boolean =>
+    isNumericExpression(ctx, expr, !noJsHostTarget(ctx));
   let sawNumeric = false;
   let sawString = false;
   let sawOther = false;
@@ -494,7 +522,7 @@ function generatorElemValType(ctx: CodegenContext, decl: GeneratorDecl): ValType
           const fact = ctx.oracle.typeFactOf(node.expression);
           if (!(fact.kind === "array" && fact.element.kind === "number")) sawOther = true;
         }
-      } else if (isNumericExpression(ctx, node.expression)) sawNumeric = true;
+      } else if (numericOperand(node.expression)) sawNumeric = true;
       else if (isStringYieldExpression(ctx, node.expression)) sawString = true;
       else sawOther = true;
     }
@@ -505,7 +533,7 @@ function generatorElemValType(ctx: CodegenContext, decl: GeneratorDecl): ValType
     // then bailed on the string return — legacy host path on the gc lane and
     // a #680 refusal in standalone, for a shape the machine supports.
     if (ts.isReturnStatement(node) && node.expression) {
-      if (isNumericExpression(ctx, node.expression)) sawNumeric = true;
+      if (numericOperand(node.expression)) sawNumeric = true;
       else if (isStringYieldExpression(ctx, node.expression)) sawString = true;
       else sawOther = true;
     }
@@ -653,6 +681,13 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   // externref values / iterator records and i32 flags, typed at creation.
   const linearSpillTypes = new Map<string, ValType>();
   const linearizeYields = elemIsAny && noJsHostTarget(ctx) && bodyHasPatternYield(decl.body);
+  // (#6651 A5) Statements holding a yield nested in a computed key / call
+  // argument / member target (`generator-yield-nested.ts`). Same gate shape as A4.
+  // (#6651 A6) Also a yield nested in a yield operand or a return value.
+  const nestedYields =
+    elemIsAny && noJsHostTarget(ctx) && (bodyHasComputedKeyYield(decl.body) || bodyHasNestedYield(decl.body));
+  // (#6651 A5) Inner-generator bodies by delegation name, for the for-of chain's close-transparency gate.
+  const delegationInnerBodies = new Map<string, ts.Block>();
 
   // Reserve the state id for the in-progress state.
   let curId = reserveState();
@@ -728,21 +763,6 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     return found;
   };
 
-  /** (#6651 A2) A `yield*` in THIS function's scope. */
-  const nodeContainsDelegatedYield = (node: ts.Node): boolean => {
-    let found = false;
-    const visit = (n: ts.Node): void => {
-      if (found || (n !== node && isFunctionLikeScope(n))) return;
-      if (ts.isYieldExpression(n) && n.asteriskToken) {
-        found = true;
-        return;
-      }
-      ts.forEachChild(n, visit);
-    };
-    visit(node);
-    return found;
-  };
-
   /** (#6651 A4) The planner's handle on this builder's state cursor. */
   let linearOrdinal = 0;
   const linearHost: LinearizeHost<UnwindEntry> = {
@@ -766,6 +786,53 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     lowerBody: (statements, unwind) => lowerStatements(statements, unwind, false),
     closeEntry: (entry) => ({ kind: "dstr-close", ...entry }),
   };
+
+  /** (#6651 A5) The nested-yield planner's handle: A4's externref suspension + #680's capture / replacement map. */
+  const nestedHost: NestedYieldHost<UnwindEntry> = {
+    suspend(yieldExpr, unwind, operand) {
+      // (#6651 A6) The suspending state's terminator compiles this yield's
+      // operand, which may read earlier yields / captures nested in it.
+      if (operand.length > 0 && !attachContinuationReplacements(curId, [...operand])) return null;
+      return linearHost.suspend(yieldExpr, unwind);
+    },
+    canCapture: (expr) => isSafeContinuationOperand(expr) && continuationCaptureType(expr) !== null,
+    capture: (expr) => captureContinuationOperand(expr)?.spillName ?? null,
+    finish(stmt, replacements) {
+      if (!attachContinuationReplacements(curId, [...replacements])) return false;
+      collectSpillsIn(stmt);
+      if (ts.isReturnStatement(stmt)) {
+        // (#6651 A6) The completion terminator compiles the value against the
+        // replacement map; a prelude `return` would be a raw wasm return.
+        finishState(curId, { kind: "return", expr: stmt.expression });
+        curId = startState();
+        return true;
+      }
+      curStatements.push(stmt);
+      return true;
+    },
+  };
+
+  /**
+   * (#6651 A6) A statement whose yield sits inside another yield's operand, or a
+   * `return` holding a yield: lowered by the nested planner when it can prove
+   * the order, otherwise REFUSED. Never compiled as a plain terminator — that
+   * read the inner yield as `undefined` and never suspended (a silent miscompile:
+   * `function* g() { return yield 1; }` completed on the first `next()`).
+   */
+  function lowerNestedOrRefuse(
+    stmt: ts.Statement,
+    unwind: readonly UnwindEntry[],
+    allowExpressionContinuations: boolean,
+  ): boolean {
+    if (nestedYields && allowExpressionContinuations && unwind.length === 0 && stateFinallyDepth === 0) {
+      if (lowerNestedYieldStatement(ctx, decl, nestedHost, stmt, unwind) === "lowered") return true;
+    }
+    return fail();
+  }
+
+  /** (#6651 A6) A non-delegating yield whose operand holds a yield of this function. */
+  const yieldOperandHoldsYield = (yieldExpr: ts.YieldExpression): boolean =>
+    !yieldExpr.asteriskToken && yieldExpr.expression !== undefined && containsAnyYield(yieldExpr.expression);
 
   /**
    * Lower a list of statements into the state graph, threading the "current
@@ -812,6 +879,15 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
           curId = startState();
           return true;
         }
+        // (#6651 A6) `return <expr holding a yield>` (the direct `return yield* x`
+        // is the arm above): suspend first, complete in the successor.
+        if (
+          stmt.expression &&
+          containsAnyYield(stmt.expression) &&
+          !(ts.isYieldExpression(stmt.expression) && stmt.expression.asteriskToken)
+        ) {
+          return lowerNestedOrRefuse(stmt, unwind, allowExpressionContinuations);
+        }
         // (#2171) The return *value* must match the generator's yield element
         // type (numeric or string); a bare `return;` (no expr) is allowed.
         if (stmt.expression && !yieldValueOk(stmt.expression)) return fail();
@@ -841,6 +917,10 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
       // Statement that CONTAINS a yield somewhere — must be modeled.
       // 1) `yield expr;` as an expression statement.
       if (ts.isExpressionStatement(stmt) && ts.isYieldExpression(stmt.expression)) {
+        if (yieldOperandHoldsYield(stmt.expression)) {
+          if (!lowerNestedOrRefuse(stmt, unwind, allowExpressionContinuations)) return false;
+          continue;
+        }
         if (!emitYield(stmt.expression, undefined, unwind)) return false;
         continue;
       }
@@ -873,16 +953,46 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
       // 2) `let x = yield expr;`
       const yd = tryYieldDeclaration(stmt);
       if (yd) {
+        if (yieldOperandHoldsYield(yd.yieldExpr)) {
+          if (!lowerNestedOrRefuse(stmt, unwind, allowExpressionContinuations)) return false;
+          continue;
+        }
         if (!emitYield(yd.yieldExpr, yd.name, unwind)) return false;
         continue;
       }
 
+      // 2a) (#6651 A5) In a generator gated by a computed-key yield (boxed-any
+      // carrier, which the f64-only continuation arms below refuse), defer the
+      // statement past its last suspension on a spec-ordered walk. Direct body
+      // only, no enclosing try — the #680 continuation's own scope.
+      if (nestedYields && allowExpressionContinuations && unwind.length === 0) {
+        const nested = lowerNestedYieldStatement(ctx, decl, nestedHost, stmt, unwind);
+        if (nested === "lowered") continue;
+        if (nested === "failed") return fail();
+      }
       // 2b) #680 continuation expressions are only admitted in the direct
       // generator body. Every recursive structural list passes false. A
       // state-lowered-finally context rejects this path even if a future caller
       // accidentally grants permission; direct yields already continued above.
       if (ts.isExpressionStatement(stmt) && stateFinallyDepth > 0 && nodeContainsYield(stmt.expression)) {
         return fail();
+      }
+      // 2c) (#680) Standalone: a yield in a comma / `&&` / `||` / `?:` operand of
+      // an expression statement is rewritten to sequential statements or an
+      // if/else (generators-native-general.ts). Only where the continuation arm
+      // below would refuse outright (non-f64 carrier, inside a try region, or a
+      // nested statement list), so every shape it lowers today is untouched.
+      if (noJsHostTarget(ctx) && (!allowExpressionContinuations || unwind.length !== 0 || elemValType.kind !== "f64")) {
+        const desugared = desugarYieldExpressionStatement(stmt);
+        if (desugared?.kind === "sequence") {
+          if (!lowerStatements(desugared.statements, unwind, allowExpressionContinuations)) return false;
+          continue;
+        }
+        if (desugared?.kind === "if") {
+          const { condition, negate, thenStatements, elseStatements } = desugared;
+          if (!lowerIfParts(condition, negate, thenStatements, elseStatements, unwind)) return false;
+          continue;
+        }
       }
       if (ts.isExpressionStatement(stmt) && allowExpressionContinuations) {
         const continuation = lowerExpressionContinuation(stmt, unwind);
@@ -968,6 +1078,18 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
         continue;
       }
       if (ts.isForOfStatement(stmt)) {
+        // (#680) Standalone: a subject that is not a typed iterator object (an
+        // array, string, Set, or untyped JS value) is driven through the native
+        // `__iterator` protocol by the linearised loop skeleton instead of
+        // A2's `__gen_delegate_*` step, which traps on those carriers.
+        if (noJsHostTarget(ctx) && stateFinallyDepth === 0 && !isGenericIterableDelegate(ctx, stmt.expression, true)) {
+          const generic = lowerLinearForOfBinding(linearHost, stmt, unwind, (b) => !loopBodyHasUnsupportedJump(b));
+          if (generic === "lowered") {
+            registerLinearForOfBinding(stmt);
+            continue;
+          }
+          if (generic === "failed") return fail();
+        }
         if (!lowerForOf(stmt, unwind)) return false;
         continue;
       }
@@ -1248,7 +1370,31 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
         return fail();
       }
       if (!subject || innerName === undefined || hostLane) return fail();
-      if (unwind.some((entry) => entry.kind !== "replay")) return fail();
+      // (#6651 A5) Inside a native-lowered `for-of` body (A2's bail 4) the chain
+      // carries the loop's `iter-close`, possibly with a `catch` of a try inside
+      // the body. The delegation state then walks that chain innermost-first
+      // instead of replaying finalizers, after forwarding the abrupt completion
+      // to the inner generator (`emitDelegateCloseForward`): `.return()` at the
+      // delegated yield closes the inner, then the loop iterator. A state-lowered
+      // `finally` entry (pending-completion routing) is still refused.
+      const delegationUnwind = unwind.some((entry) => entry.kind !== "replay");
+      if (
+        delegationUnwind &&
+        !(
+          unwind.some((entry) => entry.kind === "iter-close") &&
+          unwind.every((entry) => entry.kind === "replay" || entry.kind === "catch" || entry.kind === "iter-close")
+        )
+      ) {
+        return fail();
+      }
+      if (delegationUnwind) {
+        // The D2 close discards the inner's answer; admit only an inner for which
+        // that is exact (the legacy replay-only chain keeps its historical scope).
+        const innerBody = delegationInnerBodies.get(innerName);
+        if (!innerBody || !isCloseTransparentGenerator(innerBody)) return fail();
+        curAbrupt = undefined;
+        curUnwind = [...unwind].reverse();
+      }
       // (#2864 R1) Carrier-mismatch gate: the delegation yield-arm re-yields the
       // inner's f64 `value` through the OUTER result struct. For an f64 outer
       // that is exact; for the boxed-any outer the f64→externref mismatch is
@@ -1325,6 +1471,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     // string delegation is a follow-up; for now bail to the host path.
     const innerElem = generatorElemValType(ctx, innerDecl);
     if (innerElem === null || innerElem.kind !== "f64") return undefined;
+    delegationInnerBodies.set(callee.text, innerDecl.body); // (#6651 A5) close-transparency gate
     return callee.text;
   }
 
@@ -1457,6 +1604,18 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
       if (decl.body && bodyDeclaresBinding(decl.body, name)) continue;
       return name;
     }
+  }
+
+  /**
+   * (#6651 A6 G3b) The `sent` spill a #680 continuation suspends on. Under the
+   * boxed-any carrier (standalone/WASI only) it is an externref LINEAR spill,
+   * typed up front — the resumed value is an arbitrary JS value, and that typing
+   * is what exempts it from the any-carrier resume-binding bail in the spill
+   * pass. The f64 carrier keeps its historical spill (byte-identical).
+   */
+  const continuationAnyCarrier = elemIsAny && noJsHostTarget(ctx);
+  function continuationSentSpill(): string {
+    return continuationAnyCarrier ? linearHost.spill({ kind: "externref" }, "sent") : continuationSpillName("sent");
   }
 
   function unwrapContinuationWrapper(expr: ts.Expression): ts.Expression {
@@ -1803,7 +1962,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
       if (!capture) return false;
       captures.push(capture);
     }
-    const sentSpill = continuationSpillName("sent");
+    const sentSpill = continuationSentSpill();
     if (!emitYield(yieldExpr, sentSpill, unwind)) return false;
     return finishExpressionContinuation(host, captures, [[yieldExpr, sentSpill]]);
   }
@@ -1867,7 +2026,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
       const yieldAtTerm = nextYield < yields.length && yields[nextYield]!.index === index;
       if (yieldAtTerm) {
         const yieldExpr = yields[nextYield]!.expression;
-        const sentSpill = continuationSpillName("sent");
+        const sentSpill = continuationSentSpill();
         if (!emitYield(yieldExpr, sentSpill, unwind)) return false;
         bindings.push([yieldExpr, sentSpill]);
         nextYield++;
@@ -1890,7 +2049,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     const elseYield = continuationYieldOf(conditional.whenFalse);
     if (!conditionYield || !thenYield || !elseYield) return false;
 
-    const conditionSent = continuationSpillName("sent");
+    const conditionSent = continuationSentSpill();
     if (!emitYield(conditionYield, conditionSent, unwind)) return false;
 
     const thenEntry = reserveState();
@@ -1912,7 +2071,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     });
 
     resetCursor(thenEntry);
-    const thenSent = continuationSpillName("sent");
+    const thenSent = continuationSentSpill();
     if (!emitYield(thenYield, thenSent, unwind)) return false;
     const thenReplacements = buildContinuationReplacements(
       host.root,
@@ -1928,7 +2087,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     finishState(curId, { kind: "jump", next: join });
 
     resetCursor(elseEntry);
-    const elseSent = continuationSpillName("sent");
+    const elseSent = continuationSentSpill();
     if (!emitYield(elseYield, elseSent, unwind)) return false;
     const elseReplacements = buildContinuationReplacements(
       host.root,
@@ -2054,8 +2213,10 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
 
     // Bare-yield sent values are f64 in this checkpoint. String/boxed-any
     // carriers and every try/unwind crossing retain the existing fail-closed
-    // native-plan boundary.
-    if (unwind.length !== 0 || elemValType.kind !== "f64") return "failed";
+    // native-plan boundary. (#6651 A6 G3b) Except the boxed-any carrier in
+    // standalone/WASI, whose sent value rides an externref linear spill
+    // (`continuationSentSpill`); every one of those plans was a refusal before.
+    if (unwind.length !== 0 || (elemValType.kind !== "f64" && !continuationAnyCarrier)) return "failed";
 
     if (singleYield) {
       return lowerSingleExpressionContinuation(host, singleYield, [], unwind) ? "lowered" : "failed";
@@ -2121,24 +2282,54 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
 
   /** if (cond) thenBlock [else elseBlock] — at least one branch yields. */
   function lowerIf(stmt: ts.IfStatement, unwind: readonly UnwindEntry[]): boolean {
-    if (!isNumericExpression(ctx, stmt.expression)) return fail();
-    collectSpillsIn(stmt.expression);
+    return lowerIfParts(
+      stmt.expression,
+      false,
+      thenBody(stmt.thenStatement),
+      stmt.elseStatement ? thenBody(stmt.elseStatement) : undefined,
+      unwind,
+    );
+  }
+
+  /**
+   * (#680) The branch-terminator flavour for a structural condition. A numeric /
+   * boolean condition keeps the historical ToNumber-based test (byte-identical);
+   * in standalone any other condition takes the canonical JS ToBoolean path —
+   * an object / string / `any` test the f64 truthiness would get wrong (NaN).
+   * `undefined` = the condition is not admitted (JS-host lane).
+   */
+  function branchConditionFlavour(cond: ts.Expression): { canonical?: true } | undefined {
+    if (isNumericExpression(ctx, cond)) return {};
+    return noJsHostTarget(ctx) ? { canonical: true } : undefined;
+  }
+
+  function lowerIfParts(
+    cond: ts.Expression,
+    negate: boolean,
+    thenStatements: readonly ts.Statement[],
+    elseStatements: readonly ts.Statement[] | undefined,
+    unwind: readonly UnwindEntry[],
+  ): boolean {
+    const flavour = branchConditionFlavour(cond);
+    if (!flavour) return fail();
+    collectSpillsIn(cond);
     // Close current state with a branch terminator. Reserve the join state and
     // the branch entry states.
     const branchHostId = curId;
 
     // Reserve then-entry, else-entry, join.
     const thenEntry = reserveState();
-    const hasElse = !!stmt.elseStatement;
+    const hasElse = !!elseStatements;
     const elseEntry = hasElse ? reserveState() : -1;
     const joinId = reserveState();
 
     finishState(branchHostId, {
       kind: "branch",
-      cond: stmt.expression,
-      negate: false,
+      cond,
+      negate,
       thenState: thenEntry,
       elseState: hasElse ? elseEntry : joinId,
+      ...flavour,
     });
 
     // Lower then-branch starting at thenEntry.
@@ -2147,7 +2338,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     curResumeBindings = [];
     curAbrupt = undefined;
     curUnwind = undefined;
-    if (!lowerStatements(thenBody(stmt.thenStatement), unwind, false)) return false;
+    if (!lowerStatements(thenStatements, unwind, false)) return false;
     finishState(curId, { kind: "jump", next: joinId });
 
     if (hasElse) {
@@ -2156,7 +2347,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
       curResumeBindings = [];
       curAbrupt = undefined;
       curUnwind = undefined;
-      if (!lowerStatements(thenBody(stmt.elseStatement!), unwind, false)) return false;
+      if (!lowerStatements(elseStatements!, unwind, false)) return false;
       finishState(curId, { kind: "jump", next: joinId });
     }
 
@@ -2171,7 +2362,8 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
 
   /** while (cond) body — body yields. */
   function lowerWhile(stmt: ts.WhileStatement, unwind: readonly UnwindEntry[]): boolean {
-    if (!isNumericExpression(ctx, stmt.expression)) return fail();
+    const flavour = branchConditionFlavour(stmt.expression);
+    if (!flavour) return fail();
     if (loopBodyHasUnsupportedJump(stmt.statement)) return fail();
     collectSpillsIn(stmt.expression);
 
@@ -2185,7 +2377,14 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     states[headerId] = {
       statements: [],
       resumeBindings: [],
-      terminator: { kind: "branch", cond: stmt.expression, negate: false, thenState: bodyEntry, elseState: exitId },
+      terminator: {
+        kind: "branch",
+        cond: stmt.expression,
+        negate: false,
+        thenState: bodyEntry,
+        elseState: exitId,
+        ...flavour,
+      },
     };
 
     // body: lower, then jump back to header.
@@ -2208,7 +2407,8 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
 
   /** do body while (cond) — body runs at least once, then header. */
   function lowerDoWhile(stmt: ts.DoStatement, unwind: readonly UnwindEntry[]): boolean {
-    if (!isNumericExpression(ctx, stmt.expression)) return fail();
+    const flavour = branchConditionFlavour(stmt.expression);
+    if (!flavour) return fail();
     if (loopBodyHasUnsupportedJump(stmt.statement)) return fail();
     collectSpillsIn(stmt.expression);
 
@@ -2231,7 +2431,14 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     states[headerId] = {
       statements: [],
       resumeBindings: [],
-      terminator: { kind: "branch", cond: stmt.expression, negate: false, thenState: bodyEntry, elseState: exitId },
+      terminator: {
+        kind: "branch",
+        cond: stmt.expression,
+        negate: false,
+        thenState: bodyEntry,
+        elseState: exitId,
+        ...flavour,
+      },
     };
 
     curId = exitId;
@@ -2264,7 +2471,8 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     }
 
     const cond = stmt.condition;
-    if (cond && !isNumericExpression(ctx, cond)) return fail();
+    const flavour = cond ? branchConditionFlavour(cond) : {};
+    if (!flavour) return fail();
     if (cond) collectSpillsIn(cond);
 
     const headerId = reserveState();
@@ -2278,7 +2486,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
       statements: [],
       resumeBindings: [],
       terminator: cond
-        ? { kind: "branch", cond, negate: false, thenState: bodyEntry, elseState: exitId }
+        ? { kind: "branch", cond, negate: false, thenState: bodyEntry, elseState: exitId, ...flavour }
         : { kind: "jump", next: bodyEntry },
     };
 
@@ -2349,9 +2557,9 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
    *  - `return` anywhere in the body: the plain `return` terminator completes
    *    without walking the unwind chain, so the iterator would never be closed
    *    (§14.7.5.7 step 6);
-   *  - `yield*` in the body: the delegation terminator rebuilds its abrupt
-   *    context from `replay` entries ONLY, which would silently DROP this
-   *    loop's `iter-close` entry;
+   *  - (#6651 A5: no longer a bail) `yield*` in the body — the native-gen and
+   *    protocol-iterable delegation states walk this loop's `iter-close` entry;
+   *    the vec kind still refuses a non-replay chain;
    *  - `break` / `continue` (shared `loopBodyHasUnsupportedJump`).
    */
   function lowerForOf(stmt: ts.ForOfStatement, unwind: readonly UnwindEntry[]): boolean {
@@ -2371,7 +2579,10 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     const bindingName = declarator.name.text;
     const body = thenBody(stmt.statement);
     if (body.some((s) => statementContainsReturn(s))) return fail();
-    if (body.some((s) => nodeContainsDelegatedYield(s))) return fail();
+    // (#6651 A5) A `yield*` in the body is no longer refused here: each
+    // delegation kind decides whether it can carry this loop's `iter-close`
+    // entry (`emitYield` — the vec kind still refuses a non-replay chain; the
+    // native-gen and protocol-iterable kinds walk it).
 
     collectSpillsIn(stmt.expression);
     addSpill(bindingName);
@@ -2411,6 +2622,18 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     return ok;
   }
 
+  /**
+   * (#680) Type the binding of a `lowerLinearForOfBinding` loop at its declared
+   * representation (the PutValue coerces the stepped externref into it), exactly
+   * as A2's `lowerForOf` types its loop variable.
+   */
+  function registerLinearForOfBinding(stmt: ts.ForOfStatement): void {
+    const declarator = (stmt.initializer as ts.VariableDeclarationList).declarations[0]!;
+    const name = (declarator.name as ts.Identifier).text;
+    addSpill(name);
+    forOfBindingSpillTypes.set(name, resolveSpillLocalValType(ctx, declarator) ?? { kind: "externref" });
+  }
+
   // Conservatively spill every simple numeric local declared / assigned in the
   // generator body, since loops re-enter states across suspensions and the live
   // local set is hard to compute precisely. Identifiers that are params are
@@ -2421,6 +2644,8 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
       // params are registered (externref-typed) by lowerTryRegion, not here.
       if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && !ts.isCatchClause(n.parent)) {
         addSpill(n.name.text, n);
+      } else if (ts.isVariableDeclaration(n) && !ts.isIdentifier(n.name) && noJsHostTarget(ctx)) {
+        addPatternDeclarationSpills(n.name);
       }
       if (
         ts.isFunctionDeclaration(n) ||
@@ -2433,6 +2658,39 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
       ts.forEachChild(n, visit);
     }
     visit(node);
+  }
+
+  /**
+   * (#680) Standalone: the names a destructuring DECLARATION binds
+   * (`let { a, b: [c] } = o;`) are generator locals like any other and must
+   * survive a suspension. They used to be skipped, so a read after the next
+   * yield saw the frame's inert default (`let {a} = o; yield; yield a` produced
+   * 0). Typed exactly as the resume body's `ensureBindingLocals` will type the
+   * slot it then reuses (`resolveBindingElementType`, #3315 undefined-widening
+   * marked the same way). A name whose type does not round-trip the frame, and
+   * a rest element (whose slot the destructure re-allocates, #971), keep the
+   * previous unspilled behaviour rather than refusing the generator.
+   */
+  function bindingElementTsType(el: ts.BindingElement): ts.Type {
+    return ctx.checker.getTypeAtLocation(el);
+  }
+
+  function addPatternDeclarationSpills(pattern: ts.BindingPattern): void {
+    for (const el of pattern.elements) {
+      if (ts.isOmittedExpression(el) || el.dotDotDotToken) continue;
+      if (!ts.isIdentifier(el.name)) {
+        addPatternDeclarationSpills(el.name);
+        continue;
+      }
+      const name = el.name.text;
+      if (spillSet.has(name)) continue;
+      const elemTsType = bindingElementTsType(el);
+      const safe = spillSafeValType(resolveBindingElementType(el, elemTsType, (t) => resolveWasmType(ctx, t)));
+      if (!safe) continue;
+      patternParamSpillTypes.set(name, safe);
+      if (isUndefWidenedBindingElement(el, resolveWasmType(ctx, elemTsType))) undefWidenedPatternBindings.add(name);
+      addSpill(name);
+    }
   }
 
   // Pre-scan the whole body so every loop-carried / yield-crossing local is a
@@ -2634,7 +2892,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
       ) {
         return null;
       }
-      const elemTsType = ctx.checker.getTypeAtLocation(el);
+      const elemTsType = bindingElementTsType(el);
       const bindType =
         classDefaultSafe && ts.isClassExpression(decl.parent)
           ? { kind: "externref" as const }
@@ -2796,7 +3054,15 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     // linearised pattern reads such a source only as an externref, and the
     // post-emit reconcile pins the field to whatever slot the declaration settles
     // on — so an any-array literal spills at the boundary rep here.
-    if (!resolved && linearizeYields && declNode?.initializer && ts.isArrayLiteralExpression(declNode.initializer)) {
+    // (#680) The same holds for any standalone generator: only the linearised
+    // pattern used to reach this with such a declaration (everything else
+    // refused the generator here), and the reconcile is lane-independent.
+    if (
+      !resolved &&
+      noJsHostTarget(ctx) &&
+      declNode?.initializer &&
+      ts.isArrayLiteralExpression(declNode.initializer)
+    ) {
       spillTypes.set(name, { kind: "externref" });
       continue;
     }
@@ -2848,8 +3114,9 @@ export type GeneratorDecl = ts.FunctionDeclaration | ts.MethodDeclaration | ts.F
  *     state; the resume context reloads it before compiling the body;
  *   - no `this` (a bare function expression's `this` is call-site dependent; the
  *     state-struct model has no receiver slot for the non-method case);
- *   - a NAMED fn-expr must not reference its own name (the self-binding scope
- *     rides `__self` in the closure model, which the resume function lacks);
+ *   - a NAMED fn-expr MAY reference its own name (#6651 A7): the frame's
+ *     leading `__self` param IS that binding's value, and the resume prelude
+ *     maps the name onto it (`ensureNativeGeneratorResumeFunction`);
  *   - no outer-scope capture (checked by the caller via
  *     `generatorCapturesOuterScope`, same as methods).
  */
@@ -2892,7 +3159,6 @@ function isNativeGeneratorExpressionShape(ctx: CodegenContext, decl: ts.Function
     if (methodBodyUsesSuper(decl.body)) return false;
     if (!bodyReferencesOwnThis(decl.body)) return false;
   }
-  if (decl.name && bodyReferencesOwnName(decl.body, decl.name.text)) return false;
   // (#3302) Outer-scope captures are ADMITTED in the standalone/wasi lane:
   // the lifted closure already carries them as `__self` struct fields, and
   // the resume function re-materializes them via
@@ -4742,6 +5008,113 @@ function emitTrampoline(
 }
 
 /**
+ * (#2864 D2) Delegation abrupt forwarding — iterator close through `yield*`
+ * (§27.5.3.7 steps 7.b/7.c). A `.return(v)` / `.throw(e)` on the OUTER while
+ * suspended in a native-gen yield-star state must forward the abrupt to the
+ * INNER first (drive its resume once with the SAME mode + payloads) so the
+ * inner's `finally` blocks run, then continue the outer's own abrupt path
+ * (its finalizers + completion) exactly as before. Gated on the state's
+ * terminator being a native-gen delegation AND the slot being non-null
+ * (mid-delegation) — byte-inert for non-delegating generators, and inert at
+ * runtime for an abrupt resume at the plain-yield suspension that precedes
+ * the delegation (slot still null). A mode-2 inner re-throws after its
+ * finalizers (F2), and a `finally` that itself throws surfaces a NEW error —
+ * both are caught here, stored as the outer's error, and upgrade the outer
+ * to the throw path (a return completion whose close throws becomes a throw
+ * completion, per spec).
+ *
+ * (#6651 A5) Extracted verbatim from the legacy `abruptResume` branch of
+ * `compileState` so the `unwind` branch (a native-gen `yield*` inside a
+ * native-lowered for-of body, whose chain carries the loop's `iter-close`)
+ * forwards the abrupt completion to the inner BEFORE walking the chain.
+ * Emits into `fctx.body`; the caller has pointed it at the abrupt body.
+ */
+function emitDelegateCloseForward(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  info: NativeGeneratorInfo,
+  state: NativeGeneratorState,
+  selfLocal: number,
+  getCaughtExnIdx: number | undefined,
+): void {
+  if (state.terminator.kind === "yield-star" && state.terminator.delegationKind === "native-gen") {
+    const closeSlot = info.delegationSlots?.[state.terminator.siteIndex];
+    const closeInner = closeSlot ? ctx.nativeGenerators.get(closeSlot.innerName) : undefined;
+    if (closeSlot && closeInner) {
+      const closeResumeIdx = ensureNativeGeneratorResumeFunction(ctx, closeInner);
+      const closeDelegLocal = allocLocal(fctx, `__gen_close_deleg_${fctx.locals.length}`, {
+        kind: "ref",
+        typeIdx: closeInner.stateTypeIdx,
+      });
+      const closeErrLocal = allocLocal(fctx, `__gen_close_err_${fctx.locals.length}`, { kind: "externref" });
+      // The inner is f64-gated (delegation admission), so its `abrupt` field is
+      // f64: copy the outer's `.return(v)` value when the outer's carrier is
+      // also f64; a boxed-any outer's externref abrupt has no unbox seam here —
+      // deliver undefined (the value is unobservable: the inner result is
+      // discarded and the outer completes with its OWN abrupt field).
+      const closeAbruptPayload: Instr[] =
+        genCarrierFieldType(info.elemValType).kind === "f64"
+          ? [
+              { op: "local.get", index: selfLocal },
+              { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: info.abruptFieldIdx },
+            ]
+          : [{ op: "f64.const", value: NaN }];
+      const closeCatch: Instr[] = [
+        { op: "local.set", index: closeErrLocal },
+        { op: "local.get", index: selfLocal },
+        { op: "local.get", index: closeErrLocal },
+        { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: ERROR_FIELD },
+        ...setModeInstrs(info, selfLocal, MODE_THROW),
+      ];
+      fctx.body.push(
+        { op: "local.get", index: selfLocal },
+        { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: closeSlot.fieldIdx },
+        { op: "ref.is_null" },
+        { op: "i32.eqz" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: selfLocal },
+            { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: closeSlot.fieldIdx },
+            { op: "ref.as_non_null" },
+            { op: "local.set", index: closeDelegLocal },
+            // inner.mode = outer.mode; inner.abrupt = payload; inner.error = outer.error
+            { op: "local.get", index: closeDelegLocal },
+            { op: "local.get", index: selfLocal },
+            { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: info.modeFieldIdx },
+            { op: "struct.set", typeIdx: closeInner.stateTypeIdx, fieldIdx: closeInner.modeFieldIdx },
+            { op: "local.get", index: closeDelegLocal },
+            ...closeAbruptPayload,
+            { op: "struct.set", typeIdx: closeInner.stateTypeIdx, fieldIdx: closeInner.abruptFieldIdx },
+            { op: "local.get", index: closeDelegLocal },
+            { op: "local.get", index: selfLocal },
+            { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: ERROR_FIELD },
+            { op: "struct.set", typeIdx: closeInner.stateTypeIdx, fieldIdx: ERROR_FIELD },
+            // Drive the inner ONCE (result discarded); catch its mode-2
+            // re-throw / a finally-thrown replacement error. Foreign JS
+            // exceptions (host mode) recover via __get_caught_exception when
+            // the resume emitter acquired it (#3050 wrap parity).
+            buildTargetTaggedTry(
+              ctx,
+              { kind: "empty" },
+              [{ op: "local.get", index: closeDelegLocal }, { op: "call", funcIdx: closeResumeIdx }, { op: "drop" }],
+              [{ tagIdx: ensureExnTag(ctx), body: closeCatch }],
+              getCaughtExnIdx !== undefined ? [{ op: "call", funcIdx: getCaughtExnIdx }, ...closeCatch] : undefined,
+            ),
+            // Close complete — clear the slot.
+            { op: "local.get", index: selfLocal },
+            { op: "ref.null", typeIdx: closeInner.stateTypeIdx },
+            { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: closeSlot.fieldIdx },
+          ],
+          else: [],
+        },
+      );
+    }
+  }
+}
+
+/**
  * Compile one state's prelude + terminator into an Instr[] for its dispatch
  * arm. Branch depths are passed in (the arm sits `level` ifs deep inside the
  * trampoline loop).
@@ -4799,6 +5172,11 @@ function compileState(
     const abruptBody: Instr[] = [];
     const savedAbrupt = fctx.body;
     fctx.body = abruptBody;
+    // (#6651 A5) A native-gen `yield*` whose chain carries a for-of `iter-close`
+    // lands here, not in the legacy branch: close the inner FIRST (a close that
+    // throws upgrades `mode` to throw, which the walk then reads). No-op for any
+    // other terminator — every state that reached this branch before A5.
+    emitDelegateCloseForward(ctx, fctx, info, state, selfLocal, getCaughtExnIdx);
     emitUnwindWalk(ctx, fctx, info, state.unwind, {
       selfLocal,
       resultLocal,
@@ -4817,95 +5195,8 @@ function compileState(
     const abruptBody: Instr[] = [];
     const savedAbrupt = fctx.body;
     fctx.body = abruptBody;
-    // (#2864 D2) Delegation abrupt forwarding — iterator close through `yield*`
-    // (§27.5.3.7 steps 7.b/7.c). A `.return(v)` / `.throw(e)` on the OUTER while
-    // suspended in a native-gen yield-star state must forward the abrupt to the
-    // INNER first (drive its resume once with the SAME mode + payloads) so the
-    // inner's `finally` blocks run, then continue the outer's own abrupt path
-    // (its finalizers + completion) exactly as before. Gated on the state's
-    // terminator being a native-gen delegation AND the slot being non-null
-    // (mid-delegation) — byte-inert for non-delegating generators, and inert at
-    // runtime for an abrupt resume at the plain-yield suspension that precedes
-    // the delegation (slot still null). A mode-2 inner re-throws after its
-    // finalizers (F2), and a `finally` that itself throws surfaces a NEW error —
-    // both are caught here, stored as the outer's error, and upgrade the outer
-    // to the throw path (a return completion whose close throws becomes a throw
-    // completion, per spec).
-    if (state.terminator.kind === "yield-star" && state.terminator.delegationKind === "native-gen") {
-      const closeSlot = info.delegationSlots?.[state.terminator.siteIndex];
-      const closeInner = closeSlot ? ctx.nativeGenerators.get(closeSlot.innerName) : undefined;
-      if (closeSlot && closeInner) {
-        const closeResumeIdx = ensureNativeGeneratorResumeFunction(ctx, closeInner);
-        const closeDelegLocal = allocLocal(fctx, `__gen_close_deleg_${fctx.locals.length}`, {
-          kind: "ref",
-          typeIdx: closeInner.stateTypeIdx,
-        });
-        const closeErrLocal = allocLocal(fctx, `__gen_close_err_${fctx.locals.length}`, { kind: "externref" });
-        // The inner is f64-gated (delegation admission), so its `abrupt` field is
-        // f64: copy the outer's `.return(v)` value when the outer's carrier is
-        // also f64; a boxed-any outer's externref abrupt has no unbox seam here —
-        // deliver undefined (the value is unobservable: the inner result is
-        // discarded and the outer completes with its OWN abrupt field).
-        const closeAbruptPayload: Instr[] =
-          genCarrierFieldType(info.elemValType).kind === "f64"
-            ? [
-                { op: "local.get", index: selfLocal },
-                { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: info.abruptFieldIdx },
-              ]
-            : [{ op: "f64.const", value: NaN }];
-        const closeCatch: Instr[] = [
-          { op: "local.set", index: closeErrLocal },
-          { op: "local.get", index: selfLocal },
-          { op: "local.get", index: closeErrLocal },
-          { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: ERROR_FIELD },
-          ...setModeInstrs(info, selfLocal, MODE_THROW),
-        ];
-        abruptBody.push(
-          { op: "local.get", index: selfLocal },
-          { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: closeSlot.fieldIdx },
-          { op: "ref.is_null" },
-          { op: "i32.eqz" },
-          {
-            op: "if",
-            blockType: { kind: "empty" },
-            then: [
-              { op: "local.get", index: selfLocal },
-              { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: closeSlot.fieldIdx },
-              { op: "ref.as_non_null" },
-              { op: "local.set", index: closeDelegLocal },
-              // inner.mode = outer.mode; inner.abrupt = payload; inner.error = outer.error
-              { op: "local.get", index: closeDelegLocal },
-              { op: "local.get", index: selfLocal },
-              { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: info.modeFieldIdx },
-              { op: "struct.set", typeIdx: closeInner.stateTypeIdx, fieldIdx: closeInner.modeFieldIdx },
-              { op: "local.get", index: closeDelegLocal },
-              ...closeAbruptPayload,
-              { op: "struct.set", typeIdx: closeInner.stateTypeIdx, fieldIdx: closeInner.abruptFieldIdx },
-              { op: "local.get", index: closeDelegLocal },
-              { op: "local.get", index: selfLocal },
-              { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: ERROR_FIELD },
-              { op: "struct.set", typeIdx: closeInner.stateTypeIdx, fieldIdx: ERROR_FIELD },
-              // Drive the inner ONCE (result discarded); catch its mode-2
-              // re-throw / a finally-thrown replacement error. Foreign JS
-              // exceptions (host mode) recover via __get_caught_exception when
-              // the resume emitter acquired it (#3050 wrap parity).
-              buildTargetTaggedTry(
-                ctx,
-                { kind: "empty" },
-                [{ op: "local.get", index: closeDelegLocal }, { op: "call", funcIdx: closeResumeIdx }, { op: "drop" }],
-                [{ tagIdx: ensureExnTag(ctx), body: closeCatch }],
-                getCaughtExnIdx !== undefined ? [{ op: "call", funcIdx: getCaughtExnIdx }, ...closeCatch] : undefined,
-              ),
-              // Close complete — clear the slot.
-              { op: "local.get", index: selfLocal },
-              { op: "ref.null", typeIdx: closeInner.stateTypeIdx },
-              { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: closeSlot.fieldIdx },
-            ],
-            else: [],
-          },
-        );
-      }
-    }
+    // (#2864 D2) Delegation abrupt forwarding (see `emitDelegateCloseForward`).
+    emitDelegateCloseForward(ctx, fctx, info, state, selfLocal, getCaughtExnIdx);
     for (const finalizer of state.abruptResume.finalizers) {
       for (const stmt of finalizer) compileStatement(ctx, fctx, stmt);
     }
@@ -5519,6 +5810,20 @@ function compileState(
             { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: slot.fieldIdx },
           );
       }
+      // (#6651 A5) Likewise a native-gen delegation slot: an inner that threw is
+      // complete, and a stale slot would make the NEXT `yield* inner()` (a later
+      // for-of iteration) resume it instead of constructing a fresh inner.
+      // Byte-inert before A5 — no native-gen yield-star state had a throw route.
+      if (term.kind === "yield-star" && term.delegationKind === "native-gen") {
+        const slot = info.delegationSlots?.[term.siteIndex];
+        const inner = slot ? ctx.nativeGenerators.get(slot.innerName) : undefined;
+        if (slot && inner)
+          out.push(
+            { op: "local.get", index: selfLocal },
+            { op: "ref.null", typeIdx: inner.stateTypeIdx },
+            { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: slot.fieldIdx },
+          );
+      }
       if (route.kind === "catch") {
         // Bind the error to the catch param (local + spill, so it survives a
         // later suspension inside the catch), then enter the catch block. The
@@ -6000,6 +6305,21 @@ function emitUnwindWalk(
   body.push({ op: "if", blockType: { kind: "empty" }, then: throwBody, else: returnBody });
 }
 
+/**
+ * (#6651 A7) A NAMED generator fn-expr's own name is an immutable binding to
+ * the function itself (§15.5.4 step 4) — the closure the frame already holds
+ * as its leading `__self` param. Map the name onto that resume-function local,
+ * read-only (`tryFunctionExpressionOwnNameWrite`), unless the function shadows it.
+ */
+function bindNamedExpressionOwnName(decl: ts.FunctionExpression, resumeFctx: FunctionContext): void {
+  const name = decl.name?.text;
+  const selfLocal = resumeFctx.localMap.get("__self");
+  if (name === undefined || selfLocal === undefined || !bodyReferencesOwnName(decl.body, name)) return;
+  if (namedFunctionOwnNameShadow(decl) !== undefined) return;
+  resumeFctx.localMap.set(name, selfLocal);
+  (resumeFctx.readOnlyBindings ??= new Set()).add(name);
+}
+
 export function ensureNativeGeneratorResumeFunction(ctx: CodegenContext, info: NativeGeneratorInfo): number {
   const fnName = `__gen_resume_${sanitizeTypeName(info.functionName)}`;
   // (#2941) SINGLE SOURCE OF TRUTH = `ctx.funcMap`, which every late-import
@@ -6189,6 +6509,8 @@ export function ensureNativeGeneratorResumeFunction(ctx: CodegenContext, info: N
       }
     }
   }
+
+  if (ts.isFunctionExpression(info.decl)) bindNamedExpressionOwnName(info.decl, resumeFctx); // (#6651 A7)
 
   // (#2864 C02) `arguments` is initialized by the factory at call time, but
   // this resume function owns the detached execution context. Rehydrate the

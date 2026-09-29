@@ -97,6 +97,7 @@ import { brandBooleanBinaryResult, compileBinaryExpression } from "./binary-ops.
 import { compileArrayLiteral, compileObjectLiteral } from "./literals.js";
 import { compileElementAccess, compilePropertyAccess, maybeWrapAnyReadEqualityCarrier } from "./property-access.js";
 import { tryEmitLinkedStaticComputedRead } from "./standalone-linked-static-inheritance.js"; // (#6644)
+import { notePromiseDynamicMemberRead } from "./promise-dynamic-member-read.js"; // (#6651 D5)
 import { compileTaggedTemplateExpression, compileTemplateExpression } from "./string-ops.js";
 import { compileDeleteExpression, compileRegExpLiteral, compileTypeofExpression } from "./typeof-delete.js";
 import { describeInternalError } from "./internal-error.js";
@@ -1425,6 +1426,7 @@ function compileExpressionInner(
     // agree. Declines for every non-syntactic receiver — see the module header.
     const coercible = tryEmitNullishReceiverMemberRead(ctx, fctx, expr);
     if (coercible !== undefined) return coercible;
+    notePromiseDynamicMemberRead(ctx, fctx, expr); // (#6651 D5) `p.then` as a VALUE
   }
 
   if (ts.isPropertyAccessExpression(expr)) {
