@@ -56,7 +56,7 @@ the aborted first `-O4` run cost another 3.7 / 13.5 / 9.5 / 13.4 CPU-s.
 | hono | 1,198,739 B | 9.2 s · 700,287 B | 19.4 s · 628,989 B | 28.7 s · 605,863 B | 30.0 s · 604,406 B |
 | moment | 2,688,019 B | 16.7 s · 1,906,795 B | 51.1 s · 1,840,535 B | 66.6 s · 1,819,542 B | 68.3 s · 1,816,804 B |
 | lodash-es | 5,822,763 B | 38.4 s · 4,233,275 B | 122.1 s · 3,842,673 B | 233.9 s · 3,632,177 B | 251.8 s · 3,627,787 B |
-| axios | 9,260,766 B | 56.8 s · 5,565,338 B | 140.8 s · 4,196,091 B | not measured | ≈38 min wall (#6732) · 3,820,273 B |
+| axios | 9,260,766 B | 56.8 s · 5,565,338 B | 140.8 s · 4,196,091 B | killed at 3,600 s wall | killed at 3,600 s wall (load 29 at start); ≈38 min in #6732 · 3,820,273 B |
 
 Runtime speed (wasm-only, interleaved rounds, same seed, median µs/op, all
 checksums equal):
@@ -74,6 +74,13 @@ about as much as O4 without Flatten** (hono 28.7 vs 30.0 s, moment 66.6 vs
 68.3 s, lodash-es 233.9 vs 251.8 s), because O4 = O3 plus `flatten`,
 `simplify-locals-notee-nostructure` and `local-cse` (from a `BINARYEN_PASS_DEBUG`
 pass listing). So O3 cannot rescue an O4 timeout.
+
+Cost is **superlinear** in module size above ~6 MB. Per raw MB, O3/O4 cost
+24–25 CPU-s on hono and moment but 40–43 on lodash-es. On axios, both O3 and
+O4 without Flatten ran past a 1-hour wall limit. The second of those runs
+started at load 29, when the box was nearly idle. By contrast, O2 on axios
+took 140.8 CPU-s. That is why the O4 ceiling is a hard 7 MB and not a
+per-MB estimate.
 
 ## Implementation Plan (executed)
 
