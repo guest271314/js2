@@ -429,6 +429,18 @@ loc-budget-allow:
   #     `generateMultiModule`, beside the `fillArrayToPrimitive` /
   #     `fillClassToPrimitive` calls they twin. Finalize ordering lives in the
   #     driver, which is the whole reason the fill exists there.
+  # 2026-09-29 — cluster A, slice A12 (a parameter write survives a
+  # suspension). `generators-native.ts` +15 and `context/types.ts` +4 (both
+  # paths already listed, restated per the stranded-grant rule). The MECHANISM
+  # — which parameters the body can write, and the post-body reconcile for a
+  # re-typed parameter local — is the NEW leaf `generator-param-writeback.ts`;
+  # the store-back itself is 5 lines in `frame-core.ts::storeSpills`, the one
+  # helper every suspension already calls. What stays in the god-file is
+  # irreducible: the field's `mutable:` flag where the frame struct is built,
+  # the local-index record in the resume prelude's parameter copy (the only
+  # point that knows the index), and the reconcile call beside the spill
+  # reconcile it mirrors. The two `NativeGeneratorInfo` fields carry that
+  # record from the prelude to `storeSpills`.
   - src/codegen/context/types.ts
   - src/codegen/array-methods.ts
   - src/codegen/expressions/call-receiver-method.ts
@@ -1126,7 +1138,15 @@ func-budget-allow:
   # restated per the stranded-grant rule): the parameter-shadow check on the
   # self registration and the unregister before `hoistVarDeclarations` — the
   # only point between the parameter prologue and the body hoist.
+  # 2026-09-29 — cluster A, slice A12: `ensureNativeGeneratorResumeFunction`
+  # +6 (the parameter-copy loop records each writable parameter's local index
+  # for the store-back, plus the reconcile call) and
+  # `registerNativeGenerator` +4 (the writable-parameter scan and the field's
+  # `mutable:` flag). Both functions own the data they write — the frame
+  # struct and the resume prelude; the scan and the reconcile are the leaf
+  # `generator-param-writeback.ts`.
   - src/codegen/generators-native.ts::ensureNativeGeneratorResumeFunction
+  - src/codegen/generators-native.ts::registerNativeGenerator
   # 2026-09-28 — cluster A, slice A5: `buildNativeGeneratorPlan` +40 as the gate
   # measures it (path already listed below, restated per the stranded-grant
   # rule). Four pieces, each writing this function's own closure state and so

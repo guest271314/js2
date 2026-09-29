@@ -62,6 +62,7 @@ import {
 } from "./shared.js";
 import { UNDEF_F64_BITS } from "./value-tags.js";
 import { yieldResumptionNeedsAnyCarrier } from "./generator-resumption-carrier.js"; // (#6651 A11)
+import { reconcileParamWriteBack, writableGeneratorParamIndices } from "./generator-param-writeback.js"; // (#6651 A12)
 import { canonicalUndefinedExternInstrs } from "./any-helpers.js"; // (#2864 wave-2 S1)
 import { addUnionImports, ensureI32Condition, resolveWasmType } from "./index.js";
 import { bodyNeedsArgumentsObject } from "./helpers/body-uses-arguments.js";
@@ -4522,11 +4523,14 @@ export function registerNativeGenerator(
   const stateParamTypes = paramTypes.map((t, i) =>
     (paramNames[i] ?? "").startsWith("__genarg") ? ({ kind: "externref" } as ValType) : t,
   );
+  // (#6651 A12) A parameter the body can write survives a suspension: its field
+  // is mutable and stored back with the spills (generator-param-writeback.ts).
+  const writableParams = writableGeneratorParamIndices(decl, argumentsParamOffset, argumentsMapped);
   for (let i = 0; i < stateParamTypes.length; i++) {
     stateFields.push({
       name: `param_${paramNames[i] ?? i}`,
       type: stateParamTypes[i]!,
-      mutable: false,
+      mutable: writableParams.has(i),
     });
   }
   const paramFieldOffset =
@@ -4699,6 +4703,7 @@ export function registerNativeGenerator(
     // except for binding-pattern params (widened to `externref` above).
     paramTypes: stateParamTypes,
     paramFieldOffset,
+    writableParamIdxs: writableParams.size > 0 ? writableParams : undefined,
     argumentsFieldIdx,
     argumentsVecTypeIdx,
     argumentsParamOffset: needsArguments ? argumentsParamOffset : undefined,
@@ -6601,13 +6606,18 @@ export function ensureNativeGeneratorResumeFunction(ctx: CodegenContext, info: N
 
   resumeFctx.body.push(...nativeGeneratorExecutingCheck(ctx, info, [{ op: "local.get", index: 0 }]));
 
-  // Copy params into locals.
+  // Copy params into locals. (#6651 A12) A writable one is stored back by
+  // `storeSpills` through its local index — never by name, which a lexical
+  // shadow could rebind.
+  const paramWriteBack: { local: number; field: number }[] = [];
   for (let i = 0; i < info.paramTypes.length; i++) {
     const localIdx = allocLocal(resumeFctx, info.paramNames[i]!, info.paramTypes[i]!);
     resumeFctx.body.push({ op: "local.get", index: 0 });
     resumeFctx.body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: info.paramFieldOffset + i });
     resumeFctx.body.push({ op: "local.set", index: localIdx });
+    if (info.writableParamIdxs?.has(i)) paramWriteBack.push({ local: localIdx, field: info.paramFieldOffset + i });
   }
+  info.paramWriteBack = paramWriteBack.length > 0 ? paramWriteBack : undefined;
 
   // (#5255) The object-property caller restores `__current_this` immediately
   // after constructing the iterator. Its generator body starts only on a later
@@ -6879,6 +6889,7 @@ export function ensureNativeGeneratorResumeFunction(ctx: CodegenContext, info: N
       if (field) field.type = finalType;
     }
   }
+  reconcileParamWriteBack(resumeFctx, info); // (#6651 A12) a re-typed parameter local
 
   // Fill the reserved placeholder in place — its index (funcIdx) stayed stable
   // while body compilation appended any helper functions after it.
