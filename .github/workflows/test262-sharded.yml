@@ -2389,6 +2389,19 @@ jobs:
       # Partially-covered editions are skipped, not scored (see the script
       # header) -- the #4412 hazard, where a scoped run's partial total was
       # posted as if it were a full one.
+      # The ratchet classifies every row by reading its test262 frontmatter, and
+      # this job's checkout above is submodule-free. Without test262 every row
+      # classified as "Unclassified (legacy)", every real edition read as NOT
+      # COVERED, and the step reported OK having checked nothing: ES5 lost 7
+      # rows between 2026-09-23 and 09-28 under that green step. The script now
+      # refuses to run without the checkout; this fetches the pinned commit only.
+      - name: Check out test262 for the edition classifier
+        if: env.STANDALONE_RAN == 'true'
+        run: git submodule update --init --depth 1 test262
+
+      # Besides the per-edition floors, an edition marked `completed` in the
+      # baseline (it reached 100 %) is zero-tolerance: every one of its rows in
+      # the merged run must pass, whether or not a compare baseline is on disk.
       - name: Per-edition conformance ratchet (no completed edition may regress)
         if: env.STANDALONE_RAN == 'true'
         run: |
