@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-09-29T13:43:12.561Z",
-  "baseline_generated_at": "2026-09-29T13:43:12.561Z",
-  "baseline_sha": "ee50a5a7a570281af6c95059844fb7a8bff1c693",
+  "timestamp": "2026-09-29T14:58:17.584Z",
+  "baseline_generated_at": "2026-09-29T14:58:17.584Z",
+  "baseline_sha": "bd332a9ff5882c7a075586409c678cb9ca35d0e9",
   "oracle_version": 14,
   "mode": {
     "target": "standalone",
@@ -11,24 +11,24 @@
   },
   "summary": {
     "total": 48232,
-    "pass": 41254,
-    "fail": 5042,
+    "pass": 41256,
+    "fail": 5037,
     "compile_error": 1899,
-    "compile_timeout": 19,
+    "compile_timeout": 22,
     "skip": 18,
-    "compilable": 46296,
-    "host_free_pass": 41254,
+    "compilable": 46293,
+    "host_free_pass": 41256,
     "stale": 0,
     "by_category": {
       "standard": {
         "total": 47146,
-        "pass": 40213,
-        "fail": 5013,
+        "pass": 40215,
+        "fail": 5008,
         "compile_error": 1883,
-        "compile_timeout": 19,
+        "compile_timeout": 22,
         "skip": 18,
-        "compilable": 45226,
-        "host_free_pass": 40213,
+        "compilable": 45223,
+        "host_free_pass": 40215,
         "stale": 0,
         "label": "ECMAScript current standard"
       },
@@ -58,25 +58,25 @@
       },
       "official": {
         "total": 48232,
-        "pass": 41254,
-        "fail": 5042,
+        "pass": 41256,
+        "fail": 5037,
         "compile_error": 1899,
-        "compile_timeout": 19,
+        "compile_timeout": 22,
         "skip": 18,
-        "compilable": 46296,
-        "host_free_pass": 41254,
+        "compilable": 46293,
+        "host_free_pass": 41256,
         "stale": 0,
         "label": "standard + annex_b (default)"
       },
       "full": {
         "total": 48735,
-        "pass": 41490,
-        "fail": 5058,
+        "pass": 41492,
+        "fail": 5053,
         "compile_error": 2054,
-        "compile_timeout": 19,
+        "compile_timeout": 22,
         "skip": 114,
-        "compilable": 46548,
-        "host_free_pass": 41490,
+        "compilable": 46545,
+        "host_free_pass": 41492,
         "stale": 0,
         "label": "standard + annex_b + proposals"
       }
@@ -84,35 +84,35 @@
   },
   "official_summary": {
     "total": 48232,
-    "pass": 41254,
-    "fail": 5042,
+    "pass": 41256,
+    "fail": 5037,
     "compile_error": 1899,
-    "compile_timeout": 19,
+    "compile_timeout": 22,
     "skip": 18,
-    "compilable": 46296,
-    "host_free_pass": 41254,
+    "compilable": 46293,
+    "host_free_pass": 41256,
     "stale": 0
   },
   "full_summary": {
     "total": 48735,
-    "pass": 41490,
-    "fail": 5058,
+    "pass": 41492,
+    "fail": 5053,
     "compile_error": 2054,
-    "compile_timeout": 19,
+    "compile_timeout": 22,
     "skip": 114,
-    "compilable": 46548,
-    "host_free_pass": 41490,
+    "compilable": 46545,
+    "host_free_pass": 41492,
     "stale": 0
   },
   "strict_summary": {
     "total": 45721,
-    "pass": 38924,
-    "fail": 4916,
+    "pass": 38926,
+    "fail": 4911,
     "compile_error": 1844,
-    "compile_timeout": 19,
+    "compile_timeout": 22,
     "skip": 18,
-    "compilable": 43840,
-    "host_free_pass": 38924,
+    "compilable": 43837,
+    "host_free_pass": 38926,
     "stale": 0
   },
   "scope_summaries": {
@@ -140,13 +140,13 @@
     },
     "standard": {
       "total": 47146,
-      "pass": 40213,
-      "fail": 5013,
+      "pass": 40215,
+      "fail": 5008,
       "compile_error": 1883,
-      "compile_timeout": 19,
+      "compile_timeout": 22,
       "skip": 18,
-      "compilable": 45226,
-      "host_free_pass": 40213,
+      "compilable": 45223,
+      "host_free_pass": 40215,
       "stale": 0
     }
   },
@@ -451,13 +451,13 @@
     {
       "name": "built-ins/GeneratorFunction",
       "path": "built-ins/GeneratorFunction",
-      "pass": 14,
-      "fail": 9,
+      "pass": 19,
+      "fail": 4,
       "compile_error": 0,
       "compile_timeout": 0,
       "skip": 0,
       "total": 23,
-      "host_free_pass": 14
+      "host_free_pass": 19
     },
     {
       "name": "built-ins/GeneratorPrototype",
@@ -781,13 +781,13 @@
     {
       "name": "built-ins/Temporal",
       "path": "built-ins/Temporal",
-      "pass": 4494,
+      "pass": 4491,
       "fail": 102,
       "compile_error": 0,
-      "compile_timeout": 7,
+      "compile_timeout": 10,
       "skip": 0,
       "total": 4603,
-      "host_free_pass": 4494
+      "host_free_pass": 4491
     },
     {
       "name": "built-ins/ThrowTypeError",
@@ -1198,7 +1198,7 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 3052,
+    "assertion_fail": 3049,
     "host_import_leak": 1231,
     "illegal_cast": 235,
     "missing_builtin": 3,
@@ -1210,8 +1210,8 @@
     "range_error": 29,
     "runtime_error": 337,
     "syntax_error": 14,
-    "type_error": 803,
-    "unreachable": 6,
+    "type_error": 802,
+    "unreachable": 5,
     "wasm_compile": 98
   },
   "hard_errors": {},
@@ -1221,8 +1221,8 @@
   },
   "root_cause_map": {
     "target": "standalone",
-    "total_non_pass_non_skip": 7131,
-    "classified": 7131,
+    "total_non_pass_non_skip": 7129,
+    "classified": 7129,
     "unclassified_threshold": null,
     "has_edition_breakdown": true,
     "buckets": [
@@ -1272,14 +1272,14 @@
           "#661"
         ],
         "label": "Temporal proposal/polyfill gap",
-        "count": 109,
+        "count": 112,
         "statuses": {
           "pass": 0,
           "fail": 102,
           "compile_error": 0,
-          "compile_timeout": 7,
+          "compile_timeout": 10,
           "skip": 0,
-          "total": 109,
+          "total": 112,
           "host_free_pass": 0
         },
         "error_categories": {
@@ -1290,21 +1290,21 @@
           "illegal_cast": 1
         },
         "by_edition": {
-          "ES2026": 109
+          "ES2026": 112
         },
         "sample_files": [
           "test/built-ins/Temporal/Duration/prototype/subtract/precision-no-floating-point-loss.js",
           "test/built-ins/Temporal/Duration/prototype/round/relativeto-propertybag-invalid-offset-string.js",
+          "test/built-ins/Temporal/Duration/prototype/round/singular-units.js",
           "test/built-ins/Temporal/Instant/prototype/subtract/minimum-maximum-instant.js",
-          "test/built-ins/Temporal/PlainTime/from/argument-object-leap-second.js",
-          "test/built-ins/Temporal/toStringTag/string.js"
+          "test/built-ins/Temporal/PlainTime/from/argument-object-leap-second.js"
         ],
         "sample_signatures": [
           "assertion_fail:Test262Error: duration1.subtract(duration2): days result: Expected SameValue(«#», «#») to be true",
           "assertion_fail:Test262Error: \"+#:#\" is not a valid offset string Expected a RangeError to be thrown but no exception was thrown at all",
+          "compile_timeout:timeout (10s)",
           "range_error:RangeError: total of duration time units cannot exceed # s",
-          "assertion_fail:Test262Error: Expected a RangeError to be thrown but no exception was thrown at all",
-          "type_error:TypeError: Cannot convert object to primitive value"
+          "assertion_fail:Test262Error: Expected a RangeError to be thrown but no exception was thrown at all"
         ]
       },
       {
@@ -1815,30 +1815,29 @@
           "#1665"
         ],
         "label": "Generators and async iteration",
-        "count": 420,
+        "count": 415,
         "statuses": {
           "pass": 0,
-          "fail": 195,
+          "fail": 190,
           "compile_error": 225,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 420,
+          "total": 415,
           "host_free_pass": 0
         },
         "error_categories": {
           "other": 313,
-          "assertion_fail": 64,
+          "assertion_fail": 61,
           "runtime_error": 10,
           "null_deref": 4,
-          "type_error": 17,
+          "type_error": 16,
           "promise_error": 9,
-          "host_import_leak": 2,
-          "unreachable": 1
+          "host_import_leak": 2
         },
         "by_edition": {
           "ES2018": 348,
           "ES2022": 32,
-          "ES2015": 31,
+          "ES2015": 26,
           "ES2020": 4,
           "ES2026": 2,
           "ES2027": 1,
