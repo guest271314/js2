@@ -111,6 +111,8 @@ import { resolveDefaultExpressionImportGlobal } from "../default-expression-impo
 import { isValueSelectingNewCallee, isValueSelectingNewSite } from "./new-value-selecting-callee.js"; // (#6738)
 import { emitNativeNumberFormat } from "../number-format-native.js";
 import { compileStandaloneRegExpConstructor, isGlobalRegExpConstructorExpression } from "../regexp-standalone.js";
+import { boundClassConstructArgs } from "../bound-class-construct-args.js"; // (#6651 C5)
+import { compileNewSiteBuiltinSubclass, newSiteBuiltinParent } from "../builtin-subclass-new-site.js"; // (#6651 C5)
 import { singleReturnExpressionOfCall, tracesToProxyConstructorValue } from "../proxy-value-provenance.js"; // (#5196 R3-0); (#6651 F4)
 import { emitStandaloneTest262Error, emitWasiErrorConstructor, isWasiErrorName } from "../registry/error-types.js";
 import { VOID_RESULT, type InnerResult } from "../shared.js";
@@ -8172,6 +8174,21 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     return { kind: "externref" };
   }
 
+  // (#6651 C5) `new D(…)` for a member-less `class D extends Date|RegExp|DataView {}`
+  // IS `new <Parent>(…)`, standalone — see builtin-subclass-new-site.ts.
+  const newSiteParent = newSiteBuiltinParent(ctx, className);
+  if (newSiteParent !== undefined) {
+    const built = compileNewSiteBuiltinSubclass(ctx, fctx, className, () => {
+      if (newSiteParent === "RegExp") return compileStandaloneRegExpConstructor(ctx, fctx, expr.arguments ?? [], expr);
+      const r =
+        newSiteParent === "DataView"
+          ? tryCompileIndexedBuiltinNew(ctx, fctx, expr, newSiteParent)
+          : tryCompileBuiltinGlobalNew(ctx, fctx, expr, newSiteParent);
+      return r === NEW_INDEXED_FALLTHROUGH || r === NEW_GLOBAL_FALLTHROUGH ? undefined : r;
+    });
+    if (built !== undefined) return built;
+  }
+
   // Handle local class constructors
   if (ctx.classSet.has(className)) {
     const ctorName = `${className}_new`;
@@ -8183,7 +8200,8 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
 
     // Compile constructor arguments with type hints
     const paramTypes = getFuncParamTypes(ctx, funcIdx);
-    const args = expr.arguments ?? [];
+    // (#6651 C5) `new (C.bind(o, 1))(8)` → `C_new(1, 8)`: bound args first.
+    const args = boundClassConstructArgs(ctx, expr, className) ?? expr.arguments ?? [];
     const forceCollectionArrayVec =
       ctx.classBuiltinParentMap.get(className) === "Map" || ctx.classBuiltinParentMap.get(className) === "Set";
     const ctorRestInfo = ctx.funcRestParams.get(ctorName);
@@ -8247,8 +8265,17 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       for (let i = 0; i < args.length && i < positionalParamCount; i++) {
         compileCtorArgument(ctx, fctx, args[i]!, paramTypes?.[i], forceCollectionArrayVec && i === 0);
       }
-      for (let i = positionalParamCount; i < args.length; i++) {
-        evaluateCtorExtraArgument(ctx, fctx, args[i]!);
+      if (args.length > positionalParamCount && ctx.funcUsesArguments.has(ctorName)) {
+        // (#6651 C5) A constructor that reads `arguments` sees the surplus
+        // arguments through `__extras_argv`, exactly as a function call's
+        // (call-identifier.ts) — they used to be evaluated and dropped, so
+        // `class A { constructor() { args = arguments } }; new A(0, 1)` saw
+        // an empty arguments object on both lanes.
+        emitSetExtrasArgv(ctx, fctx, [...args], positionalParamCount);
+      } else {
+        for (let i = positionalParamCount; i < args.length; i++) {
+          evaluateCtorExtraArgument(ctx, fctx, args[i]!);
+        }
       }
       // Pad missing constructor arguments with defaults (arity mismatch)
       if (paramTypes) {

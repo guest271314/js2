@@ -144,3 +144,107 @@ export function test() { var n = new N(1); return n.toFixed(3) === "own" ? 1 : 0
     expect(await run(src, "standalone")).toBe(1);
   });
 });
+
+describe("#6651 C5 — String subclass: the no-argument carrier and a dynamic `length` read (standalone)", () => {
+  it("`new S()` wraps the empty String; `o['length']` answers through a dynamic receiver", async () => {
+    const src = `class S extends String {}
+function get(o, k) { return o[k]; }
+function descValue(o, k) { return Object.getOwnPropertyDescriptor(o, k).value; }
+export function test() {
+  var e = new S(), s = new S("test262");
+  var ok = get(e, "length") === 0 && Object.prototype.hasOwnProperty.call(e, "length");
+  ok = ok && get(s, "length") === 7 && descValue(s, "length") === 7;
+  return ok ? 1 : 0;
+}`;
+    expect(await run(src, "standalone")).toBe(1);
+  });
+
+  it("GUARD: the String-exotic index read is unchanged", async () => {
+    const src = `class S extends String {}
+function get(o, k) { return o[k]; }
+export function test() { var s = new S("abc"); return get(s, "1") === "b" && get(s, "3") === undefined ? 1 : 0; }`;
+    expect(await run(src, "standalone")).toBe(1);
+  });
+});
+
+describe("#6651 C5 — `arguments` of a constructor sees every `new` argument", () => {
+  const decl = `var args;
+class A { constructor() { args = arguments; } }
+class B extends A {}
+class P { constructor(x) { this.x = x; } }`;
+  for (const target of ["host", "standalone"] as Target[]) {
+    it(`[${target}] direct and through an implicit derived constructor (§15.7.14)`, async () => {
+      const src = `${decl}
+export function test() {
+  new A(5, 6);
+  var direct = args.length === 2 && args[1] === 6;
+  new B(0, 1, 2);
+  return direct && args.length === 3 && args[0] === 0 && args[2] === 2 ? 1 : 0;
+}`;
+      expect(await run(src, target)).toBe(1);
+    });
+
+    it(`[${target}] GUARD: a constructor that does not read \`arguments\` still ignores a surplus argument`, async () => {
+      const src = `${decl}
+export function test() { var p = new P(1, 2); return p.x === 1 ? 1 : 0; }`;
+      expect(await run(src, target)).toBe(1);
+    });
+  }
+});
+
+describe("#6651 C5 — `new` through a bound class prepends the bound arguments (§10.4.1.2)", () => {
+  const decl = `class Base { constructor(x, y) { this.x = x; this.y = y; } }
+class Sub extends Base { constructor(x, y) { super(x, y); } }
+var g = Sub.bind({}, 1);
+var f = Sub.bind({});`;
+  for (const target of ["host", "standalone"] as Target[]) {
+    it(`[${target}] \`new (Sub.bind(o, 1))(8)\` builds x = 1, y = 8`, async () => {
+      const src = `${decl}
+export function test() { var s = new g(8); return s.x === 1 && s.y === 8 && s instanceof Sub ? 1 : 0; }`;
+      expect(await run(src, target)).toBe(1);
+    });
+
+    it(`[${target}] GUARD: a bound class with no bound arguments is unchanged`, async () => {
+      const src = `${decl}
+export function test() { var s = new f(1, 2); return s.x === 1 && s.y === 2 ? 1 : 0; }`;
+      expect(await run(src, target)).toBe(1);
+    });
+  }
+});
+
+describe("#6651 C5 — a member-less Date/RegExp/DataView subclass `new` site builds the native carrier (standalone)", () => {
+  const decl = `class D extends Date {}
+class RE extends RegExp {}
+class DV extends DataView {}
+${THROWS_TYPE_ERROR}`;
+  it("Date: the arguments reach [[DateValue]]; inherited getters dispatch", async () => {
+    const src = `${decl}
+export function test() {
+  var d = new D(1859, "10", 24, 11), u = new D(-3474558000000);
+  return d.getFullYear() === 1859 && d.getMonth() === 10 && u.getUTCDate() === 24 && d instanceof D ? 1 : 0;
+}`;
+    expect(await run(src, "standalone")).toBe(1);
+  });
+
+  it("RegExp: the pattern is compiled; `test` dispatches", async () => {
+    const src = `${decl}
+export function test() { var re = new RE(39); return re.test("TC39") && !re.test("42") ? 1 : 0; }`;
+    expect(await run(src, "standalone")).toBe(1);
+  });
+
+  it("DataView: `buffer` is the argument; no argument is a TypeError (§25.3.2.1 step 2)", async () => {
+    const src = `${decl}
+var buffer = new ArrayBuffer(1);
+export function test() {
+  var dv = new DV(buffer);
+  return dv.buffer === buffer && throwsTypeError(function () { new DV(); }) === 1 ? 1 : 0;
+}`;
+    expect(await run(src, "standalone")).toBe(1);
+  });
+
+  it("GUARD: a subclass declaring a member keeps the \`D_new\` construction path", async () => {
+    const src = `class D2 extends Date { tag() { return 7; } }
+export function test() { var d = new D2(0); return d instanceof D2 && d.tag() === 7 ? 1 : 0; }`;
+    expect(await run(src, "standalone")).toBe(1);
+  });
+});

@@ -1623,6 +1623,15 @@ export function collectClassDeclaration(
       ctx.funcUsesArguments.add(initName);
       ctx.funcUsesArguments.add(ctorName);
     }
+    // (#6651 C5) …and so does an IMPLICIT derived constructor whose parent's
+    // `_init` reads them: §15.7.14's `constructor(...args) { super(...args) }`
+    // hands every argument of `new B(…)` to the parent, and `B_init` forwards
+    // `__argc`/`__extras_argv` untouched. Parents register before children.
+    const implicitParent = ctor ? undefined : ctx.classParentMap.get(className);
+    if (implicitParent !== undefined && ctx.funcUsesArguments.has(`${implicitParent}_init`)) {
+      ctx.funcUsesArguments.add(initName);
+      ctx.funcUsesArguments.add(ctorName);
+    }
   }
 
   // Register method functions (own methods defined on this class).

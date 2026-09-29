@@ -41,9 +41,16 @@
  */
 import type { ts } from "../ts-api.js";
 import type { CodegenContext } from "./context/types.js";
+import { newSiteBuiltinParent } from "./builtin-subclass-new-site.js";
 
 /** Parents whose standalone subclass carrier IS the parent's native value. */
 const ROUTED_BUILTIN_PARENTS: ReadonlySet<string> = new Set(["Number", "Boolean", "String"]);
+
+/**
+ * Parents whose carrier is native only when built at a qualifying `new D(…)`
+ * site (builtin-subclass-new-site.ts) — routed only for such a class.
+ */
+const NEW_SITE_ROUTED_PARENTS: ReadonlySet<string> = new Set(["Date", "RegExp", "DataView"]);
 
 /** The parent's lib instance type among `type`'s (transitive) base types. */
 function builtinBaseType(type: ts.Type, parent: string, depth = 0): ts.Type | undefined {
@@ -62,16 +69,20 @@ function builtinBaseType(type: ts.Type, parent: string, depth = 0): ts.Type | un
  * OWN lib declaration. Shared by the import collector, which runs before the
  * class maps below exist.
  */
-function inheritedBuiltinMemberBase(receiverType: ts.Type, method: string): ts.Type | undefined {
+function inheritedBuiltinMemberBase(
+  receiverType: ts.Type,
+  method: string,
+  parents: ReadonlySet<string> = ROUTED_BUILTIN_PARENTS,
+): ts.Type | undefined {
   const symbolName = receiverType.getSymbol()?.name;
-  if (symbolName === undefined || ROUTED_BUILTIN_PARENTS.has(symbolName)) return undefined;
+  if (symbolName === undefined || parents.has(symbolName)) return undefined;
   const declarations = receiverType.getProperty(method)?.getDeclarations() ?? [];
   if (declarations.length === 0) return undefined;
   let parent: string | undefined;
   for (const declaration of declarations) {
     const owner = (declaration.parent as (ts.Node & { name?: { text?: string } }) | undefined)?.name?.text;
     if (!declaration.getSourceFile().isDeclarationFile || owner === undefined) return undefined;
-    if (!ROUTED_BUILTIN_PARENTS.has(owner) || (parent !== undefined && parent !== owner)) return undefined;
+    if (!parents.has(owner) || (parent !== undefined && parent !== owner)) return undefined;
     parent = owner;
   }
   return parent === undefined ? undefined : builtinBaseType(receiverType, parent);
@@ -102,6 +113,19 @@ export function inheritedBuiltinReceiverType(
   if (symbolName === undefined) return undefined;
   const className = ctx.classExprNameMap.get(symbolName) ?? symbolName;
   if (!ctx.classExternrefBackedSet.has(className)) return undefined;
+  const parent = ctx.classBuiltinParentMap.get(className);
+  if (parent === undefined) return undefined;
+  if (NEW_SITE_ROUTED_PARENTS.has(parent)) {
+    // Only a class whose every direct `new` builds the native carrier.
+    if (newSiteBuiltinParent(ctx, className) !== parent) return undefined;
+    const base = inheritedBuiltinMemberBase(receiverType, method, NEW_SITE_ROUTED_PARENTS);
+    return base?.getSymbol()?.name === parent ? base : undefined;
+  }
   const base = inheritedBuiltinMemberBase(receiverType, method);
-  return base !== undefined && base.getSymbol()?.name === ctx.classBuiltinParentMap.get(className) ? base : undefined;
+  return base?.getSymbol()?.name === parent ? base : undefined;
+}
+
+/** `receiverType` itself when {@link inheritedBuiltinReceiverType} declines. */
+export function builtinSubclassReceiverType(ctx: CodegenContext, receiverType: ts.Type, member: string): ts.Type {
+  return inheritedBuiltinReceiverType(ctx, receiverType, member) ?? receiverType;
 }

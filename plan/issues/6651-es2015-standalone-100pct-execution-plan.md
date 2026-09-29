@@ -171,17 +171,32 @@ assignee: "ttraenkler/fable-es2015-plan"
 loc-budget-allow:
   # 2026-09-29 — cluster C, slice C5 (record at the end of this file). The
   # mechanisms live in leaves: `builtin-subclass-receiver.ts` (NEW — inherited
-  # Number/Boolean/String member routing), `standalone-subclass-ctors.ts`
-  # (wrapper/String carriers), `class-heritage-check.ts` (Proxy prototype,
-  # Symbol heritage), `promise-executor.ts` (IsCallable). What stays in the
-  # god-files is one call each where the decision is taken:
-  #   - `src/codegen/declarations/import-collector.ts` +1: the import; the
-  #     receiver-type line is replaced in place by `collectorReceiverType`.
-  #   - `src/codegen/expressions/call-receiver-method.ts` +4: the import and the
-  #     one-line `inheritedBuiltinReceiverType` reassignment of `receiverType`.
-  #   - `src/codegen/class-bodies.ts`: the import and the two
-  #     `classHeritageIsIntrinsicSymbol` throws (implicit ctor / `super()`).
+  # builtin member routing), `builtin-subclass-new-site.ts` (NEW — a
+  # member-less Date/RegExp/DataView/Function subclass `new` site),
+  # `bound-class-construct-args.ts` (NEW — bound arguments of a bound class),
+  # `string-wrapper-dynamic-length.ts` (NEW — String-exotic `length` through
+  # `__extern_get`), `standalone-subclass-ctors.ts` (wrapper/String carriers),
+  # `class-heritage-check.ts` (Proxy prototype, Symbol heritage),
+  # `promise-executor.ts` (IsCallable). What stays in the god-files is the one
+  # call where each decision is taken:
+  #   - `import-collector.ts` +1: the import; the receiver-type line is
+  #     replaced in place by `collectorReceiverType`.
+  #   - `call-receiver-method.ts` +4 / `property-access.ts` +1: the import and
+  #     the one-line routed `receiverType` / `objType`.
+  #   - `class-bodies.ts` +18: the import, the two `classHeritageIsIntrinsicSymbol`
+  #     throws, and the implicit-derived-ctor `funcUsesArguments` marking (the
+  #     decision has to sit beside the explicit-ctor marking it mirrors).
+  #   - `new-super.ts` +27: the bound-args override of the class-construct
+  #     argument list, the `__extras_argv` publication for a ctor reading
+  #     `arguments` (the arm it replaces is inline there), and the new-site
+  #     dispatch (it must run after the class name is resolved and before
+  #     `C_new` is called — both only exist in `compileNewExpression`).
+  #   - `object-runtime.ts` +2: the import and the `length` arm splice inside
+  #     the String-exotic `__extern_get` arm.
+  #   - `new-builtin-globals.ts` +3: the Date and Function arms honour the
+  #     `builtinNameOverride` the new-site dispatch passes.
   - src/codegen/declarations/import-collector.ts
+  - src/codegen/expressions/new-builtin-globals.ts
   # 2026-09-28 — cluster A, slice A10 (record under the A10 claim). Four
   # god-files, every path already listed below and restated per the
   # stranded-grant rule; about half of each is the comment recording why a bail
@@ -1131,13 +1146,21 @@ loc-budget-allow:
   # `promise-subclass-cell-read.ts`; the hand-off cannot move, because it is the
   # arm that would otherwise emit the bare `global.get` of the cell.
 func-budget-allow:
-  # 2026-09-29 — cluster C, slice C5. All already listed below, restated per the
-  # stranded-grant rule: `compileClassBodiesInner` +4 and `compileSuperCall` +4
-  # (the two `classHeritageIsIntrinsicSymbol` throws), and
-  # `compileReceiverMethodCall` +3 (the inherited-builtin receiver routing).
+  # 2026-09-29 — cluster C, slice C5 (see the loc-budget note). Restated per the
+  # stranded-grant rule where already listed: `compileClassBodiesInner` +4 and
+  # `compileSuperCall` +4 (the two `classHeritageIsIntrinsicSymbol` throws),
+  # `collectClassDeclaration` +9 (implicit-ctor `arguments` marking),
+  # `compileReceiverMethodCall` +3 (receiver routing), `compileNewExpression`
+  # +25 (bound args, `__extras_argv`, new-site dispatch). New:
+  # `tryCompileBuiltinGlobalNew` +3 (Date/Function honour the name override)
+  # and `tryCompileIndexedBuiltinNew` +1 (the zero-argument DataView TypeError).
   - src/codegen/class-bodies.ts::compileClassBodiesInner
   - src/codegen/class-bodies.ts::compileSuperCall
+  - src/codegen/class-bodies.ts::collectClassDeclaration
   - src/codegen/expressions/call-receiver-method.ts::compileReceiverMethodCall
+  - src/codegen/expressions/new-super.ts::compileNewExpression
+  - src/codegen/expressions/new-builtin-globals.ts::tryCompileBuiltinGlobalNew
+  - src/codegen/expressions/new-indexed.ts::tryCompileIndexedBuiltinNew
   # 2026-09-28 — cluster A, slice A10 (paths already listed below, restated per
   # the stranded-grant rule). `buildNativeGeneratorPlan` +5: the one clause that
   # routes a `finally` holding a `return` to `lowerTryRegion` (its comment is 4

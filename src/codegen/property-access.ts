@@ -8,6 +8,7 @@
  */
 
 import { ts } from "../ts-api.js";
+import { builtinSubclassReceiverType } from "./builtin-subclass-receiver.js"; // (#6651 C5) inherited builtin members
 import { carrierNameForAccess } from "./carrier-name-fallback.js"; // (#5187)
 import { isAccessorReceiver } from "./accessor-object-literal.js";
 import {
@@ -4018,8 +4019,8 @@ export function compilePropertyAccess(
   const linU8Len = tryEmitLinearU8Length(ctx, fctx, expr);
   if (linU8Len !== null) return linU8Len;
 
-  const objType = ctx.checker.getTypeAtLocation(expr.expression);
   const propName = ts.isPrivateIdentifier(expr.name) ? "__priv_" + expr.name.text.slice(1) : expr.name.text;
+  const objType = builtinSubclassReceiverType(ctx, ctx.checker.getTypeAtLocation(expr.expression), propName); // (#6651 C5)
 
   // (#6651 F4) proxy receiver → generic `__extern_get`; proxy-receiver-generic-read.ts
   const __f4p = tryProxyReceiverPropertyRead(ctx, fctx, expr, propName);

@@ -82,6 +82,7 @@ import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { addUnionImportsViaRegistry } from "./shared.js";
 import { emitToBoolean, runtimeToNumberInstrs, runtimeToPrimitiveInstrs } from "./coercion-engine.js";
+import { demandStringWrapperDynamicLength } from "./string-wrapper-dynamic-length.js";
 
 /** `externref × count` — the forwarder ABI every arm below declares. */
 function externrefParams(count: number): ValType[] {
@@ -489,6 +490,46 @@ function wrapperPrimitiveFromFirstArg(ctx: CodegenContext, parentName: string, a
 }
 
 /**
+ * (#6651 C5) `class S extends String` — the forwarder's padding is not a value.
+ *
+ * `String` had no arm here: the ladder fell through to the object runtime's
+ * `__new_String(externref)`, which wraps its operand as-is. The implicit
+ * `constructor(...args) { super(...args) }` pads a missing argument with
+ * `undefined`, so `new S()` wrapped `undefined` — no `length` own property at
+ * all, where §22.1.1.1 step 1 gives the empty String (`length` 0). This arm
+ * hands `__new_String` the empty String for a missing (or `undefined`) first
+ * argument, the same padding trade the wrapper rung above documents (an
+ * explicit `new S(undefined)` should be `"undefined"`), and ignores any further
+ * forwarded argument, as `String(value)` does.
+ */
+export function emitStandaloneStringSuperCtor(ctx: CodegenContext, argCount: number): number | undefined {
+  const key = `__new_String@${argCount}`;
+  const existing = ctx.funcMap.get(key);
+  if (existing !== undefined) return existing;
+  ensureObjectRuntime(ctx);
+  const newStringIdx = ctx.funcMap.get("__new_String");
+  const isUndefinedIdx = ctx.funcMap.get("__extern_is_undefined");
+  if (newStringIdx === undefined || isUndefinedIdx === undefined) return undefined;
+  addStringConstantGlobal(ctx, "");
+  const empty = stringConstantExternrefInstrs(ctx, "");
+  demandStringWrapperDynamicLength(ctx); // `s.length` through a dynamic read
+  const value: Instr[] =
+    argCount === 0
+      ? empty
+      : [
+          { op: "local.get", index: 0 },
+          { op: "call", funcIdx: isUndefinedIdx },
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "externref" } },
+            then: empty,
+            else: [{ op: "local.get", index: 0 }],
+          },
+        ];
+  return registerSuperCtor(ctx, key, argCount, [...value, { op: "return_call", funcIdx: newStringIdx }]);
+}
+
+/**
  * (#3972) The three #3972 arms of the `resolveStandaloneBuiltinSuperCtorIdx`
  * ladder, resolved in one call so the ladder in `class-bodies.ts` stays a list
  * of one-liners.
@@ -512,6 +553,11 @@ export function resolveStandaloneSubclassBuiltinCtor(
   }
   if (STANDALONE_WRAPPER_BUILTIN_PARENTS.has(parentName)) {
     return emitStandaloneWrapperSuperCtor(ctx, parentName, arity) ?? null;
+  }
+  if (parentName === "String") {
+    // (#6651 C5) `undefined` → the host fallback below would be the same
+    // `__new_String`, minus the padding fix; decline to it rather than fail.
+    return emitStandaloneStringSuperCtor(ctx, arity);
   }
   return undefined;
 }
