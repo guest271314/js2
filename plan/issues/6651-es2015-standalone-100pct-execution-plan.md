@@ -9737,6 +9737,19 @@ non-pass.** Residuals, first-line errors:
   policy and the compiler-boundaries inventory (both new leaves are
   registered).
 
+### 2026-09-29 — Cluster A, slice A12: generator parameter writes lost at suspension (claim)
+
+**Claimed 2026-09-29** by session `session_01FEGi3DmyPRPD5dx4kWU8hs`, branch
+`claude/es6-6651-a12-gen-param-writes`, stacked on A11 (#6285) because both
+touch the native generator frame. A write to a parameter of a sloppy generator
+is lost once the generator suspends: in
+`language/expressions/yield/formal-parameters-after-reassignment-non-strict.js`
+the mapped `arguments` sees the first write and not the second (`45` vs `54`).
+Scope: the parameter / mapped-`arguments` storage across a suspension point,
+root-caused from the emitted frame, plus every other ES2015 row with the same
+mechanism that the lane finds. Out of scope: `scope-param-*-var-open` rows (eval
+in a parameter default) and rest-binding rows (cluster I, I7 residual 3).
+
 ### 2026-09-28 — Cluster D, slice D5
 
 Target: #5197 R3-7 — a native `$Promise` has no readable `then`. A dynamic `p.then` read (through
