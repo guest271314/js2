@@ -9751,13 +9751,15 @@ Out of scope: A12's parameter writes, A14's `%GeneratorFunction%` residuals,
 
 #### A13 record — 2026-09-29
 
-Opus 5.5, high effort. Branch `claude/es6-6651-a13-gen-singles` (stacked on
-A11 #6285; `main` @ `c7901473a` merged in). Engine QuickJS, adapter rebuilt per
-tree state. "Base" is the branch with A13's `src` patch reverse-applied
-(`git diff f317dd32a -- src`, file swap in the same tree); "branch" is
-`d98b50e34`.
+Opus 5.5, high effort. Branch `claude/es6-6651-a13-gen-singles`. Engine
+QuickJS, adapter rebuilt per tree state. **Final numbers** are on the branch
+merged with `main` @ `bd332a9ff` (A10, A11, A12 and A14 all landed) against a
+base tree whose `src` is exactly that `main` (a `git archive` of
+`src`/`tests`/`scripts` under `.tmp/basetree`, every other entry linked). The
+branch was merged once more with `main` @ `046f1eaa9` (a perf PR touching none
+of A13's files) before landing; the measurements were not re-run on that merge.
 
-**Four mechanisms, one commit each** (`3f921b866`, `fb56698a0`, `d98b50e34`):
+**Four mechanisms in three commits** (`3f921b866`: 1–3; `fb56698a0`: 4; `d98b50e34`: the prescan gate for 3):
 
 1. **`g() instanceof g`, `function*` declaration** (`native-user-instanceof.ts`).
    The #3962 host-free fnctor arm walked the chain for the per-fnctor prototype
@@ -9790,7 +9792,7 @@ tree state. "Base" is the branch with A13's `src` patch reverse-applied
    receiver both build an open `$Object`, and both are excluded — so that
    intrinsic is now GetSuperBase()'s answer.
 
-**Target rows** (`--isolate`):
+**Target rows** (`--isolate`, final tree):
 
 | row | standalone base → branch | host (unchanged) |
 | --- | --- | --- |
@@ -9803,7 +9805,8 @@ tree state. "Base" is the branch with A13's `src` patch reverse-applied
 | `Object/prototype/toString/symbol-tag-generators-builtin` | fail | fail |
 | `generators/eval-body-proto-realm` | fail | pass |
 
-Standalone 0 → 4 of 8; host 3 → 3 (every A13 arm is standalone / no-host only).
+Standalone 0 → 4 of 8; host 3 → 3 (every A13 arm is standalone / no-host
+only). Identical on the pre-A10 tree measured first.
 
 **Compile-only differential.** Reach bounded by an AST scan of every test file
 plus its includes (`.tmp/mkreach2.mjs`): `instanceof` whose right side names a
@@ -9815,33 +9818,50 @@ A/A2/C/E/G/H manifests outside the reach. One process per tree.
 
 | lane | rows | identical | bytes changed | compile status changed |
 | --- | ---: | ---: | ---: | ---: |
-| standalone | 157 | 131 (all 60 controls) | 26 | **0** |
+| standalone | 157 | 130 (all 60 controls) | 27 | **0** |
 | host | 30 (targets + 22 reach) | 30 | 0 | **0** |
 
-**Verdicts** on the 97 reach rows, standalone: base 25 pass / 24 fail / 3 CE /
-45 runner skips → branch **33** / 16 / 3 / 45. Gained 8: the 4 targets above,
-`method-definition/name-super-prop-{body,param}` (cluster C's non-generator
-twins of mechanism 4) and `ctors{,-bigint}/object-arg/iterating-throws`
-(mechanism 3). **0 pass → non-pass.** The 26 changed rows: 8 gained; 12
-`staging/sm/**` (skipped by the runner on both trees — all 39 staging rows of
-the reach are); 3 `super/prop-expr-obj-{err,key-err,unresolvable}` pass on
-both; 3 non-pass on both — `ctors-bigint/object-arg/as-generator-iterable-returns`
-(length now 2; the BigInt element reads `0`),
+**Verdicts** on the 97 reach rows, standalone: base 26 pass / 26 fail / 45
+runner skips → branch **36** / 16 / 45. **Gained 10, 0 pass → non-pass:** the
+4 targets; `method-definition/name-super-prop-{body,param}` (cluster C's
+non-generator twins of mechanism 4); `generator-super-prop-body` (A10 made the
+literal-method `super` native, this supplies its base);
+`generator-prop-name-yield-expr` (mechanism 2's twin); and
+`ctors{,-bigint}/object-arg/iterating-throws` (mechanism 3). The 27 changed
+rows: those 10; 12 `staging/sm/**` (skipped by the runner on both trees — all
+39 staging rows of the reach are); 3 `super/prop-expr-obj-{err,key-err,unresolvable}`
+pass on both; 2 fail on both — `ctors-bigint/object-arg/as-generator-iterable-returns`
+(length now 2; the BigInt element reads `0`) and
 `super/prop-poisoned-underscore-proto` (`null` → `undefined`:
 `Object.prototype.constructor` read through `__reflect_get_receiver` on the
 native proto carrier; `Reflect.get(Object.prototype, "constructor") !== Object`
-on base too) and `method-definition/generator-super-prop-body` (host-import CE,
-A10's `super` leak).
-Cluster-A manifest, standalone: **184 / 197 on both trees, identical non-pass
-set** (one branch row hit ENOENT during the 10:09 test262 relink and passed on
-re-run).
+on base too).
 
-**Controls:** playground + benchmark programs (19 × host/standalone): **38 / 38
-byte-identical**. `pnpm run check:ir-fallbacks`: OK. Pins
-`tests/issue-6651-a13-gen-singles.test.ts`: 17 / 17 on the branch, 12 red on base
-(the 5 GUARDs green on both). Every source gate bare, loc/func again with
-`LOC_GATE_BASE=origin/main`, typecheck, biome, prettier, host-import policy,
-compiler-boundaries inventory (new leaf registered): green.
+**Cluster-A manifest, standalone:** final branch **188 / 197** (6 fail, 3 CE).
+The base run on the final tree did not finish before the wrap-up; on the
+pre-A10 tree both sides were 184 / 197 with an identical non-pass set.
+
+**Controls** (final tree unless noted):
+- vitest, one process per file (`VITEST_FORK_MAX_OLD_SPACE_SIZE=4096`,
+  QuickJS) over `issue-6651-*`, `*generator*`, `issue-2864-*`, the super /
+  instanceof / nullish-receiver suites (149 files): 12 files fail on the
+  branch. 10 re-run on the base tree fail identically, same counts
+  (`issue-1965`, both `issue-2864` files, `issue-3526`, `issue-4623`,
+  `issue-6651-{rs1,sg1,sn1,sy1}`, and `issue-6651-b10`, whose "failure" is a
+  vitest worker RPC timeout with 6/6 tests passing on both). Not established:
+  `issue-6651-sc1` (the base process was killed, exit 143) and
+  `issue-680-generator-expression-continuations` (base run unfinished).
+- `node scripts/run-guard-suite.mjs`: 255 / 255.
+- `pnpm run check:ir-fallbacks`: OK (pre-merge tree).
+- Playground + benchmark programs (19 × host/standalone): 38 / 38
+  byte-identical (pre-merge tree).
+- **`node scripts/equivalence-gate.mjs` was not run to completion** (started
+  twice, stopped by the two `main` merges).
+- Pins `tests/issue-6651-a13-gen-singles.test.ts`: 17 / 17 on the branch, 12
+  red on base, the 5 GUARDs green on both.
+- Every source gate bare, loc/func again with `LOC_GATE_BASE` = the merged
+  `main`, typecheck, biome, prettier, host-import policy, compiler-boundaries
+  inventory (new leaf registered): green.
 
 **Residuals — design questions, not built:**
 
