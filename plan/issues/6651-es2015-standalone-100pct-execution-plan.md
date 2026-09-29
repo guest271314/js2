@@ -19428,19 +19428,15 @@ tree: **75 binaries changed** (68 standalone, 7 host) in 69 files; no compile
 status flipped (101 FAIL/THROW entries on each side, identical rows).
 Playground examples + benchmark suites (17 files × 2 targets): byte-identical.
 
-Verdicts for the changed rows: base tree re-run on `origin/main` `8c727c39c`
-(standalone, 68 rows): 35 pass / 31 fail / 2 skip. **The branch-side re-run of
-those 68 rows and the host re-run of the 7 host rows did NOT finish before the
-wrap-up** (queued behind the shared lock). The 35 base-passing rows whose
-standalone binary changed are therefore UNVERIFIED on the branch: the
-`class/subclass-builtins/subclass-{Boolean,DataView,Date,Function,Number,Promise,RegExp,String}.js`
-pair (16), `builtin-objects/{Boolean,Number,Promise,String}/super-must-be-called.js`,
-`Symbol/symbol-valid-as-extends-value.js`, and 14 `built-ins/Promise/**`
-subclass rows (`ctx-ctor`, `invoke-resolve-*-custom`,
-`finally/subclass-species-constructor-*-count`). The Promise ones pass a
-real (function) executor, so the new IsCallable check passes them through —
-reasoned, not measured. Re-run `.tmp/c5-v-sa.txt` on both trees before
-enqueueing.
+Verdicts for the changed rows (finished after the wrap-up report; base tree
+`origin/main` `8c727c39c` vs this branch, `--isolate`): standalone 68 rows,
+base 35 pass → branch 45 pass, **0 pass → non-pass**; host 7 rows, base 2 pass
+→ branch 6 pass, 0 pass → non-pass (the extra host flip is
+`language/statements/class/arguments/default-constructor.js`). The branch run
+first showed `subclass-builtins/subclass-Function.js` (both spellings) failing
+with "the quickjs provider is not built": the final `origin/main` merge changed
+`src/` mid-run, and the QuickJS adapter cache key hashes `src/`. With the
+adapter rebuilt, both rows pass.
 
 #### Controls
 
