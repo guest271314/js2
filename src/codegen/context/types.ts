@@ -1952,9 +1952,9 @@ export interface CodegenContext extends StandaloneCapabilityDemandState, BodyRou
   arraySpeciesDirty: boolean;
   /**
    * (#6651 H6) The module may hold a Proxy VALUE — the identifier `Proxy`
-   * occurs anywhere, or it contains dynamic code (`scanForArrayHoles`). Gates
-   * the `$Proxy` arm of the standalone `__extern_length` (§7.3.18), so a
-   * Proxy-free module keeps its bytes.
+   * occurs anywhere (`scanForArrayHoles`). Gates the `$Proxy` arms of the
+   * standalone array-like trio (`proxy-array-like.ts`), so a Proxy-free module
+   * keeps its bytes.
    */
   proxyDirty?: boolean;
   /**
