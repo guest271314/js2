@@ -1,8 +1,8 @@
 [
   {
     "edition": "ES5",
-    "pass": 9021,
-    "fail": 8,
+    "pass": 9028,
+    "fail": 1,
     "ce": 0,
     "skip": 0,
     "total": 9029,
@@ -48,9 +48,9 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11123,
-    "fail": 540,
-    "ce": 41,
+    "pass": 11149,
+    "fail": 526,
+    "ce": 29,
     "skip": 0,
     "total": 11704,
     "pct": 95,
@@ -66,17 +66,17 @@
       },
       {
         "name": "generators",
-        "pass": 2424,
-        "fail": 43,
-        "ce": 19,
+        "pass": 2446,
+        "fail": 33,
+        "ce": 7,
         "skip": 0,
         "total": 2486,
         "pct": 98
       },
       {
         "name": "default-parameters",
-        "pass": 1549,
-        "fail": 3,
+        "pass": 1551,
+        "fail": 1,
         "ce": 0,
         "skip": 0,
         "total": 1552,
@@ -102,9 +102,9 @@
       },
       {
         "name": "Symbol",
-        "pass": 555,
+        "pass": 556,
         "fail": 52,
-        "ce": 2,
+        "ce": 1,
         "skip": 0,
         "total": 609,
         "pct": 91
@@ -2186,8 +2186,8 @@
   },
   {
     "edition": "ES2022",
-    "pass": 4231,
-    "fail": 1170,
+    "pass": 4233,
+    "fail": 1168,
     "ce": 391,
     "skip": 0,
     "total": 5792,
@@ -2195,8 +2195,8 @@
     "features": [
       {
         "name": "class",
-        "pass": 3366,
-        "fail": 670,
+        "pass": 3368,
+        "fail": 668,
         "ce": 247,
         "skip": 0,
         "total": 4283,
@@ -2213,8 +2213,8 @@
       },
       {
         "name": "class-methods-private",
-        "pass": 1466,
-        "fail": 172,
+        "pass": 1468,
+        "fail": 170,
         "ce": 71,
         "skip": 0,
         "total": 1709,
@@ -2231,8 +2231,8 @@
       },
       {
         "name": "generators",
-        "pass": 997,
-        "fail": 126,
+        "pass": 999,
+        "fail": 124,
         "ce": 20,
         "skip": 0,
         "total": 1143,
@@ -3571,18 +3571,18 @@
   },
   {
     "edition": "ES2026",
-    "pass": 4595,
+    "pass": 4596,
     "fail": 192,
-    "ce": 134,
+    "ce": 133,
     "skip": 0,
     "total": 4921,
     "pct": 93,
     "features": [
       {
         "name": "Temporal",
-        "pass": 4496,
+        "pass": 4497,
         "fail": 107,
-        "ce": 8,
+        "ce": 7,
         "skip": 0,
         "total": 4611,
         "pct": 98
@@ -4304,9 +4304,9 @@
   },
   {
     "edition": "Unclassified (untagged)",
-    "pass": 4536,
-    "fail": 838,
-    "ce": 71,
+    "pass": 4538,
+    "fail": 835,
+    "ce": 72,
     "skip": 0,
     "total": 5445,
     "pct": 83
