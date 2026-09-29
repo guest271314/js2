@@ -169,6 +169,19 @@ assignee: "ttraenkler/fable-es2015-plan"
 #     `$__ta_ctor`, which the Int8Array `$Object` carrier is not). The first cut
 #     inlined the arm here and cost +68 / +65; extracting it left these 8.
 loc-budget-allow:
+  # 2026-09-29 — cluster C, slice C5 (record at the end of this file). The
+  # mechanisms live in leaves: `builtin-subclass-receiver.ts` (NEW — inherited
+  # Number/Boolean/String member routing), `standalone-subclass-ctors.ts`
+  # (wrapper/String carriers), `class-heritage-check.ts` (Proxy prototype,
+  # Symbol heritage), `promise-executor.ts` (IsCallable). What stays in the
+  # god-files is one call each where the decision is taken:
+  #   - `src/codegen/declarations/import-collector.ts` +1: the import; the
+  #     receiver-type line is replaced in place by `collectorReceiverType`.
+  #   - `src/codegen/expressions/call-receiver-method.ts` +4: the import and the
+  #     one-line `inheritedBuiltinReceiverType` reassignment of `receiverType`.
+  #   - `src/codegen/class-bodies.ts`: the import and the two
+  #     `classHeritageIsIntrinsicSymbol` throws (implicit ctor / `super()`).
+  - src/codegen/declarations/import-collector.ts
   # 2026-09-29 — cluster A, slice A11 groups 3/4. `src/codegen/literals.ts` +2:
   # one import and the `argumentsBeforeDefaults` call in the object-literal
   # method path (the `arguments` object must exist before a parameter default
@@ -1087,6 +1100,13 @@ loc-budget-allow:
   # `promise-subclass-cell-read.ts`; the hand-off cannot move, because it is the
   # arm that would otherwise emit the bare `global.get` of the cell.
 func-budget-allow:
+  # 2026-09-29 — cluster C, slice C5. All already listed below, restated per the
+  # stranded-grant rule: `compileClassBodiesInner` +4 and `compileSuperCall` +4
+  # (the two `classHeritageIsIntrinsicSymbol` throws), and
+  # `compileReceiverMethodCall` +3 (the inherited-builtin receiver routing).
+  - src/codegen/class-bodies.ts::compileClassBodiesInner
+  - src/codegen/class-bodies.ts::compileSuperCall
+  - src/codegen/expressions/call-receiver-method.ts::compileReceiverMethodCall
   # 2026-09-29 — cluster A, slice A11 groups 3/4. `compileObjectLiteralForStruct`
   # +1: the `argumentsBeforeDefaults` call (same wiring as the literals.ts line
   # grant above); the gate on the arguments-object setup changes in place.

@@ -25,6 +25,7 @@ import {
 import type { Instr, ValType } from "../../ir/types.js";
 import { compileArrayMethodCall, resolveArrayInfo, tryCompileDynViewSpeciesMethodCall } from "../array-methods.js";
 import { compileArrayConcatNativeSpec } from "../array-concat-spec.js";
+import { inheritedBuiltinReceiverType } from "../builtin-subclass-receiver.js"; // (#6651 C5)
 import { isWiredTypedArrayViewName } from "../array-object-proto.js";
 import { ensureWrapperProtoDynamicMember } from "../wrapper-proto-dynamic-demand.js"; // (#4619)
 import { exactClassExpressionTypeName } from "../class-expression-identity.js";
@@ -896,6 +897,9 @@ export function compileReceiverMethodCall(
     const recovered = resolveAssignedNominalType(ctx, propAccess.expression);
     if (recovered) receiverType = recovered;
   }
+  // (#6651 C5) `class N extends Number {}; n.toFixed(2)` — an inherited builtin
+  // member dispatches as on the parent (the carrier IS the parent's wrapper box).
+  receiverType = inheritedBuiltinReceiverType(ctx, receiverType, propAccess.name.text) ?? receiverType;
   // Object literals with runtime computed keys are deliberately represented as
   // open `$Object` externrefs, even when TypeScript still describes the binding
   // as its inferred closed shape. Keep calls on those bindings on the dynamic
