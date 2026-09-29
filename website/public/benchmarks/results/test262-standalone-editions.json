@@ -48,8 +48,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11149,
-    "fail": 526,
+    "pass": 11154,
+    "fail": 521,
     "ce": 29,
     "skip": 0,
     "total": 11704,
@@ -66,12 +66,12 @@
       },
       {
         "name": "generators",
-        "pass": 2446,
-        "fail": 33,
+        "pass": 2451,
+        "fail": 28,
         "ce": 7,
         "skip": 0,
         "total": 2486,
-        "pct": 98
+        "pct": 99
       },
       {
         "name": "default-parameters",
@@ -3571,21 +3571,21 @@
   },
   {
     "edition": "ES2026",
-    "pass": 4596,
+    "pass": 4593,
     "fail": 192,
-    "ce": 133,
+    "ce": 136,
     "skip": 0,
     "total": 4921,
     "pct": 93,
     "features": [
       {
         "name": "Temporal",
-        "pass": 4497,
+        "pass": 4494,
         "fail": 107,
-        "ce": 7,
+        "ce": 10,
         "skip": 0,
         "total": 4611,
-        "pct": 98
+        "pct": 97
       },
       {
         "name": "Symbol",

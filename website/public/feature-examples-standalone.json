@@ -1049,7 +1049,7 @@
         "built-ins/GeneratorFunction",
         "built-ins/GeneratorPrototype"
       ],
-      "passCount": 2446,
+      "passCount": 2451,
       "totalCount": 2486
     },
     {
@@ -1564,12 +1564,12 @@
     {
       "name": "Temporal",
       "testCategories": ["built-ins/Temporal"],
-      "passCount": 4494,
+      "passCount": 4491,
       "totalCount": 4603,
       "editionSpread": [
         {
           "edition": "ES2026",
-          "pass": 4494,
+          "pass": 4491,
           "total": 4603
         }
       ]
