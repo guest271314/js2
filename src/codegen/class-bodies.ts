@@ -2259,24 +2259,19 @@ export function collectDeclaredFuncRefs(ctx: CodegenContext, opts?: { additive?:
       if (instr.op === "ref.func") {
         refs.add((instr as { op: "ref.func"; funcIdx: number }).funcIdx);
       }
-      // Recurse into nested instruction arrays (if/then/else, block/body, loop, try/catch)
-      if ("body" in instr && Array.isArray((instr as any).body)) {
-        scanInstrs((instr as any).body);
-      }
-      if ("then" in instr && Array.isArray((instr as any).then)) {
-        scanInstrs((instr as any).then);
-      }
-      if ("else" in instr && Array.isArray((instr as any).else)) {
-        scanInstrs((instr as any).else);
-      }
-      if ("catches" in instr && Array.isArray((instr as any).catches)) {
-        for (const c of (instr as any).catches) {
+      // Recurse into nested instruction arrays (if/then/else, block/body, loop,
+      // try/catch). A plain property read is exactly the former `"k" in instr`
+      // guard here, without a second megamorphic lookup per field (#6759).
+      const n = instr as { body?: unknown; then?: unknown; else?: unknown; catches?: unknown; catchAll?: unknown };
+      if (Array.isArray(n.body)) scanInstrs(n.body);
+      if (Array.isArray(n.then)) scanInstrs(n.then);
+      if (Array.isArray(n.else)) scanInstrs(n.else);
+      if (Array.isArray(n.catches)) {
+        for (const c of n.catches) {
           if (Array.isArray(c.body)) scanInstrs(c.body);
         }
       }
-      if ("catchAll" in instr && Array.isArray((instr as any).catchAll)) {
-        scanInstrs((instr as any).catchAll);
-      }
+      if (Array.isArray(n.catchAll)) scanInstrs(n.catchAll);
     }
   }
   for (const func of ctx.mod.functions) {
