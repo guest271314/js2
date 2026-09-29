@@ -11618,7 +11618,10 @@ of the commit it names. **The authoritative pair is the merged one:** main
 `c9d7d2069` (`.tmp/a14/tb2`) against branch `ba67c0530` (`.tmp/a14/tn2`). The
 pre-merge pair — main `c7901473a` against `1fa664e9f` — gave the same answer on
 every measurement below (same 32 changed rows, same verdicts, same target
-transitions).
+transitions). After A11 (#6285) and #6303 landed, the 34 rows that matter (the
+12 targets ∪ the 32 changed rows) were re-run on main `5e189561e` against branch
+`199cf3dbb`: the same 5 fail → pass, 0 pass → non-pass
+(`.tmp/a14/f3-sa-{base,new}.log`).
 
 **What changed — four mechanisms.**
 
