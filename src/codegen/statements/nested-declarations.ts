@@ -132,6 +132,7 @@ import {
   shadowNestedFuncName,
 } from "../nested-function-name-scope.js"; // (#4456) lexical scope for the flat funcMap namespace
 import { collectBlockScopedNames } from "./shared.js";
+import { classifyReferencedSiblingFns } from "./nested-sibling-visibility.js";
 
 /**
  * Mirror declarations.ts' omitted-parameter ABI rule for lifted nested
@@ -1840,34 +1841,16 @@ function compileNestedFunctionDeclarationInScope(
   // (#6436) A plain call to this name must install `undefined` as the receiver.
   if (readsAmbientThisGlobal(stmt)) ctx.funcReadsOwnThis.add(funcName);
 
-  // (#5148 checkpoint) Classify referenced sibling registry functions for the
-  // lift-time transitive-capture promotion both branches below perform. The
-  // capture registry is NAME-keyed across frames, so a same-named local can
-  // shadow a foreign frame's function (Deno's 01_core destructures 00_infra's
-  // `__resolvePromise` from `window.__infra`). Discriminate by whether the
-  // registry entry's recorded captures are actually sourceable from THIS
-  // frame: if any capture's recorded slot neither names the captured binding
-  // here nor has a same-named local, the registry entry is foreign — the only
-  // sound call target is the local VALUE, so value-promote it instead of
-  // chasing unresolvable captures.
-  const referencedSiblingFns = new Set<string>();
-  const shadowedSiblingFnValues = new Set<string>();
-  for (const name of referencedNames) {
-    if (name === funcName || !ctx.funcMap.has(name) || !ctx.nestedFuncCaptures.has(name)) continue;
-    const sibCaps = ctx.nestedFuncCaptures.get(name)!;
-    const capsForeign =
-      fctx.localMap.has(name) &&
-      sibCaps.some((cap) => {
-        if (fctx.localMap.has(cap.name)) return false;
-        const def =
-          cap.outerLocalIdx < fctx.params.length
-            ? fctx.params[cap.outerLocalIdx]
-            : fctx.locals[cap.outerLocalIdx - fctx.params.length];
-        return def?.name !== cap.name;
-      });
-    if (capsForeign) shadowedSiblingFnValues.add(name);
-    else referencedSiblingFns.add(name);
-  }
+  // (#5148 / #6730) Classify referenced sibling registry functions for the
+  // lift-time transitive-capture promotion both branches below perform.
+  const { referencedSiblingFns, shadowedSiblingFnValues } = classifyReferencedSiblingFns(
+    ctx,
+    fctx,
+    stmt,
+    funcName,
+    referencedNames,
+    captures,
+  );
 
   if (captures.length === 0) {
     // No captures — compile as a regular module-level function
