@@ -38064,7 +38064,7 @@
       "jsHtml": "<pre class=\"shiki material-theme-ocean\" style=\"background-color:#0F111A;color:#babed8\" tabindex=\"0\"><code><span class=\"line\"><span style=\"color:#C792EA\">const</span><span style=\"color:#BABED8\"> re </span><span style=\"color:#89DDFF\">=</span><span style=\"color:#89DDFF\"> /</span><span style=\"color:#C3E88D\">\\d</span><span style=\"color:#89DDFF\">+/</span><span style=\"color:#F78C6C\">g</span><span style=\"color:#89DDFF\">;</span></span>\n<span class=\"line\"><span style=\"color:#C792EA\">const</span><span style=\"color:#BABED8\"> found </span><span style=\"color:#89DDFF\">=</span><span style=\"color:#89DDFF\"> \"</span><span style=\"color:#C3E88D\">abc123def456</span><span style=\"color:#89DDFF\">\"</span><span style=\"color:#89DDFF\">.</span><span style=\"color:#82AAFF\">match</span><span style=\"color:#BABED8\">(re)</span><span style=\"color:#89DDFF\">;</span></span></code></pre>",
       "watHtml": "<pre class=\"shiki material-theme-ocean\" style=\"background-color:#0F111A;color:#babed8\" tabindex=\"0\"><code><span class=\"line\"><span style=\"color:#BABED8\">(</span><span style=\"color:#FFCB6B\">func</span><span style=\"color:#82AAFF\"> $__module_init</span></span>\n<span class=\"line\"><span style=\"color:#FFCB6B\">    global</span><span style=\"color:#89DDFF\">.get</span><span style=\"color:#F78C6C\"> 0</span></span>\n<span class=\"line\"><span style=\"color:#FFCB6B\">    global</span><span style=\"color:#89DDFF\">.get</span><span style=\"color:#F78C6C\"> 1</span></span>\n<span class=\"line\"><span style=\"color:#89DDFF;font-style:italic\">    call</span><span style=\"color:#F78C6C\"> 0</span></span>\n<span class=\"line\"><span style=\"color:#FFCB6B\">    global</span><span style=\"color:#89DDFF\">.set</span><span style=\"color:#F78C6C\"> 4</span></span>\n<span class=\"line\"><span style=\"color:#FFCB6B\">    global</span><span style=\"color:#89DDFF\">.get</span><span style=\"color:#F78C6C\"> 2</span></span>\n<span class=\"line\"><span style=\"color:#FFCB6B\">    global</span><span style=\"color:#89DDFF\">.get</span><span style=\"color:#F78C6C\"> 4</span></span>\n<span class=\"line\"><span style=\"color:#89DDFF;font-style:italic\">    call</span><span style=\"color:#F78C6C\"> 1</span></span>\n<span class=\"line\"><span style=\"color:#FFCB6B\">    global</span><span style=\"color:#89DDFF\">.set</span><span style=\"color:#F78C6C\"> 5</span></span>\n<span class=\"line\"><span style=\"color:#BABED8\">  )</span></span></code></pre>",
       "testCategories": ["built-ins/RegExp", "built-ins/RegExpStringIteratorPrototype"],
-      "passCount": 1812,
+      "passCount": 1813,
       "totalCount": 1896,
       "tests": [
         {
@@ -41107,7 +41107,7 @@
         },
         {
           "edition": "ES2025",
-          "pass": 177,
+          "pass": 178,
           "total": 180
         },
         {
@@ -85024,7 +85024,7 @@
       "compileSuccess": false,
       "jsHtml": "<pre class=\"shiki material-theme-ocean\" style=\"background-color:#0F111A;color:#babed8\" tabindex=\"0\"><code><span class=\"line\"><span style=\"color:#C792EA\">const</span><span style=\"color:#BABED8\"> re </span><span style=\"color:#89DDFF\">=</span><span style=\"color:#89DDFF\"> /(?&#x3C;</span><span style=\"color:#BABED8\">y</span><span style=\"color:#89DDFF\">></span><span style=\"color:#C3E88D\">\\d</span><span style=\"color:#89DDFF\">{4})</span><span style=\"color:#C3E88D\">-</span><span style=\"color:#89DDFF\">(?&#x3C;</span><span style=\"color:#BABED8\">m</span><span style=\"color:#89DDFF\">></span><span style=\"color:#C3E88D\">\\d</span><span style=\"color:#89DDFF\">{2})|(?&#x3C;</span><span style=\"color:#BABED8\">m</span><span style=\"color:#89DDFF\">></span><span style=\"color:#C3E88D\">\\d</span><span style=\"color:#89DDFF\">{2})</span><span style=\"color:#BABED8\">\\/</span><span style=\"color:#89DDFF\">(?&#x3C;</span><span style=\"color:#BABED8\">y</span><span style=\"color:#89DDFF\">></span><span style=\"color:#C3E88D\">\\d</span><span style=\"color:#89DDFF\">{4})/</span><span style=\"color:#F78C6C\">v</span><span style=\"color:#89DDFF\">;</span><span style=\"color:#464B5D;font-style:italic\"> // not yet</span></span></code></pre>",
       "testCategories": ["built-ins/RegExp/named-groups"],
-      "passCount": 15,
+      "passCount": 16,
       "totalCount": 16,
       "tests": [],
       "testsTruncated": false
