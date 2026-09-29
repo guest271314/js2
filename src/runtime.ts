@@ -2202,6 +2202,7 @@ function _wrapWasmClosureUnknownArity(
         const rawThis = this !== null && typeof this === "object" ? _unwrapForHost(this) : this;
         const receiver = _isWasmStruct(rawThis) ? rawThis : this;
         const argcCallFn = exports[`__\0js2_call_fn_method_argc_${dispatchArity}`];
+        if (_linkedClosureDispatch.isRepeat(closure, exports, `m${dispatchArity}`, receiver)) return undefined;
         return marshalNew(
           typeof argcCallFn === "function"
             ? _applyWithPrefix(argcCallFn, undefined, [args.length, receiver, closure], padded)
@@ -2247,6 +2248,7 @@ function _wrapWasmClosureUnknownArity(
     const callFn = exports[`__call_fn_${arity}`];
     if (typeof callFn !== "function") return undefined;
     const padded = _denseOwnWasmArgs(args, arity);
+    if (_linkedClosureDispatch.isRepeat(closure, exports, `f${arity}`, undefined)) return undefined;
     if (widenedFrom >= 0) {
       const argcCallFn = exports[`__\0js2_call_fn_argc_${arity}`];
       if (typeof argcCallFn === "function") {
@@ -16169,7 +16171,7 @@ assert._isSameValue = isSameValue;
           maybeWrapCallable: _maybeWrapCallableUnknownArity,
           wrapForHost: _wrapForHost,
           unwrapForHost: _unwrapForHost,
-          claimDispatchBounce: _linkedClosureDispatch.claimBounce,
+          noteDispatchFallback: _linkedClosureDispatch.noteFallback,
         });
       }
       // (#4394) The `_newtarget` twin is the same operation with the third

@@ -71,24 +71,34 @@ body's closure too.
 
 ## Fix
 
-`src/runtime/linked-closure-dispatch.ts`, a bounce detector plus a retry,
-active only while a linked project is live:
+`src/runtime/linked-closure-dispatch.ts` detects the loop and retries the
+closure through the module that minted it. It is active only while a linked
+project is live.
 
-- Each dynamic bridge dispatch records (closure, module) on a small stack.
-- The host `__call_function_N` import asks it first (`claimDispatchBounce`).
-  If the call comes from the module that is dispatching that very closure, it
-  can only be that module's dispatcher giving the closure back: a module's own
-  closures are matched natively, and a body that is really running belongs to
-  the module that minted it. The import returns without invoking anything.
-- The bridge then retries through the other modules of the project (new
-  `peersOf` on the #5225 registry), each through an uncached per-module bridge,
-  and remembers the module that ran the closure.
+- Each dynamic bridge dispatch records (closure, module, dispatcher export,
+  receiver) on a small stack.
+- The host `__call_function_N` import reports a call of the closure being
+  dispatched, from the dispatching module, on the same receiver
+  (`noteFallback`). That is the dispatcher's #4618 terminal giving the closure
+  back, and it still proceeds exactly as before.
+- Not every fallback is the loop: a re-entered bridge can choose a different
+  dispatcher (another arity, or the free-call family) and succeed. The first
+  version of this fix cut that off and broke
+  `for-of/typedarray-backed-by-resizable-buffer-shrink-to-zero-mid-iteration.js`.
+  So the loop is declared only when the re-entered bridge is about to call the
+  **same** dispatcher export of the **same** module for that closure
+  (`isRepeat`). Those are the arms that just missed, so the call can only
+  repeat forever.
+- On a loop, the re-entered bridge returns at once, the outer dispatch is
+  marked missed and unwinds, and the bridge retries through the other modules
+  of the project (new `peersOf` on the #5225 registry). Each retry goes through
+  an uncached per-module bridge. The module that ran the closure is remembered.
 - If no module can run it, the bridge throws a TypeError instead of
   overflowing the stack.
 
-With no linked project live, `peersOf` answers `[]` and the bridge takes
-exactly the old path, so the honest lane and every single-module embedder are
-unchanged.
+With no linked project live, no frame is ever pushed. Both hooks then return
+at once and the bridge takes exactly the old path, so the honest lane and
+every single-module embedder are unchanged.
 
 ## Validation
 
@@ -97,7 +107,10 @@ unchanged.
   - an in-process linked run of the same shape (body-minted validators through
     the provider's `compareIterator`): `Maximum call stack size exceeded`
     before, pass after;
-  - unit tests of the detector: only the top frame, only the same module,
-    retry order, owner memo, the all-miss TypeError.
+  - a control where the validator does not capture (its closure type is one
+    the provider knows): passes before and after;
+  - unit tests of the detector: same-export re-entry is a loop, a different
+    export is not, only the dispatching module's fallback on its receiver
+    counts, owner memo, the all-miss TypeError.
 - **Shard**: host 13/20 (2,437 rows), linked, Node 24, pool 4, before and after
   the fix; see the PR for the row-level comparison.

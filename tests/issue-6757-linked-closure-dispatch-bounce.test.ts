@@ -92,48 +92,79 @@ assert(threw, "the validator's own assertion must reach the body");
 describe("#6757 — the bounce detector", () => {
   const moduleA = { __closure_arity: () => 1 } as Record<string, Function>;
   const moduleB = { __closure_arity: () => 1 } as Record<string, Function>;
+  const receiver = {};
 
-  it("claims only the innermost dispatch, and only from the module doing it", () => {
+  /**
+   * Stand-in for one dispatch through `via`: pick `route`, and when `via` is
+   * module A, fall back to the host (A cannot call the closure) and re-enter
+   * the bridge, which picks `reentryRoute`.
+   */
+  function dispatchVia(
+    d: ReturnType<typeof createLinkedClosureDispatch>,
+    closure: object,
+    via: Record<string, Function>,
+    reentryRoute: string,
+  ): unknown {
+    if (d.isRepeat(closure, via, "m1", receiver)) return undefined;
+    if (via !== moduleA) return "ran";
+    // A's dispatcher hands the callee back; a second export view of the same
+    // instance (same functions, new container) must still count as module A.
+    d.noteFallback(closure, receiver, { ...moduleA });
+    return d.invoke(closure, moduleA, [moduleB], (inner) =>
+      d.isRepeat(closure, inner, reentryRoute, receiver) ? undefined : `re-entered via ${reentryRoute}`,
+    );
+  }
+
+  it("a re-entry through the SAME dispatcher export is a loop: unwind and run the closure in the peer", () => {
     const d = createLinkedClosureDispatch();
     const closure = {};
-    const other = {};
-    const seen: string[] = [];
-    d.invoke(closure, moduleA, [moduleB], (via) => {
-      if (via === moduleA) {
-        seen.push(`other-closure:${d.claimBounce(other, moduleA)}`);
-        seen.push(`other-module:${d.claimBounce(closure, moduleB)}`);
-        // A second export view of the same instance: same functions, new container.
-        seen.push(`same-module:${d.claimBounce(closure, { ...moduleA })}`);
-        return "bounced";
-      }
-      return "ran";
-    });
-    expect(seen).toEqual(["other-closure:false", "other-module:false", "same-module:true"]);
-    expect(d.claimBounce(closure, moduleA)).toBe(false); // nothing in flight
+    expect(d.invoke(closure, moduleA, [moduleB], (via) => dispatchVia(d, closure, via, "m1"))).toBe("ran");
   });
 
-  it("retries through the peers, keeps the result of the module that ran, and remembers it", () => {
+  it("a re-entry through a DIFFERENT dispatcher export is not a loop and keeps its result", () => {
+    const d = createLinkedClosureDispatch();
+    const closure = {};
+    expect(d.invoke(closure, moduleA, [moduleB], (via) => dispatchVia(d, closure, via, "f1"))).toBe(
+      "re-entered via f1",
+    );
+  });
+
+  it("only the dispatching module's fallback of that closure, on its receiver, is noted", () => {
+    const d = createLinkedClosureDispatch();
+    const closure = {};
+    const seen = d.invoke(closure, moduleA, [], () => {
+      d.isRepeat(closure, moduleA, "m1", receiver);
+      d.noteFallback({}, receiver, moduleA); // another closure
+      d.noteFallback(closure, receiver, moduleB); // another module
+      d.noteFallback(closure, {}, moduleA); // another receiver
+      return d.invoke(closure, moduleA, [], (inner) => d.isRepeat(closure, inner, "m1", receiver));
+    });
+    expect(seen).toBe(false);
+    expect(d.isRepeat(closure, moduleA, "m1", receiver)).toBe(false); // nothing in flight
+  });
+
+  it("remembers the module that ran the closure", () => {
     const d = createLinkedClosureDispatch();
     const closure = {};
     const order: string[] = [];
     const through = (via: Record<string, Function>) => {
       order.push(via === moduleA ? "A" : "B");
-      if (via === moduleA) {
-        d.claimBounce(closure, moduleA);
-        return undefined;
-      }
-      return 42;
+      return dispatchVia(d, closure, via, "m1");
     };
-    expect(d.invoke(closure, moduleA, [moduleB], through)).toBe(42);
-    expect(d.invoke(closure, moduleA, [moduleB], through)).toBe(42);
+    expect(d.invoke(closure, moduleA, [moduleB], through)).toBe("ran");
+    expect(d.invoke(closure, moduleA, [moduleB], through)).toBe("ran");
     expect(order).toEqual(["A", "B", "B"]);
   });
 
-  it("throws a TypeError when no module can call the closure", () => {
+  it("throws a TypeError when no module of the project can call the closure", () => {
     const d = createLinkedClosureDispatch();
     const closure = {};
-    const bounce = (via: Record<string, Function>) => void d.claimBounce(closure, via);
-    expect(() => d.invoke(closure, moduleA, [moduleB], bounce)).toThrow(TypeError);
+    const loopEverywhere = (via: Record<string, Function>): unknown => {
+      if (d.isRepeat(closure, via, "m1", receiver)) return undefined;
+      d.noteFallback(closure, receiver, via);
+      return d.invoke(closure, via, [], (inner) => (d.isRepeat(closure, inner, "m1", receiver) ? undefined : "x"));
+    };
+    expect(() => d.invoke(closure, moduleA, [moduleB], loopEverywhere)).toThrow(TypeError);
   });
 
   it("reuses one retry bridge per closure and module", () => {
