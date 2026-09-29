@@ -27,6 +27,7 @@ import { tryStandaloneHostFreeCall } from "./standalone-dynamic-code.js"; // (#6
 import { compileArrayMethodCall, compileArrayPrototypeCall, resolveArrayInfo } from "../array-methods.js";
 import { emitGlobalThisGopdFold } from "../dyn-read.js"; // (#2984)
 import { tryEmitNullishReceiverCall } from "../nullish-receiver-coercible.js"; // (#4484 B) §7.3.2 on a syntactic null/undefined receiver
+import { tryEmitDynamicGeneratorFunction } from "../generator-function-dynamic.js"; // (#6651 A9)
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "../func-space.js"; // (#1916 S3b) stable-regime minting
 import { sourceFunctionHandleForDeclaration } from "../program-abi-source-callable-planning.js";
 import { withRuntimeModuleCallableBindings } from "../runtime-module-callable-metadata.js";
@@ -7563,7 +7564,8 @@ function compileCallExpression(
     if (r !== undefined) return r;
   }
   {
-    const r = tryRuntimeEvalInterpretedBoundaryIntrinsic(ctx, fctx, expr);
+    const r =
+      tryRuntimeEvalInterpretedBoundaryIntrinsic(ctx, fctx, expr) ?? tryEmitDynamicGeneratorFunction(ctx, fctx, expr); // (#6651 A9)
     if (r !== undefined) return r;
   }
 
