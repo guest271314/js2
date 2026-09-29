@@ -28,7 +28,7 @@ import { assembleLinkedHarness } from "./test262-original-harness.js";
 import { parseMeta } from "./test262-runner.js";
 
 // @ts-expect-error -- untyped runner helper
-import { instantiateTest262Module } from "../scripts/test262-import-object.mjs";
+import { instantiateTest262Module, resetTest262RuntimeEvalProviderForTest } from "../scripts/test262-import-object.mjs";
 
 const CACHE = mkdtempSync(join(tmpdir(), "js2wasm-6723-print-"));
 afterAll(() => rmSync(CACHE, { recursive: true, force: true }));
@@ -97,12 +97,30 @@ async function linkedStdout(
     string,
     unknown
   >;
-  const instance = (await instantiateTest262Module(result.binary, importObject, {
-    target: "standalone",
-    linkedModules: result.linkedModules ?? [],
-    runDeferredInit: true,
-    linkedRuntime,
-  })) as WebAssembly.Instance;
+  // The provider imports the runtime-eval ABI (`$262.evalScript`); nothing
+  // here calls it, so a refusing stub satisfies the link. Selecting no eval
+  // engine keeps this test independent of a prebuilt provider artifact, which
+  // the issue-tests CI job does not build (same pattern as the #6723 D2 test).
+  const refuse = () => {
+    throw new Error("runtime-eval not available in this test");
+  };
+  importObject["js2wasm:runtime-eval"] = new Proxy({}, { get: () => refuse });
+  const previous = process.env.TEST262_DISABLE_RUNTIME_EVAL_PROVIDER;
+  process.env.TEST262_DISABLE_RUNTIME_EVAL_PROVIDER = "1";
+  resetTest262RuntimeEvalProviderForTest();
+  let instance: WebAssembly.Instance;
+  try {
+    instance = (await instantiateTest262Module(result.binary, importObject, {
+      target: "standalone",
+      linkedModules: result.linkedModules ?? [],
+      runDeferredInit: true,
+      linkedRuntime,
+    })) as WebAssembly.Instance;
+  } finally {
+    if (previous === undefined) Reflect.deleteProperty(process.env, "TEST262_DISABLE_RUNTIME_EVAL_PROVIDER");
+    else process.env.TEST262_DISABLE_RUNTIME_EVAL_PROVIDER = previous;
+    resetTest262RuntimeEvalProviderForTest();
+  }
   const peers = (result.linkedModules ?? [])
     .map((artifact) => importObject[artifact.namespace] as Exports | undefined)
     .filter((exp): exp is Exports => !!exp && typeof exp === "object");
