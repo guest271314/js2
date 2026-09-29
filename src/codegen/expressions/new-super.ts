@@ -101,6 +101,7 @@ import { armConstructIsConstructorGuard } from "../construct-is-constructor-guar
 import { linkCompatibleDeclaredStructAncestor } from "../struct-hierarchy-layout.js";
 import { emitBoundConstructOnNull } from "../construct-bound.js"; // (#4196) §10.4.1.2
 import { emitRuntimeEvalConstructOnNull } from "../runtime-eval-construct.js"; // (#4438) §10.2.2
+import * as bcv from "../builtin-ctor-value-invoke.js"; // (#6713) RegExp / Error-family carriers as values
 import {
   emitBuiltinCollectionConstructOnNull,
   reserveBuiltinCollectionDynConstruct,
@@ -795,7 +796,8 @@ function resolvesToDynamicAnyCtorValue(ctx: CodegenContext, calleeExpr: ts.Expre
     );
   }
   if (!ts.isIdentifier(calleeExpr)) return false;
-  if (ctx.classSet.has(calleeExpr.text) || ctx.externClasses.has(calleeExpr.text)) return false;
+  const externClassName = ctx.externClasses.has(calleeExpr.text) && !bcv.shadowsExternClassName(ctx, calleeExpr);
+  if (ctx.classSet.has(calleeExpr.text) || externClassName) return false;
   if (ctx.funcConstructorMap?.has(calleeExpr.text)) return false;
   // (#1930) Destructured-alias form for the symbol lookup (out of ratchet scope);
   // the type-flags check routes through the oracle (`typeFactOf`) rather than a
@@ -5139,6 +5141,7 @@ function emitDynamicNewFallback(
     fctx.body = base;
     emitBuiltinFnNotAConstructorGuard(ctx, fctx, descLocal);
     emitTaDynCtorConstructFromLocals(ctx, fctx, descLocal, argLocals);
+    bcv.emitBuiltinCtorValueConstructOnNull(ctx, fctx, calleeExpr, descLocal, argLocals);
     emitBuiltinCollectionConstructOnNull(ctx, fctx, descLocal, argLocals); // (#6720)
     fctx.body = savedBase;
     noMatchBase = base;
@@ -6569,6 +6572,8 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     const unavailable = standaloneUnavailableGlobalReference(ctx, fctx, expr.expression);
     if (unavailable !== undefined) return emitStandaloneUnavailableGlobalThrow(ctx, fctx, unavailable);
   }
+  const ctorAlias = bcv.tryCompileBuiltinCtorAliasInvoke(ctx, fctx, expr); // typed `var R = globalThis.RegExp`
+  if (ctorAlias !== undefined) return ctorAlias;
   // (#3927 per-type layouts) Publish the allocation-label hint when this `new`
   // is a recorded label site of a split family. BEFORE the arguments compile —
   // a labelled allocation nested in them consumes and resets the hint, so the
@@ -8060,6 +8065,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
           // [[Construct]]. Each retry declines for the other's carrier shape,
           // so the chain has no ordering hazard.
           emitRuntimeEvalConstructOnNull(ctx, fctx, expr, taDescLocal, taArgLocals);
+          bcv.emitBuiltinCtorValueConstructOnNull(ctx, fctx, dynCallee, taDescLocal, taArgLocals);
           emitBuiltinCollectionConstructOnNull(ctx, fctx, taDescLocal, taArgLocals); // (#6720) Map/Set carrier value
           return { kind: "externref" };
         }
