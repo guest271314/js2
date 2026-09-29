@@ -60,17 +60,13 @@ At 17:40 UTC the user ordered "land this now"; all three lanes were told to
 stop new work, keep only verified changes, run the gates, push, write their
 #6651 record and PR body, and report. Their PRs carry the `wip` label until the
 lead has verified the pushed head and replaced the PR body; removing `wip` hands
-them to `auto-enqueue`.
+them to `auto-enqueue`. State at 19:30 UTC:
 
-| lane | PR | target | state at 17:44 UTC |
+| lane | PR | target rows | result |
 | --- | --- | --- | --- |
-| A13 — generator singles (property descriptors, `super` in params, `@@hasInstance`, `@@toStringTag`, TypedArray from a generator) | #6311 | A13 list in #6651 | head `1d5c91fa2`, CI green; finishing its base-vs-branch measurement |
-| C5 — subclassing built-in constructors | #6321 | 22 rows under `class/subclass/**` except `GeneratorFunction/*` | head `c95e32dd1`, CI green; finishing suite parity controls |
-| H6 — Array methods over a proxy (IsArray, ArraySpeciesCreate, revocation, invalid length) | #6322 | 15 rows under `Array/prototype/**` | head `501bcd9b0`, CI green; finishing byte-differential controls |
-
-If this file still shows this table, a lane did not report: read its
-`.tmp/*-pr-body.md` and its #6651 record on the branch, check the head with
-`git ls-remote`, and finish it by hand before removing `wip`.
+| A13 — generator singles (`instanceof` on a `function*`, `null` receiver fold, TypedArray from a generator, `super` in an object-literal method) | [#6311](https://github.com/loopdive/js2/pull/6311) | 8 | **merged** 18:30 UTC. Standalone 0 → 4 of 8; 0 pass → non-pass. The other four rows are design questions in the #6651 A13 record (closure `[[Prototype]]`, `delete` on a closed literal, `createRealm` generator) |
+| C5 — subclassing built-in constructors | [#6321](https://github.com/loopdive/js2/pull/6321) | 22 under `class/subclass/**` except `GeneratorFunction/*` | head `4fcbbb16d`, required checks green, **in the merge queue** (enqueued by the bot at 19:4x UTC). Standalone 0 → 15 of 22, host 10 → 13. 75 changed binaries in a 448-file reach set, 0 pass → non-pass. Not done: constructor return override with an object, ArrayBuffer species, TypedArray subclass, `RegExp/lastIndex` |
+| H6 — Array methods over a proxy | [#6322](https://github.com/loopdive/js2/pull/6322) | 15 under `Array/prototype/**` | head on the PR `83fc24310`; lead-side merge with `main` (`1fb24a4bd`) is unpushed while the base-vs-branch re-run of its 137 changed rows finishes. Lane claim: standalone 0 → 5 of 15 (`{map,filter,slice,splice}/create-revoked-proxy.js`, `concat/is-concat-spreadable-proxy-revoked.js`); 10 rows still fail. **Still `wip` until that re-run shows 0 pass → non-pass.** Next session: read `.tmp/lead-h6-v-{new,base}.log` in the `fresh-a10` clone if it survived, else re-run the 137 changed rows base vs branch (`scripts/run-test262-paths.mts <list> --isolate --standalone`); if 0 pass → non-pass, push `1fb24a4bd`, drop `[WIP]` and the `wip` label |
 
 ## Where the 550 rows are (main `c4060cd97`)
 
