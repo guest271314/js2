@@ -390,11 +390,19 @@ export function crossFunctionInstrArrays(mod: WasmModule): Set<Instr[]> {
 }
 
 /**
- * (#6759) A visited-set for a walk over a module whose instruction arrays form
- * a TREE (see {@link instrArraySharing}): no array is ever reached twice, so
- * membership is always false and recording it is pointless. Stateless and
- * shared; it never holds a reference.
+ * (#6759) The instruction-array sharing of a module's function bodies: the
+ * cross-function {@link crossFunctionInstrArrays} set, and the few arrays
+ * reached more than once by any path (within or across functions). A repair
+ * that only inserts or replaces LEAF instructions (and at most drops dead
+ * code) adds neither, so one analysis can serve several such repairs in a row.
  */
+export interface InstrArraySharing {
+  readonly shared: Set<Instr[]>;
+  /** Arrays with more than one incoming edge — the only ones a walk can revisit. */
+  readonly multiParent: ReadonlySet<Instr[]>;
+}
+
+/** Visited-set of a walk over a module or function in which no array has two parents. */
 export const TREE_VISITED: WeakSet<Instr[]> = {
   has: () => false,
   add(): WeakSet<Instr[]> {
@@ -405,24 +413,37 @@ export const TREE_VISITED: WeakSet<Instr[]> = {
 };
 
 /**
- * (#6759) The cross-function {@link crossFunctionInstrArrays} set, plus a
- * visited-set suited to the module's shape: {@link TREE_VISITED} when no
- * array is reached twice by any path (within or across functions), else a
- * fresh set. Only valid for a walk that visits the arrays present NOW and adds
- * no array reachable from two places — true of every repair that inserts or
- * replaces leaf instructions only.
+ * (#6759) A visited-set for one walk that records only the arrays that CAN be
+ * revisited — a module typically has tens of multi-parent arrays among tens of
+ * thousands, and a single-parent array is reached exactly once, so remembering
+ * it is dead weight (a large weak table the collector must also process).
  */
-export function instrArraySharing(mod: WasmModule): { shared: Set<Instr[]>; visited: WeakSet<Instr[]> } {
+export function visitedFor(sharing: InstrArraySharing): WeakSet<Instr[]> {
+  const { multiParent } = sharing;
+  if (multiParent.size === 0) return TREE_VISITED;
+  const seen = new Set<Instr[]>();
+  const visited: WeakSet<Instr[]> = {
+    has: (body) => seen.has(body),
+    add(body) {
+      if (multiParent.has(body)) seen.add(body);
+      return visited;
+    },
+    delete: (body) => seen.delete(body),
+    [Symbol.toStringTag]: "WeakSet",
+  };
+  return visited;
+}
+
+export function instrArraySharing(mod: WasmModule): InstrArraySharing {
   type Func = WasmModule["functions"][number];
   // `owners` doubles as the per-function "seen" set: an array owned by the
   // function being walked was necessarily first reached by this walk, so
   // reaching it again is a revisit. Only foreign-owned (i.e. shared) arrays
-  // need a separate per-function seen set, allocated on first need — the
-  // common tree-shaped module allocates none.
+  // need a separate per-function seen set, allocated on first need.
   const owners = new WeakMap<Instr[], Func>();
   const shared = new Set<Instr[]>();
+  const multiParent = new Set<Instr[]>();
   const pending: Instr[][] = [];
-  let tree = true;
   for (const func of mod.functions) {
     let seenForeign: Set<Instr[]> | undefined;
     pending.push(func.body);
@@ -431,7 +452,7 @@ export function instrArraySharing(mod: WasmModule): { shared: Set<Instr[]>; visi
       const owner = owners.get(body);
       if (owner === undefined) owners.set(body, func);
       else {
-        tree = false;
+        multiParent.add(body);
         if (owner === func) continue;
         if (seenForeign?.has(body)) continue;
         (seenForeign ??= new Set()).add(body);
@@ -440,5 +461,5 @@ export function instrArraySharing(mod: WasmModule): { shared: Set<Instr[]>; visi
       for (const instr of body) if (ownsInstrArrays(instr.op)) pushNestedInstrArrays(instr, pending);
     }
   }
-  return { shared, visited: tree ? TREE_VISITED : new WeakSet() };
+  return { shared, multiParent };
 }

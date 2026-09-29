@@ -16,8 +16,10 @@ import { absoluteFuncIndexCached } from "../emit/resolve-layout.js"; // (#1916 S
 import {
   callTargetFuncType,
   crossFunctionInstrArrays,
+  type InstrArraySharing,
   instrArraySharing,
   locateCallArgProducers,
+  visitedFor,
   ownsInstrArrays,
 } from "./call-arg-producers.js";
 
@@ -153,10 +155,15 @@ export function markLeafStructsFinal(
  *
  * Recurses into nested blocks, loops, if/then/else, and try/catch bodies.
  */
-export function repairStructTypeMismatches(mod: WasmModule, diagnostics?: CodegenError[]): number {
+export function repairStructTypeMismatches(
+  mod: WasmModule,
+  diagnostics?: CodegenError[],
+  sharing: InstrArraySharing = instrArraySharing(mod),
+): number {
   let totalFixed = 0;
-  // (#6759) A tree-shaped module (the norm) needs no visited-set at all.
-  const { shared: contextBlocked, visited } = instrArraySharing(mod);
+  // (#6759) Visited bookkeeping covers only the multi-parent arrays (`visitedFor`).
+  const contextBlocked = sharing.shared;
+  const visited = visitedFor(sharing);
   const reportedBlocked = new WeakSet<Instr[]>();
 
   for (const func of mod.functions) {
@@ -941,7 +948,7 @@ function externRewriteSeeds(instrs: readonly Instr[]): number {
  * extern.convert_any on externref (redundant) or funcref (invalid — separate hierarchy).
  * Must run after ALL other codegen/fixup passes.
  */
-export function fixupExternConvertAny(ctx: CodegenContext): void {
+export function fixupExternConvertAny(ctx: CodegenContext, sharing = instrArraySharing(ctx.mod)): void {
   function getLocalType(func: WasmFunction, localIdx: number): ValType | null {
     const funcType = ctx.mod.types[func.typeIdx];
     if (!funcType || funcType.kind !== "func") return null;
@@ -1232,8 +1239,8 @@ export function fixupExternConvertAny(ctx: CodegenContext): void {
     }
   }
 
-  // (#6759) A tree-shaped module (the norm) needs no visited-set at all.
-  const { shared: contextBlocked, visited } = instrArraySharing(ctx.mod);
+  const contextBlocked = sharing.shared;
+  const visited = visitedFor(sharing);
   const reportedBlocked = new WeakSet<Instr[]>();
   for (const func of ctx.mod.functions) {
     if (func.body.length > 0) {

@@ -55,7 +55,13 @@
  */
 
 import type { Instr, TypeDef, ValType, WasmModule } from "../ir/types.js";
-import { instrArraySharing, locateOperandProducers, ownsInstrArrays } from "./call-arg-producers.js";
+import {
+  type InstrArraySharing,
+  instrArraySharing,
+  locateOperandProducers,
+  ownsInstrArrays,
+  visitedFor,
+} from "./call-arg-producers.js";
 import { callArgCoercionInstrs, getFullParamTypes, inferInstrType, resolveFuncType } from "./stack-balance.js";
 import type { CodegenError } from "./context/types.js";
 
@@ -234,7 +240,11 @@ function repairBody(
 }
 
 /** Repair every cross-hierarchy operand in the module. Returns the fixup count. */
-export function repairCrossHierarchyOperands(mod: WasmModule, diagnostics?: CodegenError[]): number {
+export function repairCrossHierarchyOperands(
+  mod: WasmModule,
+  diagnostics?: CodegenError[],
+  sharing: InstrArraySharing = instrArraySharing(mod),
+): number {
   const numImports = mod.imports.filter((imp) => imp.desc.kind === "func").length;
   const findFunc = (name: string): number | null => {
     const idx = mod.functions.findIndex((f) => f.name === name);
@@ -254,8 +264,9 @@ export function repairCrossHierarchyOperands(mod: WasmModule, diagnostics?: Code
   };
 
   let fixups = 0;
-  // (#6759) A tree-shaped module (the norm) needs no visited-set at all.
-  const { shared: contextBlocked, visited } = instrArraySharing(mod);
+  // (#6759) Visited bookkeeping covers only the multi-parent arrays (`visitedFor`).
+  const contextBlocked = sharing.shared;
+  const visited = visitedFor(sharing);
   const reportedBlocked = new WeakSet<Instr[]>();
   for (const func of mod.functions) {
     const ft = resolveFuncType(mod.types, func.typeIdx);

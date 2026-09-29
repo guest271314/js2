@@ -77,7 +77,7 @@
  */
 import type { Instr, ValType, WasmModule } from "../ir/types.js";
 import { walkChildren } from "./walk-instructions.js";
-import { instrArraySharing } from "./call-arg-producers.js";
+import { type InstrArraySharing, instrArraySharing, visitedFor } from "./call-arg-producers.js";
 
 /**
  * Remove redundant ref.as_non_null after ref.cast in a single instruction list.
@@ -283,16 +283,17 @@ function getFuncParamTypes(mod: WasmModule, typeIdx: number): ValType[] {
  * Run peephole optimizations on all function bodies in a WasmModule.
  * Returns the total number of instructions eliminated.
  */
-export function peepholeOptimize(mod: WasmModule): number {
+export function peepholeOptimize(mod: WasmModule, sharing: InstrArraySharing = instrArraySharing(mod)): number {
   let totalRemoved = 0;
   // Pattern 5 consults the enclosing function's local types, so it must not
   // rewrite an array reachable from more than one function root (or an arm
   // stored in one) using either owner's view.
   // Context-invariant patterns may safely mutate a physical array once for all
   // of its owners. Sharing one visited set across function roots enforces that.
-  // (#6759) The patterns only remove or replace leaf instructions, so a module
-  // whose arrays form a tree (the norm) needs no visited-set at all.
-  const { shared: contextBlocked, visited } = instrArraySharing(mod);
+  // (#6759) The patterns only remove or replace leaf instructions, so only the
+  // multi-parent arrays can be revisited and need bookkeeping (`visitedFor`).
+  const contextBlocked = sharing.shared;
+  const visited = visitedFor(sharing);
   for (const func of mod.functions) {
     // Build flat local-type array: params first, then declared locals
     const paramTypes = getFuncParamTypes(mod, func.typeIdx);

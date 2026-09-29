@@ -29,7 +29,7 @@ import { coercionPlan } from "./coercion-plan.js";
 import type { BlockType, FuncTypeDef, Instr, TypeDef, ValType, WasmFunction, WasmModule } from "../ir/types.js";
 import { STABLE_FUNC_BASE, absoluteFuncIndexCached } from "../emit/resolve-layout.js"; // (#1916 S3)
 import { walkInstructionDag } from "./walk-instructions.js";
-import { TREE_VISITED } from "./call-arg-producers.js";
+import { type InstrArraySharing, TREE_VISITED, visitedFor } from "./call-arg-producers.js";
 import type { CodegenError } from "./context/types.js";
 import { profileCount, profilePhase } from "../compile-profile.js";
 
@@ -2894,6 +2894,7 @@ function isContextInvariantBody(body: Instr[]): boolean {
 function contextAmbiguousFunctions(
   mod: WasmModule,
   tags: Array<{ typeIdx: number }>,
+  sharing: InstrArraySharing | undefined,
 ): { blocked: Set<WasmFunction>; features: Map<WasmFunction, StackBalanceFeatures> } {
   // First function to reach each physical array (the cross-function refusal).
   const firstOwner = new WeakMap<Instr[], WasmFunction>();
@@ -2930,24 +2931,30 @@ function contextAmbiguousFunctions(
     const visits = new Map<Instr[], BranchContext | null>();
     while (pending.length > 0) {
       const { body, context } = pending.pop()!;
-      const owner = firstOwner.get(body);
-      if (owner === undefined) firstOwner.set(body, func);
-      else if (owner !== func) {
-        blocked.add(owner);
-        blocked.add(func);
-      }
+      // (#6759) An array with one incoming edge in the whole module (the
+      // caller's sharing analysis says which have more) has no second owner
+      // and no second incoming context, so this bookkeeping can neither block
+      // nor mark a revisit for it.
+      if (!sharing || sharing.multiParent.has(body)) {
+        const owner = firstOwner.get(body);
+        if (owner === undefined) firstOwner.set(body, func);
+        else if (owner !== func) {
+          blocked.add(owner);
+          blocked.add(func);
+        }
 
-      // (#5186) Only bodies whose repair actually depends on the incoming
-      // block context can be in conflict about it. A stack-polymorphic body is
-      // left untouched by `fixBranch` under every context, so differing
-      // contexts there are not a disagreement and must not fail the compile.
-      const prior = visits.get(body);
-      if (prior !== undefined) {
-        functionFeatures.revisits = true;
-        if (prior !== null && !sameBranchContext(prior, context)) blocked.add(func);
-        continue;
+        // (#5186) Only bodies whose repair actually depends on the incoming
+        // block context can be in conflict about it. A stack-polymorphic body is
+        // left untouched by `fixBranch` under every context, so differing
+        // contexts there are not a disagreement and must not fail the compile.
+        const prior = visits.get(body);
+        if (prior !== undefined) {
+          functionFeatures.revisits = true;
+          if (prior !== null && !sameBranchContext(prior, context)) blocked.add(func);
+          continue;
+        }
+        visits.set(body, isContextInvariantBody(body) ? null : context);
       }
-      visits.set(body, isContextInvariantBody(body) ? null : context);
 
       for (let index = 0; index < body.length; index++) {
         const instr = body[index]!;
@@ -3008,9 +3015,9 @@ function recordHardStackBalanceError(mod: WasmModule, diagnostics: CodegenError[
   diagnostics?.push(diagnostic);
 }
 
-export function stackBalance(mod: WasmModule, diagnostics?: CodegenError[]): number {
+export function stackBalance(mod: WasmModule, diagnostics?: CodegenError[], sharing?: InstrArraySharing): number {
   const tags = mod.tags || [];
-  const preflight = profilePhase("preflight", () => contextAmbiguousFunctions(mod, tags));
+  const preflight = profilePhase("preflight", () => contextAmbiguousFunctions(mod, tags, sharing));
   const contextBlocked = preflight.blocked;
   const sigs = profilePhase("signatures", () => buildFuncSigs(mod));
   let deadTailFunctions = 0;
@@ -3114,8 +3121,9 @@ export function stackBalance(mod: WasmModule, diagnostics?: CodegenError[]): num
     // values causes "expected N elements on the stack for fallthru" errors.
     // (#6759) Each repair walk below gets its own visited-set, or none for a
     // tree-shaped function (see `StackBalanceFeatures.revisits`).
-    const visitedFor = (): WeakSet<Instr[]> => (features.revisits ? new WeakSet<Instr[]>() : TREE_VISITED);
-    if (features.deadTail) eliminateDeadCode(func.body, visitedFor());
+    const repairVisited = (): WeakSet<Instr[]> =>
+      !features.revisits ? TREE_VISITED : sharing ? visitedFor(sharing) : new WeakSet<Instr[]>();
+    if (features.deadTail) eliminateDeadCode(func.body, repairVisited());
 
     // Fix local.set type mismatches (e.g., f64 → externref, ref → externref)
     if (features.localWrite) {
@@ -3129,7 +3137,7 @@ export function stackBalance(mod: WasmModule, diagnostics?: CodegenError[]): num
         sigs,
         boxNumberIdx,
         unboxNumberIdx,
-        visitedFor(),
+        repairVisited(),
       );
     }
 
@@ -3145,7 +3153,7 @@ export function stackBalance(mod: WasmModule, diagnostics?: CodegenError[]): num
         sigs,
         boxNumberIdx,
         unboxNumberIdx,
-        visitedFor(),
+        repairVisited(),
       );
     }
 
@@ -3162,7 +3170,7 @@ export function stackBalance(mod: WasmModule, diagnostics?: CodegenError[]): num
         globalTypes,
         boxNumberIdx,
         unboxNumberIdx,
-        visitedFor(),
+        repairVisited(),
       );
       totalFixups += structNewFixups;
     }
@@ -3176,7 +3184,7 @@ export function stackBalance(mod: WasmModule, diagnostics?: CodegenError[]): num
         tags,
         boxNumberIdx,
         unboxNumberIdx,
-        visitedFor(),
+        repairVisited(),
         diagnosticPath,
       );
     }
