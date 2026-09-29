@@ -88,7 +88,16 @@ export function isConstIdentifierAssignmentTarget(
   // `name = init` whose left operand is `decl.name` itself (see
   // `async-await-hoist.ts`). No source-level assignment can carry a declaration
   // name as its target, so the discriminator is exact.
-  if (id.parent !== undefined && ts.isVariableDeclaration(id.parent) && id.parent.name === id) return false;
+  // (#6731) The same holds for a BindingElement's name: the native generator's
+  // linearised for-of head (`for (const [k, v] of m)`) initialises each pattern
+  // binding through this PutValue path.
+  if (
+    id.parent !== undefined &&
+    (ts.isVariableDeclaration(id.parent) || ts.isBindingElement(id.parent)) &&
+    id.parent.name === id
+  ) {
+    return false;
+  }
   // The oracle is authoritative when it resolves the reference: an active
   // same-text local set can belong to a different static block / namespace
   // binding and must not override that identity. Its `variableDeclarationOf`

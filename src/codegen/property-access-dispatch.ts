@@ -3012,7 +3012,7 @@ function propertyKeyIsCoveredFunctionDefinition(access: ts.PropertyAccessExpress
   return covered;
 }
 
-/** Emit a boxed read for standalone `IArguments.length`. */
+/** Emit a boxed read for standalone `IArguments.length` (JS host: a vec copy per read, #6756). */
 function emitArgumentsLengthRead(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -3020,7 +3020,7 @@ function emitArgumentsLengthRead(
   propName: string,
   objType: ts.Type,
 ): PADispatchResult {
-  if (propName !== "length" || objType.getSymbol?.()?.name !== "IArguments") return PA_FALLTHROUGH;
+  if (!ctx.standalone || propName !== "length" || objType.getSymbol?.()?.name !== "IArguments") return PA_FALLTHROUGH;
   const getIdx = ensureLateImport(
     ctx,
     "__extern_get",

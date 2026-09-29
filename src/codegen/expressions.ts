@@ -1170,7 +1170,7 @@ function compileExpressionInner(
   }
 
   if (expr.kind === ts.SyntaxKind.ThisKeyword) {
-    return compileThisKeyword(ctx, fctx, expr);
+    return compileThisKeyword(ctx, fctx, expr, expectedType);
   }
 
   if (ts.isIdentifier(expr)) {

@@ -25,7 +25,7 @@
  * so diagnostics keep a location.
  */
 import { ts } from "../ts-api.js";
-import { nodeContainsYield } from "./generators-native-ast-scan.js";
+import { isFunctionLikeScope, nodeContainsYield } from "./generators-native-ast-scan.js";
 
 export type YieldStatementDesugaring =
   | { kind: "sequence"; statements: ts.Statement[] }
@@ -52,6 +52,90 @@ function synthStatement(expr: ts.Expression, origin: ts.Statement): ts.Statement
   ts.setTextRange(stmt, origin);
   (stmt as { parent?: ts.Node }).parent = origin.parent;
   return stmt;
+}
+
+/** Every name a binding name binds (patterns flattened). */
+function boundNames(name: ts.BindingName, out: Set<string>): void {
+  if (ts.isIdentifier(name)) out.add(name.text);
+  else for (const el of name.elements) if (!ts.isOmittedExpression(el)) boundNames(el.name, out);
+}
+
+/** Names a function scope declares (params, var/let/const, function/class declarations, catch params). */
+function scopeDeclaredNames(fn: ts.FunctionLikeDeclaration): Set<string> {
+  const names = new Set<string>();
+  for (const p of fn.parameters) boundNames(p.name, names);
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node)) boundNames(node.name, names);
+    else if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && node.name) names.add(node.name.text);
+    if (isFunctionLikeScope(node)) return;
+    ts.forEachChild(node, visit);
+  };
+  if (fn.body) ts.forEachChild(fn.body, visit);
+  return names;
+}
+
+/** `id` names a binding, not a property / label / member key. */
+function isReferencePosition(id: ts.Identifier): boolean {
+  const p = id.parent;
+  if (ts.isPropertyAccessExpression(p) && p.name === id) return false;
+  if (ts.isQualifiedName(p) && p.right === id) return false;
+  if (ts.isLabeledStatement(p) || ts.isBreakOrContinueStatement(p)) return false;
+  if ((ts.isPropertyAssignment(p) || ts.isMethodDeclaration(p) || ts.isPropertyDeclaration(p)) && p.name === id) {
+    return false;
+  }
+  if (ts.isAccessor(p) && p.name === id) return false;
+  return true;
+}
+
+/**
+ * (#6731) A function DECLARATION nested directly in a generator body that
+ * references no binding of the generator (other than its own name) — so it is
+ * an ordinary lifted function whose instantiation time (hoisted to the start of
+ * the body, §10.2.11 step 36) is unobservable. tailwindcss's variant walker
+ * `function*Tt(e){function*i(r,t=null){…yield*i(…)}yield*i(e,null)}`.
+ * A capturing one keeps the refusal: its captures would bind the resume
+ * function's per-state copies, not the frame (measured: a mutation of a
+ * captured param after a yield was not seen by the nested function).
+ */
+export function isSelfContainedNestedFunction(fn: ts.Statement, generator: ts.FunctionLikeDeclaration): boolean {
+  if (!ts.isFunctionDeclaration(fn) || !fn.name || !fn.body || fn.parent !== generator.body) return false;
+  const outer = scopeDeclaredNames(generator);
+  const own = scopeDeclaredNames(fn);
+  const ownName = fn.name.text;
+  let captures = false;
+  const visit = (node: ts.Node): void => {
+    if (captures) return;
+    if (ts.isIdentifier(node) && node.text !== ownName && outer.has(node.text) && !own.has(node.text)) {
+      captures = isReferencePosition(node);
+    }
+    ts.forEachChild(node, visit);
+  };
+  for (const p of fn.parameters) visit(p);
+  visit(fn.body);
+  return !captures;
+}
+
+/**
+ * (#6731) `if (A, B, C) S` ≡ `A; B; if (C) S` (§13.16: the comma operands are
+ * evaluated left to right and all but the last discarded). Returned only when a
+ * DISCARDED operand yields and the tested one does not — tailwindcss's
+ * `if (r.add(i), yield {…}, p && (yield {…}), i.includes("/"))`.
+ */
+export function splitYieldingIfCondition(
+  stmt: ts.IfStatement,
+): { prefix: ts.Statement[]; condition: ts.Expression } | undefined {
+  const operands: ts.Expression[] = [];
+  const flatten = (expr: ts.Expression): void => {
+    const e = unwrapParens(expr);
+    if (ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.CommaToken) {
+      flatten(e.left);
+      flatten(e.right);
+    } else operands.push(e);
+  };
+  flatten(stmt.expression);
+  const condition = operands.pop();
+  if (!condition || containsYield(condition) || !operands.some(containsYield)) return undefined;
+  return { prefix: operands.map((operand) => synthStatement(operand, stmt)), condition };
 }
 
 /**

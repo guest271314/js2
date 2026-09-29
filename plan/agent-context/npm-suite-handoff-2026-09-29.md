@@ -57,3 +57,15 @@ styled-components DOM globals · webpack/typescript compile time.
 - The box ran at load 150–390: lane timeouts under load are not regressions.
 - `claude-opus-5-5` needs Claude Code ≥ 2.1.280.
 - Environment traps from the 09-24 handoff still apply.
+
+## Wave 8 results at final handoff
+
+| cluster | outcome | PR | next blocker / note |
+|---|---|---|---|
+| 6737-6741-census | pr-open | https://github.com/loopdive/js2/pull/6289 (mergeStateStatus  | **lodash-es (standalone-dynamic):** optimization-error → optimization-error. compileDurationMs 1,046,026 → 982,016; the O4 optimize step dominates and box load was 150–340. Next blocker, verbatim, already present on main |
+| wasm-opt-flatten-budget | pr-open | https://github.com/loopdive/js2/pull/6288 | Both lanes were run locally at box load 30–390, which is why each stepped down a level.  axios standalone-dynamic: - Before (main c8b4f0ef36): optimization-error after 837,661 ms. `wasm-opt -O4 did not produce the measur |
+| 6733-three-class-callable | pr-open | https://github.com/loopdive/js2/pull/6297 | three standalone-dynamic. Before: compile-error "Codegen error: inherited class callable ir-class:v1:ir-source%3Av1%3A0000000000000000%3Asource%3Apackage%252Fbuild%252Fthree.core.js:root:declaration:0000000000000010 / ir |
+| 6730-prettier-invalid-wasm | pr-open | https://github.com/loopdive/js2/pull/6296 | prettier standalone-dynamic lane: optimization-error before and after. Before: `CompileError: WebAssembly.compile(): Compiling function #379:"Ce" failed: struct.get[0] expected type (ref null 314), found if of type f64 @ |
+| 6731-generator-residuals | pr-open | https://github.com/loopdive/js2/pull/6300 (mergeStateStatus  | tailwindcss standalone-dynamic. Before: compile-error — "Codegen error: native generator lowering currently supports only sequential numeric yields in standalone/WASI targets (#680). Recompile with a JS host target for c |
+
+Still running when the session ended (workflow wf_b24477e7-474; results land in its journal, each agent opens its own PR): pr6265-refresh-6736, 6735-jest-async-import, 6738-new-logical-callee.
