@@ -2140,7 +2140,7 @@ export function compileBinaryExpression(
   // addition path, and the OBJECT arm (#4564) is native-only. Both preserve
   // default-hint conversion before deciding whether the result is a string.
   if (op === ts.SyntaxKind.PlusToken && !isBigIntType(leftTsType) && !isBigIntType(rightTsType)) {
-    if (admitsAnyAdditionOperands(ctx, expr, leftTsType, rightTsType)) return emitAnyAdd(ctx, fctx, expr);
+    if (admitsAnyAdditionOperands(ctx, fctx, expr, leftTsType, rightTsType)) return emitAnyAdd(ctx, fctx, expr);
   }
 
   // (#4491 T4) …and the OBJECT arm of the same §13.15.3 dispatch. `emitAnyAdd`

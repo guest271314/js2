@@ -25,6 +25,7 @@ import { join, relative } from "path";
 import { afterAll, beforeAll, describe, it } from "vitest";
 import { CompilerPool, type TestResult } from "../scripts/compiler-pool.js";
 // (#5353) ONE Temporal gate across every lane — see scripts/test262-temporal.mjs.
+import { test262OracleLane } from "../scripts/test262-harness-cache.mjs";
 import { test262NeedsTemporalGlobal, test262TemporalLaneEnabled } from "../scripts/test262-temporal.mjs";
 // oracle-version-exempt: #5215 changes callback-completeness evidence only; Test262 scoring is unchanged.
 import { negativeCompileErrorMatches, negativeCompileSucceededVerdict } from "../scripts/negative-verdict.mjs";
@@ -181,13 +182,13 @@ const TEST262_SEMANTIC_PROVIDERS = parseTest262SemanticProviders(process.env.TES
 // they stay HONEST v8 even inside a fast-mode merge_group run. This mirrors the
 // worker's own rule (sr-3461): standalone target NEVER sets `nativeHarness`.
 const TEST262_ORACLE_MODE = process.env.TEST262_ORACLE_MODE;
-const IS_HOST_LANE = TEST262_TARGET === undefined;
-const ORACLE_LANE: "honest" | "fast-nativeharness" | "linked-harness" =
-  TEST262_ORACLE_MODE === "fast" && IS_HOST_LANE
-    ? "fast-nativeharness"
-    : TEST262_ORACLE_MODE === "linked" && IS_HOST_LANE
-      ? "linked-harness"
-      : "honest";
+// (#6723 P2) `TEST262_STANDALONE_LINKED=1` admits the linked arm on the
+// standalone target (shadow measurement only); unset => the host-only gate.
+const ORACLE_LANE = test262OracleLane({
+  oracleMode: TEST262_ORACLE_MODE,
+  target: TEST262_TARGET,
+  standaloneLinked: process.env.TEST262_STANDALONE_LINKED,
+});
 
 // (#3451 slice 3) Linked-harness shadow oracle — the harness prefix is compiled
 // ONCE per include-set into a separate provider module (#2527) and each body is
