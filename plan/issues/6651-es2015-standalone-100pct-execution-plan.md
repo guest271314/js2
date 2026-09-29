@@ -11500,6 +11500,15 @@ and spread do not depend on it); a `%GeneratorFunction%` call with constant
 string arguments could be compiled away the way #2924 does it for `Function`,
 which would reach zero imports.
 
+**A14 — claimed 2026-09-29** by session `session_01FEGi3DmyPRPD5dx4kWU8hs`,
+branch `claude/es6-6651-a14-genfn-residuals` (from `origin/main`, after A9
+#6274 merged). The `%GeneratorFunction%` rows A9 left open, each root-caused and
+fixed if local: `built-ins/GeneratorFunction/{instance-length,instance-name,instance-prototype,instance-restricted-properties,instance-yield-expr-in-param,is-a-constructor}.js`,
+`built-ins/AsyncGeneratorFunction/is-a-constructor.js`, and
+`language/statements/class/subclass/builtin-objects/GeneratorFunction/*` (`class
+extends GeneratorFunction`). Out of scope: `proto-from-ctor-realm*` (needs a
+second realm), A13's `has-instance` rows.
+
 **Cluster A claimed — 2026-09-28** by session `session_01FEGi3DmyPRPD5dx4kWU8hs`
 (the lane that rebuilt A5). The claim covers generator lowering residuals, in
 this order:
