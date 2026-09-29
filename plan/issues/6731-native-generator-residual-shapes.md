@@ -14,7 +14,7 @@ task_type: bug
 area: compiler
 goal: standalone-mode
 loc-budget-allow:
-  # 2026-09-29 (#6731 tailwindcss slice): +193, the planner's jump-target stack,
+  # 2026-09-29 (#6731 tailwindcss slice): +201, the planner's jump-target stack,
   # lexical-rename wiring and emit-site swaps; the lowering itself lives in the
   # new generator-structured-jumps.ts / generator-lexical-renames.ts modules.
   - src/codegen/generators-native.ts
