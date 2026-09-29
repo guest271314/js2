@@ -445,3 +445,43 @@ local only):
 - First attempt had every eval-using row fail with "quickjs provider is not
   built": the local QuickJS adapter is keyed on the compiler bundle; rebuilt
   with `node scripts/build-quickjs-eval-provider.mjs`. CI builds it per run.
+
+## P2 shadow run (2026-09-29) — gate NOT met
+
+First full-corpus measurement of the standalone linked lane in CI: dispatch run
+36527277756 (`standalone_linked=true`, head `473c25a18c`, i.e. P0 + print slice,
+**without** the D4 error-objects fix `41d1f40ecb`). Parity report from job
+`merge standalone-linked evidence` (109281638893), artifact
+`test262-standalone-linked-473c25a18cc6f99bbb4f416985a222125bfa563e`.
+
+| status | honest (today's standalone lane) | linked (shadow) |
+|---|---:|---:|
+| pass | 41,464 | 31,285 |
+| fail | 5,069 | 15,424 |
+| compile_error | 2,066 | 1,878 |
+| compile_timeout | 22 | 34 |
+
+- Agreement 37,990 / 48,735 (77.95 %). **pass → fail 10,401**, fail → pass 222,
+  other 122.
+- Linked-lane fallbacks 10,047 (20.62 %): 4,603 Temporal rows (compiled honestly
+  by design), the rest linked compile failures on body syntax
+  (`Expression expected` 284, native generator lowering 281, rest-element
+  diagnostics 555, dynamic array length fill 254, `__get_builtin` 186, …).
+- Largest difference buckets: `[object Object]` 8,155 (the error-rendering /
+  error-constructor class the D4 errors slice addresses), `undefined` 623,
+  async "Expected a ReferenceError" 324, `value is not iterable` 259,
+  provider-function call "Cannot access property on null or undefined" ~150,
+  `illegal cast` in `testPropertyOfStrings` 95 (a trap bucket).
+- Time: row-summed compile 174.7M ms honest vs 128.2M ms linked (**1.36×**);
+  `Run shard` median 859 s honest vs 666 s linked (**1.29×**), totals 47,072 s vs
+  35,612 s over 57 shards each.
+
+### Gate verdict
+
+The P2 gate (pass→fail no worse than the host flip, no trap bucket, median shard
+≥ 2× faster) fails on all three counts. The D4 error-objects slice recovered 58
+of 360 sampled rows (216 → 274, 0 pass→fail); extrapolated, the corpus still
+loses several thousand passes, and the achievable speed-up is capped near 1.4×
+while Temporal rows (8.45 of 38.8 core-hours) and body-syntax fallbacks compile
+honestly. P3 (authority flip) is not justified by these numbers. The matrix
+rebalance (#6722, merged) remains the standalone speed-up that is live.
