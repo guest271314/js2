@@ -40,6 +40,20 @@
 // immediately and callers take exactly the old path.
 
 type Exports = Record<string, Function>;
+type PeerRegistry = {
+  peersOf(local: Exports | undefined): Exports[];
+  stateFor(exports: Exports): { getExports: () => Exports };
+};
+type WrapClosure = (
+  closure: any,
+  state: { getExports: () => Exports },
+  rawDispatch: boolean,
+  linkedPeer: boolean,
+) => Function | null;
+
+// Captured at load: a test may replace `Reflect.apply` long before a bridge runs.
+const reflectApply = Reflect.apply;
+const reflectConstruct = Reflect.construct;
 
 interface DispatchFrame {
   closure: object;
@@ -90,14 +104,44 @@ export interface LinkedClosureDispatch {
   invoke(closure: object, local: Exports, peers: readonly Exports[], through: (exports: Exports) => unknown): unknown;
   /** The bridge that dispatches `closure` through `exports`, built once by `make`. */
   bridgeFor(closure: object, exports: Exports, make: () => Function | null): Function | null;
+  /** Wire this runtime copy's #5225 registry and its dynamic-bridge factory (once, at load). */
+  configure(registry: PeerRegistry, wrap: WrapClosure): void;
+  /**
+   * What a dynamic bridge applies: `dispatch` itself, or — while a linked
+   * project is live — a wrapper that runs `dispatch` through {@link invoke}.
+   */
+  routed(closure: unknown, local: Exports, dispatch: Function, rawDispatch: boolean): Function;
 }
 
 export function createLinkedClosureDispatch(): LinkedClosureDispatch {
   const frames: DispatchFrame[] = [];
   const owners = new WeakMap<object, Exports>();
   const bridges = new WeakMap<object, Map<Exports, Function | null>>();
+  let registry: PeerRegistry | undefined;
+  let wrap: WrapClosure | undefined;
 
-  return {
+  const api: LinkedClosureDispatch = {
+    configure(peerRegistry, wrapClosure) {
+      registry = peerRegistry;
+      wrap = wrapClosure;
+    },
+
+    routed(closure, local, dispatch, rawDispatch) {
+      if (registry === undefined || wrap === undefined || closure == null || typeof closure !== "object")
+        return dispatch;
+      const peers = registry.peersOf(local);
+      if (peers.length === 0) return dispatch;
+      const peerBridge = (via: Exports) =>
+        api.bridgeFor(closure, via, () => wrap!(closure, registry!.stateFor(via), rawDispatch, true)) ?? dispatch;
+      return function linkedClosureRoute(this: unknown, ...args: unknown[]): unknown {
+        const newTarget = new.target;
+        return api.invoke(closure, local, peers, (via) => {
+          const fn = via === local ? dispatch : peerBridge(via);
+          return newTarget === undefined ? reflectApply(fn, this, args) : reflectConstruct(fn, args, newTarget);
+        });
+      };
+    },
+
     noteFallback(fn, thisArg, exports) {
       const top = frames[frames.length - 1];
       if (top === undefined || top.closure !== fn || top.route === undefined) return;
@@ -157,4 +201,8 @@ export function createLinkedClosureDispatch(): LinkedClosureDispatch {
       return perModule.get(exports) ?? null;
     },
   };
+  return api;
 }
+
+/** The dispatcher this runtime copy's bridges and host-call imports share. */
+export const linkedClosureDispatch = createLinkedClosureDispatch();

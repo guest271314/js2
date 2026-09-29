@@ -52,7 +52,7 @@ import {
 } from "./runtime/init-marshal-registry.js"; // (#5193, #5202)
 import { createLinkedProviderMirrorOwnership } from "./runtime/linked-provider-mirror-ownership.js";
 import { createCrossModuleStructOwners } from "./runtime/cross-module-struct-owners.js";
-import { createLinkedClosureDispatch } from "./runtime/linked-closure-dispatch.js";
+import { linkedClosureDispatch } from "./runtime/linked-closure-dispatch.js";
 import { decodeCompiledEntryPair } from "./runtime/compiled-entry-pair.js";
 import { rawExportsStructDecodeError } from "./runtime/raw-exports-struct-authority.js"; // (#6438)
 import { isHostStringSymbolDispatch, makeHostStringPredicateAdapter } from "./runtime/string-predicate-adapter.js";
@@ -2202,7 +2202,7 @@ function _wrapWasmClosureUnknownArity(
         const rawThis = this !== null && typeof this === "object" ? _unwrapForHost(this) : this;
         const receiver = _isWasmStruct(rawThis) ? rawThis : this;
         const argcCallFn = exports[`__\0js2_call_fn_method_argc_${dispatchArity}`];
-        if (_linkedClosureDispatch.isRepeat(closure, exports, `m${dispatchArity}`, receiver)) return undefined;
+        if (linkedClosureDispatch.isRepeat(closure, exports, `m${dispatchArity}`, receiver)) return undefined;
         return marshalNew(
           typeof argcCallFn === "function"
             ? _applyWithPrefix(argcCallFn, undefined, [args.length, receiver, closure], padded)
@@ -2248,7 +2248,7 @@ function _wrapWasmClosureUnknownArity(
     const callFn = exports[`__call_fn_${arity}`];
     if (typeof callFn !== "function") return undefined;
     const padded = _denseOwnWasmArgs(args, arity);
-    if (_linkedClosureDispatch.isRepeat(closure, exports, `f${arity}`, undefined)) return undefined;
+    if (linkedClosureDispatch.isRepeat(closure, exports, `f${arity}`, undefined)) return undefined;
     if (widenedFrom >= 0) {
       const argcCallFn = exports[`__\0js2_call_fn_argc_${arity}`];
       if (typeof argcCallFn === "function") {
@@ -2259,24 +2259,11 @@ function _wrapWasmClosureUnknownArity(
   };
   const wrapped = function wasmClosureDynamicBridge(this: any, ...args: any[]): any {
     try {
-      const run = (via: Function): any =>
+      const via = linkedPeer ? dispatch : linkedClosureDispatch.routed(closure, exports, dispatch, rawDispatch);
+      const result =
         new.target === undefined
           ? _intrinsicReflectApply(via, this, args)
           : _intrinsicReflectConstruct(via, args, new.target);
-      const peers =
-        linkedPeer || closure == null || typeof closure !== "object" ? [] : _crossModuleStructs.peersOf(exports);
-      const result =
-        peers.length === 0
-          ? run(dispatch)
-          : _linkedClosureDispatch.invoke(closure, exports, peers, (via) =>
-              via === exports
-                ? run(dispatch)
-                : run(
-                    _linkedClosureDispatch.bridgeFor(closure, via, () =>
-                      _wrapWasmClosureUnknownArity(closure, _crossModuleStructs.stateFor(via), rawDispatch, true),
-                    ) ?? dispatch,
-                  ),
-            );
       _drainNativePromiseBoundary(callbackState);
       return result;
     } catch (error) {
@@ -6383,7 +6370,7 @@ const _hostProxyExportSlots = new WeakMap<object, { current: Record<string, Func
 const _linkedProviderMirrors = createLinkedProviderMirrorOwnership(_canBeWeakKey);
 // (#5225) Inbound twin: which module of a linked project can DECODE a struct.
 const _crossModuleStructs = createCrossModuleStructOwners(_canBeWeakKey);
-const _linkedClosureDispatch = createLinkedClosureDispatch(); // owner retry for a foreign closure
+linkedClosureDispatch.configure(_crossModuleStructs, _wrapWasmClosureUnknownArity); // (#6757)
 
 /**
  * (#6492 r20) Mirror a COMPILED thenable for the keyed-combinator polyfill.
@@ -16171,7 +16158,6 @@ assert._isSameValue = isSameValue;
           maybeWrapCallable: _maybeWrapCallableUnknownArity,
           wrapForHost: _wrapForHost,
           unwrapForHost: _unwrapForHost,
-          noteDispatchFallback: _linkedClosureDispatch.noteFallback,
         });
       }
       // (#4394) The `_newtarget` twin is the same operation with the third

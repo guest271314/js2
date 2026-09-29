@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /** Fixed-arity imports for erased Wasm-to-host function calls. */
 import { applyWithVecMirrorWriteback } from "./vec-mirror-writeback.js";
+import { linkedClosureDispatch } from "./linked-closure-dispatch.js";
 
 type CallbackState = { getExports: () => Record<string, Function> | undefined } | undefined;
 type HostCallAdapters = {
@@ -8,8 +9,6 @@ type HostCallAdapters = {
   maybeWrapCallable: (value: any, callbackState: CallbackState) => any;
   wrapForHost: (value: any, exports: Record<string, Function> | undefined) => any;
   unwrapForHost: (value: any) => any;
-  /** Report a dispatcher handing back the closure it is dispatching (#6757, linked-closure-dispatch.ts). */
-  noteDispatchFallback?: (fn: any, thisArg: any, exports: Record<string, Function> | undefined) => void;
 };
 type InvokeHostFunction = (fn: any, thisArg: any, args: any[]) => any;
 
@@ -19,7 +18,8 @@ export function isHostCallImportName(name: string): boolean {
 
 export function createHostCallImport(name: string, callbackState: CallbackState, adapters: HostCallAdapters): Function {
   const invoke: InvokeHostFunction = (fn, thisArg, args) => {
-    adapters.noteDispatchFallback?.(fn, thisArg, callbackState?.getExports());
+    // (#6757) A dispatcher handing back the closure it is dispatching.
+    linkedClosureDispatch.noteFallback(fn, thisArg, callbackState?.getExports());
     if (typeof fn !== "function" && adapters.isWasmStruct(fn)) {
       const wrapped = adapters.maybeWrapCallable(fn, callbackState);
       if (typeof wrapped === "function") fn = wrapped;

@@ -10,13 +10,13 @@ horizon: s
 goal: core-semantics
 sprint: current
 # (#6757) The fix lives in the new leaf src/runtime/linked-closure-dispatch.ts.
-# runtime.ts grows only by the wiring: the import and the instance (2), the
-# `linkedPeer` bridge parameter and its two cache guards (3), the retry in the
-# dynamic bridge (13), and the host-call adapter hook (1, inside resolveImport).
+# runtime.ts keeps only the call sites (+6 lines): the import, the configure
+# call, the `linkedPeer` bridge parameter, the two `isRepeat` checks in the
+# dynamic dispatch and the `routed` wrapper the bridge applies. The same +6
+# raises plan/audit/host-import-policy-baseline.json maximumRuntimeTsLines
+# 20214 -> 20220 (exact, no slack); resolveImport is unchanged.
 loc-budget-allow:
   - src/runtime.ts
-func-budget-allow:
-  - src/runtime.ts::resolveImport
 ---
 
 # Linked lane: foreign closure dispatch bounces until the stack overflows
