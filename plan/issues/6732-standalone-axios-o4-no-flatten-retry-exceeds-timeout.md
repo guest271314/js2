@@ -82,4 +82,7 @@ reason is cut off.
 ## Resolution
 
 Fixed by #6742. The measurements, and the axios before/after lane, are in
-that issue and its PR.
+that issue and its PR. Regression test: `tests/issue-6742-wasm-opt-budget.test.ts`
+("#6732 — optimizer failure text"). Both tests fail with the parent
+`src/optimize.ts`: the timeout is not named, and the retry text is lost
+behind the source dump.
