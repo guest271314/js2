@@ -9657,6 +9657,20 @@ either (`.tmp/a7/vsbl.mjs`).
   `ctx.errors`) from the triage spec is unchanged and still deserves its own
   issue.
 
+### 2026-09-29 — Cluster A, slice A13: generator singles (claim)
+
+**Claimed 2026-09-29** by session `session_01FEGi3DmyPRPD5dx4kWU8hs`, branch
+`claude/es6-6651-a13-gen-singles`, stacked on A11 (#6285). Single generator
+rows left open by A10/A11, each root-caused and fixed if local, recorded
+otherwise:
+`object/method-definition/{generator-property-desc,generator-super-prop-param,name-prop-name-yield-expr}.js`,
+`statements/generators/has-instance.js` and `built-ins/GeneratorFunction/has-instance.js`,
+`built-ins/Object/prototype/toString/symbol-tag-generators-builtin.js`,
+`built-ins/TypedArrayConstructors/ctors/object-arg/as-generator-iterable-returns.js`,
+`language/expressions/generators/eval-body-proto-realm.js`.
+Out of scope: A12's parameter writes, A14's `%GeneratorFunction%` residuals,
+`with`/`eval` rows, cluster C's non-generator accessor rows.
+
 ### 2026-09-28 — Cluster A, slice A11: generator value semantics (claim)
 
 **Claimed 2026-09-28** by session `session_01FEGi3DmyPRPD5dx4kWU8hs`, branch
