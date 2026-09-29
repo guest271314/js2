@@ -2,7 +2,7 @@
 id: 6723
 title: "test262: give the standalone lane the linked-harness oracle — compile the harness prefix once per include-set on standalone too (standalone is ~82 % of merge_group test262 work)"
 status: in-progress
-assignee: ttraenkler/opus-6723-p0
+assignee: ttraenkler/opus-6723-d4-print
 sprint: current
 priority: high
 horizon: l
@@ -311,3 +311,71 @@ array arms, plus per-module intrinsics. Options, none chosen here:
 `p0base-host-linked` (main) vs `p0final-host-linked` (P0), same 360 rows,
 `TEST262_ORACLE_MODE=linked`: 302 / 57 / 1 CE both, 316 linked / 44
 fallback both, **0 verdict diffs**.
+
+## D4 slice: provider print sink (2026-09-29)
+
+**Root cause — not a compiler defect, a worker option.** The provider DOES mint
+the `__stdout_acc`/`__stdout_append` sink (the name is in its binary), and
+`print` does append to it. Its readout exports `__stdout_prepare`/`__stdout_char`
+are host-bridge exports, which `stripHostBridgeExports` removes on standalone
+unless the compile passes `hostBridge: "always"`. Every worker compile site gets
+that through `HARNESS_HOST_BRIDGE` (`compileSingleSource`/`compileMultipleSources`),
+but the linked path compiles through `buildHarnessProvider` and
+`compileHarnessLinkedBody` directly, bypassing both wrappers — so neither the
+provider nor the body carried the bridge the honest standalone compile has.
+The marker was written; nothing could read it. (Host is unaffected: on a JS
+environment `"auto"` already resolves to the same `required` interop.)
+
+**Fix** (`scripts/test262-worker.mjs`): `...HARNESS_HOST_BRIDGE` in
+`harnessProviderCompileOptions` and in the linked `bodyOptions`. The provider
+owns its own sink and the worker already reads every linked module's sink
+(P0's `drainAndCaptureNativeStdout`), so no ABI change and no host import
+(consumer `result.imports` stays `[]`, asserted in the new test). The provider
+cache key already fingerprints `hostBridge`, so stale providers cannot be reused.
+
+Unit test `tests/issue-6723-standalone-linked-print.test.ts`: async `$DONE`
+marker observed through the provider's drained sink; a synchronous `$DONE()`
+(its `print` running in the provider) observed; and the repro (default
+`hostBridge`: provider publishes no `__stdout_*`, marker lost).
+
+### Measurement — same 360 rows as P0 (P0's `.tmp/sample.txt`), same procedure
+
+Fresh harness cache per run, `COMPILER_POOL_SIZE=3`, quickjs eval, linked arm
+gated on by file copy (never committed). Base = `origin/main` 075e05dfc4
+(includes P0). Result files (local only):
+`benchmarks/results/d4{base,new}-{sa,host}-linked-results-*.jsonl`.
+
+| arm | pass | fail | CE | timeout | rows linked | "marker not observed" |
+|---|---:|---:|---:|---:|---:|---:|
+| standalone linked, main (`d4base-sa-linked`) | 194 | 156 | 10 | 0 | 309 | 26 |
+| standalone linked, fix (`d4new-sa-linked`) | **216** | 134 | 10 | 0 | 309 | **0** |
+| host linked, main (`d4base-host-linked`) | 302 | 57 | 1 | 0 | 316 | 0 |
+| host linked, fix (`d4new-host-linked`) | 302 | 57 | 1 | 0 | 316 | 0 |
+
+(main's standalone linked arm today is 194/156/10, not P0's 193/153/14 — main
+moved; the comparison above is against a base run executed today.)
+
+- Standalone: **22 fail→pass, 0 pass→fail.** 18 are the D4 print rows
+  (incl. `statements/class/elements/async-gen-private-method-static/yield-star-getiter-sync-returns-number-throw.js`
+  and its `expressions/` twin). The other 4 are D4 `verifyProperty` `length`
+  rows (`annexB/String/prototype/{fixed,sup}/length.js`,
+  `Array/prototype/toString/length.js`, `String/prototype/repeat/length.js`):
+  the body now also carries the bridge the honest compile has, which the
+  descriptor read relies on.
+- The 8 other base rows that reported "marker not observed" now report their
+  real `Test262:AsyncTestFailure` text: 3 fail linked but pass honest, all the
+  D4 `assert.throws` constructor class ("Expected a ReferenceError but got a
+  undefined": `async-generator/dstr/obj-ptrn-prop-id.js`,
+  `class/dstr/async-private-gen-meth-static-obj-ptrn-prop-ary.js`,
+  `statements/class/dstr/async-private-gen-meth-ary-ptrn-elem-obj-prop-id.js`);
+  5 fail or CE honest too.
+- Host: **0 verdict diffs.**
+
+### Still open (not this slice)
+
+- A test body calling the provider's `print` DIRECTLY (`print("x")`, a
+  `var print = function …` closure value) throws "Cannot access property on
+  null or undefined" on standalone, while a call to a declared provider
+  function (`$DONE()`) works — cross-module closure-value call, same family as
+  the other D4 classes. Rare in test262 (async rows go through `$DONE`).
+- D4 classes 1, 2, 5, 6, 7 unchanged.
