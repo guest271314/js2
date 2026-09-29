@@ -50,7 +50,7 @@ import { compileStatement, hoistFunctionDeclarations } from "../statements.js";
 import { ensureExtrasArgvGlobal, maybeSetArgcForKnownCall } from "../statements/nested-declarations.js";
 import { compileStringLiteral, isStaticUndefinedArg } from "../string-ops.js";
 import { isStrictFunction } from "../helpers/is-strict-function.js";
-import { needsImplicitArgumentsObject } from "../helpers/body-uses-arguments.js";
+import { hasRestParameter, needsImplicitArgumentsObject } from "../helpers/body-uses-arguments.js";
 import {
   defaultValueInstrs,
   emitGuardedFuncRefCast,
@@ -184,7 +184,10 @@ export function compileTailDispatch(
       // path; await-free/elidable IIFEs keep the byte-identical fast path.
       const isAsyncIIFE = callee.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword) ?? false;
       const isDrivenAsyncIIFE = isAsyncIIFE && planAsyncClosureActivation(ctx, callee, /*isAsync*/ true) !== null;
+      // (#6651 I7) Neither the inline binder nor the lifted `compileIIFE` packs an
+      // identifier rest (`((...a) => a)(1, 2)` bound `a = 1`); the closure path does.
       if (
+        (hasRestParameter(callee.parameters) && ts.isIdentifier(callee.parameters.at(-1)!.name)) ||
         isGeneratorIIFE ||
         isRecursiveNamedFnExprIIFE ||
         reachesDirectEval ||

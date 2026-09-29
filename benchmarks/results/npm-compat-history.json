@@ -19863,6 +19863,84 @@
           "standalone": {}
         }
       }
+    },
+    {
+      "generatedAt": "2026-09-28T23:18:39.419Z",
+      "sourceRevision": "6d0d5c94da654b8f202b7914efd524cec1fcf961",
+      "optimizationLevels": {
+        "js-host": 4,
+        "js-host-native": 4,
+        "standalone": 4
+      },
+      "packages": {
+        "react-dom": {
+          "jsHostNative": {},
+          "jsHost": {},
+          "standalone": {
+            "static": 0.010745710827736335,
+            "dynamic": 0.0015739211173005552
+          }
+        },
+        "lit": {
+          "jsHostNative": {},
+          "jsHost": {
+            "dynamic": 0.00717561912971671
+          },
+          "standalone": {}
+        }
+      }
+    },
+    {
+      "generatedAt": "2026-09-28T23:58:32.159Z",
+      "sourceRevision": "2f74da3007765058d1bf85f046ac90fe47fcf460",
+      "optimizationLevels": {
+        "js-host": 4,
+        "js-host-native": 4,
+        "standalone": 4
+      },
+      "packages": {
+        "react-dom": {
+          "jsHostNative": {},
+          "jsHost": {},
+          "standalone": {
+            "static": 0.011499195106163717,
+            "dynamic": 0.0014023057302773572
+          }
+        },
+        "lit": {
+          "jsHostNative": {},
+          "jsHost": {
+            "dynamic": 0.010160803791560624
+          },
+          "standalone": {}
+        }
+      }
+    },
+    {
+      "generatedAt": "2026-09-29T02:35:22.812Z",
+      "sourceRevision": "b658d67f1fb8068a79ad88c7a364c890036d37a9",
+      "optimizationLevels": {
+        "js-host": 4,
+        "js-host-native": 4,
+        "standalone": 4
+      },
+      "packages": {
+        "react-dom": {
+          "jsHostNative": {},
+          "jsHost": {},
+          "standalone": {
+            "static": 0.012375404732963613,
+            "dynamic": 0.0017657784237507794
+          }
+        },
+        "lit": {
+          "jsHostNative": {},
+          "jsHost": {
+            "dynamic": 0.010191624284417673
+          },
+          "standalone": {}
+        }
+      }
     }
   ]
 }

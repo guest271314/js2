@@ -2700,6 +2700,7 @@ function compileClassBodiesInner(
         params.map((p) => p.type),
         0,
         /* unmapped */ true,
+        ctor.parameters,
       );
     }
 
@@ -3352,6 +3353,7 @@ function compileClassBodiesInner(
           params.slice(isStatic ? 0 : 1).map((p) => p.type),
           isStatic ? 0 : 1,
           true,
+          member.parameters,
         );
       }
 
@@ -3483,7 +3485,7 @@ function compileClassBodiesInner(
         const methodParamTypes = params.slice(isStatic ? 0 : 1).map((p) => p.type);
         const paramOffset = isStatic ? 0 : 1; // skip 'this' param for instance methods
         // Class bodies are always strict code → unmapped arguments (#779e).
-        emitArgumentsObject(ctx, fctx, methodParamTypes, paramOffset, true);
+        emitArgumentsObject(ctx, fctx, methodParamTypes, paramOffset, true, member.parameters);
       }
 
       if (isGeneratorMethod && member.body && nativeGenInfo) {
@@ -4034,6 +4036,7 @@ function emitPromiseSubclassOnHostCtor(
       params.map((param) => param.type),
       0,
       /* unmapped */ true,
+      ctor.parameters,
     );
   }
 
