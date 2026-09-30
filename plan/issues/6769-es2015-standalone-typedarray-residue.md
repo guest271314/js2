@@ -45,6 +45,18 @@ func-budget-allow:
   - src/codegen/dataview-native.ts::emitTaDynSpeciesCreate
   - src/codegen/dataview-native.ts::emitTaDynCtorConstructInline
   - src/codegen/native-dynamic-instanceof.ts::fillNativeDynamicInstanceOf
+  # 2026-09-30 (#6769 S4, implementation): the closed-method dispatcher's
+  # Array-HOF arm gains ONE conjunct line (a dyn view with a live-receiver
+  # producer falls past the Array loop to the producer arm); the arm-building
+  # logic itself lives in two new module-level helpers, so the fill grows by
+  # exactly that call line.
+  - src/codegen/closed-method-dispatch.ts::fillClosedMethodDispatch
+coercion-sites-allow:
+  # 2026-09-30 (#6769 S4, implementation): the live-receiver `filter` producer
+  # applies §7.1.2 ToBoolean to the predicate result through the existing native
+  # `__is_truthy` — the same helper the packed-vec `filter` in this file already
+  # calls. No new coercion logic; one more call site of the canonical one.
+  - src/codegen/ta-hof-map-filter.ts
 ---
 
 ## Problem
