@@ -187,6 +187,7 @@ import { finalizeStandaloneLinkReversePeer } from "./standalone-link-reverse-pee
 import { importStandaloneLinkErrorCtorCells } from "./standalone-link-error-ctor-cells.js"; // (#6723 D4)
 import { fillLinkBoundaryToStringTagTerminal } from "./link-boundary-tostring.js"; // (#5406)
 import { eliminateDeadLayoutAndPlanProgramAbi } from "./program-abi-finalization.js";
+import { sweepAfterInline, verifyFunctionSweep } from "./function-reachability-sweep.js"; // (#6768)
 import { emitDataStructHostBridgeManifest } from "./data-struct-host-bridge.js";
 import { planProgramAbiFunctionValue, planProgramAbiGlobal, PROGRAM_ABI_GLOBAL_ROLE } from "./program-abi-planning.js";
 import { collectLocalCallEdgesByIdentity } from "./ir-first-gate.js";
@@ -7070,6 +7071,7 @@ export function generateModule(
     // load-bearing; the four preconditions are spelled out under "Placement
     // contract" in `ir-inline.ts`. Do not move it without reading them.
     profilePhase("finalize/ir-inline", () => inlineUserFunctions(ctx));
+    profilePhase("finalize/function-sweep", () => sweepAfterInline(ctx)); // (#6768) inlined callees
 
     // ES5 Function `caller`: after dead-import elimination has finalized
     // function indices, thread each source caller's strictness into source
@@ -7108,6 +7110,7 @@ export function generateModule(
     // (#5270 step 1.3) Last: trampoline `call` → `return_call` against final
     // types. Nothing after this retypes a function or edits a body.
     promoteTrampolineTailCalls(ctx);
+    verifyFunctionSweep(mod); // #6768 no-op unless JS2WASM_FUNC_SWEEP_VERIFY=1
   } catch (e) {
     recordWholeSourceFailure(ctx, ast.sourceFile, classifyIrFailure(e, "build"), irPlanningIdentityContext);
     reportErrorNoNode(ctx, `Codegen error: ${e instanceof Error ? e.message : String(e)}`);
@@ -11762,6 +11765,7 @@ export function generateMultiModule(multiAst: MultiTypedAST, options?: CodegenOp
     // load-bearing; the four preconditions are spelled out under "Placement
     // contract" in `ir-inline.ts`. Do not move it without reading them.
     profilePhase("inline-user-functions", () => inlineUserFunctions(ctx));
+    profilePhase("function-sweep", () => sweepAfterInline(ctx)); // (#6768) inlined callees
 
     // Mirror the single-source ES5 Function `caller` finalizer.
     profilePhase("finalize-function-poison-pill-calls", () => finalizeFunctionPoisonPillCalls(ctx));
@@ -11799,6 +11803,7 @@ export function generateMultiModule(multiAst: MultiTypedAST, options?: CodegenOp
     profilePhase("fixup-extern-convert-any", () =>
       fixupExternConvertAny(ctx, repairSharing.shared.size === 0 ? repairSharing : undefined),
     );
+    verifyFunctionSweep(mod); // #6768 no-op unless JS2WASM_FUNC_SWEEP_VERIFY=1
   } catch (e) {
     const failure = classifyIrFailure(e, "build");
     for (const sourceFile of multiAst.sourceFiles) {
