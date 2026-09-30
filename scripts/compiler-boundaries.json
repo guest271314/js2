@@ -220,9 +220,10 @@
         "src/runtime/contracts/index.ts",
         "src/runtime/contracts/timer-capability.ts",
         "src/runtime/contracts/builtin-brands.ts",
-        "src/runtime/contracts/collection-kind.ts"
+        "src/runtime/contracts/collection-kind.ts",
+        "src/runtime/contracts/js-value-tags.ts"
       ],
-      "minModules": 7
+      "minModules": 8
     },
     {
       "id": "backend-wasmgc",
@@ -1749,6 +1750,7 @@
     }
   ],
   "files": [
+    { "path": "src/backend/wasmgc/resources/native-string-own-keys.ts", "state": "clean", "layer": "backend-wasmgc" },
     {
       "path": "src/runtime/wasmgc/values/string-create-body.ts",
       "state": "clean",
@@ -1849,6 +1851,8 @@
       "state": "clean",
       "layer": "backend-wasmgc"
     },
+    { "path": "src/runtime/wasmgc/values/string-index-key-body.ts", "state": "clean", "layer": "native-runtime" },
+    { "path": "src/runtime/wasmgc/values/string-own-keys-body.ts", "state": "clean", "layer": "native-runtime" },
     {
       "path": "src/wasm/model/instruction-walk.ts",
       "state": "clean",
@@ -13419,6 +13423,11 @@
     },
     {
       "path": "src/runtime/contracts/collection-kind.ts",
+      "state": "clean",
+      "layer": "runtime-contracts"
+    },
+    {
+      "path": "src/runtime/contracts/js-value-tags.ts",
       "state": "clean",
       "layer": "runtime-contracts"
     },

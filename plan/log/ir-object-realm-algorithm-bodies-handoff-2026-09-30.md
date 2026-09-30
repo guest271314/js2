@@ -69,6 +69,24 @@ Independent clean test262 checkout is pinned at
 `b363f29d3c43c626dc852744ad64a0b48a003693`, 56,970 tracked files. Its shared object
 source worktree must be preserved. No hook bypass, gate weakening or force-push.
 
+## Integrated main and normal hooks
+
+Implementation commit `f81a8e54c33ed6153d3ccbae4145ca6e1ce8fbca` is signed;
+normal hooks passed all 563 changed-root assertions without bypasses. The next
+signed merge integrates freshly fetched main
+`8245fc8ea121909a81d98cce003340c7c55e1296`. Its sole conflict is the boundary
+test additions: preserve both the three Object bodies and the delivered
+runtime-contract JavaScript value-tag leaf. Source String-key implementations,
+all corresponding regression tests and original signed inventory receipts remain.
+
+String-key PR6352 is delivered as `82b63dab16f0a9a0edee211eba9a92db346e927c`:
+exact head ancestry and seven scoped blobs are verified on main, with all 102
+actual conformance shards, final regression gate, CI, CLA and differential
+merge-group workflows passing. Its slice claim completion was verified upstream.
+ABI PR6353 is merged as `9fb5ecccffc2e37c37db5972b336f0037cb837fe`; complete
+protected/content evidence belongs in the publication receipt before delivery
+is declared. The broader ABI/Number claim remains active.
+
 ## Required continuation
 
 Reuse `native-closures.ts` authenticated root/signature/metadata tokens. Do not
