@@ -1889,6 +1889,20 @@ export function compileNamespaceStaticCall(
         // uses); keeps the ordinary externref path for non-literal / null protos.
         compileProtoArg(ctx, fctx, protoArg);
         fctx.body.push({ op: "local.tee", index: spoProtoLocal });
+        // The static guards above cannot validate values read from the realm's
+        // heterogeneous handle table. Both operands have now been evaluated;
+        // reject invalid dynamic values before the writer can mutate anything.
+        emitNativeReflectTargetGuard(ctx, fctx, spoTargetLocal, "Reflect.setPrototypeOf called on non-object");
+        fctx.body.push({ op: "local.get", index: spoProtoLocal }, { op: "ref.is_null" }, { op: "i32.eqz" });
+        const beforePrototypeGuard = fctx.body.length;
+        emitNativeReflectTargetGuard(
+          ctx,
+          fctx,
+          spoProtoLocal,
+          "Reflect.setPrototypeOf requires an object or null prototype",
+        );
+        const prototypeGuard = fctx.body.splice(beforePrototypeGuard);
+        fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: prototypeGuard });
         const spoIdx = ensureLateImport(ctx, "__object_setPrototypeOf", [externRef, externRef], [externRef]);
         flushLateImportShifts(ctx, fctx);
         // (#6651 cluster F) §28.1.14 step 4 — the REAL boolean. The KNOWN
