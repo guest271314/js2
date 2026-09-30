@@ -19942,6 +19942,37 @@ control.
 Record, probes, pins and side findings:
 `plan/issues/6769-es2015-standalone-typedarray-residue.md`.
 
+### 2026-09-30 — #5197 r3: the 19 residual ES2015 standalone `built-ins/Promise/**` rows (plan, Fable lane)
+
+Plan written to `plan/issues/5197-es2015-standalone-promise-r2.md` §
+"Implementation Plan — r3 (2026-09-30)". Measured on `origin/main` @
+`d4e15d90f9`: all 19 non-pass; 23 probes (`.tmp/5197r3/`) pin the
+mechanisms. Buckets: **B1** `then` never performs §27.2.5.4 steps 3-4
+(`SpeciesConstructor` + `NewPromiseCapability(C)`) and a Promise-rooted class
+object has no inherited `@@species`, `P.resolve(x)` bypasses `P`, the
+anonymous `new class extends Promise{…}(fn)` site is an invalid binary — 9
+rows; **B2** LIFO reactions — 1; **B3** `Resolve(p, <$Vec>)` skips
+`Get(array,"then")` — 2; **B4** no `[[AlreadyResolved]]` — 2; **B5** a
+function `C` in `Promise.<m>.call(C, …)` is bypassed once the module reads
+`Function.prototype` (runtime-eval regime; the D1 arm's executor is absent
+from the WAT) and D1 drains a dynamic iterable — 3; **B6** `catch` on a
+primitive receiver — 1; **B7** `Promise.all(<string>)` result typing — 1.
+Steps 1-7 in that order; 13 firm rows, 6 conditional on one named probe
+each. D3/D4/D5/D7 made B1 reachable (the 09-03 "G9 deferred" entries are
+superseded); nothing is judged unreachable by construction.
+
+**Implementation (2026-09-30, Opus lane, branch `issue-5197-r3-promise`):
+0 → 17/19** — 12 of the 13 firm rows and 5 of the 6 conditional ones. Two
+remain: `all/resolve-element-function-prototype.js` (firm, Step 5: in the
+assembled module the resolve-element function never reaches `thenable.then`;
+mechanism not reduced below that) and `prototype/catch/this-value-obj-coercible.js`
+(Step 6 measured and reverted — its Symbol sub-case needs a
+`%Symbol.prototype%` read from a symbol value). Control: 1,188/1,189
+currently-passing rows (ES5 226/226); the one failure is pre-existing on
+`origin/main`. Record, deviations and residual mechanisms:
+`plan/issues/5197-es2015-standalone-promise-r2.md` §
+"2026-09-30 — r3 implementation (Opus)".
+
 ## 2026-09-30 — #6767: class definition reflective residue (pointer)
 
 `language/statements/class/definition/**` (19 standalone rows, 18 non-pass on
@@ -19958,3 +19989,21 @@ that reach beyond the cluster: call-site parameter inference no longer narrows
 a parameter to `$C` from a `C.prototype` argument, and `C[k]()` on a class
 identifier no longer pushes a stray receiver (an invalid module when used as a
 call argument).
+
+## 2026-09-30 — #5350 r2 (super property WRITES) — pointer
+
+`super.x = v` / `super[k] = v` now lower onto `__reflect_set_receiver` in
+standalone (branch `issue-5350-r2-super-property-write`; full record under
+"2026-09-30 r2 implementation (Opus)" in
+`plan/issues/5350-es2015-standalone-super-property-r1.md`). Cluster C gains 4
+rows (`super/prop-{dot,expr}-obj-ref-non-strict.js`,
+`super/prop-{dot,expr}-cls-ref-strict.js`); p10 37 → 63 (node 127). Two
+findings for this plan's other lanes: (1) the receiver walk now refuses to
+create a key on a NON-EXTENSIBLE receiver, so `Reflect.set`'s 4-argument form
+answers `false` there (it answered `true`); (2) the remaining `super/*-cls-ref-this.js`
+pair is blocked by a class-member `this` that cannot hold a non-instance
+receiver (`P.prototype.getThis() === P.prototype` traps "illegal cast" on main,
+no `super` involved), and `super/call-proto-not-ctor.js` by class objects having
+no runtime [[Prototype]] (`Object.setPrototypeOf(C, f)` is a silent no-op;
+`super()` is inlined from the compile-time parent) — both representation
+questions, neither built.

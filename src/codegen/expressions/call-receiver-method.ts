@@ -262,10 +262,11 @@ function sourceDeletesBuiltinPrototypeMember(
   const callStart = receiver.getStart(sourceFile);
   return (positions.get(key) ?? []).some((deleteStart) => deleteStart < callStart);
 }
-import { resolvePromiseSubclassName } from "./promise-subclass.js";
+import { promiseSubclassNameOfType } from "./promise-subclass.js";
 import { ensureTaToStringHelper, taToStringApplies } from "../ta-to-string.js"; // (#6651 E7)
 import { reserveTaToLocaleString, taToLocaleStringApplies } from "../to-locale-string-element.js"; // (#6651 TA1)
 import { isHostResolvedBuiltinReceiver } from "../standalone-unavailable-globals.js"; // (#1472)
+import { guardedCastBackup, publishNonInstanceSuperReceiver } from "./super-receiver-publish.js"; // (#5350 r2)
 import {
   BUILTIN_CLASS_NAMES,
   coerceNumberMethodArgToF64,
@@ -1247,7 +1248,8 @@ export function compileReceiverMethodCall(
     ) {
       const receiverTsType = ctx.checker.getTypeAtLocation(propAccess.expression);
       const recvSym = receiverTsType.getSymbol()?.name;
-      const apparentSym = ctx.checker.getApparentType(receiverTsType).getSymbol()?.name;
+      const apparentTsType = ctx.checker.getApparentType(receiverTsType);
+      const apparentSym = apparentTsType.getSymbol()?.name;
       // A statically-known `class P extends Promise` value carries the same
       // native `$Promise` representation as Promise itself when its forwarding
       // constructor takes the standalone super(executor) path. TypeScript
@@ -1256,11 +1258,10 @@ export function compileReceiverMethodCall(
       // generic member-call path even though the runtime value is a real native
       // promise. Recognize transitive Promise ancestry only on the native lane,
       // keeping host/gc dispatch unchanged.
+      // (#5197 r3) …including an ANONYMOUS `class extends Promise` instance.
       const isNativePromiseSubclassReceiver =
         isStandaloneThenChainNativeActive(ctx) &&
-        [recvSym, apparentSym].some(
-          (name): name is string => name !== undefined && resolvePromiseSubclassName(ctx, name) !== undefined,
-        );
+        promiseSubclassNameOfType(ctx, receiverTsType, apparentTsType) !== undefined;
       const isPromiseReceiver = recvSym === "Promise" || apparentSym === "Promise" || isNativePromiseSubclassReceiver;
       if (method === "finally" && isNativePromiseSubclassReceiver) {
         nativeFinallyActive = true;
@@ -2178,7 +2179,9 @@ export function compileReceiverMethodCall(
         receiverMaybeNull && methodParamTypes0?.[0]?.kind === "ref"
           ? { kind: "ref_null", typeIdx: (methodParamTypes0[0] as { typeIdx: number }).typeIdx }
           : methodParamTypes0?.[0];
+      const castBackupBefore = guardedCastBackup(fctx); // (#5350 r2)
       let recvType = compileExpression(ctx, fctx, propAccess.expression, recvHint0);
+      publishNonInstanceSuperReceiver(ctx, fctx, fullName, recvType, castBackupBefore); // (#5350 r2) `C.prototype.m()`
       // Track whether receiver went through emitGuardedRefCast — if so, null
       // means "wrong struct type" (not genuinely null), so we should NOT throw
       // TypeError on null after cast.
