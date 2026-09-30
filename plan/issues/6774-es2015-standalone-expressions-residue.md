@@ -1135,8 +1135,8 @@ are other lanes'; 7 stay red by construction of this slice.
 - Record appended to THIS file (`### 2026-09-30 — #6774 implementation
   (Opus)`): rows before/after, per-step probe table, pins' base verdicts,
   control diffs, gates, residuals with mechanisms; one-paragraph pointers in
-  `plan/issues/4769-*.md` (S7 supersedes its scope-gen note),
-  `plan/issues/2765-*.md` (S20), `plan/issues/5153-*.md` (S22 closes its F
+  `plan/issues/4769-es2015-generator-c02-non-arguments-residual.md` (S7 supersedes its scope-gen note),
+  `plan/issues/2765-instanceof-hard-residuals-proto-getter-and-undeclared-ref.md` (S20), `plan/issues/5153-es2015-standalone-super-wave1.md` (S22 closes its F
   bucket) and `plan/issues/6651-es2015-standalone-100pct-execution-plan.md`.
 
 ## Lane protocol
