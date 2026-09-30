@@ -48,6 +48,7 @@ import { isRegExpProtoSymbolWrite } from "./regexp-proto-symbol-writes.js"; // (
 import { planHoleyArrayCarrier } from "./holey-array-plan.js"; // (#4222) isolated sparse-carrier proof
 import { recordDescriptorArrayReceiver } from "./declarations/descriptor-array-carrier.js"; // (#4670)
 import { armExhaustiveForNonCallableMemberLiteral } from "./class-to-primitive.js"; // (#6771 S2d)
+import { isArrayLengthConstructor } from "./array-length-holes.js"; // (#6771 S3)
 
 /**
  * Cheap AST pre-scan: set `ctx.usesArrayHoles` when the program contains any
@@ -91,6 +92,9 @@ export function scanForArrayHoles(ctx: CodegenContext, root: ts.Node): void {
         }
       }
     }
+    // (#6771 S3) `Array(n)` / `new Array(n)` stores the `$Hole` marker
+    // standalone (`holeFilledArrayNewInstrs`), so its reads must be armed too.
+    if (!ctx.usesArrayHoles && ctx.standalone && isArrayLengthConstructor(node)) ctx.usesArrayHoles = true;
     // (#6482 r4) A plain `x.length = n` arms the marker too, for the same
     // reason `isDescriptorDefineReference` does: §10.4.2.1 ArraySetLength makes
     // a shrink DELETE the dropped elements, so the store now writes the f64
