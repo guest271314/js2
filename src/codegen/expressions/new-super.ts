@@ -3,6 +3,7 @@ import { widenJsDefaultGuessSlot } from "../js-default-param-type-guess.js";
 import { materializeFnctorTwinCaptures } from "../fnctor-twin-captures.js";
 import { resolveStaticSpreadArgs } from "../static-spread-arity.js"; // (#6460)
 import { isDynamicGeneratorFunctionBinding, tryEmitDynamicGeneratorFunction } from "../generator-function-dynamic.js"; // (#6651 A9)
+import { isDescriptorAccessorRead } from "../analysis/proxy-binding-escape.js"; // (#6775 S3)
 import { emitLayoutSelectingStructNew, maybeEmitLayoutHint } from "../fnctor-layout-emit.js"; // (#3927) per-type layouts
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
@@ -845,6 +846,10 @@ function resolvesToDynamicAnyCtorValue(ctx: CodegenContext, calleeExpr: ts.Expre
           : init.expression;
     }
     if (ts.isConditionalExpression(init)) return true;
+    // (#6775 S3) An accessor read off a descriptor
+    // (`Object.getOwnPropertyDescriptor(o, k).get|.set`) is a runtime function
+    // value too — typically a built-in accessor with no [[Construct]].
+    if (isDescriptorAccessorRead(init)) return true;
   }
   const fact = ctx.oracle.typeFactOf(calleeExpr);
   if (fact.kind === "any" || fact.kind === "unknown") return true;
