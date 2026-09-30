@@ -91,3 +91,33 @@ to strict36/36; the incoming Object body files match their delivered test snapsh
 Normal signed merge hooks, fork publication, ready PR and protected admission
 are the remaining delivery steps. Keep claim active until main proof, and never
 push a branch after it is armed/queued without resolving admission first.
+
+
+### Current-main delivery refresh — 2026-09-30
+
+Root owns refresh worktree /private/tmp/js2-ir-native-builtin-main-delivery-20260930,
+branch codex/3518-native-builtin-main-delivery-20260930, original claim unchanged
+owner but now points at that branch. Existing PR6358 remains non-draft/held/
+auto-merge disabled during review. Remote checkpointc90ef283 and original
+58c6f064 checkout are preserved. Merge input is freshly fetched main2ef807a68,
+including delivered performance PR6364/dd38a24ab (eight blobs/exact ancestry;
+102real shards+regression/CI/CLA/differential merge-group checks verified).
+
+
+Current-main refresh validation: strict385/385 (36builtin+349boundary),
+zero skipped/pending/todo or unhandled errors; TS7exit0 and all seven
+preservation gates pass against exact main2ef807a68. All7370 source/test/
+script/config pins remained unchanged. Original builtin twelve hashes and
+all63 incoming nonmetadata main files remain exact. Normal signed merge
+hooks and fork publication follow; this record grants no main-delivery or
+full-public-realm/IR completion. Scoped receipts .tmp/builtin-main-delivery/.
+
+Only issue suffixes/inventory required composition: all1730main rows/order
+plus six authentic builtin leaves→1736, backendfloor43/native-runtime93.
+No source edits or conflicts. Independent historical failure evidence remains
+unchanged. Keep the original worktrees/corpora and all original assertions.
+After normal hooks, fast-forward push only to the existing fork PR branch,
+verify exact fresh server head/base, release hold when justified and admit
+the exact verified head through protection. Deliver6358before refreshing6359;
+no stale push or speculative queue base. Public graph writer owns a separate
+claimed lane and waits for root coordination before ancestry refresh.
