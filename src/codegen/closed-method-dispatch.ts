@@ -1,3 +1,5 @@
+import { buildPromisePeelValue } from "../runtime/wasmgc/promise/thenable-bodies.js";
+import { finalizePromiseThenableLookup } from "./promise-thenable-lookup.js";
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
  * #2151 — standalone any-receiver method dispatch over CLOSED object-literal
@@ -36,18 +38,25 @@
  * protocol, and the bulk of test262 any-method patterns). Methods invoked with
  * arguments fall through to the existing path (the dispatcher is not used).
  */
-import type { Instr, ValType, WasmFunction } from "../ir/types.js";
+import type { FuncHandle, Instr, ValType, WasmFunction } from "../ir/types.js";
 import {
   canonicalUndefinedExternInstrs,
   ensureExternSameValueZeroHelper,
   ensureExternStrictEqHelper,
   undefinedExternInstrs,
 } from "./any-helpers.js";
-import { buildClosureRefTestArms } from "./closure-classifier.js"; // (#3125) IsCallable arms
+import { collectClosureBaseWrapperTypeIdxs } from "./closure-classifier.js"; // (#3125) IsCallable arms
 import type { CodegenContext, OptionalParamInfo } from "./context/types.js";
 import { classMemberFuncKey } from "./class-member-keys.js";
+import {
+  DYN_ARRAY_PRODUCER_METHODS,
+  ensureNativeArrayProducer,
+  isDynArrayProducerForm,
+} from "./dyn-array-producers.js"; // (#6447)
 import { ensureNativeArrayHof, NATIVE_HOF_METHODS } from "./hof-native.js";
-import { COLLECTION_KIND, ensureMapHelpers, MAP_LAYOUT } from "./map-runtime.js"; // (#3309) $Map brand arm
+import { taDynDetachedGuardInstrs } from "./ta-dyn-method-call.js"; // (#1645 S1) detached-view ValidateTypedArray prologue
+import { COLLECTION_KIND } from "./collection-kind.js"; // (#6419) import-free leaf — map-runtime.js is in an import cycle
+import { ensureMapHelpers, MAP_LAYOUT } from "./map-runtime.js"; // (#3309) $Map brand arm
 import { ensureSetHelpers } from "./set-runtime.js"; // (#3309) __set_add for the `add` arm
 import { ensureNativeIterHof, isIterHofForm, NATIVE_ITER_HOF_METHODS } from "./iter-hof-native.js"; // (#2903)
 import { ensureNativeLazyIter, isLazyIterForm, LAZY_ITER_ARG2_METHODS, LAZY_ITER_METHODS } from "./iter-lazy-native.js"; // (#2903 R3)
@@ -63,10 +72,16 @@ import { CLOSURE_ARITY_FIELD_IDX, getFuncRefWrapperRootTypeIdx } from "./closure
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2 read chokepoint / S3b stable-regime minting)
 import { wrapClosureCallFastArm } from "./closure-call-fast.js"; // (#4185) closure-receiver fast `.call` arm
 import { buildFnctorArrayHofTargetTest } from "./fnctor-array-prototype.js";
-import { resolveVecHostBridgeHelper } from "./vec-access-exports.js";
+import { reserveVecMethodHelper, resolveVecHostBridgeHelper } from "./vec-access-exports.js";
 import { ensureLateImport } from "./expressions/late-imports.js";
 import { defaultValueInstrs } from "./type-coercion.js";
+// (#5383 S2g) The externref-argument marshalling this file used to own inline;
+// `standalone-class-construct.ts` is the second caller.
+import { buildCoerceIdxs, type CoerceIdxs, externArgCoercionInstrs, resultBoxingInstrs } from "./extern-arg-marshal.js";
 import { closedDispatchGuardsOwnSlot } from "./expressions/own-property-method-shadow.js";
+import { classArmClaimInstrs } from "./class-arm-tag-guard.js"; // (#6608) nominal `__tag` arm guard
+import { arraySubclassOwnMethodShadowTest } from "./array-subclass-receiver.js"; // (#2917)
+import { standaloneDispatchArityPads } from "./zero-arg-method-pad.js"; // (#6693) JS call arity
 
 /**
  * (#2583) The callback-free, argument-taking array search/predicate methods
@@ -380,9 +395,30 @@ export function reserveClosedMethodDispatch(ctx: CodegenContext, methodName: str
   // `__extern_get_idx` vec/array-like arms the loop reads through are emitted
   // only under `ctx.standalone` (see `objArrayLikeArms` in object-runtime.ts —
   // same gate as the vararg dispatcher above).
-  if (ctx.standalone && NATIVE_HOF_METHODS.has(methodName) && arity >= 1) {
+  // (#6651 E-S1) Arity 0 is admitted too: `sample.every()` is `IsCallable(undefined)`
+  // → TypeError per §23.1.3.x step 3, and without the arm the zero-arg call fell
+  // to the open-`$Object` bottom arm, where `__extern_method_call` answers
+  // `undefined` for a vec brand — a normal return where the spec requires a
+  // throw (`<m>/callbackfn-{not-callable,is-not-callable}-throws.js`, the
+  // "no arg(s)" assertion). The arm passes the canonical `undefined` as the
+  // callback so the helper's own IsCallable gate raises the TypeError.
+  if (ctx.standalone && NATIVE_HOF_METHODS.has(methodName)) {
     getOrRegisterVecBaseType(ctx);
     ensureNativeArrayHof(ctx, methodName);
+  }
+
+  // (#6447) For the pure Array PRODUCER methods (`concat`/`sort`) emit the
+  // array-like-substrate helper `__arrprod_<name>` NOW (append-only defined
+  // funcs; the fill only READS funcMap — #1719) and register the `$__vec_base`
+  // supertype the fill's brand test needs. Without the arm a genuinely-`any`
+  // array receiver falls to the open-`$Object` bottom arm, and
+  // `__extern_method_call` answers `undefined` for a non-`$Object` brand by
+  // construction — which is how `n.concat(r, i)` came back undefined inside the
+  // compiled Temporal provider and took every property-bag entry point with it.
+  // Same shape and same gate as the #2927 mutator arm above. Standalone only.
+  if (ctx.standalone && DYN_ARRAY_PRODUCER_METHODS.has(methodName) && isDynArrayProducerForm(methodName, arity)) {
+    getOrRegisterVecBaseType(ctx);
+    ensureNativeArrayProducer(ctx, methodName);
   }
 
   // (#2903) For the EAGER Iterator-helper methods (find/every/some/forEach/
@@ -533,6 +569,8 @@ type MethodEntry = {
   optionalParams: OptionalParamInfo[];
   /** Host dynamic calls follow JavaScript's missing-argument semantics. */
   hostDynamic: boolean;
+  /** (#6693) Standalone stand-ins for omitted formals, by param index. */
+  absentPads: Map<number, Instr[]> | null;
 };
 
 /**
@@ -587,15 +625,18 @@ function collectMethodEntries(ctx: CodegenContext, methodName: string, exactArit
       if (!opt.hasExpressionDefault) return true; // constant default, or `?` with none
       return type?.kind === "f64"; // the one lane with an absence sentinel
     };
+    let absentPads: Map<number, Instr[]> | null = null;
     if (exactArity !== null) {
-      if (paramTypes.length < exactArity) continue;
-      if (!hostDynamic && paramTypes.slice(exactArity).some((type, i) => !canSynthesizeOmitted(exactArity + i, type))) {
-        continue;
-      }
+      const covered =
+        paramTypes.length >= exactArity &&
+        (hostDynamic || paramTypes.slice(exactArity).every((type, i) => canSynthesizeOmitted(exactArity + i, type)));
+      // (#6693) Standalone JS call arity: pad omitted formals, drop extras.
+      if (!covered) absentPads = standaloneDispatchArityPads(ctx, fullName, paramTypes, optionalParams, exactArity);
+      if (!covered && !absentPads) continue;
     }
     if (funcType.params.length < 1) continue;
     const resultType: ValType = funcType.results.length > 0 ? funcType.results[0]! : { kind: "externref" };
-    entries.push({ structName, typeIdx, funcIdx, paramTypes, resultType, optionalParams, hostDynamic });
+    entries.push({ structName, typeIdx, funcIdx, paramTypes, resultType, optionalParams, hostDynamic, absentPads });
   }
   return entries;
 }
@@ -638,71 +679,6 @@ function collectFieldEntries(ctx: CodegenContext, methodName: string): FieldEntr
   return entries;
 }
 
-/** Coerce helper funcIdxs, read once per fill pass (registered at reserve). */
-type CoerceIdxs = {
-  boxNumIdx?: number;
-  /** (#5241) `__box_boolean` — a boolean-returning method's `i32` result. */
-  boxBoolIdx?: number;
-  unboxNumIdx?: number;
-  unboxBoolIdx?: number;
-  undefinedIdx?: number;
-  /**
-   * (#5380) Lazy accessor for `__unbox_number_or_omitted` — see
-   * {@link ensureUnboxNumberOrOmitted}. A THUNK, not an index: the helper is
-   * minted only when an arm actually has a defaulted f64 formal, so a module
-   * without one emits exactly the bytes it did before.
-   */
-  unboxNumOrOmitted?: () => number | undefined;
-};
-
-/**
- * (#5380) Mint (once) `__unbox_number_or_omitted(externref) -> f64`: the plain
- * numeric unbox, except that an explicit host `undefined` becomes the
- * omitted-argument sNaN sentinel the callee's parameter prologue recognises.
- *
- * `f(undefined)` must run `f`'s default (§10.2.11 / FunctionDeclarationInstan-
- * tiation), and an f64 formal has no other way to carry "absent": a plain
- * unboxing `undefined` numerically yields a quiet NaN, indistinguishable from a real
- * `NaN` argument. The MISSING-argument arm of `buildEntryArm` already pushes
- * this sentinel; this is the same value for an argument that is present but
- * undefined.
- *
- * A helper FUNCTION rather than inline instructions because the arm's argument
- * may be produced by `__extern_get_idx` — evaluating it twice (once to test,
- * once to unbox) would both cost and, for an accessor-backed element, observe
- * the read twice. Returns `undefined` when either primitive is unavailable, so
- * the caller keeps its previous bytes.
- */
-function ensureUnboxNumberOrOmitted(ctx: CodegenContext, unboxIdx: number | undefined): number | undefined {
-  const existing = ctx.funcMap.get("__unbox_number_or_omitted");
-  if (existing !== undefined) return existing;
-  const isUndefIdx = ctx.funcMap.get("__extern_is_undefined");
-  if (unboxIdx === undefined || isUndefIdx === undefined) return undefined;
-  const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "f64" }], "$__unbox_number_or_omitted_type");
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.mod.functions.push({
-    name: "__unbox_number_or_omitted",
-    typeIdx,
-    locals: [],
-    body: [
-      { op: "local.get", index: 0 },
-      { op: "call", funcIdx: isUndefIdx },
-      {
-        op: "if",
-        blockType: { kind: "val", type: { kind: "f64" } },
-        then: [{ op: "i64.const", value: 0x7ff00000deadc0den }, { op: "f64.reinterpret_i64" }],
-        else: [
-          { op: "local.get", index: 0 },
-          { op: "call", funcIdx: unboxIdx },
-        ],
-      },
-    ],
-    exported: false,
-  } as WasmFunction);
-  ctx.funcMap.set("__unbox_number_or_omitted", funcIdx);
-  return funcIdx;
-}
-
 /**
  * Build one closed-struct call arm: cast recv→`this`, push each declared arg
  * (sourced via `pushArg(a)` — fixed dispatcher params OR `__extern_get_idx`),
@@ -716,8 +692,14 @@ function buildEntryArm(
   entry: MethodEntry,
   pushArg: (a: number) => Instr[],
   providedArity: number | null = null,
+  // (#6634 S49) True only for a (methodName, arity) dispatcher whose
+  // candidate entries mix a CLASS implementer with a NON-class one — see
+  // `ensureStructFromObjectCoercionHelper`'s doc comment for why that mix is
+  // exactly the shape whose call-site argument may arrive as an open
+  // `$Object` no arm's plain `ref.cast` can inhabit. Every other dispatcher
+  // keeps its previous bytes exactly.
+  allowObjectCoercion = false,
 ): Instr[] {
-  const { boxNumIdx, boxBoolIdx, unboxNumIdx, unboxBoolIdx } = ci;
   const arm: Instr[] = [
     { op: "local.get", index: anyLocalIdx },
     { op: "ref.cast", typeIdx: entry.typeIdx }, // `this`
@@ -727,7 +709,10 @@ function buildEntryArm(
     const missing = providedArity !== null && a >= providedArity;
     if (missing) {
       const opt = entry.optionalParams.find((candidate) => candidate.index === a);
-      if (entry.hostDynamic) {
+      const pad = entry.absentPads?.get(a);
+      if (pad) {
+        arm.push(...pad);
+      } else if (entry.hostDynamic) {
         if (want.kind === "externref" && ci.undefinedIdx !== undefined) {
           arm.push({ op: "call", funcIdx: ci.undefinedIdx });
         } else if (want.kind === "f64") {
@@ -753,54 +738,20 @@ function buildEntryArm(
       continue;
     }
     arm.push(...pushArg(a)); // the arg, as externref, onto the stack
-    if (want.kind === "f64") {
-      // (#5380) A PRESENT-but-undefined argument to a DEFAULTED f64 formal must
-      // still run the default; only that formal takes the sentinel-preserving
-      // unboxer, so every other numeric argument keeps its previous bytes.
-      const optionalHere = entry.optionalParams.some((candidate) => candidate.index === a);
-      const omittedAwareIdx = optionalHere ? ci.unboxNumOrOmitted?.() : undefined;
-      if (omittedAwareIdx !== undefined) arm.push({ op: "call", funcIdx: omittedAwareIdx });
-      else if (unboxNumIdx !== undefined) arm.push({ op: "call", funcIdx: unboxNumIdx });
-      else arm.push({ op: "drop" }, { op: "f64.const", value: 0 });
-    } else if (want.kind === "i32") {
-      if ((want as { boolean?: true }).boolean && unboxBoolIdx !== undefined) {
-        arm.push({ op: "call", funcIdx: unboxBoolIdx });
-      } else if (unboxNumIdx !== undefined) {
-        arm.push({ op: "call", funcIdx: unboxNumIdx });
-        arm.push({ op: "i32.trunc_sat_f64_s" });
-      } else {
-        arm.push({ op: "drop" }, { op: "i32.const", value: 0 });
-      }
-    } else if (want.kind === "ref" || want.kind === "ref_null") {
-      arm.push({ op: "any.convert_extern" });
-      arm.push({ op: "ref.cast", typeIdx: (want as { typeIdx: number }).typeIdx });
-    }
-    // externref param: already externref — no coercion.
+    // (#5380) A PRESENT-but-undefined argument to a DEFAULTED f64 formal must
+    // still run the default; only that formal takes the sentinel-preserving
+    // unboxer, so every other numeric argument keeps its previous bytes.
+    arm.push(
+      ...externArgCoercionInstrs(
+        ci,
+        want,
+        entry.optionalParams.some((candidate) => candidate.index === a),
+        allowObjectCoercion,
+      ),
+    );
   }
   arm.push({ op: "call", funcIdx: entry.funcIdx });
-  // Box-coerce the result back to externref.
-  if (entry.resultType.kind === "ref" || entry.resultType.kind === "ref_null") {
-    arm.push({ op: "extern.convert_any" });
-  } else if (entry.resultType.kind === "f64") {
-    if (boxNumIdx !== undefined) arm.push({ op: "call", funcIdx: boxNumIdx });
-    else arm.push({ op: "drop" }, { op: "ref.null.extern" });
-  } else if (entry.resultType.kind === "i32") {
-    // (#5241) A BOOLEAN return also lowers to `i32`, and the ValType carries
-    // the `boolean` marker the ARGUMENT coercion above already honours. Boxing
-    // it as a number answered `1`/`0` where the same call on a TYPED receiver
-    // answered `true`/`false` — measured on a plain class,
-    // `String(inst.bigger(0))` → `"1"` through this dispatcher, `"true"`
-    // direct. Pre-existing; it became reachable for more names once #5241
-    // stopped the extern-class hijack from consuming those calls first.
-    if ((entry.resultType as { boolean?: true }).boolean && boxBoolIdx !== undefined) {
-      arm.push({ op: "call", funcIdx: boxBoolIdx });
-    } else {
-      arm.push({ op: "f64.convert_i32_s" });
-      if (boxNumIdx !== undefined) arm.push({ op: "call", funcIdx: boxNumIdx });
-      else arm.push({ op: "drop" }, { op: "ref.null.extern" });
-    }
-  }
-  // externref result: no coercion.
+  arm.push(...resultBoxingInstrs(ci, entry.resultType));
   return arm;
 }
 
@@ -813,14 +764,7 @@ function buildEntryArm(
  */
 export function fillClosedMethodDispatch(ctx: CodegenContext): void {
   const mod = ctx.mod;
-  const ci: CoerceIdxs = {
-    boxNumIdx: ctx.funcMap.get("__box_number"),
-    boxBoolIdx: ctx.funcMap.get("__box_boolean"),
-    unboxNumIdx: ctx.funcMap.get("__unbox_number"),
-    unboxBoolIdx: ctx.funcMap.get("__unbox_boolean"),
-    undefinedIdx: ctx.funcMap.get("__get_undefined"),
-    unboxNumOrOmitted: () => ensureUnboxNumberOrOmitted(ctx, ci.unboxNumIdx),
-  };
+  const ci: CoerceIdxs = buildCoerceIdxs(ctx);
   const methodCallIdx = ctx.funcMap.get("__extern_method_call");
   const objVecNewIdx = ctx.funcMap.get(ctx.standalone || ctx.wasi ? "__objvec_new" : "__js_array_new");
   const objVecPushIdx = ctx.funcMap.get(ctx.standalone || ctx.wasi ? "__objvec_push" : "__js_array_push");
@@ -842,6 +786,13 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
     // local (arity+1) = the `any` temp.
     const anyLocalIdx = arity + 1;
     const entries = collectMethodEntries(ctx, methodName, arity);
+    // (#6634 S49) See `buildEntryArm`'s `allowObjectCoercion` param and
+    // `ensureStructFromObjectCoercionHelper`'s doc comment: only a dispatcher
+    // whose candidates mix a CLASS implementer with a non-class one can
+    // receive an argument the call site had no single struct to target, so
+    // only THAT dispatcher's arms opt into the object-to-struct fallback.
+    const mixedClassAndLiteralEntries =
+      entries.some((e) => ctx.classSet.has(e.structName)) && entries.some((e) => !ctx.classSet.has(e.structName));
 
     // Bottom arm: open-$Object fallback — build a $ObjVec of the fixed args.
     let current: Instr[];
@@ -1110,7 +1061,14 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
     // carrier through the fully-armed `__iterator_next` and materialize a REAL
     // §7.4.11 result object. Placed outermost: a user closed struct with its own
     // `next` is neither carrier, so the `ref.test` misses and precedence holds.
-    if (ctx.standalone && methodName === "next" && arity === 0) {
+    // (#6484 S3 review) `ctx.wasi` joined the gate. WASI is the other no-JS-host
+    // lane and builds the same `$IterRec` carriers, but this arm was
+    // `ctx.standalone`-only, so `it.next()` on a typed-array iterator fell to
+    // `__extern_method_call` and threw `next is not a function` under
+    // `--target wasi` while standalone answered correctly. Map/Set hid the gap:
+    // map-runtime.ts prepends its OWN `$__IterRec.next()` arm to
+    // `__extern_method_call`, so only the vec carriers were exposed.
+    if ((ctx.standalone || ctx.wasi) && methodName === "next" && arity === 0) {
       const stepResultIdx = ctx.funcMap.get("__iter_next_result");
       const carrierTypeIdxs = [ctx.structMap.get("__IterRec"), ctx.structMap.get("$LazyIterHelper")].filter(
         (t): t is number => t !== undefined,
@@ -1451,13 +1409,37 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
     // never fires standalone). Route to the carrier-generic `__vec_push` /
     // `__vec_pop` helpers (reserved at reserve-time; body filled in the finalize
     // vec-export pass).
-    const vecPushIdx = resolveVecHostBridgeHelper(ctx, "push");
-    const vecPopIdx = resolveVecHostBridgeHelper(ctx, "pop");
     const wantVecMutArm =
       (ctx.standalone || ctx.wasi) &&
       VEC_MUTATE_METHODS.has(methodName) &&
       isVecMutateForm(methodName, arity) &&
       ctx.vecBaseTypeIdx >= 0;
+    // (#5383 S2n) RESOLVE-OR-RESERVE, not resolve. The bridge allocation is
+    // made by `emitVecAccessExports`, and the two generate entry points call
+    // that at OPPOSITE SIDES of this fill: `generateModule` before it,
+    // `generateMultiModule` after it. So a plain resolve answers a handle in a
+    // single-module compile and `undefined` in a multi-module one — the arm was
+    // silently dropped for every multi-module standalone/wasi program, which is
+    // the #2927 data-loss bug re-opened (measured: `this.pop()` inside a
+    // `class X extends Array` method returned `undefined` and mutated nothing,
+    // so JSBI's `__trim` never trimmed, `JSBI.subtract(x, x)` answered 2^29
+    // instead of 0, and `Temporal.Duration.from({hours:1}).total("minutes")`
+    // answered NaN through the compiled polyfill).
+    //
+    // Reserving here makes the arm ORDER-INDEPENDENT rather than reordering the
+    // finalize passes. It is byte-neutral for the lane that already worked: in
+    // a single-module compile the resolve succeeds and the reserve never runs,
+    // and the whole block is gated on standalone/wasi, so the gc lane is
+    // untouched. `reserveVecMethodHelper` also sets `usesVecValue`, which is
+    // what makes the finalize vec-export pass fill the placeholder bodies the
+    // arm calls into.
+    const resolveOrReserveVecHelper = (kind: "push" | "pop"): FuncHandle | undefined => {
+      const resolved = resolveVecHostBridgeHelper(ctx, kind);
+      if (resolved !== undefined || !wantVecMutArm) return resolved;
+      return reserveVecMethodHelper(ctx, kind);
+    };
+    const vecPushIdx = resolveOrReserveVecHelper("push");
+    const vecPopIdx = resolveOrReserveVecHelper("pop");
     if (wantVecMutArm) {
       let mutArmBody: Instr[] | undefined;
       if (methodName === "push" && vecPushIdx !== undefined && ci.boxNumIdx !== undefined) {
@@ -1502,10 +1484,51 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
         current = [
           { op: "local.get", index: anyLocalIdx },
           { op: "ref.test", typeIdx: ctx.vecBaseTypeIdx },
+          ...arraySubclassOwnMethodShadowTest(ctx, methodName),
           {
             op: "if",
             blockType: { kind: "val", type: { kind: "externref" } },
             then: mutArmBody,
+            else: current,
+          },
+        ];
+      }
+    }
+
+    // (#6447) `$__vec_base` brand arm for the pure Array PRODUCER methods
+    // (`concat` any arity, `sort` arity 0/1). The twin of the #2927 mutator arm
+    // directly above, for the same reason and with the same guard: a
+    // genuinely-`any` array receiver is a `$__vec_base`-subtyped struct that
+    // matches no `entries` arm, and the open-`$Object` bottom arm's
+    // `__extern_method_call` returns `undefined` for every non-`$Object` brand
+    // (its own comment says so). The helper was minted at reserve time; this
+    // only READS funcMap (#1719).
+    //
+    // `$ObjVec` subtypes `$__vec_base`, so one `ref.test` admits BOTH the
+    // concrete `__vec_<k>` carriers and the dynamic boxed-any carrier that
+    // `concat`/`map`/`Object.keys` themselves produce — which is what makes
+    // `n.concat(r, i).sort()` work end-to-end rather than only its first half.
+    if (
+      ctx.standalone &&
+      DYN_ARRAY_PRODUCER_METHODS.has(methodName) &&
+      isDynArrayProducerForm(methodName, arity) &&
+      ctx.vecBaseTypeIdx >= 0 &&
+      objVecNewIdx !== undefined
+    ) {
+      const producerIdx = ctx.funcMap.get(`__arrprod_${methodName}`);
+      if (producerIdx !== undefined) {
+        current = [
+          { op: "local.get", index: anyLocalIdx },
+          { op: "ref.test", typeIdx: ctx.vecBaseTypeIdx },
+          ...arraySubclassOwnMethodShadowTest(ctx, methodName), // (#6683)
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "externref" } },
+            then: [
+              { op: "local.get", index: 0 },
+              ...buildFixedArgVec(arity, anyLocalIdx + 1, objVecNewIdx, objVecPushIdx),
+              { op: "call", funcIdx: producerIdx },
+            ],
             else: current,
           },
         ];
@@ -1650,17 +1673,13 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
     {
       const hofFuncIdx = ctx.funcMap.get(`__hof_${methodName}`);
       const objVecTypeIdx = ctx.objectRuntimeTypes?.objVecTypeIdx;
-      if (
-        ctx.standalone &&
-        arity >= 1 &&
-        hofFuncIdx !== undefined &&
-        ctx.vecBaseTypeIdx >= 0 &&
-        objVecTypeIdx !== undefined
-      ) {
+      if (ctx.standalone && hofFuncIdx !== undefined && ctx.vecBaseTypeIdx >= 0 && objVecTypeIdx !== undefined) {
         const isReduceForm = methodName === "reduce" || methodName === "reduceRight";
         const hofCall: Instr[] = [
           { op: "local.get", index: 0 }, // recv (externref)
-          { op: "local.get", index: 1 }, // cb
+          // (#6651 E-S1) arity 0 has no `cb` param to read — feed the canonical
+          // `undefined` so the helper's IsCallable gate throws the TypeError.
+          ...((arity >= 1 ? [{ op: "local.get", index: 1 }] : canonicalUndefinedExternInstrs(ctx)) satisfies Instr[]),
           ...((arity >= 2 ? [{ op: "local.get", index: 2 }] : [{ op: "ref.null.extern" }]) satisfies Instr[]), // thisArg | init
           ...((isReduceForm ? [{ op: "i32.const", value: arity >= 2 ? 1 : 0 }] : []) satisfies Instr[]), // hasInit
           { op: "call", funcIdx: hofFuncIdx },
@@ -1718,18 +1737,22 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
     // Dispatch `.test(subject)` by the runtime `$NativeRegExp` brand, not by
     // the first ambient extern class named `test`. User closed-struct methods
     // are wrapped outside this arm below and therefore retain precedence.
+    // (#6672) `.exec(subject)` takes the same brand arm into
+    // `__regexp_exec_carrier` (regexp-exec-carrier.ts), whose result is already
+    // the externref match array / null — so no boxing call follows it.
     let wrapNativeRegExpTest: ((fallback: Instr[]) => Instr[]) | undefined;
     {
       const regexpTypeIdx = ctx.structMap.get("__StandaloneRegExp");
-      const regexpTestIdx = ctx.funcMap.get("__regexp_test_carrier");
+      const isExec = methodName === "exec";
+      const regexpTestIdx = ctx.funcMap.get(isExec ? "__regexp_exec_carrier" : "__regexp_test_carrier");
       const boxBoolIdx = ctx.funcMap.get("__box_boolean");
       if (
         ctx.standalone &&
-        methodName === "test" &&
+        (methodName === "test" || isExec) &&
         arity === 1 &&
         regexpTypeIdx !== undefined &&
         regexpTestIdx !== undefined &&
-        boxBoolIdx !== undefined
+        (isExec || boxBoolIdx !== undefined)
       ) {
         wrapNativeRegExpTest = (fallback: Instr[]): Instr[] => [
           { op: "local.get", index: anyLocalIdx },
@@ -1741,7 +1764,7 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
               { op: "local.get", index: 0 },
               { op: "local.get", index: 1 },
               { op: "call", funcIdx: regexpTestIdx },
-              { op: "call", funcIdx: boxBoolIdx },
+              ...(isExec ? [] : [{ op: "call", funcIdx: boxBoolIdx! } as Instr]),
             ],
             else: fallback,
           },
@@ -1807,7 +1830,14 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
     }
 
     for (const entry of entries) {
-      const callAndCoerce = buildEntryArm(ci, anyLocalIdx, entry, (a) => [{ op: "local.get", index: 1 + a }], arity);
+      const callAndCoerce = buildEntryArm(
+        ci,
+        anyLocalIdx,
+        entry,
+        (a) => [{ op: "local.get", index: 1 + a }],
+        arity,
+        mixedClassAndLiteralEntries,
+      );
       // An own property installed at runtime beats this class's prototype
       // method for THIS receiver (marked's `use()` hooks). Only user classes,
       // only names the reserve saw a callable member write for; object-literal
@@ -1838,8 +1868,10 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
             ] satisfies Instr[])
           : callAndCoerce;
       current = [
-        { op: "local.get", index: anyLocalIdx },
-        { op: "ref.test", typeIdx: entry.typeIdx },
+        // (#6608) NOMINAL claim: `ref.test` alone is structural, and every
+        // same-shaped class in the ladder passes it — so the outermost arm ran
+        // for every receiver. Byte-identical when no layout collides.
+        ...classArmClaimInstrs(ctx, entry.structName, entry.typeIdx, anyLocalIdx),
         { op: "if", blockType: { kind: "val", type: { kind: "externref" } }, then: armBodyForEntry, else: current },
       ];
     }
@@ -1867,12 +1899,25 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
       for (const instr of mcPatchInstrs) (instr as { index: number }).index = mResLocal;
     }
 
+    // (#1645 S1) §23.2.4.4 step 5 — a detached dyn view throws TypeError before
+    // ANY arm below observes it. It has to sit here, not on one of the arms: a
+    // `$__ta_dyn_view` is a `$__vec_base` subtype, so the generic vec arm claims
+    // it for every method with no `__ta_dyn_<m>` helper (`some`, `forEach`,
+    // `sort`, `find`, …) and answers from the view's post-detach length of 0 —
+    // i.e. returns normally where the spec requires a throw.
+    const taDynDetached = taDynDetachedGuardInstrs(ctx, methodName, anyLocalIdx, (name, type) => {
+      const idx = arity + 1 + locals.length;
+      locals.push({ name, type });
+      return idx;
+    });
+
     dispFn.locals = locals;
     dispFn.body = [
       ...nullishReceiverGuardInstrs(ctx, methodName),
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
       { op: "local.set", index: anyLocalIdx },
+      ...taDynDetached,
       ...current,
     ];
     void (dispFn as WasmFunction);
@@ -1954,11 +1999,18 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
             ])
           : current;
       current = [
-        { op: "local.get", index: anyLocalIdx },
-        { op: "ref.test", typeIdx: entry.typeIdx },
+        // (#6608) Same nominal claim as the fixed-arity ladder above.
+        ...classArmClaimInstrs(ctx, entry.structName, entry.typeIdx, anyLocalIdx),
         { op: "if", blockType: { kind: "val", type: { kind: "externref" } }, then: callAndCoerce, else: current },
       ];
     }
+
+    // (#1645 S1) Same §23.2.4.4 step-5 prologue as the fixed-arity fill above.
+    const taDynDetachedVararg = taDynDetachedGuardInstrs(ctx, methodName, anyLocalIdx, (name, type) => {
+      const idx = anyLocalIdx + varargLocals.length;
+      varargLocals.push({ name, type });
+      return idx;
+    });
 
     dispFn.locals = varargLocals;
     dispFn.body = [
@@ -1966,6 +2018,7 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
       { op: "local.set", index: anyLocalIdx },
+      ...taDynDetachedVararg,
       ...current,
     ];
     void (dispFn as WasmFunction);
@@ -2005,205 +2058,48 @@ export function fillPromiseThenableHelpers(ctx: CodegenContext): void {
   const predFn = definedFuncAt(ctx, predIdx);
   if (!predFn) return;
 
-  // ── `__promise_peel_value(value) -> externref` ─────────────────────────
-  // Unwrap an `$AnyValue`-boxed resolution so the predicate / thenable-job
-  // dispatch `ref.test` the RAW payload: tag 6 → refval (the GC object),
-  // tag 5 → externval (string OR tag-5-carried object — the classifier arms
-  // below reject non-objects anyway), every other tag / non-box → unchanged.
-  // Left as the identity placeholder when `$AnyValue` was never registered.
   const peelIdx = ctx.funcMap.get("__promise_peel_value");
   const peelFn = peelIdx !== undefined ? definedFuncAt(ctx, peelIdx) : undefined;
-  const anyValueTypeIdx = ctx.anyValueTypeIdx;
-  if (peelFn && anyValueTypeIdx >= 0) {
-    // $AnyValue field layout (ensureAnyValueType): 0 tag · 3 refval · 4 externval.
-    const AV_TAG = 0;
-    const AV_REF = 3;
-    const AV_EXT = 4;
-    const peelAnyLocal = 1;
-    peelFn.locals = [{ name: "__any", type: { kind: "anyref" } }];
-    peelFn.body = [
-      { op: "local.get", index: 0 },
-      { op: "ref.is_null" },
-      {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [{ op: "local.get", index: 0 }, { op: "return" }],
-      },
-      { op: "local.get", index: 0 },
-      { op: "any.convert_extern" },
-      { op: "local.set", index: peelAnyLocal },
-      { op: "local.get", index: peelAnyLocal },
-      { op: "ref.test", typeIdx: anyValueTypeIdx },
-      {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [
-          // tag 6 (object) → extern.convert_any(refval)
-          { op: "local.get", index: peelAnyLocal },
-          { op: "ref.cast", typeIdx: anyValueTypeIdx },
-          { op: "struct.get", typeIdx: anyValueTypeIdx, fieldIdx: AV_TAG },
-          { op: "i32.const", value: 6 },
-          { op: "i32.eq" },
-          {
-            op: "if",
-            blockType: { kind: "empty" },
-            then: [
-              { op: "local.get", index: peelAnyLocal },
-              { op: "ref.cast", typeIdx: anyValueTypeIdx },
-              { op: "struct.get", typeIdx: anyValueTypeIdx, fieldIdx: AV_REF },
-              { op: "extern.convert_any" },
-              { op: "return" },
-            ],
-          },
-          // tag 5 (string/extern payload) → externval
-          { op: "local.get", index: peelAnyLocal },
-          { op: "ref.cast", typeIdx: anyValueTypeIdx },
-          { op: "struct.get", typeIdx: anyValueTypeIdx, fieldIdx: AV_TAG },
-          { op: "i32.const", value: 5 },
-          { op: "i32.eq" },
-          {
-            op: "if",
-            blockType: { kind: "empty" },
-            then: [
-              { op: "local.get", index: peelAnyLocal },
-              { op: "ref.cast", typeIdx: anyValueTypeIdx },
-              { op: "struct.get", typeIdx: anyValueTypeIdx, fieldIdx: AV_EXT },
-              { op: "return" },
-            ],
-          },
-        ],
-      },
-      { op: "local.get", index: 0 },
-    ];
-  }
-
-  // ── `__promise_has_callable_then(value) -> i32` ────────────────────────
-  const peeledLocalIdx = 1; // param 0 = value externref
-  const anyLocalIdx = 2;
-  const thenAnyLocalIdx = 3;
-  const body: Instr[] = [
-    // peeled = __promise_peel_value(value) — classify the RAW payload.
-    { op: "local.get", index: 0 },
-    ...((peelIdx !== undefined ? [{ op: "call", funcIdx: peelIdx }] : []) satisfies Instr[]),
-    { op: "local.set", index: peeledLocalIdx },
-    // null externref (JS null / absent) → not a thenable.
-    { op: "local.get", index: peeledLocalIdx },
-    { op: "ref.is_null" },
-    {
-      op: "if",
-      blockType: { kind: "empty" },
-      then: [{ op: "i32.const", value: 0 }, { op: "return" }],
-    },
-    { op: "local.get", index: peeledLocalIdx },
-    { op: "any.convert_extern" },
-    { op: "local.set", index: anyLocalIdx },
-  ];
-
-  // Shared tail: test the externref left on the stack against the closure
-  // base wrappers; 1 on a hit, else 0.
-  const closureTest = (loadThen: Instr[]): Instr[] => [
-    ...loadThen,
-    { op: "any.convert_extern" },
-    { op: "local.set", index: thenAnyLocalIdx },
-    ...buildClosureRefTestArms(ctx, thenAnyLocalIdx, [{ op: "i32.const", value: 1 }, { op: "return" }]),
-    { op: "i32.const", value: 0 },
-    { op: "return" },
-  ];
-
-  // Closed-struct METHOD arms — a compiled `then` method is always callable.
-  const seenMethodType = new Set<number>();
-  for (const entry of collectMethodEntries(ctx, "then", null)) {
-    if (seenMethodType.has(entry.typeIdx)) continue;
-    seenMethodType.add(entry.typeIdx);
-    body.push({ op: "local.get", index: anyLocalIdx });
-    body.push({ op: "ref.test", typeIdx: entry.typeIdx });
-    body.push({
-      op: "if",
-      blockType: { kind: "empty" },
-      then: [{ op: "i32.const", value: 1 }, { op: "return" }],
+  if (peelFn && ctx.anyValueTypeIdx >= 0) {
+    const peel = buildPromisePeelValue({
+      typeIdx: ctx.anyValueTypeIdx,
+      tagFieldIdx: 0,
+      refFieldIdx: 3,
+      externFieldIdx: 4,
     });
+    peelFn.locals = peel.locals;
+    peelFn.body = peel.body;
   }
-
-  // Closed-struct ACCESSOR arms (#1888 S5c) — MUST run BEFORE the field arms:
-  // `Object.defineProperty(o, 'then', {get})` on a closed-struct target stores
-  // the getter closure in a per-(struct,prop) module GLOBAL
-  // (`ctx.structAccessorClosure`), invisible to `__extern_get` — while the
-  // struct may ALSO carry a pre-shaped (runtime-null) `then` FIELD that would
-  // wrongly classify it non-thenable if tested first. Spec Get REQUIRES running
-  // the getter here — a poisoned getter must throw OUT of this predicate
-  // (resolve-poisoned-then), and a returned closure classifies the value as a
-  // thenable. A runtime-null getter global (define-site never executed) falls
-  // through to the field/$Object arms below.
+  // Collect at the original finalization point, after all wrapper registrations.
+  const methodTypeIdxs = collectMethodEntries(ctx, "then", null).map((entry) => entry.typeIdx);
   const callAccessorGetIdx = ctx.funcMap.get("__call_accessor_get");
+  const accessors: { typeIdx: number; getGlobal: number }[] = [];
   if (callAccessorGetIdx !== undefined) {
     for (const [key, entry] of ctx.structAccessorClosure) {
       if (!key.endsWith("_then") || entry.getGlobal === undefined) continue;
-      const structName = key.slice(0, -"_then".length);
-      const structTypeIdx = ctx.structMap.get(structName);
-      if (structTypeIdx === undefined) continue;
-      body.push({ op: "local.get", index: anyLocalIdx });
-      body.push({ op: "ref.test", typeIdx: structTypeIdx });
-      body.push({
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [
-          { op: "global.get", index: entry.getGlobal },
-          { op: "ref.is_null" },
-          { op: "i32.eqz" },
-          {
-            op: "if",
-            blockType: { kind: "empty" },
-            then: closureTest([
-              // then = getter.call(value) — §7.3.2 GetV via the S5b driver.
-              { op: "local.get", index: peeledLocalIdx },
-              { op: "global.get", index: entry.getGlobal },
-              { op: "call", funcIdx: callAccessorGetIdx },
-            ]),
-          },
-        ],
-      });
+      const typeIdx = ctx.structMap.get(key.slice(0, -"_then".length));
+      if (typeIdx !== undefined) accessors.push({ typeIdx, getGlobal: entry.getGlobal });
     }
   }
-
-  // Closed-struct FIELD arms — `{ then: <value> }`: callable iff the stored
-  // value is a closure.
-  for (const fe of collectFieldEntries(ctx, "then")) {
-    body.push({ op: "local.get", index: anyLocalIdx });
-    body.push({ op: "ref.test", typeIdx: fe.typeIdx });
-    body.push({
-      op: "if",
-      blockType: { kind: "empty" },
-      then: closureTest([
-        { op: "local.get", index: anyLocalIdx },
-        { op: "ref.cast", typeIdx: fe.typeIdx },
-        { op: "struct.get", typeIdx: fe.typeIdx, fieldIdx: fe.fieldIdx },
-      ]),
-    });
-  }
-
-  // Open `$Object` arm — spec Get (runs accessors; a poisoned getter throws
-  // OUT of this predicate) + closure test.
+  const fields = collectFieldEntries(ctx, "then");
   const externGetIdx = ctx.funcMap.get("__extern_get");
   const objectTypeIdx = ctx.objectRuntimeTypes?.objectTypeIdx;
-  if (externGetIdx !== undefined && objectTypeIdx !== undefined) {
-    body.push({ op: "local.get", index: anyLocalIdx });
-    body.push({ op: "ref.test", typeIdx: objectTypeIdx });
-    body.push({
-      op: "if",
-      blockType: { kind: "empty" },
-      then: closureTest([
-        { op: "local.get", index: peeledLocalIdx },
-        ...stringConstantExternrefInstrs(ctx, "then"),
-        { op: "call", funcIdx: externGetIdx },
-      ]),
-    });
-  }
-
-  body.push({ op: "i32.const", value: 0 });
-  predFn.locals = [
-    { name: "__peeled", type: { kind: "externref" } },
-    { name: "__any", type: { kind: "anyref" } },
-    { name: "__thenAny", type: { kind: "anyref" } },
-  ];
-  predFn.body = body;
+  const inventory = {
+    finalized: true as const,
+    peelFuncIdx: peelIdx,
+    methodTypeIdxs,
+    accessors,
+    callAccessorGetIdx,
+    fields,
+    closureWrapperTypeIdxs: collectClosureBaseWrapperTypeIdxs(ctx),
+    openObject:
+      externGetIdx !== undefined && objectTypeIdx !== undefined
+        ? {
+            typeIdx: objectTypeIdx,
+            externGetFuncIdx: externGetIdx,
+            thenStringInstrs: stringConstantExternrefInstrs(ctx, "then"),
+          }
+        : null,
+  };
+  finalizePromiseThenableLookup(ctx, predFn, inventory);
 }

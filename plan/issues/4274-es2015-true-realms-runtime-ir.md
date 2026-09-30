@@ -4,12 +4,12 @@ title: "ES2015 true realms: replace `$262.createRealm` pseudo-realm with IR/runt
 status: ready
 sprint: current
 created: 2026-08-09
-updated: 2026-08-09
+updated: 2026-09-20
 priority: high
 horizon: xl
 feasibility: hard
 reasoning_effort: max
-model: gpt-5.6-sol
+model: gpt-5.6-terra
 task_type: feature
 area: ir, runtime, test-runner
 language_feature: cross-realm
@@ -23,6 +23,119 @@ origin: "2026-08-09 exact-ES2015 cross-realm feature cohort: GC 128/128 non-pass
 ---
 
 # #4274 — Give `$262.createRealm()` real realm identity
+
+## 2026-09-20 measured Symbol-realm handoff
+
+The two official ES2015 originals `built-ins/Symbol/for/cross-realm.js`
+and `built-ins/Symbol/keyFor/cross-realm.js` were rerun on upstream
+`62221769a87acdc32759c656702eede64936feb5` and the isolated #5269
+description-coercion candidate. Both runs finish **0 pass / 2 fail** with
+`TypeError: Cannot read properties of undefined (reading 'for')` when using
+the foreign `OSymbol`. This is an existing failure, not a regression attributed
+to the description patch. Manifest SHA-256:
+`2a4648073a41b6739f26bd5f72f72a09a419e9a14d796452eed8fc3bc55c7680`.
+
+Both worktrees independently built and canary-verified their QuickJS adapters
+through `scripts/build-quickjs-eval-provider.mjs`; the pinned artifact key is
+`2e2d7736713beeda`, artifact SHA-256
+`073742801ba76347371be277f6d275488badce1df6bfb480741548ec2a279d45`.
+The earlier missing-provider errors are superseded by these measured runtime
+failures. Exact terminal logs:
+
+- `/private/tmp/js2-5269-symbol-matched-base-terra-20260920-crossrealm-baseline-20260920.log`
+- `/private/tmp/js2-5269-symbol-controls-terra-20260920-crossrealm-candidate-20260920.log`
+
+**Current harness attribution:** `run-test262-paths.mts --isolate --standalone`
+calls `runTest262File`, which assembles the original harness through
+`tests/test262-original-harness.ts::harnessSourceParts`. That route prepends
+`scripts/test262-fyi-runtime.js`, whose `createRealm` currently forwards
+`Symbol: globalThis.Symbol`. The empty `createRealm` stub in the deprecated
+`wrapTest` path is not the cause demonstrated by this run. The exact lowering
+that exposes the forwarded Symbol as undefined remains to be isolated.
+
+Next implementation plan, subject to the existing IR coordination hold:
+
+1. Reproduce the two originals plus direct `globalThis.Symbol` and returned
+   realm-global property controls, preserving the authoritative harness route.
+2. Trace the failed global/property lowering separately from realm identity.
+   Repairing undefined exposure alone cannot satisfy the originals: they also
+   require distinct foreign `Symbol.for`/`Symbol.keyFor` function identities.
+3. Implement realm-local intrinsic facades with the existing planned explicit
+   realm carrier and shared agent-level Symbol registry. Do not make the tests
+   appear green by aliasing the current realm's Symbol namespace or weakening
+   their identity assertions.
+4. Rerun the frozen realm cohorts and ordinary current-realm Symbol controls;
+   record exact per-file deltas. These two rows do not update the historical
+   128/129-row cohort totals below.
+
+This is a documentation handoff, not a new implementation claim or permission
+to modify the parallel machine's IR migration.
+
+## 2026-09-13 redispatch plan
+
+**Coordination hold:** the user identified a parallel IR-migration session.
+Do not claim or start this prepared-IR/runtime implementation until its active
+owner agrees on boundaries and landing order. The older app task titled
+`IR migration` confirmed it has handed off and cannot certify its successor's
+reservations. This is queued design work, not an active implementation claim.
+
+The canonical standalone baseline produced at
+`e0023dbbe6c37e15c1f56ed0c8bc8d15d0afbac3` (JSONL SHA-256
+`07c89a5c2626f3312ff611f008a69ed6d8826e9802da024df39726ddabc1e9ba`)
+contains 129 official ES2015 files whose original source calls
+`$262.createRealm`: 25 pass, 103 fail, and one compile error. This source-call
+selection has been reconciled against the historical 128-file feature cohort.
+The tagged cohort retains exactly the historical manifest hash below and now
+has 25 pass, 102 fail, and one compile error. The sole additional source-call
+file is `test/built-ins/Proxy/revocable/tco-fn-realm.js` (fail). The sorted
+129-path source-call manifest, using `test/` prefixes and a final newline, has
+SHA-256 `6fd14b2192e62853ae0c039b2efdd9e72c23c2e7bf43a917f4e7677f89e4b7a6`.
+Retain both exact manifests; do not silently change the acceptance population.
+The 104 nonpasses include 24 Proxy, 13 Function, 13 Symbol, ten Array, eight
+RegExp, and six NativeErrors rows. These are overlapping family symptoms;
+they do not establish that one realm change fixes all 104.
+
+The existing claim was released; the 2026-09-13 live check found no active
+owner. Keep the issue ready until a worker claims the first implementation
+slice. Implement with Terra Max in an isolated worktree per user routing.
+
+The next predispatch read at upstream
+`e06f76745bb0008550d17df3c0c0dae35bed6c01` again found no active claim
+(the old claim remains released) and no open PR matching issue 4274.
+PR #5841 is open at `4a0f8a92c279a903e15762a77c9cc23cd5211c23` and
+PR #5847 is open at `c0ca1a551012bc78ff491dae66068227e82c1bde`.
+They own current-global/provider outlining and accessor population, not
+distinct foreign-realm identity. Both touch context, index, registry, and
+link-boundary modules; #5847 adds `native-globalthis-outline.ts`. Coordinate
+those shared integration seams and keep the realm carrier in a separate
+owner module. This read is not a claim or authorization to overwrite either
+PR's implementation; recheck ownership when a worker actually starts.
+
+Before implementing, reproduce two realm-identity failures and passing
+controls using the maintained runner. Re-ground the explicit realm-carrier
+and prepared-IR design below against current compiler/runtime ownership.
+Deliver the carrier and identity controls first, then independently measured
+constructor/prototype and shared-Symbol-registry behavior. Do not replace
+foreign intrinsics with current-realm aliases or weaken the harness oracle.
+Audit open global-realm/Temporal seed PRs #5847 and #5841 for ownership overlap;
+their provider initialization work is not this separate cross-realm identity
+implementation. Each finished slice needs an upstream PR and recorded exact
+before/after rows, while the full issue remains open until all criteria pass.
+
+Source ownership was rechecked at the pinned baseline before redispatch:
+`tests/test262-runner.ts` still emits an empty self-referential realm global.
+`src/codegen/property-access-dispatch.ts::tryConstructorPrototypeIdentity`
+still aliases the foreign TypedArray prototype shape to current-realm
+singletons. Also audit
+`src/codegen/proxy-value-provenance.ts::isRealmGlobalExpression`: it treats a
+`.global` read from a method named `createRealm` as native Proxy provenance.
+This additional shortcut means a passing Proxy construction row does not
+prove foreign constructor or error-realm identity. Preserve its ordinary
+Proxy behavior when replacing the alias with real realm provenance; include
+an unrelated user-defined `createRealm` method as a negative provenance
+control. Existing canonical-global plumbing serves the current realm and
+must not be mistaken for a multi-realm carrier merely because its name
+contains `realm`.
 
 ## Exact impact
 

@@ -51,10 +51,16 @@ export function projectIrBackendTargetProfile(
   profile: CompileTargetProfile,
   options: { readonly fast?: boolean } = {},
 ): IrBackendTargetProfile {
+  // (#5385) The IR asks a SEMANTIC question here ("which provider regime lowers
+  // this?"), not an environment one. A JS-environment build under the
+  // native-first policy lowers with the standalone regime and never receives
+  // an implicit host semantic import, so it projects exactly like standalone.
+  const nativeRegimeInJs = profile.nativeRegime && profile.target === "gc";
   return Object.freeze({
     backend: profile.backend,
-    target: profile.target,
-    allowHostImports: profile.environment === "javascript" && profile.capabilityPolicy === "ambient-js",
+    target: nativeRegimeInJs ? "standalone" : profile.target,
+    allowHostImports:
+      profile.environment === "javascript" && profile.capabilityPolicy === "ambient-js" && !nativeRegimeInJs,
     fast: options.fast,
   });
 }
@@ -483,6 +489,10 @@ function porfforBinopLegal(op: IrBinop): boolean {
 }
 
 function backendTypeError(backend: IrBackendKind, type: IrType, fnctorResolved = false): string | null {
+  // This backend-only checker cannot confer target/program support ownership.
+  // The complete program admission separately requires standalone support.
+  if (type.kind === "support-ref")
+    return backend === "wasmgc" ? null : `${backend} backend does not support support-ref types`;
   if (type.kind === "fnctor" && !fnctorResolved) {
     return `${backend} backend does not support nominal fnctor types until an explicit ABI resolver is installed`;
   }

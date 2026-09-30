@@ -571,3 +571,111 @@ isolated worktrees) on the Temporal goal. The owner's direction at ~14:00 UTC:
   — suspect: property write on a `class extends Array` instance).
 - **Handoff**: `plan/agent-context/temporal-standalone-handover-2026-09-07.md`
   (entry point) + `plan/issues/5383-standalone-temporal-provider.md`.
+
+## 2026-09-08 (evening) — standalone Temporal: the polyfill constructs, host-free
+
+- **Landed**: S2b (#5761), S2c (#5762), S2d (#5767), S2e (#5773). Four compiler
+  defects root-caused from the compiled polyfill, each with a reduction and a
+  byte A/B showing the gc lane unchanged.
+- **Open, stacked, both current with main**: S2f (#5777 — `$__ta_ctor` identity
+  by brand, a class value is `typeof "function"`, the callable-kind/construct
+  boundary twins) and S2g (#5780 — `new K(…)` on a class VALUE runs the
+  constructor body, in-module and across the link boundary).
+- **State reached**: with no JS host imports at all, the provider links,
+  `__module_init` completes, `Object.keys(Temporal)` answers nine, a class value
+  crosses the boundary as `typeof "function"`, and
+  `new Temporal.PlainDate(2024,1,1)` runs the real constructor.
+- **The remaining stop**: a dynamic read of a class instance's PROTOTYPE member
+  answers `undefined` — module-local, six-line reduction, no Temporal involved;
+  own fields and dynamic method CALLS both work. Across the boundary a method
+  call on a provider-owned instance additionally has no peer terminal. So of the
+  three smoke assertions only `Object.keys(Temporal).length === 9` passes, and
+  the smoke test is deliberately still unwritten rather than asserting the
+  passing subset.
+- **Key learnings**: two independent "widen the struct so its shape is unique"
+  fixes had landed on the SAME shape, so `ref.test $__ta_ctor` answered true for
+  every instance of a field-less class — a structural test can never answer a
+  nominal question, and the brand it needed was already being written and never
+  read; a class value and an instance share type and `__tag`, so identity
+  (`ref.eq` against the class-object singleton) is the only discriminator, and
+  the same fact drives `typeof`, construct dispatch and `is_constructor`; a
+  compiler key made of an identifier's TEXT is scope-blind, which routed every
+  `e.length` in a module through one binding's descriptor.
+- **Queue**: three parks, all collateral, all proven the same cheap way —
+  compile the named row on the PR head and on the park comment's exact baseline
+  compiler sha, compare the runner's `wasm_sha`. Identical bytes, hold removed,
+  #5773 then merged. Two minutes per diagnosis; worth doing every time before
+  touching a `hold`.
+- **Handoff**: `plan/agent-context/temporal-standalone-handover-2026-09-08.md`.
+
+## 2026-09-12 — standalone Temporal S1→S5 closed out: it works, it is measured, and it stays opt-in
+
+- **The arc landed.** Sixteen slices (S1 through S2p, PRs #5721 … #5847), each
+  one root-causing a compiler defect the compiled `@js-temporal/polyfill`
+  exposed. None of them was a Temporal defect. A real `Temporal` global now
+  exists for `--target standalone`, host-free: the provider links,
+  `Object.keys(Temporal)` is nine, `new Temporal.PlainDate(2024,1,1).day` is 1,
+  and `Temporal.Duration.from({hours:1}).total("minutes")` is 60 — all asserted
+  as a real test, instantiated with an **empty import object**.
+- **S5 measured it and the bar is not met.** Three non-Intl families ×120 rows,
+  linked vs unlinked: `Temporal is not defined` 123 → **0** and the
+  `__temporal_*` host-import leak 74 → **0**, but the linked lane scores **0
+  pass** against 10 unlinked, at 2.3× the compile time with 8 rows timing out.
+  10 pass→fail: 6 false passes, **4 legitimate**.
+- **The reported error text was hiding the reason, on 352 of 360 rows.** Every
+  linked failure said `Object.prototype.toString is not yet implemented in
+  --target standalone`. That call exists in exactly one place in the test262
+  harness — inside the `catch` of `String(value)` in `formatSimpleValue` —
+  which the harness reaches only after an assertion has ALREADY failed. The
+  method itself works fine for a consumer-owned object.
+- **The real cause is the link boundary (#5406).** A value that crosses a
+  `link:` boundary is not an ordinary object in the consumer: the provider's
+  error constructors are not the consumer's, so a thrown error has
+  `e instanceof Error` true, `e instanceof RangeError` false,
+  `e.constructor.name` **undefined** — and `assert.throws` compares
+  constructors by identity. **136 rows cannot pass however correct Temporal
+  is.** Two genuine Temporal value defects were isolated separately (#5408),
+  and the 1.83× link cost is #5407, the only blocker to the artifact being
+  default-on.
+- **Key learnings.** A "pass" is not evidence until its assertion shape is
+  checked — a throws-only row passes when the feature is ABSENT, because
+  `undefined.m()` throws the expected TypeError; that accounted for 6 of the 10
+  losses, and the other 4 were settled the expensive way, by compiling the row
+  and reading `WebAssembly.Module.imports` (zero imports + value assertions ⇒
+  the pass was real, which CORRECTED an earlier slice's argued claim that two
+  of them were false). Never attribute a failure to the error text a runner
+  hands you without finding where that text can physically be raised. And two
+  slices in a row had the wrong target named in their brief (S2o: linking costs
+  2 %, not 3.3×; S2p: the penalty was a per-call-site splice) — both cheap to
+  correct only because each measured first.
+- **Handoff**: `plan/agent-context/temporal-standalone-handover-2026-09-12.md`.
+
+## 2026-09-05 → 2026-09-29 — merging the JS-host lane into the native regime (#5385)
+
+- **Question answered.** JS-host mode does not earn its keep through interop:
+  the value adapter is a separate axis (#4396/#4399); host mode is a second,
+  borrowed-from-V8 ECMAScript implementation. Plan v2 in #5385.
+- **Finding that changed the plan.** The nightly native-first lane compiled
+  only 9 % of test262 because the harness hit `ctx.standalone`-gated host
+  paths; the standalone codegen regime IS the native core. Switching a JS
+  build onto that regime (plus the JS value bridge) took a 321-row sample
+  from 0 to 218 passes; the full lane went 4,411 → 35,384 → 36,327 (host
+  34,099, standalone 35,237).
+- **Landed** (all byte-identical for default gc/standalone/wasi): S0 axis
+  #6083, S1 #6147, S1b #6156, S2 #6153, S3-a #6152, S3-b #6202, S3-c #6178,
+  S3-e #6199, S3-f #6291, S4 #6186, S5 #6191 (regime on by default for
+  native-first, kill switch `JS2WASM_NATIVE_REGIME_JS=0`), #6697 test heap.
+- **New issues filed**: #5385 umbrella; #6685/#6686/#6687/#6689/#6697/#6706/
+  #6707/#6708/#6709/#6710/#6748/#6749/#6750 slices.
+- **S6 (default flip) verdict: not yet** — npm-compat regime lane has three
+  wrong checksums (#6749, critical), the per-edition ratchet is below floor
+  on ES5/ES2026 (#6750), the regime Temporal provider dies at init (#6748).
+- **Key learnings.** (1) The census, not the total, decides: +1.6k rows hid
+  ES5 −99. (2) Two spec root causes were wrong and only the implementer's
+  measurement caught it (S3-a: stale index from a late import, not a
+  pre-shift read; S3-f: a padded `undefined` cast in the dispatcher, not the
+  reaction job) — specs must name the repro and the guard, not assert the
+  cause. (3) Environment hazards (stale `.git/config.lock`, unprovisioned
+  agent worktrees, the #3008 whole-file gate, load-gated spawns) cost more
+  wall-clock than any codegen problem; they are listed in the handoff.
+- **Handoff**: `plan/agent-context/host-lane-merge-handoff-2026-09-29.md`.

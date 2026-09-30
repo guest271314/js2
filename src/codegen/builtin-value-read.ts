@@ -17,6 +17,7 @@ import { ts } from "../ts-api.js";
 import type { Instr, ValType } from "../ir/types.js";
 import { numberIsPredicateOps } from "./number-is-predicate-ops.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
+import { emitStandaloneDateNowValue } from "./standalone-clock-capability.js";
 import { addUnionImports, TYPED_ARRAY_NAMES, typedArrayPackedSignedness } from "./index.js";
 import {
   coerceType,
@@ -27,6 +28,7 @@ import {
   valTypesMatch,
 } from "./shared.js";
 import { emitThrowTypeError, noJsHost } from "./expressions/helpers.js";
+import { emitObjectCreateValueBody } from "./object-create-value-body.js";
 import { allocLocal } from "./context/locals.js";
 import { isViewRefTestInstrs } from "./dataview-native.js"; // (#5150) ArrayBuffer.isView value closure
 import { reportErrorNoNode } from "./context/errors.js";
@@ -97,6 +99,7 @@ import {
 import { emitExternrefSlotToAnyStr } from "./native-string-slot-bridge.js";
 import { emitNativeReflectTargetGuard } from "./reflect-target-guard.js";
 import { sourceShadowsGlobalName } from "./source-function-members.js"; // (#5194 review F2)
+import { sourceWritesRegExpProtoSymbol } from "./regexp-proto-symbol-writes.js"; // (#6651 B9)
 
 export const BUILTIN_CTOR_NAMES = new Set([
   "Object",
@@ -938,6 +941,8 @@ function tryCompileStandaloneBuiltinProtoIteratorRead(
   if (!ts.isIdentifier(receiver.expression)) return undefined;
 
   const builtinName = receiver.expression.text;
+  // (#6651 B9) A replaced member is a runtime value: the dynamic read consults the companion.
+  if (builtinName === "RegExp" && sourceWritesRegExpProtoSymbol(expr, key.name.text)) return undefined;
   const isIteratorAlias = key.name.text === "iterator" && (builtinName === "Map" || builtinName === "Set");
   if (!isIteratorAlias && !BUILTIN_CTOR_NAMES.has(builtinName)) return undefined;
   if (
@@ -1030,6 +1035,11 @@ export function ensureStandaloneBuiltinStaticMethodClosure(
       returnType = { kind: "externref" };
       break;
     case "Object.getOwnPropertyNames":
+      paramTypes = [{ kind: "externref" }];
+      returnType = { kind: "externref" };
+      break;
+    // (#6684) One slot, not spec arity 2 — see object-create-value-body.ts.
+    case "Object.create":
       paramTypes = [{ kind: "externref" }];
       returnType = { kind: "externref" };
       break;
@@ -1286,6 +1296,12 @@ export function ensureStandaloneBuiltinStaticMethodClosure(
       returnType = BOOLEAN_PREDICATE_RESULT;
       break;
     }
+    // (#6681) `Date.now` as a VALUE (lodash-es `_shortOut`): the direct call's
+    // own lowering, as `() -> f64` — the checker's `() => number` call ABI.
+    case "Date.now":
+      paramTypes = [];
+      returnType = { kind: "f64" };
+      break;
     default: {
       // (#2984 Phase 3) Any OTHER standard builtin static method — the
       // `BUILTIN_STATIC_METHOD_ARITY` membership is the complete own
@@ -1354,6 +1370,8 @@ export function ensureStandaloneBuiltinStaticMethodClosure(
       if (returnType && !valTypesMatch({ kind: "externref" }, returnType)) {
         coerceType(ctx, closureFctx, { kind: "externref" }, returnType);
       }
+    } else if (key === "Object.create") {
+      if (!emitObjectCreateValueBody(ctx, closureFctx)) return null;
     } else if (key === "Object.getOwnPropertyNames") {
       const namesIdx = ensureLateImport(ctx, "__getOwnPropertyNames", [{ kind: "externref" }], [{ kind: "externref" }]);
       if (namesIdx === undefined) return null;
@@ -1733,6 +1751,8 @@ export function ensureStandaloneBuiltinStaticMethodClosure(
           ],
         },
       );
+    } else if (key === "Date.now") {
+      emitStandaloneDateNowValue(ctx, closureFctx);
     } else if (genericThrowBody && builtinName === "Math" && emitMathValueReadBody(ctx, closureFctx, propName)) {
       // (#4565; supersedes the #4491 wave-4 lane G arm, same defect) — the
       // upstream module mints the `Math_<fn>` kernel late itself, so it needs

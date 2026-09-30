@@ -212,6 +212,35 @@ export function failedPerfLane(placement, status, diagnostic, extra = {}) {
   };
 }
 
+/** The two standalone perf lanes: CLI `--lane` name → `perf.lanes` key. */
+export const STANDALONE_PERF_LANES = [
+  { lane: "standalone-static", key: "standalone", inputMode: "compile-time-static" },
+  { lane: "standalone-dynamic", key: "standaloneDynamic", inputMode: "runtime-dynamic" },
+];
+
+/**
+ * (#6660) Resolve the standalone lanes of one package's perf record. The
+ * standalone lanes compile their own host-free graph (`--target standalone`),
+ * so a JS-host package-entry failure is not evidence about them and its
+ * diagnostic is deliberately NOT an input here: a selected lane is always
+ * measured — in process normally, or through `inChild(lane)` (a bounded
+ * child compile, see the generator) when `hostBlocked`, because a graph that
+ * exhausted the host harness must not stall the refresh without a budget.
+ *
+ * @param {{ hostBlocked: boolean, selected: Record<string, boolean>,
+ *   inProcess: (lane: string) => Promise<object> | object,
+ *   inChild: (lane: string) => Promise<object> | object }} options
+ * @returns {Promise<{ standalone: object, standaloneDynamic: object }>}
+ */
+export async function resolveStandalonePerfLanes({ hostBlocked, selected, inProcess, inChild }) {
+  const lanes = {};
+  for (const { lane, key, inputMode } of STANDALONE_PERF_LANES) {
+    if (!selected[lane]) lanes[key] = skippedPerfLane("standalone", inputMode);
+    else lanes[key] = hostBlocked ? await inChild(lane) : await inProcess(lane);
+  }
+  return lanes;
+}
+
 const O4_TRY_TABLE_FLATTEN_OMISSION =
   "wasm-opt -O4 omitted Binaryen's unsupported flatten pass for standardized try_table output; all remaining O4 passes completed.";
 
@@ -275,6 +304,7 @@ export function npmPerfRows(packages) {
     if (!pkg.perf?.lanes) continue;
     for (const [key, label] of [
       ["jsHost", "JS host · runtime dynamic"],
+      ["jsHostNative", "JS host native-first · runtime dynamic"],
       ["standalone", "standalone · compile-time static"],
       ["standaloneDynamic", "standalone · runtime dynamic"],
     ]) {
@@ -321,11 +351,21 @@ export function npmPerfHistoryPoint(packages, generatedAt, sourceRevision = null
     if (!perf) continue;
     const lanes = perf.lanes ?? { jsHost: perf };
     const jsHostDynamic = measuredRatio(lanes.jsHost);
+    const jsHostNativeDynamic = measuredRatio(lanes.jsHostNative);
     const standaloneStatic = measuredRatio(lanes.standalone);
     const standaloneDynamic = measuredRatio(lanes.standaloneDynamic);
-    if (jsHostDynamic === null && standaloneStatic === null && standaloneDynamic === null) continue;
+    if (
+      jsHostDynamic === null &&
+      jsHostNativeDynamic === null &&
+      standaloneStatic === null &&
+      standaloneDynamic === null
+    )
+      continue;
 
     snapshots[pkg.name] = {
+      ...(lanes.jsHostNative
+        ? { jsHostNative: jsHostNativeDynamic === null ? {} : { dynamic: jsHostNativeDynamic } }
+        : {}),
       jsHost: {
         ...(jsHostDynamic === null ? {} : { dynamic: jsHostDynamic }),
       },

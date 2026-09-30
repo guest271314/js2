@@ -180,6 +180,7 @@ export function createCodegenContext(
     inheritedSetDirtyKeys: new Set<string>(), // (#4602) scanForArrayHoles: statically-named keys such a descriptor could use
     vecIndexDeleteDirty: false, // (#4222) scanForArrayHoles: a `delete arr[i]` may tombstone an index
     arraySpeciesDirty: false, // (#5145) scanForArrayHoles: Symbol.species / a `.constructor` assignment is present
+    isConcatSpreadableDirty: false, // (#6485) scanForArrayHoles: the module can name @@isConcatSpreadable
     vecOwnKeysDirty: false, // (#4230 L1) scanForArrayHoles: a descriptor define / own-name read is present
     dynamicCodeDirty: false, // (#4159/#4160) scanForArrayHoles: eval/Function present ⇒ both flags above forced
     usesVecValue: false, // (#2083) flipped by genuine getOrRegisterVecType usage
@@ -221,13 +222,17 @@ export function createCodegenContext(
     hostDynamicClassMethodNames: new Set(),
     hostDynamicClassAccessorReads: new Set(),
     runtimeKeyClassMethodNames: new Set(),
+    standaloneRuntimeKeyClassProtos: new Set(),
     genericResolved: new Map(),
+    bigIntKernelFunctions: new Set(),
     funcRestParams: new Map(),
     funcUsesArguments: new Set(),
+    funcReadsOwnThis: new Set(),
     objectLiteralMethodFuncIdx: new Map(),
     extrasArgvGlobalIdx: -1,
     extrasArgvVecTypeIdx: -1,
     argcGlobalIdx: -1,
+    hostArgcGlobalIdx: -1,
     currentThisGlobalIdx: -1,
     callerStrictGlobalIdx: -1,
     sourceFunctionStrictness: new Map(),
@@ -241,6 +246,8 @@ export function createCodegenContext(
     // bytes. Only the package linker sets the option.
     sharedExnTag:
       options?.sharedExceptionTag === true && targetProfile.target !== "wasi" && targetProfile.target !== "standalone",
+    // (#5383 S2m) Decided lazily by `ensureExnTag`, never by an option.
+    exnTagImported: false,
     // (#5247) Provider builds only — their exports are wasm→wasm call targets.
     exportsConsumedByWasm: options?.exportsConsumedByWasm === true,
     hasUnionImports: false,
@@ -260,6 +267,9 @@ export function createCodegenContext(
     classParentMap: new Map(),
     classBuiltinParentMap: new Map(),
     classExternrefBackedSet: new Set(),
+    classDynamicUnresolvedHeritageSet: new Set(),
+    classLinkedDynamicParentExpr: new Map(),
+    classLinkedDynamicParentGlobal: new Map(),
     classCtorHostRegistered: new Set(),
     classTagCounter: 0,
     classTagMap: new Map(),
@@ -406,9 +416,10 @@ export function createCodegenContext(
     linkNodeShims: targetProfile.target === "wasi" && linkedNamespaces.has("node:fs"),
     nodeFsReadSyncIdx: -1,
     nodeFsWriteSyncIdx: -1,
-    standalone: targetProfile.target === "standalone",
+    standalone: targetProfile.nativeRegime, // (#5385) the native semantic regime, not the environment
     ...(options?.standaloneGlobalThisImport ? { standaloneGlobalThisImport: options.standaloneGlobalThisImport } : {}),
     directEvalMode: options?.directEval ?? "legacy",
+    runtimeEvalProviderAbsent: targetProfile.target === "standalone" && options?.runtimeEvalProvider === false,
     // (#2141 S1) Honest generic any-boxing regime — default OFF (legacy tag-5
     // box-the-externref ABI, byte-identical modules). Flips in S4.
     honestAnyBoxing: options?.honestAnyBoxing ?? false,

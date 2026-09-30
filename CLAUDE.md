@@ -240,6 +240,20 @@ node scripts/check-loc-budget.mjs && node scripts/check-func-budget.mjs \
 
 ## Test262
 
+**The authoritative host oracle is the LINKED harness (#3451 slice 6, oracle
+v14, 2026-09-17).** CI's host (`gc`) shards run `TEST262_ORACLE_MODE=linked`:
+the harness prefix is compiled once per include-set and each test body is
+linked against it, so published host verdicts carry `oracle_lane:
+linked-harness`. The honest whole-assembly lane is kept as the **scheduled
+audit** (`test262-honest-audit`, nightly cron / `honest_audit=true` dispatch) —
+never required, never in the merge queue. Standalone is untouched (the linked
+oracle is host-only). Measured before flipping: 98.15 % agreement, net −57
+passes (#6486 P3e, run 35178155322).
+
+- **Local runs stay honest** — `scripts/run-test262-vitest.sh` leaves the flag
+  unset, so `pnpm run test:262` measures the audit lane. Reproduce a CI verdict
+  with `TEST262_ORACLE_MODE=linked pnpm run test:262`; a local/CI disagreement
+  on ~1.85 % of rows is expected, not automatically a bug.
 - test262.test.ts has no assertions — all vitest tests pass; conformance is tracked via report
 - Skip filters — **verified against `tests/test262-runner.ts` on 2026-07-26 (#24); this is now the
   complete list, not a historical one.** `shouldSkip` skips exactly:
@@ -379,6 +393,30 @@ Five properties worth knowing before you touch it:
   floor that is too low never fires.
 - **An edition present in the run but absent from the baseline reports
   `UNGATED`** with a CI warning, rather than sitting silently unprotected.
+
+**An edition that has reached 100 % allows NO regression (project-lead rule,
+2026-09-29).** Such an edition carries `completed: true` in the baseline, and
+from then on every one of its rows must pass in every run that contains it —
+full or partial, with or without a `--compare` baseline. One non-passing row
+fails `merge shard reports` and parks the PR. There is no tolerance, no
+"net-positive" argument, and no re-baselining around it:
+
+- `--update` sets `completed` the first time a full run measures pass == total,
+  and never clears it. It also refuses to bank while a completed edition has a
+  failing row.
+- The only escape is a per-row `exceptions` entry with a `reason`: a row that
+  cannot pass on this target **by construction**, or a known failure that has
+  **never passed** since the floor was seeded — never a regression. Adding one,
+  or clearing `completed`, is a hand edit reviewed like lowering a floor.
+- ES5 is marked `completed` with one exception, `Array/prototype/toString/
+  S15.4.4.2_A1_T4.js`, which has failed since the floor was seeded.
+- ES5 is the first completed edition. It lost 7 rows between 2026-09-23 and
+  09-28 while this gate reported OK: the `merge shard reports` job had no test262
+  checkout, so every row classified as "Unclassified (legacy)" and ES5 read as
+  NOT COVERED. The job now checks out the submodule, and the script **refuses**
+  (exit 2) to run without it rather than scoring nothing. The standalone
+  regression guard's 15-row tolerance (`STANDALONE_REGRESSION_TOLERANCE`) does
+  not apply inside a completed edition.
 
 The baseline records the `eval_engine` it was measured under, because a
 refusal-only runtime-eval provider fails every eval-dependent test by
@@ -798,7 +836,7 @@ The issue frontmatter `status:` field tracks where an issue is, set by whichever
 
 <!-- AUTO:conformance-start -->
 
-**test262 conformance**: 38,147 / 48,232 (79.1 %)
+**test262 conformance**: 39,229 / 48,232 (81.3 %)
 
 <!-- AUTO:conformance-end -->
 

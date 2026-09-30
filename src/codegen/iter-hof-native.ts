@@ -577,7 +577,13 @@ export function fillIterHofSteppers(ctx: CodegenContext): void {
   // Only generators whose resume function actually EMITTED participate —
   // reading `funcMap` per #2941 (the shift-maintained single source of truth)
   // rather than the cached `resumeFuncIdx` number.
-  const producers: { stateTypeIdx: number; resumeIdx: number; resultTypeIdx: number; elemValType: ValType }[] = [];
+  const producers: {
+    stateTypeIdx: number;
+    resumeIdx: number;
+    nativeDelegates?: boolean;
+    resultTypeIdx: number;
+    elemValType: ValType;
+  }[] = [];
   const seen = new Set<number>();
   for (const info of ctx.nativeGenerators.values()) {
     if (info.resumeFuncIdx === undefined || seen.has(info.stateTypeIdx)) continue;
@@ -585,6 +591,7 @@ export function fillIterHofSteppers(ctx: CodegenContext): void {
     producers.push({
       stateTypeIdx: info.stateTypeIdx,
       resumeIdx: info.resumeFuncIdx,
+      nativeDelegates: info.nativeDelegates,
       resultTypeIdx: info.resultTypeIdx,
       elemValType: info.elemValType,
     });
@@ -771,6 +778,33 @@ export function fillIterHofSteppers(ctx: CodegenContext): void {
         },
       );
     }
+    // (#6484 S2) A `$__IterRec` → the RECORD is the handle (pass-through), the
+    // same shape as the three arms above. Needed because of the S2 carrier
+    // migration: `arr[Symbol.iterator]()` used to answer a snapshot `$Vec`,
+    // which the ladder arm below admitted, and now answers a live record, which
+    // nothing here admitted — so `iter.reduce(cb, init)` fell to the null
+    // sentinel and silently returned `undefined` WITHOUT calling `cb` once
+    // (measured 2026-09-16: `calls=3` on the base tree, `calls=0` after the
+    // migration; it cost `built-ins/Iterator/prototype/reduce/
+    // reducer-memo-can-be-any-type.js`). `__iter_hof_next` / `_close` delegate
+    // to `__iterator_next` / `__iterator_return`, both of which take exactly
+    // this record, so the pass-through is the whole fix.
+    //
+    // It is also MORE correct than what it restores: stepping the record
+    // consumes the iterator, which is what §27.1.4 helpers do, where the old
+    // snapshot-vec route re-read a frozen copy and left the cursor untouched.
+    const iterRecTypeIdx = ctx.structMap.get("__IterRec");
+    if (iterRecTypeIdx !== undefined) {
+      arms.push(
+        { op: "local.get", index: ANY },
+        { op: "ref.test", typeIdx: iterRecTypeIdx },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [{ op: "local.get", index: 0 }, { op: "return" }],
+        },
+      );
+    }
     // Driven generator frame → the frame IS the handle (pass-through).
     for (const p of producers) {
       arms.push(
@@ -843,6 +877,13 @@ export function fillIterHofSteppers(ctx: CodegenContext): void {
             { op: "local.get", index: ANY },
             { op: "ref.cast", typeIdx: p.stateTypeIdx },
             { op: "call", funcIdx: p.resumeIdx },
+            ...(p.nativeDelegates
+              ? ([
+                  { op: "extern.convert_any" },
+                  { op: "call", funcIdx: ctx.funcMap.get("__gen_delegate_iter_result")! },
+                  { op: "return" },
+                ] as Instr[])
+              : []),
             { op: "local.set", index: RES_ANY }, // (ref RT) <: anyref
             // done
             { op: "local.get", index: RES_ANY },

@@ -6,7 +6,8 @@ import type { CodegenContext } from "./context/types.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
 import { nativeStringLiteralInstrs } from "./native-strings.js";
 import { protoIndexOwnViewSubstituteInstrs } from "./proto-index-store.js";
-import { addFuncType } from "./registry/types.js";
+import { classObjectIdentityArms } from "./standalone-class-construct.js"; // (#5383 S2g)
+import { addFuncType, taCtorIdentityTestInstrs } from "./registry/types.js";
 
 const HELPER = "__reflect_is_constructor";
 const NATIVE_TARGET_HELPER = "__is_native_reflect_target";
@@ -44,11 +45,6 @@ export function fillNativeReflectTargetClassifier(ctx: CodegenContext): void {
   if (!fn) return;
   const candidates: number[] = [];
   if (ctx.nativeProtoTypeIdx !== undefined) candidates.push(ctx.nativeProtoTypeIdx);
-  // A first-class TypedArray constructor is the nominal `$__ta_ctor` carrier,
-  // not a `$Object` or closure wrapper. Deno's primordials bootstrap reflects
-  // over all of these constructor values after putting them in one dynamic
-  // list, so the ordinary target guard must admit this sibling carrier too.
-  if (ctx.taCtorTypeIdx >= 0) candidates.push(ctx.taCtorTypeIdx);
 
   const body: Instr[] = [];
   for (const typeIdx of candidates) {
@@ -62,6 +58,27 @@ export function fillNativeReflectTargetClassifier(ctx: CodegenContext): void {
         then: [{ op: "i32.const", value: 1 }, { op: "return" }],
       },
     );
+  }
+  // A first-class TypedArray constructor is the nominal `$__ta_ctor` carrier,
+  // not a `$Object` or closure wrapper. Deno's primordials bootstrap reflects
+  // over all of these constructor values after putting them in one dynamic
+  // list, so the ordinary target guard must admit this sibling carrier too.
+  //
+  // (#6622) IDENTITY, not shape — same discriminator as
+  // `taCtorIdentityTestInstrs`'s own docstring (#5383 S2f R11): a bare
+  // `ref.test $__ta_ctor` also matches every instance of a field-less class
+  // (WasmGC canonicalises structurally-identical struct types, and an empty
+  // class root's `(__tag i32, __shape_brand i32)` shape is byte-for-byte
+  // `$__ta_ctor`'s `(kind i32, brand i32)` — `class-bodies.ts` #2158/#2009 and
+  // `$__ta_ctor` #5194 r3 F1 independently widened to the SAME two-i32 shape).
+  // A bare test here made `Reflect.isExtensible`/own-property MOP callers treat
+  // every such class instance as a native TypedArray-constructor target.
+  if (ctx.taCtorTypeIdx >= 0) {
+    body.push(...taCtorIdentityTestInstrs(ctx, [{ op: "local.get", index: 0 }, { op: "any.convert_extern" }]), {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "i32.const", value: 1 }, { op: "return" }],
+    });
   }
   body.push({ op: "i32.const", value: 0 });
   fn.body = body;
@@ -113,9 +130,7 @@ export function fillNativeReflectOwnPropertyMop(ctx: CodegenContext): void {
     then.push({ op: "local.get", index: vecLocal }, { op: "return" });
     ownNamesFn.body.unshift(
       ...ownNamesProtoArm,
-      { op: "local.get", index: 0 },
-      { op: "any.convert_extern" },
-      { op: "ref.test", typeIdx: taCtorTypeIdx },
+      ...taCtorIdentityTestInstrs(ctx, [{ op: "local.get", index: 0 }, { op: "any.convert_extern" }]),
       { op: "if", blockType: { kind: "empty" }, then },
     );
   } else if (ownNamesFn && ownNamesProtoArm.length > 0) {
@@ -182,9 +197,7 @@ export function fillNativeReflectOwnPropertyMop(ctx: CodegenContext): void {
     ];
     gopdFn.body.unshift(
       ...gopdProtoArm,
-      { op: "local.get", index: 0 },
-      { op: "any.convert_extern" },
-      { op: "ref.test", typeIdx: taCtorTypeIdx },
+      ...taCtorIdentityTestInstrs(ctx, [{ op: "local.get", index: 0 }, { op: "any.convert_extern" }]),
       { op: "if", blockType: { kind: "empty" }, then: taThen },
     );
   } else if (gopdFn && gopdProtoArm.length > 0) {
@@ -215,7 +228,6 @@ export function fillReflectIsConstructor(ctx: CodegenContext): void {
   if (!fn || funcIdx === undefined) return;
   const body: Instr[] = [{ op: "local.get", index: 0 }, { op: "any.convert_extern" }, { op: "local.set", index: 1 }];
   const candidates = [...ctx.constructibleClosureTypeIdxs].sort((a, b) => a - b);
-  if (ctx.taCtorTypeIdx >= 0) candidates.push(ctx.taCtorTypeIdx);
   for (const typeIdx of candidates) {
     body.push(
       { op: "local.get", index: 1 },
@@ -226,6 +238,27 @@ export function fillReflectIsConstructor(ctx: CodegenContext): void {
         then: [{ op: "i32.const", value: 1 }, { op: "return" }],
       },
     );
+  }
+  // (#6622) IDENTITY, not shape — see `fillNativeReflectTargetClassifier`
+  // above and `taCtorIdentityTestInstrs`'s own docstring (#5383 S2f R11). A
+  // bare `ref.test $__ta_ctor` also matches every instance of a field-less
+  // compiled class (WasmGC canonicalises structurally-identical struct types,
+  // and an empty class root's `(__tag i32, __shape_brand i32)` shape —
+  // `class-bodies.ts` #2158/#2009 — is byte-for-byte `$__ta_ctor`'s `(kind i32,
+  // brand i32)` — #5194 r3 F1). Measured against the real standalone
+  // `@js-temporal/polyfill` provider: this bare test made `IsConstructor`
+  // answer `true` for `new Temporal.Duration(1)` (and every other field-less
+  // Temporal class instance), so `new (new Temporal.Duration(1))()` SUCCEEDED
+  // where §13.3.5.1 says it must throw, and — because the same wrongly-set
+  // bit also feeds the `__js2wasm_link_callable_kind` boundary terminal
+  // (`standalone-link-boundary.ts`) — `typeof <provider instance>` answered
+  // `"function"` instead of `"object"` across the wasm→wasm link.
+  if (ctx.taCtorTypeIdx >= 0) {
+    body.push(...taCtorIdentityTestInstrs(ctx, [{ op: "local.get", index: 1 }]), {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "i32.const", value: 1 }, { op: "return" }],
+    });
   }
   // (#3371 r4) §10.4.1 — a bound function exotic object has a [[Construct]]
   // slot IFF its [[BoundTargetFunction]] does. `$__bound_fn` is a nominal
@@ -276,6 +309,14 @@ export function fillReflectIsConstructor(ctx: CodegenContext): void {
   // threw "newTarget is not a constructor" — test262's `isConstructor(Set)`
   // returned false where the spec says true.
   body.push(...buildBuiltinConstructorTestArm(ctx, 1, [{ op: "i32.const", value: 1 }, { op: "return" }]));
+  // (#5383 S2g) …and a compiled class reached as a VALUE, which under
+  // standalone is the class-object singleton — a `$ClassName` struct that no
+  // `ref.test` can tell from an INSTANCE, so the test is identity (#5383 S2f
+  // R13's discriminator). A class has [[Construct]] by definition; without this
+  // the wasm→wasm boundary's `callableKind` published bit 1 = 0 for a
+  // provider's class and the consumer's `new NS.C(…)` never asked the module
+  // that owns it. No-op in the JS-host lane, which has the class mirror.
+  body.push(...classObjectIdentityArms(ctx, 1, [{ op: "i32.const", value: 1 }, { op: "return" }]));
   // An actual caller-owned JS constructor remains the same admitted object;
   // the narrow adapter reports only its callable/constructible bits.
   const boundaryKindIdx = ctx.funcMap.get("__boundary_object_callable_kind");

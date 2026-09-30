@@ -52,6 +52,7 @@ import { coerceType as coerceTypeImpl } from "../type-coercion.js";
 import { ensureHostStrictSpreadDispatch, ensureNativeStrictSpreadRuntime } from "../iterator-native.js";
 import { ensureDateDaysFromCivilHelper, ensureDateFormatStringHelper, ensureDateStruct } from "./builtins.js";
 import { emitStandaloneDateTimestamp } from "../standalone-clock-capability.js";
+import { mintDateCarrierDynamicMembers } from "../date-carrier-dynamic-member.js";
 import { emitObjectCoercion } from "./calls-guards.js";
 import {
   emitDynamicNewFunctionHostEval,
@@ -1619,15 +1620,17 @@ export function tryCompileBuiltinGlobalNew(
   }
 
   // Handle `new Function(...)`.
-  if (ts.isIdentifier(expr.expression) && expr.expression.text === "Function") {
+  // (#6651 C5) …or a member-less Function subclass site (builtin-subclass-new-site.ts).
+  const functionOverride = builtinNameOverride === "Function";
+  if (functionOverride || (ts.isIdentifier(expr.expression) && expr.expression.text === "Function")) {
     const args = expr.arguments ?? [];
+    const calleeIsGlobalFunction =
+      functionOverride || isGlobalFunctionIdentifier(expr.expression as ts.Identifier, ctx.checker);
     // (#2924) Constant param list + body → compile-away to a real AOT callable
     // (global scope, no capture). Dynamic bodies fall through to the no-op stub
     // below (the Tier-2 interpreter, #2928, handles them). Guarded on the
     // GLOBAL `Function` intrinsic (a local shadow keeps the legacy stub path).
-    const staticFn = isGlobalFunctionIdentifier(expr.expression, ctx.checker)
-      ? tryStaticNewFunction(ctx, fctx, args)
-      : undefined;
+    const staticFn = calleeIsGlobalFunction ? tryStaticNewFunction(ctx, fctx, args) : undefined;
     if (staticFn !== undefined) return staticFn;
     // (#2960) Dynamic body (non-constant args). No longer a silent no-op stub:
     //  - JS-host mode → route to the meta-circular runtime-eval shim
@@ -1636,7 +1639,7 @@ export function tryCompileBuiltinGlobalNew(
     //  - standalone/wasi (no host) → emit a source-located warning + a callable
     //    value that throws catchably at CALL time (construction still succeeds,
     //    so a program that never invokes it keeps working).
-    if (isGlobalFunctionIdentifier(expr.expression, ctx.checker)) {
+    if (calleeIsGlobalFunction) {
       const hostEval = emitDynamicNewFunctionHostEval(ctx, fctx, args);
       if (hostEval !== undefined) return hostEval;
       if (noJsHost(ctx)) {
@@ -1659,8 +1662,10 @@ export function tryCompileBuiltinGlobalNew(
   }
 
   // Handle `new Date()`, `new Date(ms)`, `new Date(y, m, d, ...)` — native Date struct
-  if (ts.isIdentifier(expr.expression) && expr.expression.text === "Date") {
+  // (#6651 C5) …or a member-less Date subclass site (builtin-subclass-new-site.ts).
+  if (builtinNameOverride === "Date" || (ts.isIdentifier(expr.expression) && expr.expression.text === "Date")) {
     const dateTypeIdx = ensureDateStruct(ctx);
+    mintDateCarrierDynamicMembers(ctx, fctx, expr); // (#6678) Date members off an untyped slot
     const args = expr.arguments ?? [];
 
     if (args.length === 0) {

@@ -20,12 +20,12 @@
  * so the `registerNative` call ORDER (and the minted func-index sequence) is
  * preserved exactly.
  */
+import { registerObjectSameValueHelper } from "./object-same-value.js";
 import type { Instr, ValType } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
 import { getStringToNumberProvider, getToPrimitiveProvider } from "./coercion-engine.js";
 import { buildThrowJsErrorInstrs } from "./js-errors.js";
 import { nativeStringLiteralInstrs } from "./native-strings.js";
-import { addUnionImportsViaRegistry } from "./shared.js";
 import { getOrRegisterVecBaseType } from "./registry/types.js";
 import { undefinedExternInstrs } from "./any-helpers.js";
 import { buildExternGetIdxBody } from "./object-runtime.js";
@@ -35,6 +35,7 @@ import { bagKeysTail, buildBagPushKeys } from "./carrier-bag-visibility.js"; // 
 import { protoIndexForInPushInstrs, protoIndexHasIdxInstrs } from "./proto-index-store.js";
 import { stringExoticPushKeysPrologue } from "./string-exotic-own-props.js"; // (#4491) §10.4.3 own index keys
 import { definedFuncAt } from "./func-space.js";
+import { orProxyArrayLikeTest, proxyArrayLikeTypeIdx } from "./proxy-array-like.js"; // (#6651 H6)
 
 /**
  * Everything the enumeration/array-like/object-static block reads from the
@@ -106,17 +107,17 @@ function nonObjectForInKeysIf(ctx: CodegenContext, boundaryObjectForInKeysIdx?: 
  * Called once, in place, from `ensureObjectRuntime`.
  */
 /**
- * (#2036 / #3317 / #4556, extracted from `buildObjectEnumerationHelpers` to fit
- * the function-size budget — behaviour unchanged) The array-like open-`$Object`
- * arm of standalone `__extern_length`: ToLength(Get(O, "length")) per §23.1.3,
- * so a borrowed `Array.prototype.<m>.call(arrayLike, …)` iterates correctly.
+ * (#2036 / #3317 / #4556) Shared ToLength conversion for standalone
+ * `__extern_length` readers. The input `externref` is already on the stack;
+ * the caller supplies the ordinary Get. This preserves the full
+ * ToLength(Get(O, "length")) sequence for both `$Object` and closed
+ * user-struct receivers.
  *
- * Locals it uses, as registered by the caller: 1=any(anyref), 2=lenF64(f64),
+ * Locals it uses, as registered by the caller: 2=lenF64(f64),
  * 3=lenTrunc(f64), 4=primExt(externref, the ToPrimitive scratch).
  */
-function buildObjectArrayLikeLengthArm(ctx: CodegenContext, objectTypeIdx: number, symbolTypeIdx: number): Instr[] {
+export function buildArrayLikeToLengthFromExternref(ctx: CodegenContext, symbolTypeIdx: number): Instr[] {
   const MAX_SAFE = 9007199254740991; // 2^53 - 1
-  const externGetIdx2036 = ctx.funcMap.get("__extern_get")!;
   const unboxIdx2036 = ctx.funcMap.get("__unbox_number")!;
   // (#4556) ToNumber, not just unbox. §7.1.20 ToLength is
   // `ToIntegerOrInfinity(ToNumber(Get(O,"length")))`, and ToNumber of an
@@ -191,49 +192,58 @@ function buildObjectArrayLikeLengthArm(ctx: CodegenContext, objectTypeIdx: numbe
           { op: "call", funcIdx: unboxIdx2036 },
         ];
   return [
-    { op: "local.get", index: 1 },
-    { op: "ref.test", typeIdx: objectTypeIdx },
+    // ToLength: ToNumber (above — NaN for a non-numeric length), then
+    // truncate + clamp to [0, 2^53-1].
+    ...toNumberInstrs,
+    { op: "local.tee", index: 2 },
+    // if NaN → 0 (n != n)
+    { op: "local.get", index: 2 },
+    { op: "f64.ne" },
     {
       op: "if",
       blockType: { kind: "val", type: { kind: "f64" } },
-      then: [
-        // lenVal = __extern_get(v, "length")  (proto-walk + marshaling)
-        { op: "local.get", index: 0 },
-        ...nativeStringLiteralInstrs(ctx, "length"),
-        { op: "extern.convert_any" },
-        { op: "call", funcIdx: externGetIdx2036 },
-        // ToLength: ToNumber (above — NaN for a non-numeric length),
-        // then truncate + clamp to [0, 2^53-1].
-        ...toNumberInstrs,
-        { op: "local.tee", index: 2 },
-        // if NaN → 0 (n != n)
+      then: [{ op: "f64.const", value: 0 }],
+      else: [
+        // trunc toward zero
         { op: "local.get", index: 2 },
-        { op: "f64.ne" },
+        { op: "f64.trunc" },
+        { op: "local.tee", index: 3 },
+        // if <= 0 → 0
+        { op: "f64.const", value: 0 },
+        { op: "f64.le" },
         {
           op: "if",
           blockType: { kind: "val", type: { kind: "f64" } },
           then: [{ op: "f64.const", value: 0 }],
           else: [
-            // trunc toward zero
-            { op: "local.get", index: 2 },
-            { op: "f64.trunc" },
-            { op: "local.tee", index: 3 },
-            // if <= 0 → 0
-            { op: "f64.const", value: 0 },
-            { op: "f64.le" },
-            {
-              op: "if",
-              blockType: { kind: "val", type: { kind: "f64" } },
-              then: [{ op: "f64.const", value: 0 }],
-              else: [
-                // min(trunc, 2^53-1)
-                { op: "local.get", index: 3 },
-                { op: "f64.const", value: MAX_SAFE },
-                { op: "f64.min" },
-              ],
-            },
+            // min(trunc, 2^53-1)
+            { op: "local.get", index: 3 },
+            { op: "f64.const", value: MAX_SAFE },
+            { op: "f64.min" },
           ],
         },
+      ],
+    },
+  ];
+}
+
+/** `$Object` arm: Get first, then the shared ordinary ToLength conversion. */
+function buildObjectArrayLikeLengthArm(ctx: CodegenContext, objectTypeIdx: number, symbolTypeIdx: number): Instr[] {
+  const externGetIdx2036 = ctx.funcMap.get("__extern_get")!;
+  return [
+    { op: "local.get", index: 1 },
+    { op: "ref.test", typeIdx: objectTypeIdx },
+    ...orProxyArrayLikeTest(ctx, 1), // (#6651 H6) §7.3.18 on a Proxy
+    {
+      op: "if",
+      blockType: { kind: "val", type: { kind: "f64" } },
+      then: [
+        // lenVal = __extern_get(v, "length") (proto-walk + marshaling).
+        { op: "local.get", index: 0 },
+        ...nativeStringLiteralInstrs(ctx, "length"),
+        { op: "extern.convert_any" },
+        { op: "call", funcIdx: externGetIdx2036 },
+        ...buildArrayLikeToLengthFromExternref(ctx, symbolTypeIdx),
       ],
       else: [{ op: "f64.const", value: 0 }],
     },
@@ -733,6 +743,7 @@ export function buildObjectEnumerationHelpers(ctx: CodegenContext, s: ObjectEnum
       objVecArrTypeIdx,
       numberToStringIdx: objArrayLikeArms ? ctx.funcMap.get("number_toString")! : -1,
       externGetIdx: objArrayLikeArms ? ctx.funcMap.get("__extern_get")! : -1,
+      proxyTypeIdx: objArrayLikeArms ? proxyArrayLikeTypeIdx(ctx) : undefined, // (#6651 H6)
       vecArms: [],
       // (#2106 S1) OOB / non-indexable miss = undefined under the singleton
       // regime (`arr[oob] === undefined`), consistent with the `$Object` arm
@@ -980,6 +991,7 @@ export function buildObjectEnumerationHelpers(ctx: CodegenContext, s: ObjectEnum
       ? [
           { op: "local.get", index: 2 },
           { op: "ref.test", typeIdx: objectTypeIdx },
+          ...orProxyArrayLikeTest(ctx, 2), // (#6651 H6) HasProperty on a Proxy
           {
             op: "if",
             blockType: { kind: "empty" },
@@ -1405,175 +1417,7 @@ export function buildObjectEnumerationHelpers(ctx: CodegenContext, s: ObjectEnum
     );
   }
 
-  // ── __object_is(externref a, externref b) -> i32 (#2042 S3 — Object.is) ────
-  //
-  // SameValue (§7.2.10) over two boxed externrefs. Tag-dispatched like the
-  // union-helper `===` lowering, but with the SameValue numeric rule:
-  // NaN is SameValue NaN, and +0 is NOT SameValue -0. Comparing the f64 bit
-  // patterns (`i64.reinterpret_f64` + `i64.eq`) gives exactly that — equal NaN
-  // bit patterns compare equal, and +0 (0x0…) vs -0 (0x8000…) compare unequal.
-  // boolean → unbox i32; bigint → i64; both-null → equal; else ref identity.
-  //
-  // NATIVE-PROVIDER (`semanticProviders === "native-first"`), not merely
-  // standalone-only (#2609/#4397). The
-  // native `__defineProperty_value` block below is registered UNCONDITIONALLY by
-  // this runtime and its #2042-S4 ValidateAndApplyPropertyDescriptor preflight
-  // bakes a direct `call __object_is` for the SameValue value-change check. WASI
-  // is host-free too (no JS `__object_is` import — `--target wasi` sets
-  // `ctx.wasi` but leaves `ctx.standalone` false), so gating this registration on
-  // `ctx.standalone` alone left `funcMap.get("__object_is")` undefined in WASI,
-  // and the define helper baked an undefined funcIdx → "function index out of
-  // range — undefined at __defineProperty_value" hard emit error (loopdive/js2wasm#389).
-  // The compatibility-provider path still owns `__object_is` via its JS import,
-  // so its output stays byte-identical.
-  if (ctx.targetProfile.semanticProviders === "native-first") {
-    addUnionImportsViaRegistry(ctx);
-    const typeofNumIdx = ctx.funcMap.get("__typeof_number")!;
-    const typeofBoolIdx = ctx.funcMap.get("__typeof_boolean")!;
-    const typeofBigIdx = ctx.funcMap.get("__typeof_bigint")!;
-    const unboxNumIdx = ctx.funcMap.get("__unbox_number")!;
-    const unboxBoolIdx = ctx.funcMap.get("__unbox_boolean")!;
-    const toBigIdx = ctx.funcMap.get("__to_bigint")!;
-    const EQ_HEAP = -19; // WasmGC `eq` abstract heap type
-
-    // params: a=0, b=1 ; locals: aa=2 (anyref), ba=3 (anyref)
-    const bothTag = (tagIdx: number): Instr[] => [
-      { op: "local.get", index: 0 },
-      { op: "call", funcIdx: tagIdx },
-      { op: "local.get", index: 1 },
-      { op: "call", funcIdx: tagIdx },
-      { op: "i32.and" },
-    ];
-    // Reference identity over the WasmGC `eq` heap (the anyref temps are already
-    // materialised in locals 2/3 by `identityArm`'s preamble below).
-    const refIdentityArm: Instr[] = [
-      { op: "local.get", index: 2 },
-      { op: "ref.test", typeIdx: EQ_HEAP },
-      { op: "local.get", index: 3 },
-      { op: "ref.test", typeIdx: EQ_HEAP },
-      { op: "i32.and" },
-      {
-        op: "if",
-        blockType: { kind: "val", type: { kind: "i32" } },
-        then: [
-          { op: "local.get", index: 2 },
-          { op: "ref.cast", typeIdx: EQ_HEAP },
-          { op: "local.get", index: 3 },
-          { op: "ref.cast", typeIdx: EQ_HEAP },
-          { op: "ref.eq" },
-        ],
-        else: [{ op: "i32.const", value: 0 }],
-      },
-    ];
-    // String SameValue = value equality (flatten both, __str_equals); else ref
-    // identity. `__str_flatten`/`__str_equals` are resolved at the top of this
-    // same `ensureObjectRuntime` pass (object-runtime helpers already call them,
-    // e.g. __obj_hash/__obj_find), so the call indices are regime-consistent.
-    const stringOrIdentityArm: Instr[] =
-      strFlattenIdx !== undefined && strEqualsIdx !== undefined && anyStrTypeIdx >= 0
-        ? [
-            { op: "local.get", index: 2 },
-            { op: "ref.test", typeIdx: anyStrTypeIdx },
-            { op: "local.get", index: 3 },
-            { op: "ref.test", typeIdx: anyStrTypeIdx },
-            { op: "i32.and" },
-            {
-              op: "if",
-              blockType: { kind: "val", type: { kind: "i32" } },
-              then: [
-                { op: "local.get", index: 2 },
-                { op: "ref.cast", typeIdx: anyStrTypeIdx },
-                { op: "call", funcIdx: strFlattenIdx },
-                { op: "local.get", index: 3 },
-                { op: "ref.cast", typeIdx: anyStrTypeIdx },
-                { op: "call", funcIdx: strFlattenIdx },
-                { op: "call", funcIdx: strEqualsIdx },
-              ],
-              else: refIdentityArm,
-            },
-          ]
-        : refIdentityArm;
-    const identityArm: Instr[] = [
-      { op: "local.get", index: 0 },
-      { op: "any.convert_extern" },
-      { op: "local.set", index: 2 },
-      { op: "local.get", index: 1 },
-      { op: "any.convert_extern" },
-      { op: "local.set", index: 3 },
-      ...stringOrIdentityArm,
-    ];
-    const bigintArm = (elseArm: Instr[]): Instr[] => [
-      ...bothTag(typeofBigIdx),
-      {
-        op: "if",
-        blockType: { kind: "val", type: { kind: "i32" } },
-        then: [
-          { op: "local.get", index: 0 },
-          { op: "call", funcIdx: toBigIdx },
-          { op: "local.get", index: 1 },
-          { op: "call", funcIdx: toBigIdx },
-          { op: "i64.eq" },
-        ],
-        else: elseArm,
-      },
-    ];
-    const boolArm = (elseArm: Instr[]): Instr[] => [
-      ...bothTag(typeofBoolIdx),
-      {
-        op: "if",
-        blockType: { kind: "val", type: { kind: "i32" } },
-        then: [
-          { op: "local.get", index: 0 },
-          { op: "call", funcIdx: unboxBoolIdx },
-          { op: "local.get", index: 1 },
-          { op: "call", funcIdx: unboxBoolIdx },
-          { op: "i32.eq" },
-        ],
-        else: elseArm,
-      },
-    ];
-    const numberArm = (elseArm: Instr[]): Instr[] => [
-      ...bothTag(typeofNumIdx),
-      {
-        op: "if",
-        blockType: { kind: "val", type: { kind: "i32" } },
-        then: [
-          // SameValue numbers: compare f64 bit patterns (NaN==NaN, +0!=-0).
-          { op: "local.get", index: 0 },
-          { op: "call", funcIdx: unboxNumIdx },
-          { op: "i64.reinterpret_f64" },
-          { op: "local.get", index: 1 },
-          { op: "call", funcIdx: unboxNumIdx },
-          { op: "i64.reinterpret_f64" },
-          { op: "i64.eq" },
-        ],
-        else: elseArm,
-      },
-    ];
-    const nullArm = (rest: Instr[]): Instr[] => [
-      { op: "local.get", index: 0 },
-      { op: "ref.is_null" },
-      { op: "local.get", index: 1 },
-      { op: "ref.is_null" },
-      { op: "i32.and" },
-      {
-        op: "if",
-        blockType: { kind: "val", type: { kind: "i32" } },
-        then: [{ op: "i32.const", value: 1 }],
-        else: rest,
-      },
-    ];
-    registerNative(
-      "__object_is",
-      [{ kind: "externref" }, { kind: "externref" }],
-      [{ kind: "i32" }],
-      [
-        { name: "aa", type: { kind: "anyref" } },
-        { name: "ba", type: { kind: "anyref" } },
-      ],
-      nullArm(numberArm(boolArm(bigintArm(identityArm)))),
-    );
-  }
+  registerObjectSameValueHelper(ctx, { registerNative, anyStrTypeIdx, strFlattenIdx, strEqualsIdx });
 }
 
 /**

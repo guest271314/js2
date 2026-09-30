@@ -25,6 +25,7 @@
  */
 import { ts } from "../ts-api.js";
 import { isVoidType } from "../checker/type-mapper.js";
+import { COLLECTION_KIND } from "./collection-kind.js"; // (#6419) import-free leaf — see the note at COLLECTION_KIND below
 import type { Instr, StructTypeDef, ArrayTypeDef, ValType } from "../ir/types.js";
 import { canonicalUndefinedExternInstrs, ensureAnyValueType, undefinedSingletonActive } from "./any-helpers.js";
 import type { ClosureInfo, CodegenContext, FunctionContext } from "./context/types.js";
@@ -43,7 +44,7 @@ import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js
 import { nativeStringLiteralInstrs } from "./native-string-literals.js"; // (#4629) dyn-dispatch fill key compares
 import { getWellKnownSymbolId } from "./literals.js"; // (#4629) @@iterator id
 import { ensureSymbolCarrier, usesNativeSymbolProvider } from "./symbol-native.js"; // (#5267 A-2) symbol keys box as symbols, not ids
-import { ensureNativeIteratorRuntime } from "./iterator-native.js"; // (#5267 B-2) live collection iterator records
+import { ensureNativeIteratorRuntime, ITER_FAMILY_MAP, ITER_FAMILY_SET } from "./iterator-native.js"; // (#5267 B-2) live collection iterator records; (#6484 S1) family tags
 import { getClosureFuncSelfTypeIdx, getOrCreateFuncRefWrapperTypes } from "./closures/funcref-wrapper-types.js"; // (#4629) iterator closure singleton
 
 /** WasmGC `eq` abstract heap type, signed-LEB `0x6d` = -19. Used for ref.eq on
@@ -80,22 +81,11 @@ export const MAP_LAYOUT = {
   TOMBSTONE_BIT,
 } as const;
 
-/**
- * (#3171) Which keyed collection a `$Map` struct instance backs. All four
- * collections share the `$Map` hash table (Set/WeakSet store key === value), so
- * struct identity alone cannot distinguish `[[MapData]]` / `[[SetData]]` /
- * `[[WeakMapData]]` / `[[WeakSetData]]` for the spec receiver brand checks
- * (`Map.prototype.get.call(new Set())` must throw a TypeError). The immutable
- * `kind` field (MAP_LAYOUT.M_KIND), stamped at construction by `__map_new`,
- * carries the brand.
- */
-export const COLLECTION_KIND = {
-  MAP: 0,
-  SET: 1,
-  WEAKMAP: 2,
-  WEAKSET: 3,
-} as const;
-export type CollectionKind = (typeof COLLECTION_KIND)[keyof typeof COLLECTION_KIND];
+// (#3171 / #6419) `COLLECTION_KIND` lives in the import-free leaf
+// `collection-kind.js`. It used to be declared here, but this module sits in an
+// import cycle, so a module that entered the cycle from the other side could
+// read the binding while it was still in TDZ. Import it from the leaf.
+export { COLLECTION_KIND, type CollectionKind } from "./collection-kind.js";
 
 /**
  * Register the WasmGC struct/array types backing the native Map. Idempotent.
@@ -2233,6 +2223,9 @@ export function emitLiveCollectionIterRec(
     { op: "i32.const", value: iterKind },
     { op: "call", funcIdx: iterNewIdx },
     { op: "extern.convert_any" },
+    // (#6484 S1) family — statically known here: this producer is only reached
+    // from a checker-proven Map/Set receiver.
+    { op: "i32.const", value: isSet ? ITER_FAMILY_SET : ITER_FAMILY_MAP },
     { op: "struct.new", typeIdx: iterRecTypeIdx },
     { op: "extern.convert_any" },
   );
@@ -2853,6 +2846,20 @@ export function fillMapSetDynDispatchArms(ctx: CodegenContext): void {
               },
               { op: "call", funcIdx: iterNewIdx },
               { op: "extern.convert_any" },
+              // (#6484 S1) family — the SAME `m.kind === SET` discriminator the
+              // projection above uses, so a dynamically-reached Set iterator
+              // reports `%SetIteratorPrototype%` and a Map one reports
+              // `%MapIteratorPrototype%`.
+              ...castMap(),
+              { op: "struct.get", typeIdx: mapIdx, fieldIdx: MAP_LAYOUT.M_KIND },
+              { op: "i32.const", value: 1 },
+              { op: "i32.eq" },
+              {
+                op: "if",
+                blockType: { kind: "val", type: { kind: "i32" } },
+                then: [{ op: "i32.const", value: ITER_FAMILY_SET }],
+                else: [{ op: "i32.const", value: ITER_FAMILY_MAP }],
+              },
               { op: "struct.new", typeIdx: iterRecTypeIdx },
               { op: "extern.convert_any" },
               { op: "return" },

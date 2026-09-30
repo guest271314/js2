@@ -16,17 +16,21 @@ import { integrityVarKey, widenedVarKeyFromDecl } from "../widened-var-key.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { isPristineEs5IntrinsicIsFrozenCall } from "../../ir/object-integrity.js";
 import { resolveArrayInfo } from "../array-methods.js";
+import { admitArrayFromVecCarrier } from "../array-from-vec-carrier.js";
 import { numberIsPredicateOps } from "../number-is-predicate-ops.js";
 import { sameValueNumberOps } from "../same-value-number-ops.js";
 import {
   emitArrayIteratorPrototypeSingleton,
   emitIteratorPrototypeSingleton,
   emitFunctionPrototypeObjectSingleton,
-  emitGeneratorFunctionPrototypeSingleton,
-  emitGeneratorPrototypeSingleton,
   emitTypedArrayIntrinsicCtorObject,
   isWiredTypedArrayViewName,
 } from "../array-object-proto.js";
+import {
+  emitGeneratorFunctionPrototypeSingleton,
+  isStaticSyncGeneratorFunctionValue,
+} from "../generator-function-intrinsic.js";
+import { isDynamicGeneratorFunctionValue } from "../generator-function-dynamic.js"; // (#6651 A14)
 import { isAnyValue, undefinedExternInstrs, undefinedSingletonActive } from "../any-helpers.js";
 import { BUILTIN_STATIC_METHOD_ARITY, pushBuiltinFnSingletonValueInstrs } from "../builtin-fn-meta.js";
 import {
@@ -60,6 +64,9 @@ import { popBody, pushBody } from "../context/bodies.js";
 import { reportError } from "../context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "../context/locals.js";
 import { rollbackSpeculative, snapshotSpeculative } from "../context/speculative.js";
+import { tryEmitArrayOfSpreadVec } from "../array-of-spread.js";
+import { tryEmitSpreadHostArgs } from "../host-method-args.js";
+import { hasSpreadArgument } from "../spread-arg-list.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import { emitGlobalThisGopdFold } from "../dyn-read.js";
 import { dynamicProtoRootFor, dynamicProtoFieldIdx, reserveDynprotoNorm } from "../dynamic-proto.js"; // (#802)
@@ -86,6 +93,7 @@ import {
   tryCompileOverriddenBuiltinProtoDescriptor,
 } from "../literals.js";
 import { emitCollectionIteratorVec, ensureMapGroupBy } from "../map-runtime.js";
+import { ensureIterRecPrototypeHelper } from "../iterator-proto-next.js"; // (#6484 S1)
 import {
   emitBrandCheckTypeError,
   emitLazyNativeProtoGet,
@@ -124,6 +132,10 @@ import { ensureStringRawHelper } from "../string-raw.js";
 import { defaultValueInstrs, pushDefaultValue } from "../type-coercion.js";
 import { compileMathCall } from "./builtins.js";
 import { tryCompileObjectCreateStaticPrototype } from "./call-object-builtins.js";
+import {
+  emitStandaloneObjectCreateClassInstance,
+  reserveStandaloneObjectCreateClassInstance,
+} from "../standalone-object-create-class-instance.js"; // (#6464)
 import { emitLazyProtoGet } from "./extern.js";
 import { buildThrowJsErrorInstrs, emitThrowTypeError, noJsHost } from "./helpers.js";
 import {
@@ -139,6 +151,9 @@ import { emitUndefined, ensureGetUndefined, ensureLateImport, flushLateImportShi
 import { resolveStructName } from "./misc.js";
 import * as objectGetPrototypeOf from "./object-get-prototype-of.js";
 import { tryCompileFnctorInstanceGetPrototypeOf } from "../fnctor-instance-prototype.js";
+import { recordStandaloneRuntimeKeyClassMemberRead } from "../standalone-class-dyn-member.js"; // (#6617)
+import { isStandaloneArraySubclass } from "../array-subclass-receiver.js"; // (#2917)
+import { emitArrayRootedProtoParent } from "../vec-proto-link.js"; // (#2917)
 import {
   BUILTIN_CLASS_NAMES,
   compileCallExpression,
@@ -220,6 +235,79 @@ function emitBuiltinGetPrototypeOfFallback(
   fctx: FunctionContext,
   arg: ts.Expression,
 ): InnerResult {
+  // (#6484 S1) The four checker-keyed iterator arms above fire only when the
+  // argument's static type is `ArrayIterator`/`MapIterator`/`SetIterator`/
+  // `StringIterator`. A value that reached `any` — the shape most reflective
+  // code has — skips all four and used to answer `ref.null.extern` here.
+  // Register the run-time resolver FIRST (it can add late imports, and doing
+  // that mid-body is the #2043 index-shift hazard), then branch on the carrier:
+  // an `$__IterRec` resolves through its `family` tag, everything else keeps the
+  // exact generic lowering below.
+  const iterProtoIdx = ensureIterRecPrototypeHelper(ctx);
+  const iterRecTypeIdx = ctx.structMap.get("__IterRec");
+  if (iterProtoIdx !== undefined && iterRecTypeIdx !== undefined) {
+    flushLateImportShifts(ctx, fctx);
+    const gptIdx = ensureLateImport(ctx, "__getPrototypeOf", [{ kind: "externref" }], [{ kind: "externref" }]);
+    flushLateImportShifts(ctx, fctx);
+    // Below this point the shape mirrors the generic lowering exactly, arm for
+    // arm, so a decline anywhere leaves the historical answer on the stack.
+    const iterArgType = compileExpression(ctx, fctx, arg);
+    if (!iterArgType) {
+      fctx.body.push({ op: "ref.null.extern" });
+      return { kind: "externref" };
+    }
+    if (tryEmitBuiltinFunctionPrototype(ctx, fctx, iterArgType)) return { kind: "externref" };
+    if (iterArgType.kind !== "externref") coerceType(ctx, fctx, iterArgType, { kind: "externref" });
+    if (gptIdx === undefined) {
+      fctx.body.push({ op: "drop" }, { op: "ref.null.extern" });
+      return { kind: "externref" };
+    }
+    // Compile the argument EXACTLY once: both arms read it back from a local,
+    // so evaluation order and side effects are unchanged.
+    const recvLocal = allocLocal(fctx, `__gpo_iter_${fctx.locals.length}`, { kind: "externref" });
+    fctx.body.push({ op: "local.tee", index: recvLocal });
+    // (#6625/#6629 S42 main-sync) A non-IterRec receiver used to fall straight
+    // to the generic `__getPrototypeOf` here, silently bypassing the
+    // #6609/#6625 CALLABLE-or-CLASS-OBJECT runtime check
+    // (`tryEmitDynamicCallableGetPrototypeOf`) — this arm's own ref.test guard
+    // runs FIRST for almost every module (any module that uses an iterator
+    // registers `$__IterRec`), so the dynamic-callable arm at line ~296 below
+    // could never fire in practice; #6609/#6625's own witnesses regressed
+    // silently once #6484 S1 landed this branch. Build the non-IterRec arm by
+    // delegating to the SAME helper the generic (non-IterRec-aware) path below
+    // uses, via the sanctioned body-swap so it can be embedded as an `else:`
+    // array (it emits directly into `fctx.body`, not a returned array).
+    const savedGpoIterBody = pushBody(fctx);
+    fctx.body.push({ op: "local.get", index: recvLocal });
+    const dynamicHandled = objectGetPrototypeOf.tryEmitDynamicCallableGetPrototypeOf(ctx, fctx, arg);
+    if (!dynamicHandled) {
+      // Declined (e.g. off the standalone/wasi lane): the pushed receiver is
+      // still on the stack, untouched — fall back to the generic import,
+      // re-read fresh since the helper may have registered/shifted imports.
+      const gptIdxFallback = ctx.funcMap.get("__getPrototypeOf") ?? gptIdx;
+      fctx.body.push({ op: "call", funcIdx: gptIdxFallback });
+    }
+    const nonIterRecArm = fctx.body;
+    popBody(fctx, savedGpoIterBody);
+    // Re-read the IterRec-arm's own funcIdx AFTER the helper above, which may
+    // have added/shifted late imports.
+    const iterProtoIdxFinal = ctx.funcMap.get("__iter_rec_proto") ?? iterProtoIdx;
+    fctx.body.push(
+      { op: "any.convert_extern" },
+      { op: "ref.test", typeIdx: iterRecTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "externref" } },
+        then: [
+          { op: "local.get", index: recvLocal },
+          { op: "call", funcIdx: iterProtoIdxFinal },
+        ],
+        else: nonIterRecArm,
+      },
+    );
+    return { kind: "externref" };
+  }
+
   const argType = compileExpression(ctx, fctx, arg);
   if (!argType) {
     fctx.body.push({ op: "ref.null.extern" });
@@ -231,6 +319,19 @@ function emitBuiltinGetPrototypeOfFallback(
   if (argType.kind !== "externref") {
     coerceType(ctx, fctx, argType, { kind: "externref" });
   }
+  // (#6609/#6625) A value that is CALLABLE, or a CLASS OBJECT, only at
+  // runtime answers %Function.prototype%.
+  if (objectGetPrototypeOf.tryEmitDynamicCallableGetPrototypeOf(ctx, fctx, arg)) {
+    return { kind: "externref" };
+  }
+  // (#6617) Every static arm has declined, so the argument's class — if it has
+  // one — is not knowable here. The native helper's #6617 arm resolves it at
+  // RUNTIME from the instance's `__tag`, but only for classes whose prototype
+  // singleton exists, and in an ordinary module that set is demand-driven. This
+  // is the arming site for the generic question, the twin of #6457's for the
+  // dynamic `.prototype` read; in a linked PROVIDER the demand is already
+  // total (#5383 S2h), which is why the provider half needs no site of its own.
+  recordStandaloneRuntimeKeyClassMemberRead(ctx, undefined);
   const getPrototypeIdx = ensureLateImport(ctx, "__getPrototypeOf", [{ kind: "externref" }], [{ kind: "externref" }]);
   flushLateImportShifts(ctx, fctx);
   if (getPrototypeIdx !== undefined) {
@@ -1219,7 +1320,15 @@ export function compileBuiltinStaticCall(
               } else {
                 fctx.body.push({ op: "array.get", typeIdx: srcArrIdx });
               }
-              if (!valTypesMatch(srcStore, storeWasm)) coerceType(ctx, fctx, srcStore, storeWasm);
+              // (#6651 E5) An externref element is ToNumber'd FIRST (§23.2.2.1's
+              // Set runs ToNumber, i.e. ToPrimitive/valueOf): a direct externref→i32
+              // coercion is `__unbox_number`, which reads an object as NaN → 0.
+              let elemT = srcStore;
+              if (srcStore.kind === "externref" && storeWasm.kind !== "f64") {
+                coerceType(ctx, fctx, srcStore, { kind: "f64" });
+                elemT = { kind: "f64" };
+              }
+              if (!valTypesMatch(elemT, storeWasm)) coerceType(ctx, fctx, elemT, storeWasm);
               fctx.body.push({ op: "array.set", typeIdx: taArrTypeIdx });
               // i++
               fctx.body.push({ op: "local.get", index: iTmp });
@@ -1413,64 +1522,78 @@ export function compileBuiltinStaticCall(
       const arrInfo = resolveArrayInfo(ctx, argTsType);
       if (arrInfo) {
         const { vecTypeIdx, arrTypeIdx, elemType } = arrInfo;
-        // Compile the source array
-        compileExpression(ctx, fctx, expr.arguments[0]!);
-        const srcVec = allocLocal(fctx, `__arrfrom_src_${fctx.locals.length}`, {
-          kind: "ref_null",
-          typeIdx: vecTypeIdx,
-        });
-        const srcData = allocLocal(fctx, `__arrfrom_sdata_${fctx.locals.length}`, {
-          kind: "ref_null",
-          typeIdx: arrTypeIdx,
-        });
-        const lenTmp = allocLocal(fctx, `__arrfrom_len_${fctx.locals.length}`, { kind: "i32" });
-        const dstData = allocLocal(fctx, `__arrfrom_ddata_${fctx.locals.length}`, {
-          kind: "ref_null",
-          typeIdx: arrTypeIdx,
-        });
+        // (#6422) This arm's `$Vec` comes from the CHECKER type, so `Uint8Array`
+        // lands here even when the argument lowers to a `$__ta_view` share or a
+        // host externref. #1919 transactional try-lower: probe-compile, let
+        // `admitArrayFromVecCarrier` decide (de-viewing a view), and roll the
+        // probe back into the fallbacks below for anything it refuses — rather
+        // than `local.set`ting a non-vec into the `ref null $Vec` local, which
+        // `repairStructTypeMismatches` papered over with a `ref.cast_null $Vec`
+        // that TRAPPED. Reading the COMPILED type also covers the bound form
+        // (`const v = new Uint8Array(buf); Array.from(v)`).
+        const snap = snapshotSpeculative(ctx, fctx);
+        const srcType = compileExpression(ctx, fctx, expr.arguments[0]!);
+        if (admitArrayFromVecCarrier(ctx, fctx, srcType, vecTypeIdx)) {
+          const srcVec = allocLocal(fctx, `__arrfrom_src_${fctx.locals.length}`, {
+            kind: "ref_null",
+            typeIdx: vecTypeIdx,
+          });
+          const srcData = allocLocal(fctx, `__arrfrom_sdata_${fctx.locals.length}`, {
+            kind: "ref_null",
+            typeIdx: arrTypeIdx,
+          });
+          const lenTmp = allocLocal(fctx, `__arrfrom_len_${fctx.locals.length}`, { kind: "i32" });
+          const dstData = allocLocal(fctx, `__arrfrom_ddata_${fctx.locals.length}`, {
+            kind: "ref_null",
+            typeIdx: arrTypeIdx,
+          });
 
-        fctx.body.push({ op: "local.set", index: srcVec });
-        // Get length
-        fctx.body.push({ op: "local.get", index: srcVec });
-        fctx.body.push({
-          op: "struct.get",
-          typeIdx: vecTypeIdx,
-          fieldIdx: 0,
-        });
-        fctx.body.push({ op: "local.set", index: lenTmp });
-        // Get source data
-        fctx.body.push({ op: "local.get", index: srcVec });
-        fctx.body.push({
-          op: "struct.get",
-          typeIdx: vecTypeIdx,
-          fieldIdx: 1,
-        });
-        fctx.body.push({ op: "local.set", index: srcData });
-        // Create new data array with default value — defaultValueInstrs
-        // handles externref/ref/ref_null/i32/f64/i64 uniformly. Hand-rolling
-        // `ref.null typeIdx: -1` for the externref element case produced
-        // "Unknown heap type -1" wasm_compile errors (#1338).
-        for (const ins of defaultValueInstrs(elemType)) fctx.body.push(ins);
-        fctx.body.push({ op: "local.get", index: lenTmp });
-        fctx.body.push({ op: "array.new", typeIdx: arrTypeIdx });
-        fctx.body.push({ op: "local.set", index: dstData });
-        // Copy elements: array.copy dst dstOff src srcOff len
-        fctx.body.push({ op: "local.get", index: dstData });
-        fctx.body.push({ op: "i32.const", value: 0 });
-        fctx.body.push({ op: "local.get", index: srcData });
-        fctx.body.push({ op: "i32.const", value: 0 });
-        fctx.body.push({ op: "local.get", index: lenTmp });
-        fctx.body.push({
-          op: "array.copy",
-          dstTypeIdx: arrTypeIdx,
-          srcTypeIdx: arrTypeIdx,
-        });
-        // Create new vec struct with copied data
-        fctx.body.push({ op: "local.get", index: lenTmp });
-        fctx.body.push({ op: "local.get", index: dstData });
-        fctx.body.push({ op: "ref.as_non_null" });
-        fctx.body.push({ op: "struct.new", typeIdx: vecTypeIdx });
-        return { kind: "ref", typeIdx: vecTypeIdx };
+          fctx.body.push({ op: "local.set", index: srcVec });
+          // Get length
+          fctx.body.push({ op: "local.get", index: srcVec });
+          fctx.body.push({
+            op: "struct.get",
+            typeIdx: vecTypeIdx,
+            fieldIdx: 0,
+          });
+          fctx.body.push({ op: "local.set", index: lenTmp });
+          // Get source data
+          fctx.body.push({ op: "local.get", index: srcVec });
+          fctx.body.push({
+            op: "struct.get",
+            typeIdx: vecTypeIdx,
+            fieldIdx: 1,
+          });
+          fctx.body.push({ op: "local.set", index: srcData });
+          // Create new data array with default value — defaultValueInstrs
+          // handles externref/ref/ref_null/i32/f64/i64 uniformly. Hand-rolling
+          // `ref.null typeIdx: -1` for the externref element case produced
+          // "Unknown heap type -1" wasm_compile errors (#1338).
+          for (const ins of defaultValueInstrs(elemType)) fctx.body.push(ins);
+          fctx.body.push({ op: "local.get", index: lenTmp });
+          fctx.body.push({ op: "array.new", typeIdx: arrTypeIdx });
+          fctx.body.push({ op: "local.set", index: dstData });
+          // Copy elements: array.copy dst dstOff src srcOff len
+          fctx.body.push({ op: "local.get", index: dstData });
+          fctx.body.push({ op: "i32.const", value: 0 });
+          fctx.body.push({ op: "local.get", index: srcData });
+          fctx.body.push({ op: "i32.const", value: 0 });
+          fctx.body.push({ op: "local.get", index: lenTmp });
+          fctx.body.push({
+            op: "array.copy",
+            dstTypeIdx: arrTypeIdx,
+            srcTypeIdx: arrTypeIdx,
+          });
+          // Create new vec struct with copied data
+          fctx.body.push({ op: "local.get", index: lenTmp });
+          fctx.body.push({ op: "local.get", index: dstData });
+          fctx.body.push({ op: "ref.as_non_null" });
+          fctx.body.push({ op: "struct.new", typeIdx: vecTypeIdx });
+          return { kind: "ref", typeIdx: vecTypeIdx };
+        }
+        // Not this vec (a `$__ta_view` share, a host externref, …) — undo the
+        // probe and let the paths below read the real carrier.
+        rollbackSpeculative(ctx, fctx, snap);
       }
     }
     // (#5268 r3 R3-1) Native standalone `Array.from(items[, mapFn[, thisArg]])`
@@ -1578,11 +1701,12 @@ export function compileBuiltinStaticCall(
     // `__js_array_push`) imports don't exist — the old path leaked them and
     // returned a wrong/empty array standalone. Build a native vec directly,
     // mirroring the multi-arg `Array(a,b,c)` branch of
-    // `compileArrayConstructorCall` (no spread → fixed arity). Spread args keep
-    // the host path (handled by the generic spread-call lowering in host mode);
-    // a standalone spread of Array.of falls through to the existing path.
-    const hasSpreadArg = expr.arguments.some((a) => ts.isSpreadElement(a));
-    if (noJsHost(ctx) && !hasSpreadArg) {
+    // `compileArrayConstructorCall`. (#6421) A SPREAD is expanded at its runtime
+    // length by the shared builder rather than skipped: the old `!hasSpreadArg`
+    // gate dropped a standalone `Array.of(...xs)` onto the host path whose
+    // imports do not exist, so it answered length 0.
+    const hasSpreadArg = hasSpreadArgument(expr.arguments);
+    if (noJsHost(ctx)) {
       // Element type: contextual `Array<T>` type arg, else f64 for a numeric
       // arg set, else externref (mixed / non-numeric). Mirrors the untyped
       // dense-array default in compileArrayConstructorCall.
@@ -1594,10 +1718,16 @@ export function compileBuiltinStaticCall(
       } else {
         // No resolvable element type: pick f64 only when every arg is a static
         // number; otherwise box to externref so mixed/object elements survive.
-        const allNumeric = expr.arguments.every((a) => {
-          const t = ctx.checker.getTypeAtLocation(a);
-          return (t.flags & (ts.TypeFlags.Number | ts.TypeFlags.NumberLiteral)) !== 0;
-        });
+        // (#6421) A spread's ELEMENTS are invisible to this static scan — the
+        // node is a SpreadElement, not a number — so a spread-containing list
+        // can never be called all-numeric. Box to externref instead of guessing
+        // f64 (the choice #5361 made for `splice`).
+        const allNumeric =
+          !hasSpreadArg &&
+          expr.arguments.every((a) => {
+            const t = ctx.checker.getTypeAtLocation(a);
+            return (t.flags & (ts.TypeFlags.Number | ts.TypeFlags.NumberLiteral)) !== 0;
+          });
         elemWasm = expr.arguments.length > 0 && allNumeric ? { kind: "f64" } : { kind: "externref" };
       }
       const elemKey =
@@ -1606,7 +1736,18 @@ export function compileBuiltinStaticCall(
           : elemWasm.kind;
       const ofVecTypeIdx = getOrRegisterVecType(ctx, elemKey, elemWasm);
       const ofArrTypeIdx = getArrTypeIdxFromVec(ctx, ofVecTypeIdx);
-      if (ofArrTypeIdx >= 0) {
+      // (#6421) A runtime-length argument list is sized and filled by the
+      // shared spread builder; it declines (emitting nothing) when this target
+      // cannot expand a spread, and the host path below still catches that.
+      if (ofArrTypeIdx >= 0 && hasSpreadArg) {
+        const ofSpread = tryEmitArrayOfSpreadVec(ctx, fctx, expr.arguments, {
+          vecTypeIdx: ofVecTypeIdx,
+          arrTypeIdx: ofArrTypeIdx,
+          elemType: elemWasm,
+        });
+        if (ofSpread) return ofSpread;
+      }
+      if (ofArrTypeIdx >= 0 && !hasSpreadArg) {
         if (expr.arguments.length === 0) {
           fctx.body.push({ op: "i32.const", value: 0 });
           fctx.body.push({ op: "i32.const", value: 0 });
@@ -1645,14 +1786,22 @@ export function compileBuiltinStaticCall(
       fctx.body.push({ op: "call", funcIdx: arrNewIdx });
       const itemsLocal = allocLocal(fctx, `__arrof_items_${fctx.locals.length}`, { kind: "externref" });
       fctx.body.push({ op: "local.set", index: itemsLocal });
-      for (const arg of expr.arguments) {
-        fctx.body.push({ op: "local.get", index: itemsLocal });
-        const argType = compileExpression(ctx, fctx, arg, { kind: "externref" });
-        if (argType && argType.kind !== "externref") coerceType(ctx, fctx, argType, { kind: "externref" });
-        fctx.body.push({ op: "call", funcIdx: arrPushIdx });
+      // (#6421) With a spread present the whole list goes through the shared
+      // expanding builder — one `__js_array_push` per AST node handed
+      // `Array.of` the SOURCE array as a single element. Without one the
+      // unrolled loop is exact and stays byte-identical.
+      if (!tryEmitSpreadHostArgs(ctx, fctx, expr.arguments, itemsLocal, "__js_array_push", arrPushIdx)) {
+        for (const arg of expr.arguments) {
+          fctx.body.push({ op: "local.get", index: itemsLocal });
+          const argType = compileExpression(ctx, fctx, arg, { kind: "externref" });
+          if (argType && argType.kind !== "externref") coerceType(ctx, fctx, argType, { kind: "externref" });
+          fctx.body.push({ op: "call", funcIdx: arrPushIdx });
+        }
       }
       fctx.body.push({ op: "local.get", index: itemsLocal });
-      fctx.body.push({ op: "call", funcIdx: ofIdx });
+      // Expanding a spread can register late imports, which shifts every
+      // defined-function index captured before them — re-read by name.
+      fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__array_of") ?? ofIdx });
       return { kind: "externref" };
     }
     fctx.body.push({ op: "ref.null.extern" });
@@ -2237,42 +2386,6 @@ export function compileBuiltinStaticCall(
     if (es5Early) return es5Early;
     const arg0 = expr.arguments[0]!;
 
-    // (#4748) The native standalone generator-instance getPrototypeOf arm
-    // returns the intrinsic `%GeneratorPrototype%` singleton directly. The
-    // exact ES2015 bootstrap expression asks for one more prototype walk:
-    // `Object.getPrototypeOf(Object.getPrototypeOf(function*(){}()))`.
-    // Preserve that intrinsic result instead of sending the `$Object` GP
-    // singleton through its unmodeled `$proto` field (which otherwise yields
-    // null and makes the following `Symbol.toStringTag` read trap). Evaluate
-    // the inner call normally for source-order side effects, then reuse the
-    // same identity-stable GP singleton. Host/gc remains on its existing path.
-    if ((ctx.standalone || ctx.wasi) && ts.isCallExpression(arg0)) {
-      const innerCallee = arg0.expression;
-      if (
-        ts.isPropertyAccessExpression(innerCallee) &&
-        ts.isIdentifier(innerCallee.expression) &&
-        innerCallee.expression.text === "Object" &&
-        innerCallee.name.text === "getPrototypeOf" &&
-        arg0.arguments.length === 1
-      ) {
-        const innerArg = arg0.arguments[0]!;
-        let innerTypeName: string | undefined;
-        try {
-          innerTypeName = ctx.checker.getTypeAtLocation(innerArg).getSymbol()?.name;
-        } catch {
-          innerTypeName = undefined;
-        }
-        if (innerTypeName === "Generator") {
-          const innerType = compileExpression(ctx, fctx, arg0);
-          if (innerType) fctx.body.push({ op: "drop" });
-          const protoType = emitGeneratorPrototypeSingleton(ctx, fctx);
-          if (protoType) return protoType;
-          fctx.body.push({ op: "ref.null.extern" });
-          return { kind: "externref" };
-        }
-      }
-    }
-
     // (#5099) The iterator allocation is an unobservable intermediate in this
     // intrinsic bootstrap query. Route directly to the metadata-bearing
     // singleton so the generic standalone `__iterator` fallback cannot throw
@@ -2313,6 +2426,8 @@ export function compileBuiltinStaticCall(
       if (parentClassName && emitLazyProtoGet(ctx, fctx, parentClassName)) {
         return { kind: "externref" };
       }
+      // (#2917) `class J extends Array`: J.prototype's [[Prototype]] is Array.prototype.
+      if (emitArrayRootedProtoParent(ctx, fctx, childClassName)) return { kind: "externref" };
       // Base class with no parent: return null (Object.prototype not modeled)
       fctx.body.push({ op: "ref.null.extern" });
       return { kind: "externref" };
@@ -2327,6 +2442,19 @@ export function compileBuiltinStaticCall(
     // Same shape for `async function*`. Tests rely on this:
     //   var GeneratorPrototype = Object.getPrototypeOf(g).prototype;
     //   GeneratorPrototype.next.call(non_gen);  // → TypeError
+    //
+    // (#6651 A3) The same answer for a sync generator function EXPRESSION —
+    // `Object.getPrototypeOf(function*() {})`, the spelling every
+    // `built-ins/GeneratorFunction/**` row uses — and for a provably unchanged
+    // object-literal generator METHOD (`o.m`, see the predicate). Neither
+    // operand evaluation is observable, so neither is compiled.
+    if (
+      (ctx.standalone || ctx.wasi) &&
+      (isStaticSyncGeneratorFunctionValue(ctx, arg0) || isDynamicGeneratorFunctionValue(ctx, arg0))
+    ) {
+      const t = emitGeneratorFunctionPrototypeSingleton(ctx, fctx);
+      if (t) return t;
+    }
     if (ts.isIdentifier(arg0)) {
       const argName = arg0.text;
       const isGen = ctx.generatorFunctions.has(argName);
@@ -2472,31 +2600,8 @@ export function compileBuiltinStaticCall(
       return { kind: "externref" };
     }
 
-    // (#3236 S2) `Object.getPrototypeOf(<sync generator instance>)` → the same
-    // native `%GeneratorPrototype%` singleton that `genFn.prototype` /
-    // `getPrototypeOf(genFn).prototype` resolve to (§27.5.1). A generator
-    // INSTANCE (`g()`) is OrdinaryCreateFromConstructor(g, "%GeneratorPrototype%")
-    // — its `[[Prototype]]` is the intrinsic %GeneratorPrototype% captured at
-    // instantiation, INDEPENDENT of any later mutation of `g.prototype`
-    // (default-proto.js sets `g.prototype = null` yet still expects GP). The
-    // native generator model doesn't carry a per-instance proto slot, so we
-    // route to the identity-stable GP singleton directly — the SAME cached
-    // global `emitGeneratorPrototypeSingleton` returns everywhere, so the
-    // `getPrototypeOf(g()) === getPrototypeOf(g).prototype` identity holds.
-    // The TS checker names a sync generator's result type `Generator`
-    // (distinct from `AsyncGenerator`, which keeps the host path), so this
-    // routes genuinely. Compile+drop the arg for its evaluation side effects
-    // (`g()` evaluates arguments; the generator body itself stays suspended).
-    // Host/gc mode keeps the `__getPrototypeOf` import (byte-inert).
-    if ((ctx.standalone || ctx.wasi) && argTsType.getSymbol()?.name === "Generator") {
-      const argType = compileExpression(ctx, fctx, arg0);
-      if (argType) fctx.body.push({ op: "drop" });
-      const protoType = emitGeneratorPrototypeSingleton(ctx, fctx);
-      if (protoType) return protoType;
-      // Runtime unavailable: preserve the historical null return.
-      fctx.body.push({ op: "ref.null.extern" });
-      return { kind: "externref" };
-    }
+    // Native generator instances carry a mutable canonical prototype view;
+    // the generic runtime read below preserves changes and opaque receivers.
 
     const className = resolveStructName(ctx, argTsType);
     if (objectGetPrototypeOf.tryNativeCollectionGpo(ctx, fctx, arg0, argTsType)) return { kind: "externref" };
@@ -2596,6 +2701,12 @@ export function compileBuiltinStaticCall(
     flushLateImportShifts(ctx, fctx);
 
     if (hostIdx !== undefined) {
+      // (#6464) The standalone twin of #5239: a dynamic `<value>.prototype`
+      // misses the syntactic fast path above and would become a plain `$Object`
+      // whose members can never bind a compiled receiver. Reserved here (the
+      // body needs `ctx.protoGlobals`, complete only at finalize) and filled by
+      // `fillStandaloneObjectCreateClassInstance`.
+      let classInstanceIdx: number | undefined;
       // Compile the proto argument
       if (arg0.kind === ts.SyntaxKind.NullKeyword) {
         fctx.body.push({ op: "ref.null.extern" });
@@ -2607,6 +2718,7 @@ export function compileBuiltinStaticCall(
         // (identifiers, calls, Foo.prototype) keep the ordinary path inside
         // compileProtoArg.
         compileProtoArg(ctx, fctx, arg0);
+        classInstanceIdx = reserveStandaloneObjectCreateClassInstance(ctx);
       } else {
         const argType = compileExpression(ctx, fctx, arg0);
         if (!argType) {
@@ -2619,7 +2731,11 @@ export function compileBuiltinStaticCall(
           coerceType(ctx, fctx, argType, { kind: "externref" });
         }
       }
-      fctx.body.push({ op: "call", funcIdx: hostIdx });
+      if (classInstanceIdx !== undefined) {
+        emitStandaloneObjectCreateClassInstance(fctx, classInstanceIdx, hostIdx);
+      } else {
+        fctx.body.push({ op: "call", funcIdx: hostIdx });
+      }
 
       // Second argument (property descriptors): expand at compile time, but only
       // for descriptors this expansion can FULLY model. The admission test and
@@ -2947,7 +3063,12 @@ export function compileBuiltinStaticCall(
     // host import and already passes) — gated on ctx.standalone so host
     // bytes stay identical.
     const arg0TsType = ctx.checker.getTypeAtLocation(arg0);
-    const structName = isScriptGlobalThisReceiver ? undefined : resolveStructName(ctx, arg0TsType);
+    // (#2917) A standalone Array subclass's struct is vestigial — the instance
+    // is a vec — so the struct fold answered `undefined` for `length`/indices.
+    const structName =
+      isScriptGlobalThisReceiver || isStandaloneArraySubclass(ctx, arg0TsType.getSymbol()?.name)
+        ? undefined
+        : resolveStructName(ctx, arg0TsType);
     const literalKeyText = (e: ts.Expression): string | undefined => {
       if (ts.isStringLiteral(e)) return e.text;
       if (!ctx.standalone) return undefined;
@@ -3835,8 +3956,8 @@ export function compileBuiltinStaticCall(
     // ToObject THROWS for it, while `Object()` answers a fresh plain object, so
     // that case stays with the native's own guard.
     const targetTag = ctx.standalone ? ctx.oracle.staticJsTypeOf(targetArg) : "mixed";
-    const targetIsPrimitive =
-      targetTag === "number" || targetTag === "string" || targetTag === "boolean" || targetTag === "bigint";
+    // (#6651 SY1) `symbol` is Table 13's FIFTH wrapper row — `emitObjectCoercion` grew its Symbol arm in slice I4, this gate did not.
+    const targetIsPrimitive = ["number", "string", "boolean", "bigint", "symbol"].includes(targetTag);
     if (targetIsPrimitive) {
       emitObjectCoercion(ctx, fctx, [targetArg]);
     } else {
@@ -3959,6 +4080,45 @@ export function compileBuiltinStaticCall(
       fctx.body.push({ op: "drop" });
       fctx.body.push({ op: "ref.null.extern" });
       return { kind: "externref" };
+    }
+    // (#5383 S2l) STANDALONE, non-literal entries. Until now the ONLY standalone
+    // shape with a native lowering was the array-LITERAL-of-pairs above;
+    // everything else fell through to `ensureLateImport`, whose funcMap lookup
+    // decided the outcome — and `__object_fromEntries` is in funcMap only when
+    // something ELSE in the module already pulled in `ensureObjectRuntime`. So
+    // the same source line compiled or was REFUSED depending on unrelated module
+    // content: `Object.fromEntries(nt.map(([e,t]) => [t,e]))` compiled (the
+    // array-literal callback body ensures the runtime) while
+    // `Object.fromEntries(nt)`, `nt.slice(0)`, `nt.map((e) => e)` and
+    // `Object.fromEntries(mk())` all failed with the #1472 Phase B refusal.
+    // That is not a capability boundary, it is an accident of ordering.
+    //
+    // Ensure the runtime explicitly and call the self-hosted native directly
+    // when the argument is statically an ARRAY or TUPLE — the shapes the
+    // native's `__extern_length` / `__extern_get_idx` walk genuinely indexes
+    // (typed-vec arms + the closed-struct/tuple arms in
+    // `fillExternArrayLikeStructArms`). No new host import: the native is a
+    // defined function, so this adds no import and shifts no index (#1984).
+    //
+    // A NON-indexable iterable (a `Map`, a generator) deliberately keeps the
+    // refusal. The native would walk it with `__extern_length` → 0 and return
+    // `{}` — a silent wrong answer, which is exactly the failure this slice
+    // exists to remove. Native iterator-protocol consumption is the #2190
+    // follow-up; until then the loud compile error is the correct answer.
+    if (ctx.standalone) {
+      const entriesFact = ctx.oracle.typeFactOf(entriesArg);
+      if (entriesFact.kind === "array" || entriesFact.kind === "tuple") {
+        ensureObjectRuntime(ctx);
+        const feNativeIdx = ctx.funcMap.get("__object_fromEntries");
+        if (feNativeIdx !== undefined) {
+          const nativeArgType = compileExpression(ctx, fctx, entriesArg, { kind: "externref" });
+          if (nativeArgType && nativeArgType.kind !== "externref")
+            coerceType(ctx, fctx, nativeArgType, { kind: "externref" });
+          if (nativeArgType === null) fctx.body.push({ op: "ref.null.extern" });
+          fctx.body.push({ op: "call", funcIdx: feNativeIdx });
+          return { kind: "externref" };
+        }
+      }
     }
     const argType = compileExpression(ctx, fctx, entriesArg, { kind: "externref" });
     if (argType && argType.kind !== "externref") coerceType(ctx, fctx, argType, { kind: "externref" });

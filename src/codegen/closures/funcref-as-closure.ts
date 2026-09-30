@@ -1,3 +1,8 @@
+import {
+  initializeNativeGeneratorFunctionValue,
+  nativeGeneratorFunctionValueNeedsResultBridge,
+  nativeGeneratorFunctionValueWrapperResults,
+} from "../generators-factory-prototype.js";
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
  * Funcref-as-closure wrapping for js2wasm.
@@ -37,12 +42,7 @@ import {
   getOrCreateConstructibleFuncRefWrapperTypes,
   getOrCreateFuncRefWrapperTypes,
 } from "./funcref-wrapper-types.js";
-
-function hasExplicitThisParameter(declaration: ts.Node | undefined): declaration is ts.FunctionDeclaration {
-  if (!declaration || !ts.isFunctionDeclaration(declaration)) return false;
-  const first = declaration.parameters[0];
-  return first !== undefined && ts.isIdentifier(first.name) && first.name.text === "this";
-}
+import { hasExplicitThisParameter } from "./func-value-callable-signature.js";
 
 /**
  * (#5270 step 1.3) A `__fn_tramp_*` body is a PURE FORWARDER — it re-pushes the
@@ -159,6 +159,19 @@ function emitMemoizedNestedFnClosure(
     (fctx.nestedFnClosureMemos ??= new Map()).set(funcName, memoLocal);
   }
 
+  const isSelfRef = fctx.name === funcName;
+  // An identity-observed FunctionDeclaration has one stable lexical value,
+  // materialized at its first dynamic use. A sibling closure that captures
+  // that binding is itself such a use: reading the preallocated externref
+  // local directly would otherwise snapshot its initial null value. Fill the
+  // bindings BEFORE the guard, straight-line with this site: inside the
+  // then-arm, each capture's own build nested the same fill for its captures,
+  // so one reference emitted a copy per dependency path (#1058 — the checker's
+  // mutually-referencing inner functions ran out of memory on this).
+  if (!isSelfRef) {
+    for (const cap of nestedCaptures) materializeHoistedFunctionValueBinding(ctx, fctx, cap.name, cap.mutable !== true);
+  }
+
   fctx.body.push({ op: "local.get", index: memoLocal });
   fctx.body.push({ op: "ref.is_null" });
 
@@ -177,7 +190,6 @@ function emitMemoizedNestedFnClosure(
   // dereference `cap.outerLocalIdx`, which points into a different
   // (outer) scope and yields garbage / null when reused inside the
   // current lifted body.
-  const isSelfRef = fctx.name === funcName;
   for (let i = 0; i < nestedCaptures.length; i++) {
     const cap = nestedCaptures[i]!;
     if (isSelfRef) {
@@ -185,13 +197,6 @@ function emitMemoizedNestedFnClosure(
       fctx.body.push({ op: "local.get", index: i });
       continue;
     }
-    // An identity-observed FunctionDeclaration has one stable lexical value,
-    // materialized at its first dynamic use. A sibling closure that captures
-    // that binding is itself such a use: reading the preallocated externref
-    // local directly would otherwise snapshot its initial null value. Keep the
-    // lazy timing (important when the function captures later initializers),
-    // but fill the binding immediately before this closure copies it.
-    materializeHoistedFunctionValueBinding(ctx, fctx, cap.name, cap.mutable !== true);
     // (#2029 family A) Cross-fctx capture sourcing. `cap.outerLocalIdx` is a
     // slot in the function that DECLARED the nested fn; when this
     // materialization runs inside a DIFFERENT function (an object-literal
@@ -461,7 +466,8 @@ export function emitFuncRefAsClosure(
     // Captures stay leading raw ABI slots; only the declaration's TS-only
     // pseudo-this slot is removed from the first-class callable signature.
     const userParams = explicitThisParam ? sourceUserParams.slice(1) : sourceUserParams;
-    const results = sig.results;
+    const nativeGeneratorResultBridge = nativeGeneratorFunctionValueNeedsResultBridge(ctx, sig.results);
+    const results = nativeGeneratorFunctionValueWrapperResults(ctx, sig.results);
 
     const wrapperTypes = getOrCreateFuncRefWrapperTypes(ctx, userParams, results);
     if (!wrapperTypes) return null;
@@ -487,7 +493,10 @@ export function emitFuncRefAsClosure(
           // double-remaps on a late-import shift.
           metaSlotOf()?.init,
         );
-        return { kind: "ref", typeIdx: cachedArtifacts.structTypeIdx };
+        return initializeNativeGeneratorFunctionValue(ctx, fctx, metaDecl, {
+          kind: "ref",
+          typeIdx: cachedArtifacts.structTypeIdx,
+        });
       }
     }
 
@@ -577,6 +586,7 @@ export function emitFuncRefAsClosure(
       trampolineBody.push({ op: "local.get", index: i + 1 });
     }
     trampolineBody.push(trampolineForwardCall(funcIdx));
+    if (nativeGeneratorResultBridge) trampolineBody.push({ op: "extern.convert_any" });
 
     const trampolineFuncIdx = mintDefinedFunc(ctx);
     ctx.trampolineForwarders.add(trampolineFuncIdx);
@@ -632,14 +642,16 @@ export function emitFuncRefAsClosure(
       userParams.length,
       metaSlot?.init,
     );
-    return { kind: "ref", typeIdx: structTypeIdx };
+    return initializeNativeGeneratorFunctionValue(ctx, fctx, metaDecl, { kind: "ref", typeIdx: structTypeIdx });
   }
 
   const userParams = explicitThisParam ? sig.params.slice(1) : sig.params;
 
+  const nativeGeneratorResultBridge = nativeGeneratorFunctionValueNeedsResultBridge(ctx, sig.results);
+  const wrapperResults = nativeGeneratorFunctionValueWrapperResults(ctx, sig.results);
   const wrapperTypes = constructible
-    ? getOrCreateConstructibleFuncRefWrapperTypes(ctx, userParams, sig.results)
-    : getOrCreateFuncRefWrapperTypes(ctx, userParams, sig.results);
+    ? getOrCreateConstructibleFuncRefWrapperTypes(ctx, userParams, wrapperResults)
+    : getOrCreateFuncRefWrapperTypes(ctx, userParams, wrapperResults);
   if (!wrapperTypes) return null;
 
   const { structTypeIdx, liftedFuncTypeIdx, closureInfo } = wrapperTypes;
@@ -660,6 +672,7 @@ export function emitFuncRefAsClosure(
     trampolineBody.push({ op: "local.get", index: i + 1 });
   }
   trampolineBody.push(trampolineForwardCall(funcIdx));
+  if (nativeGeneratorResultBridge) trampolineBody.push({ op: "extern.convert_any" });
 
   const trampolineFuncIdx = mintDefinedFunc(ctx);
   ctx.trampolineForwarders.add(trampolineFuncIdx);
@@ -688,7 +701,22 @@ export function emitFuncRefAsClosure(
   if (metaTypeIdx !== undefined && metaSlot) for (const instr of metaSlot.init) fctx.body.push(instr);
   fctx.body.push({ op: "struct.new", typeIdx: allocTypeIdx });
 
-  return { kind: "ref", typeIdx: allocTypeIdx };
+  return initializeNativeGeneratorFunctionValue(ctx, fctx, metaDecl, { kind: "ref", typeIdx: allocTypeIdx });
+}
+
+/**
+ * (#1058) Where each binding was last published in a straight-line body: the
+ * store instruction and its index. A re-emit is redundant while that store is
+ * still in place earlier in the same body array, because it then runs before
+ * any later instruction of the array. A rollback that truncates the body, or
+ * an insert before the store, moves or replaces the recorded instruction, so
+ * the check fails and the value is published again.
+ */
+const publishedBindings = new WeakMap<Instr[], Map<string, { index: number; instr: Instr }>>();
+
+function publishedEarlierInBody(body: Instr[], name: string): boolean {
+  const mark = publishedBindings.get(body)?.get(name);
+  return mark !== undefined && body[mark.index] === mark.instr;
 }
 
 /**
@@ -707,7 +735,8 @@ export function materializeHoistedFunctionValueBinding(
     !fctx.hoistedFunctionValueBindings?.has(name) ||
     fctx.liftedCaptureNames?.has(name) ||
     (alreadyMaterialized && !reemitForImmutableCapture) ||
-    fctx.materializingHoistedFunctionValueBindings?.has(name)
+    fctx.materializingHoistedFunctionValueBindings?.has(name) ||
+    (alreadyMaterialized && publishedEarlierInBody(fctx.body, name))
   ) {
     return alreadyMaterialized || fctx.materializingHoistedFunctionValueBindings?.has(name) || false;
   }
@@ -772,5 +801,8 @@ export function materializeHoistedFunctionValueBinding(
   }
   fctx.materializingHoistedFunctionValueBindings.delete(name);
   (fctx.materializedHoistedFunctionValueBindings ??= new Set()).add(name);
+  let published = publishedBindings.get(fctx.body);
+  if (!published) publishedBindings.set(fctx.body, (published = new Map()));
+  published.set(name, { index: fctx.body.length - 1, instr: fctx.body[fctx.body.length - 1]! });
   return true;
 }

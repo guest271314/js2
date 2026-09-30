@@ -14,6 +14,7 @@
  * the god-file shrinking rather than growing.
  */
 import { ts } from "../ts-api.js";
+import { emitVecLengthHoleFill } from "./vec-length-hole-fill.js"; // (#6482 r4)
 import type { Instr, ValType } from "../ir/types.js";
 import { allocLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
@@ -263,7 +264,7 @@ export function maybeEmitVecLengthDefine(
     // newLen = ToUint32(value)  (value is a validated non-negative integer).
     const newLenLocal = allocLocal(fctx, `__deflen_new_${fctx.locals.length}`, { kind: "i32" });
     fctx.body.push({ op: "local.get", index: nlLocal });
-    fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+    fctx.body.push({ op: "i32.trunc_sat_f64_u" });
     fctx.body.push({ op: "local.set", index: newLenLocal });
 
     // GROW: when newLen exceeds the backing `$data` capacity, reallocate so the
@@ -286,7 +287,13 @@ export function maybeEmitVecLengthDefine(
     fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
     fctx.body.push({ op: "local.set", index: dataLocal });
     fctx.body.push({ op: "local.get", index: dataLocal });
-    fctx.body.push({ op: "array.len" });
+    fctx.body.push({ op: "ref.is_null" });
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "val", type: { kind: "i32" } },
+      then: [{ op: "i32.const", value: 0 }],
+      else: [{ op: "local.get", index: dataLocal }, { op: "array.len" }],
+    });
     fctx.body.push({ op: "local.tee", index: oldCapLocal });
     fctx.body.push({ op: "local.get", index: newLenLocal });
     fctx.body.push({ op: "i32.lt_s" }); // oldCap < newLen?
@@ -301,12 +308,19 @@ export function maybeEmitVecLengthDefine(
         { op: "local.get", index: newLenLocal },
         { op: "array.new_default", typeIdx: arrTypeIdx },
         { op: "local.set", index: newDataLocal },
-        { op: "local.get", index: newDataLocal },
-        { op: "i32.const", value: 0 },
-        { op: "local.get", index: dataLocal },
-        { op: "i32.const", value: 0 },
         { op: "local.get", index: oldCapLocal },
-        { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: newDataLocal },
+            { op: "i32.const", value: 0 },
+            { op: "local.get", index: dataLocal },
+            { op: "i32.const", value: 0 },
+            { op: "local.get", index: oldCapLocal },
+            { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx },
+          ],
+        },
         { op: "local.get", index: vecLocal },
         { op: "local.get", index: newDataLocal },
         { op: "ref.as_non_null" },
@@ -314,15 +328,24 @@ export function maybeEmitVecLengthDefine(
       ],
     });
 
+    // (#6482 r4) The reallocation above `array.new_default`s, which zero-fills
+    // the new tail — but a GROW creates holes, not zeros, and a SHRINK orphans
+    // the dropped slots. Mark the affected region before the length moves, so
+    // `__vec_has_own_index` does not read a stale/default value as a present
+    // element (`15.2.3.6-4-159`). Runs BEFORE the store: it needs the old
+    // length to know which region this store is about to orphan.
+    emitVecLengthHoleFill(ctx, fctx, vecLocal, newLenLocal, "both", true);
+
     // vec.length = newLen
     fctx.body.push({ op: "local.get", index: vecLocal });
     fctx.body.push({ op: "local.get", index: newLenLocal });
     fctx.body.push({ op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 0 });
 
-    // defineProperty returns O.
+    // defineProperty returns O, not a materialized host-array copy. Let the
+    // consumer request any required boundary conversion; discarded results
+    // must not enumerate a potentially enormous sparse logical length.
     fctx.body.push({ op: "local.get", index: vecLocal });
-    coerceType(ctx, fctx, { kind: "ref_null", typeIdx: vecTypeIdx }, { kind: "externref" });
-    return { kind: "externref" };
+    return { kind: "ref_null", typeIdx: vecTypeIdx };
   }
 
   // No value: only the illegal attribute-change rejection is handled inline.

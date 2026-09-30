@@ -36,13 +36,16 @@ import type { Instr, ValType, WasmFunction } from "../ir/types.js";
 import type { TypeFact } from "../checker/oracle.js";
 import { ts } from "../ts-api.js";
 import { ensureAnyFromExternHelper, ensureExternStrictEqHelper } from "./any-helpers.js";
-import { boxToAny } from "./value-tags.js";
+import { boxToAny, emitIsUndefF64 } from "./value-tags.js";
 import { allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { noJsHost } from "./expressions/helpers.js";
 import { addUnionImports, nativeStringType } from "./index.js";
 import { ensureAnyToStringHelper, ensureStrTruthyHelper, stringConstantExternrefInstrs } from "./native-strings.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
+import { addFuncType } from "./registry/types.js";
+import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
+import { buildThrowJsErrorInstrs } from "./js-errors.js";
 import { getBoolToStringEmitter, getNativeStringRefFromExternrefEmitter } from "./string-emitter-registry.js";
 import { buildClosureRefTestArms } from "./closure-classifier.js";
 import {
@@ -55,6 +58,7 @@ import {
   registerEnsureExternrefToStringProvider,
 } from "./shared.js";
 import { coerceType, tryStructToString } from "./type-coercion.js";
+import { symbolWrapperToStringThrowArm } from "./symbol-to-primitive-arms.js"; // (#6651 H1)
 
 /**
  * The three coercion modes the backend dispatches over. Derived once from the
@@ -218,6 +222,93 @@ export function installCompiledClosureToStringArm(ctx: CodegenContext): void {
  * the throw must short-circuit operand evaluation; the engine assumes a
  * non-symbol operand on the stack.
  */
+/**
+ * (#6423) ToString for a number already on the stack, aware of the f64
+ * absence sentinel.
+ *
+ * `__extern_get` narrows a dynamic property read whose slot is number-shaped
+ * to `{ kind: "f64", undefSentinel: true }` and materialises an ABSENT slot as
+ * `UNDEF_F64_BITS` (property-access-dispatch.ts, #5251). That brand is what
+ * makes `typeof o.p`, `o.p === undefined` and `"p" in o` answer correctly. The
+ * ToString arms, however, called `number_toString` on the raw f64, and the
+ * host import stringifies the sentinel bit pattern as `"NaN"` — so
+ * `String(o.maxAge)` on an object with no `maxAge` printed `"NaN"` where the
+ * spec (§7.1.17 via ToString(undefined)) says `"undefined"`.
+ *
+ * Gated on the BRAND, never on NaN-ness: `UNDEF_F64_BITS` is a *signaling* NaN
+ * payload that JS arithmetic cannot produce, while a genuine `NaN` value is the
+ * quiet `0x7FF8000000000000`. Testing the exact i64 pattern (`emitIsUndefF64`)
+ * is what keeps `String(NaN) === "NaN"` and `String(0) === "0"` intact; an
+ * `f64.ne` self-compare would map every NaN to `"undefined"`, which is a worse
+ * bug than the one being fixed.
+ *
+ * Leaves exactly one **externref** on the stack — the same shape
+ * `number_toString` leaves — so each caller's tail
+ * (`emitStringBuiltinNumberResult`, a host `concat`) is untouched.
+ *
+ * Unbranded operands emit the plain call, byte-for-byte as before.
+ *
+ * **JS-HOST LANE ONLY, deliberately.** In `standalone` / `native-strings-host`
+ * the brand-aware arm is skipped and the plain call is emitted, so codegen in
+ * those lanes is byte-identical to the parent *by construction*. Two reasons,
+ * and the second is the load-bearing one:
+ *
+ *  1. Those lanes do not have the defect. Their ToString goes through
+ *     `$__any_to_string` rather than the narrowed f64, and the standalone probe
+ *     answers all seven cases (127) on the parent *and* with this change —
+ *     measured both ways, so there is nothing here to fix.
+ *  2. They have OTHER branded-f64 producers that the js-host lane does not —
+ *     `for-of` over a numeric vec yields `{kind:"f64", undefSentinel:true}`
+ *     (statements/loops.ts), as do native generator IteratorResult reads. A
+ *     first cut of this change routed `compileNativeConcatOperand` and the
+ *     native template span through the helper as well; that change is NOT
+ *     covered by any measurement available here (the 17-suite dogfood A/B is
+ *     entirely js-host, `target: "gc"`), and the standalone host-free
+ *     pass-count floor (#2097) went red in the merge group while it was in.
+ *     Attribution was ambiguous — a lot of standalone-touching source had
+ *     landed since the high-water mark without the shard matrix running — and
+ *     restricting the helper is what makes the question answerable: with this
+ *     gate the standalone binary cannot differ from the parent's, so a repeat
+ *     breach is provably not this change. Extending the fix to those lanes
+ *     wants its own issue, with a standalone measurement behind it.
+ *
+ * `HOLE_F64_BITS` is deliberately NOT tested here: every value-producing read
+ * of a slot that may hold it already maps HOLE → UNDEF at the read boundary
+ * (`vec-f64-hole-presence.ts`), so the hole never reaches a ToString arm.
+ *
+ * No `ensureLateImport` inside — `funcMap` is read-only mid-body (the same rule
+ * `canonicalUndefinedExternInstrs` follows). `addStringConstantGlobal` only
+ * adds an imported GLOBAL, whose index shift `fixupModuleGlobalIndices` repairs
+ * across `ctx.currentFunc.body`; the instructions are built after that call so
+ * no index is captured across it.
+ */
+export function emitNumberToStringSentinelAware(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  valType: ValType | null,
+  toStrIdx: number,
+): void {
+  if (!valType || valType.kind !== "f64" || valType.undefSentinel !== true || coercionMode(ctx) !== "js-host") {
+    fctx.body.push({ op: "call", funcIdx: toStrIdx });
+    return;
+  }
+  addStringConstantGlobal(ctx, "undefined");
+  const undefinedInstrs = stringConstantExternrefInstrs(ctx, "undefined");
+  const scratch = allocTempLocal(fctx, { kind: "f64" });
+  fctx.body.push({ op: "local.tee", index: scratch });
+  emitIsUndefF64(fctx.body);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "externref" } },
+    then: undefinedInstrs,
+    else: [
+      { op: "local.get", index: scratch },
+      { op: "call", funcIdx: toStrIdx },
+    ],
+  });
+  releaseTempLocal(fctx, scratch);
+}
+
 export function emitToString(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -265,7 +356,10 @@ export function emitToString(
     }
     if (valType.kind === "i32") fctx.body.push({ op: "f64.convert_i32_s" });
     else if (valType.kind === "i64") fctx.body.push({ op: "f64.convert_i64_s" });
-    if (toStrIdx !== undefined) fctx.body.push({ op: "call", funcIdx: toStrIdx });
+    // (#6423) An UNDEF-SENTINEL-branded f64 stringifies as "undefined", not
+    // as the sentinel's "NaN". Unbranded operands (including i32/i64, which
+    // carry no brand) emit the same single call as before.
+    if (toStrIdx !== undefined) emitNumberToStringSentinelAware(ctx, fctx, valType, toStrIdx);
     if (native) {
       // number_toString returns an externref wrapping a native string; convert
       // it back to a native `ref $AnyString`.
@@ -532,6 +626,79 @@ export function getToPrimitiveProvider(ctx: CodegenContext): number | undefined 
 /** Look up the canonical runtime ToString provider after its owner is ready. */
 export function getExternrefToStringProvider(ctx: CodegenContext): number | undefined {
   return ctx.funcMap.get("__extern_toString");
+}
+
+/**
+ * (#6651 B6) §7.1.17 ToString over an externref INCLUDING its Symbol rule —
+ * `__extern_to_string_spec(v)`. `__extern_toString` renders a Symbol (it also
+ * backs `String(sym)`, which §22.1.1.1 step 1.a answers with
+ * SymbolDescriptiveString), so a spec-internal ToString that must reject one —
+ * the RegExp `@@` protocol's `ToString(string)` / `ToString(flags)` — asks for
+ * this wrapper instead: a Symbol input, or a Symbol produced by ToPrimitive,
+ * throws a TypeError; every other value takes `__extern_toString` unchanged
+ * (ToPrimitive runs ONCE — `__extern_toString` of the primitive result does not
+ * re-enter user code). Falls back to `__extern_toString` outside
+ * standalone/wasi or in a module with no `$Symbol` carrier.
+ */
+export function ensureSpecExternrefToStringProvider(ctx: CodegenContext, fctx: FunctionContext): number | undefined {
+  const NAME = "__extern_to_string_spec";
+  const existing = ctx.funcMap.get(NAME);
+  if (existing !== undefined) return existing;
+  const plain = getExternrefToStringProvider(ctx);
+  if (!(ctx.standalone || ctx.wasi) || ctx.symbolTypeIdx < 0 || plain === undefined) return plain;
+  if (getToPrimitiveProvider(ctx) === undefined) return plain;
+  addStringConstantGlobal(ctx, "string");
+  const throwSym = (): Instr[] =>
+    buildThrowJsErrorInstrs(ctx, "TypeError", "Cannot convert a Symbol value to a string", { flush: fctx });
+  const inputThrow = throwSym();
+  const primitiveThrow = throwSym();
+  const wrapperThrow = throwSym();
+  flushLateImportShifts(ctx, fctx);
+  const toStr = getExternrefToStringProvider(ctx)!;
+  const toPrim = getToPrimitiveProvider(ctx)!;
+  const sym = ctx.symbolTypeIdx;
+  // (#6651 H1) `Object(sym)`: the intrinsic @@toPrimitive answers the Symbol.
+  const L_ENTRY = 2;
+  const wrapperArm = symbolWrapperToStringThrowArm(ctx, L_ENTRY, wrapperThrow);
+  const body: Instr[] = [
+    { op: "local.get", index: 0 },
+    { op: "ref.is_null" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "local.get", index: 0 }, { op: "call", funcIdx: toStr }, { op: "return" }],
+    },
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" },
+    { op: "ref.test", typeIdx: sym },
+    { op: "if", blockType: { kind: "empty" }, then: inputThrow },
+    ...wrapperArm,
+    { op: "local.get", index: 0 },
+    ...stringConstantExternrefInstrs(ctx, "string"),
+    { op: "call", funcIdx: toPrim },
+    { op: "local.tee", index: 1 },
+    { op: "any.convert_extern" },
+    { op: "ref.test", typeIdx: sym },
+    { op: "if", blockType: { kind: "empty" }, then: primitiveThrow },
+    { op: "local.get", index: 1 },
+    { op: "call", funcIdx: toStr },
+  ];
+  const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }]);
+  const funcIdx = mintDefinedFunc(ctx);
+  ctx.funcMap.set(NAME, funcIdx);
+  pushDefinedFunc(ctx, funcIdx, {
+    name: NAME,
+    typeIdx,
+    locals: [
+      { name: "prim", type: { kind: "externref" } },
+      ...(wrapperArm.length === 0
+        ? []
+        : [{ name: "entry", type: { kind: "ref_null", typeIdx: ctx.objectRuntimeTypes!.propEntryTypeIdx } } as const]),
+    ],
+    body,
+    exported: false,
+  });
+  return funcIdx;
 }
 
 /** Look up the canonical StringToNumber provider after its owner is ready. */

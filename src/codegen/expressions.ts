@@ -20,6 +20,8 @@ import {
   staticPromiseResolveSettledExpr,
 } from "./async-cps.js";
 import { asyncGenConsumerNeedsDrive } from "./async-frame.js";
+import { emitAsyncValueSinkUnwrap, emitStandaloneAwaitUnwrap } from "./async-value-sink-unwrap.js";
+import type { AsyncConsumerKind } from "./async-cps.js";
 import type { Instr, ValType } from "../ir/types.js";
 import {
   emitStandalonePromiseReject,
@@ -50,6 +52,7 @@ import {
 import { compileStringLiteral, emitNativeStringToHostExternref } from "./string-ops.js";
 import { compileHostBigIntLiteralText } from "./bigint-host-literal.js";
 import { usesHostBigIntCarrier } from "./host-bigint-carrier.js";
+import { tryCompileWideBigIntExpression } from "./bigint-wide.js";
 import { ensureImportMetaObject } from "./import-meta.js";
 import {
   canStructurallyProjectRef,
@@ -81,6 +84,7 @@ import { isForeignEvalNode } from "./expressions/eval-source.js";
 
 import { compileClassExpression, compileNewExpression } from "./expressions/new-super.js";
 import { emitNewTargetClassId } from "./new-target.js"; // (#2023)
+import { boxNullRefAsUndefined } from "./null-ref-undefined-box.js"; // (#1058)
 
 import { compileConditionalExpression, compileYieldExpression } from "./expressions/misc.js";
 
@@ -92,6 +96,8 @@ import { closureBagInitInstr } from "./closures/closure-header-layout.js";
 import { brandBooleanBinaryResult, compileBinaryExpression } from "./binary-ops.js";
 import { compileArrayLiteral, compileObjectLiteral } from "./literals.js";
 import { compileElementAccess, compilePropertyAccess, maybeWrapAnyReadEqualityCarrier } from "./property-access.js";
+import { tryEmitLinkedStaticComputedRead } from "./standalone-linked-static-inheritance.js"; // (#6644)
+import { notePromiseDynamicMemberRead } from "./promise-dynamic-member-read.js"; // (#6651 D5)
 import { compileTaggedTemplateExpression, compileTemplateExpression } from "./string-ops.js";
 import { compileDeleteExpression, compileRegExpLiteral, compileTypeofExpression } from "./typeof-delete.js";
 import { describeInternalError } from "./internal-error.js";
@@ -413,14 +419,14 @@ function asyncAssignedSymbolsInFile(ctx: CodegenContext, sf: ts.SourceFile): Rea
  * we only skip when an explicit non-Promise cast/assertion is present (#1727
  * minimal-diff variant — scope 2).
  */
-function asyncResultConsumedAsValue(ctx: CodegenContext, expr: ts.CallExpression): boolean {
+function asyncConsumerKind(ctx: CodegenContext, expr: ts.CallExpression): AsyncConsumerKind {
   // (#1936) Single source of truth: the three-state census classifier lives in
   // async-cps.ts so the offline census script reuses the same logic. The legacy
-  // boolean is exactly `kind !== "thenable"` — `await` and `value` consumers
-  // both take the raw-T passthrough today; only the `thenable` consumer wraps.
-  // This stays behaviour-identical until #1796 changes the value/thenable
-  // dispatch. The rich rationale for each case is documented above.
-  return classifyAsyncConsumer(ctx.checker, expr) !== "thenable";
+  // boolean was exactly `kind !== "thenable"` — `await` and `value` consumers
+  // both take the raw-T passthrough; only the `thenable` consumer wraps. #6428
+  // needs the kind itself (the `value` sink unwraps a carrier `$Promise`), so
+  // the kind is returned and the single call site does the comparison.
+  return classifyAsyncConsumer(ctx.checker, expr);
 }
 
 /**
@@ -546,47 +552,6 @@ function wrapAsyncReturn(ctx: CodegenContext, fctx: FunctionContext, resultType:
     fctx.body.push({ op: "call", funcIdx: resolveIdx });
   }
   return { kind: "externref" };
-}
-
-/**
- * (#2865 AG0) Emit a one-level native-`$Promise` await unwrap, host-free.
- * Consumes one externref on the stack and leaves one externref:
- *   - if it is a `$Promise` struct → push its `value` field (the resolved
- *     value the awaiter wants);
- *   - otherwise → push the original externref unchanged (a plain value / a
- *     non-Promise thenable is already "the value" under the standalone
- *     synchronous-settlement model).
- *
- * A runtime `ref.test (ref $Promise)` discriminates — the non-null test means a
- * null externref (or any non-`$Promise`) takes the passthrough arm. This fixes
- * the standalone identity-passthrough NaN bug (`await <fulfilled $Promise>`
- * previously returned the promise object itself, which the consumer coerced to
- * f64 → NaN). Genuinely-pending awaits (a promise that only settles on a later
- * microtask) need true frame suspension — deferred to #2865 AG1 (PATH B).
- */
-function emitStandaloneAwaitUnwrap(ctx: CodegenContext, fctx: FunctionContext): void {
-  const promiseTypeIdx = getOrRegisterPromiseType(ctx);
-  const tmp = allocTempLocal(fctx, { kind: "externref" });
-  // stack: externref(operand) → stash, then test the stashed copy.
-  fctx.body.push({ op: "local.set", index: tmp });
-  fctx.body.push({ op: "local.get", index: tmp });
-  fctx.body.push({ op: "any.convert_extern" });
-  fctx.body.push({ op: "ref.test", typeIdx: promiseTypeIdx });
-  const thenBody: Instr[] = [
-    { op: "local.get", index: tmp },
-    { op: "any.convert_extern" },
-    { op: "ref.cast", typeIdx: promiseTypeIdx },
-    // $Promise field 1 = `value` (externref). See getOrRegisterPromiseType.
-    { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 },
-  ];
-  const elseBody: Instr[] = [{ op: "local.get", index: tmp }];
-  fctx.body.push({
-    op: "if",
-    blockType: { kind: "val", type: { kind: "externref" } },
-    then: thenBody,
-    else: elseBody,
-  });
-  releaseTempLocal(fctx, tmp);
 }
 
 /**
@@ -962,6 +927,7 @@ function compileExpressionBody(
         }
       }
       coerceType(ctx, fctx, result, expectedType);
+      if (expectedType.kind === "externref") boxNullRefAsUndefined(ctx, fctx, expr, result);
       return expectedType;
     }
     if (
@@ -1121,6 +1087,21 @@ function compileExpressionInner(
   // inner dispatch: outer wrappers and public expected-type boxing/coercion
   // therefore still run before the original operand identity is reached.
   // The planner validates every entry; this has no replay/default fallback.
+  // (#6504 round 31) Same contract, async lane: a pre-await operand that was
+  // evaluated and spilled BEFORE the suspension is read back here rather than
+  // re-evaluated, which is what makes recompiling the containing argument
+  // expression on resume side-effect-free.
+  const asyncOperandLocal = fctx.asyncOperandValueLocals?.get(expr);
+  if (asyncOperandLocal !== undefined) {
+    const asyncOperandType = getLocalType(fctx, asyncOperandLocal);
+    if (asyncOperandType === undefined) {
+      reportError(ctx, expr, "Internal error: async continuation operand spill local is unavailable");
+      return null;
+    }
+    fctx.body.push({ op: "local.get", index: asyncOperandLocal });
+    return asyncOperandType;
+  }
+
   const nativeGeneratorExpressionLocal = fctx.nativeGeneratorExpressionValueLocals?.get(expr);
   if (nativeGeneratorExpressionLocal !== undefined) {
     const nativeGeneratorExpressionType = getLocalType(fctx, nativeGeneratorExpressionLocal);
@@ -1141,6 +1122,10 @@ function compileExpressionInner(
     fctx.body.push({ op: "f64.const", value });
     return { kind: "f64" };
   }
+
+  // (#6656) A bigint expression whose i64 lowering would lose the value.
+  const wideBigInt = tryCompileWideBigIntExpression(ctx, fctx, expr, expectedType);
+  if (wideBigInt !== undefined) return wideBigInt;
 
   if (ts.isBigIntLiteral(expr)) {
     return compileBigIntLiteral(ctx, fctx, expr, expectedType);
@@ -1185,7 +1170,7 @@ function compileExpressionInner(
   }
 
   if (expr.kind === ts.SyntaxKind.ThisKeyword) {
-    return compileThisKeyword(ctx, fctx, expr);
+    return compileThisKeyword(ctx, fctx, expr, expectedType);
   }
 
   if (ts.isIdentifier(expr)) {
@@ -1398,11 +1383,11 @@ function compileExpressionInner(
       // raw `T` already on the stack is exactly what the sink wants. Genuine
       // Promise consumers (`.then`, `const p: Promise<T> = f()`,
       // `Promise.all`, bare `return f()`) have no non-Promise cast, so the
-      // wrap still fires. See `asyncResultConsumedAsValue` above.
-      if (asyncResultConsumedAsValue(ctx, expr)) {
-        // Skip the wrap; the raw value on the stack is what the consumer
-        // (await passthrough or primitive cast sink) expects.
-        return callResult;
+      // wrap still fires. See `asyncConsumerKind` above.
+      const consumerKind = asyncConsumerKind(ctx, expr);
+      if (consumerKind !== "thenable") {
+        // Raw T is what the consumer wants — except a carrier `value` sink, which unwraps a `$Promise` first (#6428).
+        return emitAsyncValueSinkUnwrap(ctx, fctx, consumerKind, callResult);
       }
       // (#2867) A drive-lowered async callee already returns a real `$Promise`
       // (externref) — the #2895 frame driver settled it. Re-wrapping it via
@@ -1441,6 +1426,7 @@ function compileExpressionInner(
     // agree. Declines for every non-syntactic receiver — see the module header.
     const coercible = tryEmitNullishReceiverMemberRead(ctx, fctx, expr);
     if (coercible !== undefined) return coercible;
+    notePromiseDynamicMemberRead(ctx, fctx, expr); // (#6651 D5) `p.then` as a VALUE
   }
 
   if (ts.isPropertyAccessExpression(expr)) {
@@ -1461,6 +1447,14 @@ function compileExpressionInner(
   }
 
   if (ts.isElementAccessExpression(expr)) {
+    // (#6644) A COMPUTED static read on a class that `extends` a LINKED
+    // provider class falls back to the parent's class object when this
+    // module's own lowering misses — a strict superset of that lowering,
+    // which it calls. Declines for every other receiver.
+    const linkedComputed = tryEmitLinkedStaticComputedRead(ctx, fctx, expr, () =>
+      compileElementAccess(ctx, fctx, expr, { kind: "externref" }),
+    );
+    if (linkedComputed !== undefined) return linkedComputed;
     // (#2128) Same getter-dispatch re-sync as the property-access arm above.
     // (#3037 CS1b(ii)) Re-classify a dynamic `any`-element read (`a[i]`, `o[key]`)
     // that is a direct operand of a standalone `any`-equality into the `$AnyValue`

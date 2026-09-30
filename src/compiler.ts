@@ -796,6 +796,9 @@ function buildCodegenOptions(
         `target: "${options.target}" does not use that cell bridge.`,
     );
   }
+  if (options.runtimeEvalProvider === false && options.target !== "standalone") {
+    throw new Error('Compile option runtimeEvalProvider: false requires target: "standalone".');
+  }
   if (options.standaloneGlobalThisImport !== undefined) {
     if (options.target !== "standalone") {
       throw new Error('Compile option standaloneGlobalThisImport requires target: "standalone".');
@@ -830,6 +833,7 @@ function buildCodegenOptions(
     standalone: targetProfile.target === "standalone",
     standaloneGlobalThisImport: options.standaloneGlobalThisImport,
     directEval: options.directEval,
+    runtimeEvalProvider: options.runtimeEvalProvider,
     // (#2141 S1) honest any-boxing regime flag (default off = legacy tag-5 ABI).
     honestAnyBoxing: options.honestAnyBoxing,
     unionAnyRep: options.unionAnyRep,
@@ -849,6 +853,8 @@ function buildCodegenOptions(
     strictNoHostImports: targetProfile.strictEnvImportGate,
     // (#2119) thread module-strictness inference uniformly across all drivers.
     inferModuleStrictArguments: options.inferModuleStrictArguments,
+    // (#6474) opt-in: let the multi-file path read the entry's own source goal.
+    entryScriptGoal: options.entryScriptGoal,
     // Phase 2 (#1131): default experimentalIR to on so recursive numeric
     // kernels (fib, factorial, etc.) compile without the boxing roundtrip the
     // legacy path emits for untyped JS parameters. Pass `experimentalIR: false`
@@ -923,51 +929,6 @@ function isWasmException(e: unknown): boolean {
   );
 }
 
-const STANDALONE_DYNAMIC_IMPORT_ERROR =
-  "Standalone dynamic import is unsupported until compileMulti provides internal module records and namespace objects";
-
-/**
- * #3494 — catch eager import() before codegen, including top-level await paths
- * that the flattened module initializer may not lower through
- * compileCallExpression. A standalone binary cannot satisfy the host loader,
- * and compileMulti has no honest internal module-record substitute yet.
- *
- * #3509 — ordinary arrow/function-expression bodies are runtime-trap eligible:
- * creating one needs no loader, and calls.ts emits a host-free TypeError if its
- * import executes. Async/generator functions stay fatal here because a direct
- * synchronous throw would not preserve their rejection/lazy-throw semantics.
- */
-function detectStandaloneDynamicImports(sourceFile: ts.SourceFile): CompileError[] {
-  const errors: CompileError[] = [];
-  const canTrapAtRuntime = (call: ts.CallExpression): boolean => {
-    for (let parent: ts.Node | undefined = call.parent; parent; parent = parent.parent) {
-      if (!ts.isFunctionLike(parent)) continue;
-      if (!ts.isArrowFunction(parent) && !ts.isFunctionExpression(parent)) return false;
-      const isAsync = parent.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword) ?? false;
-      const isGenerator = ts.isFunctionExpression(parent) && parent.asteriskToken !== undefined;
-      return !isAsync && !isGenerator;
-    }
-    return false;
-  };
-  const visit = (node: ts.Node): void => {
-    if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
-      if (canTrapAtRuntime(node)) return;
-      const { line, character } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
-      errors.push({
-        message: STANDALONE_DYNAMIC_IMPORT_ERROR,
-        line: line + 1,
-        column: character + 1,
-        severity: "error",
-        file: sourceFile.fileName,
-      });
-      return;
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(sourceFile);
-  return errors;
-}
-
 /**
  * #1927 — the single, shared front-end pipeline core. Owns everything from ES
  * early-error detection down through binary/WAT/dts/WIT emit. It is SYNCHRONOUS
@@ -1012,23 +973,16 @@ function runPipeline(input: PipelineInput): CompileResult {
     // for script tests. Product compiles leave it undefined and are covered by
     // the real `ts.isExternalModule` indicator inside the rule.
     const moduleGoal = options.inferModuleStrictArguments === true;
+    // (#6491 r3) Script goal is an EXPLICIT opt-in, never `!moduleGoal` — see
+    // the `scriptGoal` doc comment in index.ts for why the negation is unsafe.
+    const scriptGoal = options.scriptGoal === true;
     for (const sf of userSourceFiles) {
-      earlyErrors.push(...detectEarlyErrors(sf, { moduleGoal }));
+      earlyErrors.push(...detectEarlyErrors(sf, { moduleGoal, scriptGoal }));
     }
     errors.push(...earlyErrors);
     if (hasNewError(earlyErrors)) {
       return failResult(errors);
     }
-  }
-
-  // Step 1a-ii: target-capability validation. This is deliberately independent
-  // of allowJs: Test262 module fixtures use JavaScript source, and silently
-  // skipping this gate there produced a success result with no runnable import
-  // semantics for top-level `await import(...)`.
-  if (targetProfile.target === "standalone") {
-    const dynamicImportErrors = userSourceFiles.flatMap(detectStandaloneDynamicImports);
-    errors.push(...dynamicImportErrors);
-    if (dynamicImportErrors.length > 0) return failResult(errors);
   }
 
   // Step 1b: Safe mode validation for all user source files.
@@ -1394,6 +1348,61 @@ function finalizePipelineModule(
  * wasm-opt is requested (#1757 / GH #986), so normal compilation and
  * standalone bundles do not need to embed Binaryen.
  */
+/**
+ * Syntactic diagnostics that must NOT reject a compile.
+ *
+ * (#3451) Module-scope so the MULTI-file gate can apply the same allowlist the
+ * single-file gate does. Every entry is a TypeScript diagnostic for source that
+ * is valid JavaScript (sloppy-mode octals, `yield` as an identifier, decorators,
+ * `1109 Expression expected` on test262's error-recovery patterns), so a gate
+ * that omits the list is not "stricter" — it is wrong, and it was measurably so
+ * for the linked test262 lane, which needs BOTH a real syntax gate and exactly
+ * the honest lane's tolerances.
+ */
+// Don't stop on type errors – the compiler can still generate code for many cases
+// Only stop on syntax errors (parsing failures), except tolerated ones
+const TOLERATED_SYNTAX_CODES = new Set([
+  1156, // "'let' declarations can only be declared inside a block"
+  1313, // "The body of an 'if' statement cannot be the empty statement"
+  1344, // "A label is not allowed here"
+  1182, // "A destructuring declaration must have an initializer"
+  1228, // "A type predicate is only allowed in return type position"
+  1163, // "A 'yield' expression is only allowed in a generator body" — syntactic diagnostic (#267)
+  1206, // "Decorators are not valid here" — decorator syntax tolerated, decorators ignored (#376)
+  1207, // "Decorators cannot be applied to multiple get/set accessors" (#376)
+  1436, // "Decorators must precede the name and all keywords of property declarations" (#376)
+  1486, // "Decorator used before 'export' here" (#376)
+  1497, // "Expression must be enclosed in parentheses to be used as a decorator" (#376)
+  1498, // "Invalid syntax in decorator" (#376)
+  8038, // "Decorators may not appear after 'export' or 'export default'" (#376)
+  1184, // "Modifiers cannot appear here" — valid JS patterns in test262 (#537)
+  1109, // "Expression expected" — valid JS patterns in test262 (#537)
+  1135, // "Argument expression expected" — valid JS patterns in test262 (#537)
+  1262, // "Identifier expected. 'X' is a reserved word at the top-level of a module" — await as identifier (#537)
+  1435, // "Unknown keyword or identifier. Did you mean 'X'?" — yield in nested generator contexts (#521)
+  1503, // "This regular expression flag is only available when targeting 'es2024'" (#654)
+  1232, // "An import declaration can only be used at the top level of a namespace or module" (#654)
+  1102, // "'delete' cannot be called on an identifier in strict mode" — valid sloppy-mode JS (#535)
+  1100, // "Invalid use of 'X' in strict mode" — sloppy-mode JS allows eval/arguments (#331)
+  1121, // "Octal literals are not allowed in strict mode" — valid sloppy-mode JS
+  1489, // "Decimals with leading zeros are not allowed" — valid sloppy-mode JS octal literals
+  // #2708 — legacy string-literal escapes (Annex B §12.9.4) are valid in sloppy
+  // mode. Don't let the TS scanner errors block compilation; node-checks.ts
+  // re-raises them as a hard early error in strict mode (mirrors 1121/1489).
+  1487, // "Octal escape sequences are not allowed." — sloppy-mode legacy octal in string
+  1488, // "Escape sequence '\\8'/'\\9' is not allowed." — sloppy-mode NonOctalDecimalEscape
+  // #2631/#1768 — "Signature declarations can only be used in TypeScript files."
+  // Fires under checkJs at the import site when a `.js` file imports a value
+  // whose synthetic `.d.ts` typing is a callable/overloaded declaration (e.g.
+  // `import { readSync, writeSync } from "node:fs"` resolving to the node-emu
+  // typings). Benign for codegen — the import resolves and lowers regardless.
+  // Scoped to this exact code so it does NOT relax the gate for genuine
+  // strict-mode SyntaxErrors (e.g. duplicate params), which the eval shim
+  // (src/runtime-eval.ts) relies on `compileSourceSync(...).success === false`
+  // to surface as a thrown SyntaxError (the 17 strict-eval test262 cases).
+  8017,
+]);
+
 export async function compileSource(
   source: string,
   options: CompileOptions = {},
@@ -1679,49 +1688,6 @@ export function compileSourceSync(
     }
   }
 
-  // Don't stop on type errors – the compiler can still generate code for many cases
-  // Only stop on syntax errors (parsing failures), except tolerated ones
-  const TOLERATED_SYNTAX_CODES = new Set([
-    1156, // "'let' declarations can only be declared inside a block"
-    1313, // "The body of an 'if' statement cannot be the empty statement"
-    1344, // "A label is not allowed here"
-    1182, // "A destructuring declaration must have an initializer"
-    1228, // "A type predicate is only allowed in return type position"
-    1163, // "A 'yield' expression is only allowed in a generator body" — syntactic diagnostic (#267)
-    1206, // "Decorators are not valid here" — decorator syntax tolerated, decorators ignored (#376)
-    1207, // "Decorators cannot be applied to multiple get/set accessors" (#376)
-    1436, // "Decorators must precede the name and all keywords of property declarations" (#376)
-    1486, // "Decorator used before 'export' here" (#376)
-    1497, // "Expression must be enclosed in parentheses to be used as a decorator" (#376)
-    1498, // "Invalid syntax in decorator" (#376)
-    8038, // "Decorators may not appear after 'export' or 'export default'" (#376)
-    1184, // "Modifiers cannot appear here" — valid JS patterns in test262 (#537)
-    1109, // "Expression expected" — valid JS patterns in test262 (#537)
-    1135, // "Argument expression expected" — valid JS patterns in test262 (#537)
-    1262, // "Identifier expected. 'X' is a reserved word at the top-level of a module" — await as identifier (#537)
-    1435, // "Unknown keyword or identifier. Did you mean 'X'?" — yield in nested generator contexts (#521)
-    1503, // "This regular expression flag is only available when targeting 'es2024'" (#654)
-    1232, // "An import declaration can only be used at the top level of a namespace or module" (#654)
-    1102, // "'delete' cannot be called on an identifier in strict mode" — valid sloppy-mode JS (#535)
-    1100, // "Invalid use of 'X' in strict mode" — sloppy-mode JS allows eval/arguments (#331)
-    1121, // "Octal literals are not allowed in strict mode" — valid sloppy-mode JS
-    1489, // "Decimals with leading zeros are not allowed" — valid sloppy-mode JS octal literals
-    // #2708 — legacy string-literal escapes (Annex B §12.9.4) are valid in sloppy
-    // mode. Don't let the TS scanner errors block compilation; node-checks.ts
-    // re-raises them as a hard early error in strict mode (mirrors 1121/1489).
-    1487, // "Octal escape sequences are not allowed." — sloppy-mode legacy octal in string
-    1488, // "Escape sequence '\\8'/'\\9' is not allowed." — sloppy-mode NonOctalDecimalEscape
-    // #2631/#1768 — "Signature declarations can only be used in TypeScript files."
-    // Fires under checkJs at the import site when a `.js` file imports a value
-    // whose synthetic `.d.ts` typing is a callable/overloaded declaration (e.g.
-    // `import { readSync, writeSync } from "node:fs"` resolving to the node-emu
-    // typings). Benign for codegen — the import resolves and lowers regardless.
-    // Scoped to this exact code so it does NOT relax the gate for genuine
-    // strict-mode SyntaxErrors (e.g. duplicate params), which the eval shim
-    // (src/runtime-eval.ts) relies on `compileSourceSync(...).success === false`
-    // to surface as a thrown SyntaxError (the 17 strict-eval test262 cases).
-    8017,
-  ]);
   const hasSyntaxErrors = ast.syntacticDiagnostics.some(
     (d) => d.category === 1 && d.file === ast.sourceFile && !TOLERATED_SYNTAX_CODES.has(d.code),
   );
@@ -1863,7 +1829,16 @@ export async function compileMultiSource(
   const hasSyntaxErrors =
     (!options.allowJs || options.strictJsSyntax === true) &&
     multiAst.syntacticDiagnostics.some(
-      (d) => d.category === 1 && isEntryDiag(d) && multiAst.sourceFiles.some((sf) => d.file === sf),
+      (d) =>
+        d.category === 1 &&
+        isEntryDiag(d) &&
+        multiAst.sourceFiles.some((sf) => d.file === sf) &&
+        // (#3451) Apply the SAME tolerance list the single-file gate applies.
+        // Without it `strictJsSyntax` is not "the single-file gate for a
+        // graph" but a stricter one, and every entry in that list names source
+        // that is valid JavaScript — so the linked test262 lane rejected rows
+        // the authoritative single-module lane compiles and runs.
+        !TOLERATED_SYNTAX_CODES.has(d.code),
     );
   const hasHardTypeErrors =
     !options.allowJs &&

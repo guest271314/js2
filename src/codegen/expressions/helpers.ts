@@ -20,6 +20,7 @@ import { stringConstantExternrefInstrs } from "../native-strings.js";
 import { addStringConstantGlobal } from "../registry/imports.js";
 import { coerceType, compileExpression, valTypesMatch } from "../shared.js";
 import { ensureLateImport, flushLateImportShifts } from "./late-imports.js";
+import { isStrictContext } from "../helpers/is-strict-function.js";
 export { tryCompileCallableStaticField } from "./static-callable-field.js";
 
 // (#3191 — bloat S1) The JS-error-throw lowering was hoisted into the
@@ -81,6 +82,22 @@ export function isConstIdentifierAssignmentTarget(
   fctx: FunctionContext,
   id: ts.Identifier,
 ): boolean {
+  // (#5372) A write whose LHS IS the binding's own declaration name node is
+  // that binding's initialisation, not an assignment: the async CFG planner
+  // delivers a declarator's non-suspending initializer arm through a synthetic
+  // `name = init` whose left operand is `decl.name` itself (see
+  // `async-await-hoist.ts`). No source-level assignment can carry a declaration
+  // name as its target, so the discriminator is exact.
+  // (#6731) The same holds for a BindingElement's name: the native generator's
+  // linearised for-of head (`for (const [k, v] of m)`) initialises each pattern
+  // binding through this PutValue path.
+  if (
+    id.parent !== undefined &&
+    (ts.isVariableDeclaration(id.parent) || ts.isBindingElement(id.parent)) &&
+    id.parent.name === id
+  ) {
+    return false;
+  }
   // The oracle is authoritative when it resolves the reference: an active
   // same-text local set can belong to a different static block / namespace
   // binding and must not override that identity. Its `variableDeclarationOf`
@@ -97,6 +114,18 @@ export function isConstIdentifierAssignmentTarget(
     if (
       (ts.isClassDeclaration(declaration) || ts.isClassExpression(declaration)) &&
       writeIsInsideOwnClassBody(declaration, id)
+    ) {
+      return true;
+    }
+    // (#6651 A8) A named function expression's own name is the same kind of
+    // binding (§15.2.5 CreateImmutableBinding): a STRICT write — simple,
+    // compound, update or destructuring, from the body or a nested closure —
+    // throws a TypeError (§9.1.1.1.5 step 5). A sloppy write is ignored, so it
+    // does not take this arm. The name resolves here only inside the function.
+    if (
+      ts.isFunctionExpression(declaration) &&
+      declaration.name?.text === id.text &&
+      isStrictContext(id, ctx.inferModuleStrictArguments)
     ) {
       return true;
     }

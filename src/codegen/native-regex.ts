@@ -2175,7 +2175,8 @@ export function ensureRegexSearch(ctx: CodegenContext): number {
 
 /**
  * Emit `__regex_replace(prog, classTable, nGroups, strData, strOff, strLen,
- * subject, replacement, global) -> ref $NativeString` (#1539 Phase 2c).
+ * subject, replacement, global, nScratch, names, startIdx, sticky, unicode)
+ * -> (ref $NativeString, i32 finalLastIndex)` (#1539 Phase 2c).
  *
  * Implements `String.prototype.replace` / `replaceAll` for a backend-created
  * RegExp with a **literal** (non-`$`-pattern, non-function) replacement string
@@ -2183,8 +2184,12 @@ export function ensureRegexSearch(ctx: CodegenContext): number {
  * replacer paths refused at the call site). Walks the subject with
  * `__regex_search`, accumulating `result = … + slice[lastEnd, matchStart) +
  * replacement` for each match and appending `slice[lastEnd, len)` at the end.
- * `global != 0` replaces every match (advancing past empty matches by 1 per
- * §22.2.6.11 AdvanceStringIndex); otherwise only the first.
+ * `global != 0` replaces every match; `startIdx` / `sticky` select the static
+ * RegExp cursor mode used by `RegExp.prototype[@@replace]`. The helper returns
+ * the final `RegExpBuiltinExec` lastIndex: the successful match end for one
+ * sticky execution, or zero after the terminating global failure. Closed
+ * string-receiver callers pass zero for the cursor arguments and discard that
+ * second result, preserving their ordinary scan.
  *
  * Returns a `$NativeString` — no array boundary, so no `__make_iterable` /
  * host import is pulled in standalone.
@@ -2230,8 +2235,11 @@ export function ensureRegexReplace(ctx: CodegenContext): number {
       { kind: "i32" }, // global flag
       { kind: "i32" }, // nScratch (#1959 — PROGRESS guard slots)
       { kind: "ref", typeIdx: i32ArrType }, // namesTable (#2588 — $<name> map)
+      { kind: "i32" }, // startIdx — current RegExp lastIndex for y operations
+      { kind: "i32" }, // sticky bit
+      { kind: "i32" }, // fullUnicode bit for AdvanceStringIndex
     ],
-    [strRef],
+    [strRef, { kind: "i32" }],
   );
   const funcIdx = mintDefinedFunc(ctx);
   ctx.nativeRegexHelpers.set("__regex_replace", funcIdx);
@@ -2247,15 +2255,90 @@ export function ensureRegexReplace(ctx: CodegenContext): number {
     REPL = 7,
     GLOBAL = 8,
     NSCRATCH = 9,
-    NAMES = 10; // #2588 names table
+    NAMES = 10,
+    START = 11,
+    STICKY = 12,
+    UNICODE = 13;
   // locals
-  const NSLOTS = 11; // 2 * nGroups + nScratch
-  const CAPS = 12; // ref array<i32> capture slots
-  const POS = 13; // current search start
-  const LASTEND = 14; // end of last replaced match (start of next kept slice)
-  const RESULT = 15; // ref $NativeString accumulator
-  const MSTART = 16;
-  const MEND = 17;
+  const NSLOTS = 14; // 2 * nGroups + nScratch
+  const CAPS = 15; // ref array<i32> capture slots
+  const POS = 16; // current search start
+  const LASTEND = 17; // end of last replaced match (start of next kept slice)
+  const RESULT = 18; // ref $NativeString accumulator
+  const MSTART = 19;
+  const MEND = 20;
+
+  // AdvanceStringIndex(S, mend, fullUnicode) for an empty match. Under u/v,
+  // a lead+trail surrogate pair advances by two UTF-16 code units; lone halves
+  // and non-Unicode patterns advance by one. Keep this inline: it is part of
+  // the existing closed replacement helper rather than a second regex engine.
+  const advanceEmptyMatch: Instr[] = [
+    { op: "local.get", index: MEND },
+    { op: "local.get", index: UNICODE },
+    {
+      op: "if",
+      blockType: { kind: "val", type: { kind: "i32" } },
+      then: [
+        { op: "local.get", index: MEND },
+        { op: "i32.const", value: 1 },
+        { op: "i32.add" },
+        { op: "local.get", index: SLEN },
+        { op: "i32.lt_s" },
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "i32" } },
+          then: [
+            // S[mend] is a high surrogate and S[mend + 1] is a low surrogate.
+            { op: "local.get", index: SDATA },
+            { op: "local.get", index: SOFF },
+            { op: "local.get", index: MEND },
+            { op: "i32.add" },
+            { op: "array.get_u", typeIdx: strDataIdx },
+            { op: "i32.const", value: 0xd800 },
+            { op: "i32.ge_s" },
+            { op: "local.get", index: SDATA },
+            { op: "local.get", index: SOFF },
+            { op: "local.get", index: MEND },
+            { op: "i32.add" },
+            { op: "array.get_u", typeIdx: strDataIdx },
+            { op: "i32.const", value: 0xdbff },
+            { op: "i32.le_s" },
+            { op: "i32.and" },
+            { op: "local.get", index: SDATA },
+            { op: "local.get", index: SOFF },
+            { op: "local.get", index: MEND },
+            { op: "i32.add" },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "array.get_u", typeIdx: strDataIdx },
+            { op: "i32.const", value: 0xdc00 },
+            { op: "i32.ge_s" },
+            { op: "i32.and" },
+            { op: "local.get", index: SDATA },
+            { op: "local.get", index: SOFF },
+            { op: "local.get", index: MEND },
+            { op: "i32.add" },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "array.get_u", typeIdx: strDataIdx },
+            { op: "i32.const", value: 0xdfff },
+            { op: "i32.le_s" },
+            { op: "i32.and" },
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "i32" } },
+              then: [{ op: "i32.const", value: 2 }],
+              else: [{ op: "i32.const", value: 1 }],
+            },
+          ],
+          else: [{ op: "i32.const", value: 1 }],
+        },
+      ],
+      else: [{ op: "i32.const", value: 1 }],
+    },
+    { op: "i32.add" },
+    { op: "local.set", index: POS },
+  ];
 
   const body: Instr[] = [
     // nSlots = 2 * nGroups + nScratch (#1959 scratch slots ride in caps)
@@ -2268,14 +2351,15 @@ export function ensureRegexReplace(ctx: CodegenContext): number {
     { op: "local.get", index: NSLOTS },
     { op: "array.new_default", typeIdx: i32Arr },
     { op: "local.set", index: CAPS },
-    // result = "" (empty NativeString {len:0, off:0, data:[]}), pos = 0, lastEnd = 0
+    // result = "" (empty NativeString {len:0, off:0, data:[]}), pos =
+    // startIdx, lastEnd = 0. Ordinary callers pass startIdx=0.
     { op: "i32.const", value: 0 },
     { op: "i32.const", value: 0 },
     { op: "i32.const", value: 0 },
     { op: "array.new_default", typeIdx: strDataIdx },
     { op: "struct.new", typeIdx: strTypeIdx },
     { op: "local.set", index: RESULT },
-    { op: "i32.const", value: 0 },
+    { op: "local.get", index: START },
     { op: "local.set", index: POS },
     { op: "i32.const", value: 0 },
     { op: "local.set", index: LASTEND },
@@ -2292,7 +2376,7 @@ export function ensureRegexReplace(ctx: CodegenContext): number {
             { op: "local.get", index: SLEN },
             { op: "i32.gt_s" },
             { op: "br_if", depth: 1 },
-            // if !__regex_search(... pos, sticky=0 ...): break
+            // if !__regex_search(... pos, sticky ...): break
             { op: "local.get", index: PROG },
             { op: "local.get", index: CTAB },
             { op: "local.get", index: NSLOTS },
@@ -2300,7 +2384,7 @@ export function ensureRegexReplace(ctx: CodegenContext): number {
             { op: "local.get", index: SOFF },
             { op: "local.get", index: SLEN },
             { op: "local.get", index: POS },
-            { op: "i32.const", value: 0 },
+            { op: "local.get", index: STICKY },
             { op: "local.get", index: CAPS },
             { op: "call", funcIdx: searchIdx },
             { op: "i32.eqz" },
@@ -2340,19 +2424,20 @@ export function ensureRegexReplace(ctx: CodegenContext): number {
             { op: "local.get", index: GLOBAL },
             { op: "i32.eqz" },
             { op: "br_if", depth: 1 },
-            // advance pos: pos = mend + (mend > mstart ? 0 : 1)  (empty-match guard)
-            { op: "local.get", index: MEND },
+            // AdvanceStringIndex after an empty match. A non-empty match begins
+            // the next search at its end as before.
             { op: "local.get", index: MEND },
             { op: "local.get", index: MSTART },
             { op: "i32.gt_s" },
             {
               op: "if",
-              blockType: { kind: "val", type: { kind: "i32" } },
-              then: [{ op: "i32.const", value: 0 }],
-              else: [{ op: "i32.const", value: 1 }],
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: MEND },
+                { op: "local.set", index: POS },
+              ],
+              else: advanceEmptyMatch,
             },
-            { op: "i32.add" },
-            { op: "local.set", index: POS },
             { op: "br", depth: 0 },
           ],
         },
@@ -2365,6 +2450,16 @@ export function ensureRegexReplace(ctx: CodegenContext): number {
     { op: "local.get", index: SLEN },
     { op: "call", funcIdx: substringIdx },
     { op: "call", funcIdx: concatIdx },
+    // The final global RegExpBuiltinExec is the terminating failure and sets
+    // lastIndex to zero. A single non-global sticky execution instead leaves
+    // the successful match end (or zero on failure) in lastEnd.
+    { op: "local.get", index: GLOBAL },
+    {
+      op: "if",
+      blockType: { kind: "val", type: { kind: "i32" } },
+      then: [{ op: "i32.const", value: 0 }],
+      else: [{ op: "local.get", index: LASTEND }],
+    },
   ];
 
   const fn: WasmFunction = {
@@ -2400,6 +2495,21 @@ export const MATCH_VEC_FIELD_GROUPS = 4;
 export const MATCH_VEC_FIELD_INDICES = 5;
 
 /**
+ * Ensure the ordinary native-string vector used by a global `@@match` result.
+ *
+ * A global match returns an Array of full-match strings, not a
+ * `RegExpExecArray`. Keep this carrier separate from
+ * `$__regexp_match_vec`, whose additional fields are only valid for the
+ * single capture result produced by `exec` / non-global `match`.
+ */
+export function ensureRegexMatchFlatVecType(ctx: CodegenContext): number {
+  const anyStrTypeIdx = ctx.anyStrTypeIdx;
+  const nstrElemKey = `ref_${anyStrTypeIdx}`;
+  const nstrElemType: ValType = { kind: "ref_null", typeIdx: anyStrTypeIdx };
+  return getOrRegisterVecType(ctx, nstrElemKey, nstrElemType);
+}
+
+/**
  * Ensure the `$__regexp_match_vec` struct type (#1914) — the match-result
  * shape for standalone `exec`/`match`.
  *
@@ -2420,7 +2530,7 @@ export function ensureRegexMatchVecType(ctx: CodegenContext): number {
   const nstrElemKey = `ref_${anyStrTypeIdx}`;
   const nstrElemType: ValType = { kind: "ref_null", typeIdx: anyStrTypeIdx };
   const nstrArrTypeIdx = getOrRegisterArrayType(ctx, nstrElemKey, nstrElemType);
-  const baseVecTypeIdx = getOrRegisterVecType(ctx, nstrElemKey, nstrElemType);
+  const baseVecTypeIdx = ensureRegexMatchFlatVecType(ctx);
 
   // The base vec must be a non-final root for the subtype to validate.
   const baseVecDef = ctx.mod.types[baseVecTypeIdx];
@@ -2991,14 +3101,13 @@ export function ensureRegexSplit(ctx: CodegenContext): number {
 
 /**
  * Emit `__regex_match_all(prog, classTable, nGroups, strData, strOff, strLen,
- * subject) -> ref null $__regexp_match_vec` (#1913).
+ * subject, nScratch, sticky) -> ref null $__vec_ref_<AnyString>` (#1913).
  *
  * `String.prototype.match` with a GLOBAL regex (§22.2.6.8 step 6): collect
  * every match's [0] substring, advancing past empty matches per
- * AdvanceStringIndex; null when there were no matches. The result reuses the
- * match-vec subtype for type uniformity with the non-global path —
- * `index`/`input` carry the FIRST match (a documented narrow deviation: per
- * spec a global match result is a plain Array without those properties).
+ * AdvanceStringIndex; null when there were no matches. The result is the
+ * ordinary native-string vec: §22.2.6.8 global matching returns a plain Array
+ * without `index`, `input`, `groups`, or `indices` metadata.
  */
 export function ensureRegexMatchAll(ctx: CodegenContext): number {
   const existing = ctx.nativeRegexHelpers.get("__regex_match_all");
@@ -3015,7 +3124,7 @@ export function ensureRegexMatchAll(ctx: CodegenContext): number {
   const nstrElemKey = `ref_${anyStrTypeIdx}`;
   const nstrElemType: ValType = { kind: "ref_null", typeIdx: anyStrTypeIdx };
   const nstrArrTypeIdx = getOrRegisterArrayType(ctx, nstrElemKey, nstrElemType);
-  const matchVecTypeIdx = ensureRegexMatchVecType(ctx);
+  const flatVecTypeIdx = ensureRegexMatchFlatVecType(ctx);
 
   const substringIdx = ctx.nativeStrHelpers.get("__str_substring");
   if (substringIdx === undefined) {
@@ -3033,8 +3142,9 @@ export function ensureRegexMatchAll(ctx: CodegenContext): number {
       { kind: "i32" }, // strLen
       strRef, // subject (flattened)
       { kind: "i32" }, // nScratch (#1959 — PROGRESS guard slots)
+      { kind: "i32" }, // sticky — anchor every search for a /gy/ walk
     ],
-    [{ kind: "ref_null", typeIdx: matchVecTypeIdx }],
+    [{ kind: "ref_null", typeIdx: flatVecTypeIdx }],
   );
   const funcIdx = mintDefinedFunc(ctx);
   ctx.nativeRegexHelpers.set("__regex_match_all", funcIdx);
@@ -3047,18 +3157,18 @@ export function ensureRegexMatchAll(ctx: CodegenContext): number {
     SOFF = 4,
     SLEN = 5,
     SUBJ = 6,
-    NSCRATCH = 7;
+    NSCRATCH = 7,
+    STICKY = 8;
   // locals
-  const NSLOTS = 8;
-  const CAPS = 9;
-  const POS = 10;
-  const RARR = 11;
-  const RLEN = 12;
-  const RCAP = 13;
-  const NEWARR = 14;
-  const MSTART = 15;
-  const MEND = 16;
-  const FIRSTMS = 17;
+  const NSLOTS = 9;
+  const CAPS = 10;
+  const POS = 11;
+  const RARR = 12;
+  const RLEN = 13;
+  const RCAP = 14;
+  const NEWARR = 15;
+  const MSTART = 16;
+  const MEND = 17;
 
   const body: Instr[] = [
     // nSlots = 2 * nGroups + nScratch (#1959 scratch slots ride in caps)
@@ -3080,8 +3190,6 @@ export function ensureRegexMatchAll(ctx: CodegenContext): number {
     { op: "local.set", index: RCAP },
     { op: "i32.const", value: 0 },
     { op: "local.set", index: POS },
-    { op: "i32.const", value: 0 },
-    { op: "local.set", index: FIRSTMS },
     {
       op: "block",
       blockType: { kind: "empty" },
@@ -3103,7 +3211,7 @@ export function ensureRegexMatchAll(ctx: CodegenContext): number {
             { op: "local.get", index: SOFF },
             { op: "local.get", index: SLEN },
             { op: "local.get", index: POS },
-            { op: "i32.const", value: 0 },
+            { op: "local.get", index: STICKY },
             { op: "local.get", index: CAPS },
             { op: "call", funcIdx: searchIdx },
             { op: "i32.eqz" },
@@ -3116,17 +3224,6 @@ export function ensureRegexMatchAll(ctx: CodegenContext): number {
             { op: "i32.const", value: 1 },
             { op: "array.get", typeIdx: i32Arr },
             { op: "local.set", index: MEND },
-            // first match start → the result's index field
-            { op: "local.get", index: RLEN },
-            { op: "i32.eqz" },
-            {
-              op: "if",
-              blockType: { kind: "empty" },
-              then: [
-                { op: "local.get", index: MSTART },
-                { op: "local.set", index: FIRSTMS },
-              ],
-            },
             // Grow result if needed; append substring(subject, mstart, mend).
             { op: "local.get", index: RLEN },
             { op: "local.get", index: RCAP },
@@ -3190,21 +3287,13 @@ export function ensureRegexMatchAll(ctx: CodegenContext): number {
     { op: "i32.eqz" },
     {
       op: "if",
-      blockType: { kind: "val", type: { kind: "ref_null", typeIdx: matchVecTypeIdx } },
-      then: [{ op: "ref.null", typeIdx: matchVecTypeIdx }],
+      blockType: { kind: "val", type: { kind: "ref_null", typeIdx: flatVecTypeIdx } },
+      then: [{ op: "ref.null", typeIdx: flatVecTypeIdx }],
       else: [
         { op: "local.get", index: RLEN },
         { op: "local.get", index: RARR },
         { op: "ref.as_non_null" },
-        { op: "local.get", index: FIRSTMS },
-        { op: "local.get", index: SUBJ },
-        // groups/indices (#2588/#2589): a global `String.prototype.match`
-        // result is a flat array of matched strings, not a capture object, so
-        // neither named-groups nor `d`-flag indices apply per-element here.
-        // The `groups`/`indices` fields are externref → push null externref.
-        { op: "ref.null.extern" },
-        { op: "ref.null.extern" },
-        { op: "struct.new", typeIdx: matchVecTypeIdx },
+        { op: "struct.new", typeIdx: flatVecTypeIdx },
       ],
     },
   ];
@@ -3222,7 +3311,6 @@ export function ensureRegexMatchAll(ctx: CodegenContext): number {
       { name: "newArr", type: { kind: "ref_null", typeIdx: nstrArrTypeIdx } },
       { name: "mstart", type: { kind: "i32" } },
       { name: "mend", type: { kind: "i32" } },
-      { name: "firstms", type: { kind: "i32" } },
     ],
     body,
     exported: false,

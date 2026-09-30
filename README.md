@@ -13,7 +13,7 @@ Conformance is tracked along the two compile paths — both figures auto-update 
 
 <!-- AUTO:conformance-start -->
 
-**test262 conformance**: 38,147 / 48,232 (79.1 %)
+**test262 conformance**: 39,229 / 48,232 (81.3 %)
 
 <!-- AUTO:conformance-end -->
 
@@ -21,7 +21,7 @@ The line above is the **JS-host path** (default `gc` target): runs alongside the
 
 <!-- AUTO:conformance-standalone-start -->
 
-**standalone (host-free) test262 conformance**: 34,979 / 48,232 (72.5 %)
+**standalone (host-free) test262 conformance**: 41,291 / 48,232 (85.6 %)
 
 <!-- AUTO:conformance-standalone-end -->
 
@@ -173,6 +173,24 @@ npm test
 pnpm run test:262
 pnpm dev
 ```
+
+### Exact Test262 selections
+
+The default Test262 runner discovers its maintained category list. For an
+auditable original-file cohort that includes a path outside that list, pass a
+newline-delimited canonical `test/...` manifest instead:
+
+```bash
+TEST262_EXACT_MANIFEST_FILE=scripts/test262-es2015-11778-manifest.txt pnpm run test:262
+```
+
+Exact manifests are validated against the provisioned Test262 corpus before a
+compiler build, then snapshotted so completion is checked against the original
+selection. They cannot be combined with `TEST262_PATH_FILTER` or
+`TEST262_PATH_FILTER_FILE`. The committed ES2015 manifest contains 11,778
+original paths, including 74 `intl402` paths omitted by default discovery; it
+is a selection/completeness input, not evidence that those paths pass at
+runtime.
 
 To independently cross-check compiler compatibility with test262.fyi's
 literal, unmodified harness assembler, initialize its optional data submodule

@@ -1,18 +1,17 @@
+import { parseTest262SemanticProviders } from "./test262-lane.mjs";
 /**
  * Unified test262 worker — compiles AND executes a test in one process.
  * Uses child_process.fork for full memory isolation.
  *
  * Protocol:
- *   Parent sends: { id, source, execute, isNegative, isRuntimeNegative, negativePhase?, target?, fixtureFiles?, dynamicFixtureFiles?, entryFile? }
+ *   Parent sends: { id, source, execute, isNegative, isRuntimeNegative, negativePhase?, target?, fixtureFiles?, dynamicFixtureFiles?, entryFile?, selfModuleGraph? }
  *   Worker sends: { id, status, error?, ret?, compileMs?, execMs?, errorCodes?, ... }
  *
  * When execute=false: compile only, write to disk (for cache warming).
  * When execute=true: compile + instantiate + run test(), return full result.
  */
-import { readFileSync, writeFileSync } from "node:fs";
-import { createHash } from "node:crypto";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { createContext, runInContext } from "node:vm";
 import { compile, compileMulti, createIncrementalCompiler } from "./compiler-bundle.mjs";
 // (#5353) NAMESPACE imports, deliberately, for the two symbol sets this worker
@@ -29,11 +28,18 @@ import * as runtimeBundle from "./runtime-bundle.mjs";
 import { buildImports, _resetIteratorRuntimeIntrinsicsForRealmIsolation } from "./runtime-bundle.mjs";
 import { poisonRecycleReason } from "./test262-poison-error.mjs";
 import { negativeCompileErrorMatches, negativeCompileSucceededVerdict } from "./negative-verdict.mjs";
+import { hasPinnedNamespaceSelfModuleImport } from "./test262-fixture-graph.mjs";
 // (#3613) ONE renderer, shared with tests/test262-runner.ts. The worker's
 // behaviour is unchanged — these bodies moved here verbatim; it is the LOCAL
 // runner that was missing the tryNativeExnRender step.
 import { safeStringifyThrown, tryNativeExnRender } from "./lib/wasm-exn-render.mjs";
-import { SANDBOX_GLOBAL_NAMES } from "./test262-sandbox-globals.mjs";
+import { SANDBOX_GLOBAL_NAMES, applySandboxGlobalFunctionAttributes } from "./test262-sandbox-globals.mjs";
+import {
+  restoreOwnKeyOrder,
+  restoreSymbolAndAccessorMeta,
+  snapshotOwnKeyOrder,
+  snapshotSymbolAndAccessorMeta,
+} from "./test262-own-key-order.mjs";
 // (#4162) ONE import-object finaliser, shared with tests/test262-runner.ts and
 // tests/test262-shared.ts. It owns the #2928 E6 standalone runtime-eval
 // provider attachment (cached-binary loading + a fresh per-test namespace for
@@ -43,7 +49,14 @@ import { SANDBOX_GLOBAL_NAMES } from "./test262-sandbox-globals.mjs";
 import { instantiateTest262Module } from "./test262-import-object.mjs";
 // (#5353) ONE gate + ONE pre-warm contract for the compiled `Temporal` global,
 // shared with tests/test262-runner.ts and tests/test262-shared.ts.
-import { readTemporalPrewarmStamp, temporalCacheDir, temporalProviderDisabled } from "./test262-temporal.mjs";
+import {
+  readTemporalPrewarmStamp,
+  temporalCacheDir,
+  temporalProviderCompileOptions,
+  temporalProviderDisabled,
+  test262TemporalLaneEnabled,
+} from "./test262-temporal.mjs";
+import { test262CompilerBundleHash, test262HarnessProviderCacheDir } from "./test262-harness-cache.mjs";
 
 // ── Bundle hash (#1521) ────────────────────────────────────────────────
 // Each cache entry written below carries a `bundle_hash` field. When the
@@ -57,19 +70,8 @@ import { readTemporalPrewarmStamp, temporalCacheDir, temporalProviderDisabled } 
 //   2. sha256 of the source-runner compiler bundle or packaged compiler entry
 //
 // Computed once per worker startup — cheap (a few MB read + sha256).
-const _workerDir = dirname(fileURLToPath(import.meta.url));
-function computeBundleHash() {
-  const fromEnv = process.env.TEST262_BUNDLE_HASH;
-  if (fromEnv && fromEnv.length > 0) return fromEnv;
-  for (const file of ["compiler-bundle.mjs", "index.js"]) {
-    try {
-      const buf = readFileSync(join(_workerDir, file));
-      return createHash("sha256").update(buf).digest("hex").slice(0, 16);
-    } catch {}
-  }
-  return "no-bundle";
-}
-const BUNDLE_HASH = computeBundleHash();
+// (#6723 P1) One implementation, shared with the harness-provider cache key.
+const BUNDLE_HASH = test262CompilerBundleHash();
 
 // ── Standalone runtime-eval provider (#2928 E6/E7, now shared — #4162) ──
 // A standalone module whose ONLY dynamic-code dependency is the core-Wasm
@@ -98,12 +100,31 @@ function buildOriginalHarnessSandbox(consoleProxy) {
       sandbox[name] = runInContext(name, context);
     } catch {}
   }
+  // (#6492 r16) The copy loop assigns, which creates ENUMERABLE properties;
+  // §19.2's function-valued globals are non-enumerable and the corpus checks it
+  // (`S15.1.2.2_A9.5` &c.).
+  applySandboxGlobalFunctionAttributes(sandbox);
   Object.defineProperties(sandbox, {
     eval: { value: runInContext("eval", context), writable: true, enumerable: false, configurable: true },
     undefined: { value: undefined, writable: false, enumerable: false, configurable: false },
     Infinity: { value: Number.POSITIVE_INFINITY, writable: false, enumerable: false, configurable: false },
     NaN: { value: Number.NaN, writable: false, enumerable: false, configurable: false },
   });
+  // (#6492 r18) `Promise` is the ONE builtin the sandbox must NOT own a
+  // separate copy of. The runtime mints every promise in the HOST realm
+  // (`Promise_new_pending` / `Promise_resolve` / `_wrapThenable`), and moving
+  // that minting into the sandbox was measured at 536 -> 336 on
+  // `built-ins/Promise/` — §27.2.4.7's `nextPromise.constructor === C` fast
+  // path and every `Object.getPrototypeOf(p) === Promise.prototype` assertion
+  // need minting, the capability `C` and the value read to sit in ONE realm.
+  // Meanwhile the compiled `Promise` identifier resolves through the sandbox
+  // (`declared_global`), so a test's `Promise.resolve = fn` landed on a
+  // `Promise` nothing else in the pipeline ever looked at. Sharing the host
+  // intrinsic collapses that split at its source, in the fixture, instead of
+  // threading a realm through the product runtime. Cross-test pollution is
+  // already owned by `_STATIC_SNAPSHOTS` (#1220, which snapshots `Promise` +
+  // its statics for exactly these rows) and by the #1957 realm canary.
+  sandbox.Promise = Promise;
   sandbox.console = consoleProxy;
   sandbox.globalThis = sandbox;
   // (#3428) asyncHelpers.js guards `asyncTest` with
@@ -516,7 +537,14 @@ const _STATIC_SNAPSHOTS = [
   // close over the global `Promise` constructor, so the poisoned static methods are
   // also reached directly by compiled `Promise.resolve(x)` / `Promise.all(arr)`.
   // Symmetric with the existing Array/Object/String/etc. entries.
-  ["Promise", Promise, ["resolve", "reject", "all", "allSettled", "any", "race"]],
+  // (#6492 r18) `allKeyed` / `allSettledKeyed` joined this list when the
+  // sandbox started SHARING the host `Promise`: a row that patches or deletes
+  // one of them now mutates the object every later row reads, and the sub-key
+  // list is what `restoreBuiltins()` re-applies. Measured before adding them:
+  // `Promise/property-order.js` and `allKeyed/result-property-descriptors.js`
+  // failed in a full-slice run and PASSED in a single-row run — the signature
+  // of residue from a preceding row, not of a flake.
+  ["Promise", Promise, ["resolve", "reject", "all", "allSettled", "any", "race", "allKeyed", "allSettledKeyed"]],
 ];
 
 // --- Category 4: accessor properties on RegExp.prototype (getters).
@@ -574,7 +602,34 @@ const _staticOrig = _STATIC_SNAPSHOTS.map(([name, obj, keys]) => ({
   name,
   obj,
   values: keys.map((k) => [k, _snapshotValue(obj, k), _snapshotDescriptor(obj, k)]),
+  // (#6492 r19) The pristine own-key ORDER, plus every own descriptor, so
+  // `restoreOwnKeyOrder` can rebuild it. Value-restore alone cannot: a row
+  // that `delete`s a static (test262's `verifyProperty` deletes
+  // `length`/`name` to probe configurable and does NOT put them back) and a
+  // later re-definition append the key at the END of the insertion order.
+  // `built-ins/Promise/property-order.js` measures exactly that — it asserts
+  // `name` comes directly after `length` in `Object.getOwnPropertyNames`.
+  // Harmless before r18, when the sandbox owned a private `Promise`; since the
+  // sandbox SHARES the host object, one earlier row now reorders it for every
+  // later row in the fork.
+  ...snapshotOwnKeyOrder(obj),
 }));
+
+// (#6492 r20) Symbol-keyed own properties and getter metadata, for the SAME
+// shared intrinsics plus their prototypes. Two canary drift lines survived
+// every list above — `Promise.prototype[Symbol.toStringTag]:deleted` and
+// `Promise[Symbol.species]<get>.length:deleted` — because the string-keyed
+// lists cannot see a symbol key and the #3470 function-metadata restore walks
+// methods, not accessor `get`/`set` functions.
+const _symbolMetaOrig = _STATIC_SNAPSHOTS.flatMap(([name, obj]) => {
+  const targets = [[name, obj]];
+  const proto = obj?.prototype;
+  if (proto != null && (typeof proto === "object" || typeof proto === "function")) {
+    targets.push([`${name}.prototype`, proto]);
+  }
+  return targets.map(([label, target]) => ({ name: label, obj: target, snapshot: snapshotSymbolAndAccessorMeta(target) }));
+});
+
 const _accessorOrig = _ACCESSOR_SNAPSHOTS.map(([name, obj, keys]) => ({
   name,
   obj,
@@ -788,6 +843,23 @@ function cleanCleanup() {
 // making subsequent compiler internals like `Array.from(nodeArray)` throw
 // `%Array%.from requires that the property of the first argument,
 // items[Symbol.iterator], when exists, be a function`.
+/** Do `obj[key]`'s writable/enumerable/configurable still match the snapshot? */
+function _descriptorAttributesMatch(obj, key, origDesc) {
+  if (!origDesc) return true;
+  let cur;
+  try {
+    cur = Object.getOwnPropertyDescriptor(obj, key);
+  } catch {
+    return true;
+  }
+  if (!cur) return false;
+  return (
+    cur.writable === origDesc.writable &&
+    cur.enumerable === origDesc.enumerable &&
+    cur.configurable === origDesc.configurable
+  );
+}
+
 function _restoreMethodProp(obj, key, orig, origDesc) {
   if (orig === undefined) return;
   let cur;
@@ -796,7 +868,15 @@ function _restoreMethodProp(obj, key, orig, origDesc) {
   } catch {
     cur = undefined;
   }
-  if (cur === orig) return;
+  // (#6492 r20) The value being back is NOT the same as the property being
+  // back. A row that deletes a method and re-assigns it recreates the property
+  // `enumerable: true`, and a `defineProperty` row can leave `writable` /
+  // `configurable` wrong while the value matches — the #4758 shape, which the
+  // `Array.prototype[Symbol.iterator]` arm above already handles by hand. This
+  // was the residue behind the last three permanent realm-canary lines
+  // (`Promise.prototype.{then,catch,finally}:changed`): value-equal, attributes
+  // drifted, restore returning early.
+  if (cur === orig && _descriptorAttributesMatch(obj, key, origDesc)) return;
 
   // Hot path: plain assignment. Succeeds when the descriptor is still
   // writable. Silently no-ops (or throws in strict mode) when the test
@@ -805,11 +885,11 @@ function _restoreMethodProp(obj, key, orig, origDesc) {
     obj[key] = orig;
   } catch {}
 
-  // Re-check and fall back to defineProperty if the value is still wrong
-  // AND we have the original descriptor to re-apply. Only reached on the
-  // cold "test poisoned via defineProperty" path.
+  // Re-check and fall back to defineProperty if the value is still wrong, or
+  // the ATTRIBUTES are, and we have the original descriptor to re-apply. Only
+  // reached on the cold "test poisoned / deleted-and-reassigned" path.
   try {
-    if (obj[key] === orig) return;
+    if (obj[key] === orig && _descriptorAttributesMatch(obj, key, origDesc)) return;
   } catch {
     // accessor threw — try defineProperty anyway
   }
@@ -1003,6 +1083,20 @@ function restoreBuiltins() {
     }
   }
 
+  // (#6492 r19) …then the own-key ORDER, which the value restore above cannot
+  // repair. Runs for every snapshotted intrinsic, not just `Promise`: each one
+  // is now shared with the sandbox and each has `length`/`name` rows in the
+  // corpus that delete them.
+  for (const { obj, order, descriptors } of _staticOrig) {
+    restoreOwnKeyOrder(obj, order, descriptors);
+  }
+
+  // (#6492 r20) …and the symbol-keyed properties + getter metadata those lists
+  // cannot express.
+  for (const { obj, snapshot } of _symbolMetaOrig) {
+    restoreSymbolAndAccessorMeta(obj, snapshot);
+  }
+
   // Restore accessor properties (getters) via Object.defineProperty when
   // their backing get function differs from the snapshot. These are cold
   // paths (RegExp.prototype.flags etc.) so defineProperty is safe here —
@@ -1130,12 +1224,25 @@ function makeWorkerRecycleError(reason) {
   return err;
 }
 
-function hasFixtureGraph(fixtureFiles) {
+function isFixtureFileRecord(fixtureFiles) {
   return (
     fixtureFiles &&
     typeof fixtureFiles === "object" &&
-    !Array.isArray(fixtureFiles) &&
-    Object.keys(fixtureFiles).length > 0
+    !Array.isArray(fixtureFiles)
+  );
+}
+
+function hasFixtureGraph(fixtureFiles) {
+  return isFixtureFileRecord(fixtureFiles) && Object.keys(fixtureFiles).length > 0;
+}
+
+function hasValidatedSelfNamespaceGraph({ selfModuleGraph, originalHarness, entryFile, fixtureFiles, source }) {
+  return (
+    selfModuleGraph === true &&
+    originalHarness === true &&
+    isFixtureFileRecord(fixtureFiles) &&
+    typeof source === "string" &&
+    hasPinnedNamespaceSelfModuleImport(entryFile, source)
   );
 }
 
@@ -1161,14 +1268,30 @@ const FYI_NEGATIVE_FIXTURE_RESOLUTION_CODES = new Set([2459]);
 //     key matches the provider it would ask for — then the call is the measured
 //     ~1 s cache read. Without the stamp the rows run UNLINKED (today's
 //     behaviour) instead of timing out one after another across the shard.
-//  2. HOST LANE ONLY. The provider is `--target gc` with the JS host adapter
-//     (`src/temporal-provider.ts` says so, and the linker's deferred provider
-//     export does not exist for WASI). Linking it under `--target standalone`
-//     would trip this worker's own #2961 guard — "standalone target emitted
-//     host imports" — and turn honest standalone failures into compile_errors,
-//     against the #1897 floor. The gate in tests/test262-shared.ts is therefore
-//     host-only; this worker double-checks rather than trusting the message.
-let temporalProviderPromise;
+//  2. ONE PROVIDER PER TARGET (#5383 S3). Until this slice the rule here was
+//     "host lane only", because the only provider that existed was `--target
+//     gc` with the JS host adapter. #5383 builds a host-free standalone one, so
+//     the lane question is now answered by `test262TemporalLaneEnabled` in
+//     scripts/test262-temporal.mjs — the SAME function the in-process lane and
+//     the shard parent call, so the three can never disagree about which rows
+//     get a binding.
+//
+//     The old note's second half — that linking under standalone would trip
+//     this worker's own #2961 guard — turns out to be false, and it was worth
+//     measuring rather than inheriting: a standalone consumer linked against
+//     the standalone provider reports `result.imports === []` (measured
+//     2026-09-12, `.tmp/s3-imports.mts`; the six real wasm imports all live in
+//     the provider's `link:` namespace, which the compiler's import list
+//     deliberately excludes because the linker satisfies them). So the guard
+//     needs no relaxation and keeps its full strength for every other row —
+//     the outcome to prefer, since a widened #2961 guard is exactly how a
+//     host-import leak would stop being visible.
+//
+//     Standalone additionally REQUIRES the stamp (the host lane does not),
+//     which is the fail-soft hinge: no standalone artifact ⇒ rows run unlinked
+//     exactly as before, never a cold build and never a per-row timeout.
+/** Memoised per target — including the `null`, so a stampless fork asks once. */
+const temporalProviderPromises = new Map();
 let temporalUnavailableAnnounced = false;
 
 /** Say ONCE, on stderr, why this fork is running Temporal rows unlinked. */
@@ -1197,10 +1320,19 @@ function temporalWiringAvailable() {
   );
 }
 
-/** Build (or, in practice, cache-read) the provider once per fork. */
-async function getWorkerTemporalProvider() {
-  if (temporalProviderPromise) return temporalProviderPromise;
-  temporalProviderPromise = (async () => {
+/**
+ * Build (or, in practice, cache-read) the provider once per fork, per target.
+ *
+ * (#6706) ...and per semantic-provider policy: the native-first lane links a
+ * provider compiled under the native regime, certified by its OWN stamp. With
+ * no such stamp its rows run unlinked (announced) — never against the
+ * host-semantics provider, which would label host results as regime results.
+ */
+async function getWorkerTemporalProvider(target, semanticProviders = "auto") {
+  const memoKey = semanticProviders === "native-first" ? `${target ?? "host"}/native-first` : (target ?? "host");
+  const memoised = temporalProviderPromises.get(memoKey);
+  if (memoised) return memoised;
+  const promise = (async () => {
     if (temporalProviderDisabled()) {
       announceTemporalUnavailable("JS2WASM_TEST262_TEMPORAL=0");
       return null;
@@ -1209,15 +1341,22 @@ async function getWorkerTemporalProvider() {
       announceTemporalUnavailable("bundles do not export the provider wiring — rebuild from the bundle entries");
       return null;
     }
+    // The lane question, asked HERE rather than per row: this getter memoises,
+    // so the stamp is read once per fork instead of once per Temporal row.
     const cacheDir = temporalCacheDir();
-    const stamp = readTemporalPrewarmStamp(cacheDir);
-    if (!stamp) {
-      announceTemporalUnavailable(`no pre-warm stamp in ${cacheDir}`);
+    if (!test262TemporalLaneEnabled(target, cacheDir, semanticProviders)) {
+      announceTemporalUnavailable(`the ${memoKey} lane has no eligible provider`);
       return null;
     }
+    const stamp = readTemporalPrewarmStamp(cacheDir, target, semanticProviders);
+    if (!stamp) {
+      announceTemporalUnavailable(`no ${memoKey} pre-warm stamp in ${cacheDir}`);
+      return null;
+    }
+    const compileOptions = temporalProviderCompileOptions(target, semanticProviders);
     const { loadTemporalPolyfillSource } = await import("./test262-temporal.mjs");
     const polyfillSource = await loadTemporalPolyfillSource();
-    const key = compilerBundle.temporalProviderCacheKey({ polyfillSource });
+    const key = compilerBundle.temporalProviderCacheKey({ polyfillSource, compileOptions });
     if (key !== stamp.key) {
       // A stamp from a different polyfill (or different provider compile
       // options) does not certify THIS provider, and building it here is the
@@ -1225,9 +1364,9 @@ async function getWorkerTemporalProvider() {
       announceTemporalUnavailable(`pre-warm stamp key ${stamp.key.slice(0, 16)} != ${key.slice(0, 16)}`);
       return null;
     }
-    const provider = await compilerBundle.buildTemporalProvider({ polyfillSource, cacheDir });
+    const provider = await compilerBundle.buildTemporalProvider({ polyfillSource, cacheDir, compileOptions });
     console.error(
-      `[test262-worker] Temporal provider ${provider.namespace} (${provider.artifact.binary.length} B) ` +
+      `[test262-worker] Temporal provider (${memoKey}) ${provider.namespace} (${provider.artifact.binary.length} B) ` +
         `in ${provider.buildMs}ms cacheHit=${provider.cacheHit} from ${cacheDir}`,
     );
     if (!provider.cacheHit) {
@@ -1240,7 +1379,98 @@ async function getWorkerTemporalProvider() {
     announceTemporalUnavailable(String(error));
     return null;
   });
-  return temporalProviderPromise;
+  temporalProviderPromises.set(memoKey, promise);
+  return promise;
+}
+
+// ────────────────────────── (#3451) linked-harness provider ───────────
+//
+// The harness prefix is compiled ONCE per include-set into a separate provider
+// module and every body is compiled against it. There are 64 distinct prefixes
+// in the whole corpus (#3451 slice 1), so a fork sees a handful.
+//
+// The 30 s per-row fork budget is the constraint that shapes this, exactly as
+// it shapes the Temporal provider (#5353): a COLD provider build is 0.7-2.9 s,
+// affordable only if amortised — so the promise (including a rejection) is
+// memoised per prefix and per target for the fork's lifetime.
+// `scripts/prewarm-test262-harness-providers.mjs` fills the on-disk cache ahead
+// of a shard so even the first row of each include-set is a cache read.
+
+/** Memoised per (target, prefix) — including failures, so a bad prefix is asked once. */
+const harnessProviderPromises = new Map();
+let harnessProviderUnavailableAnnounced = false;
+
+function announceHarnessProviderUnavailable(reason) {
+  if (harnessProviderUnavailableAnnounced) return;
+  harnessProviderUnavailableAnnounced = true;
+  // Loud: a silent null here means every row quietly ran the honest lane while
+  // the run still claimed to be measuring the linked one.
+  console.error(`[test262-worker] linked harness provider NOT available (${reason}); rows fall back to honest`);
+}
+
+/** Are both halves of the wiring present in the bundles this worker loaded? */
+function harnessProviderWiringAvailable() {
+  return (
+    typeof compilerBundle.buildHarnessProvider === "function" &&
+    typeof compilerBundle.compileHarnessLinkedBody === "function" &&
+    typeof runtimeBundle.instantiateLinkedProviders === "function" &&
+    typeof runtimeBundle.wireCompiledInstance === "function"
+  );
+}
+
+function harnessProviderCompileOptions(target) {
+  // Must match `compileHarnessLinkedBody`'s option set on the consumer side, or
+  // the provider and the body disagree about the ABI they share.
+  // (#6723 D4) Both sides carry the harness's `hostBridge: "always"`, like
+  // every other worker compile site (HARNESS_HOST_BRIDGE): on standalone the
+  // default strips `__stdout_*`, so the provider's `print` (hence `$DONE`'s
+  // completion marker) wrote to a sink nothing could read.
+  return {
+    ...HARNESS_HOST_BRIDGE,
+    allowJs: true,
+    emitWat: false,
+    skipSemanticDiagnostics: true,
+    ...(target ? { target } : {}),
+  };
+}
+
+async function getWorkerHarnessProvider(harnessPrefix, target) {
+  if (!harnessProviderWiringAvailable()) {
+    announceHarnessProviderUnavailable("bundles do not export the provider wiring — rebuild from the bundle entries");
+    return null;
+  }
+  const memoKey = `${target ?? "host"}\u0000${harnessPrefix.length}\u0000${harnessPrefix}`;
+  const memoised = harnessProviderPromises.get(memoKey);
+  if (memoised) return memoised;
+  const promise = (async () => {
+    const cacheDir = test262HarnessProviderCacheDir();
+    const provider = await compilerBundle.buildHarnessProvider({
+      harnessPrefix,
+      cacheDir,
+      compileOptions: harnessProviderCompileOptions(target),
+    });
+    console.error(
+      `[test262-worker] harness provider ${provider.namespace} (${provider.artifact.binary.length} B, ` +
+        `${provider.getters.size} getters) in ${provider.buildMs}ms cacheHit=${provider.cacheHit} from ${cacheDir}`,
+    );
+    return provider;
+  })().catch((error) => {
+    announceHarnessProviderUnavailable(String(error));
+    return null;
+  });
+  harnessProviderPromises.set(memoKey, promise);
+  return promise;
+}
+
+/**
+ * (#6723 D3) The text a linked-lane row compiles when it falls back to the
+ * honest lane: the honest assembly of the same variant, as the parent built it.
+ * `prefix + source` is NOT that for a strict variant — the directive lands
+ * after the harness, where it is no longer a directive prologue, so a strict
+ * row silently ran sloppy (4 standalone rows flipped pass→fail on it).
+ */
+function linkedHarnessHonestSource(linkedHarness, source) {
+  return linkedHarness.honestSource ?? linkedHarness.harnessPrefix + source;
 }
 
 async function doCompile(
@@ -1251,9 +1481,16 @@ async function doCompile(
   originalHarness,
   fixtureFiles,
   entryFile,
+  moduleGraph,
   isNegative,
   negativePhase,
   temporal,
+  semanticProviders,
+  linkedHarness,
+  // (#6491 r3) Explicit SCRIPT goal, computed from METADATA by `isScriptGoal`
+  // in the caller. Threaded to EVERY compile branch below so the honest
+  // whole-assembly and the linked body-only unit are given the same goal.
+  scriptGoal,
 ) {
   // Defence-in-depth: restore any poisoned builtins BEFORE each compile.
   // postCompileCleanup runs after the previous test, but under rare worker
@@ -1302,9 +1539,12 @@ async function doCompile(
     (target && target !== "standalone") || (!originalHarness && inferModuleStrictArguments)
       ? {}
       : { deferTopLevelInit: true };
-  if (hasFixtureGraph(fixtureFiles)) {
+  if (moduleGraph) {
     if (!originalHarness || typeof entryFile !== "string" || entryFile.length === 0) {
       throw new Error("fixture graph requires an original-harness entryFile");
+    }
+    if (!isFixtureFileRecord(fixtureFiles)) {
+      throw new Error("fixture graph requires an object fixtureFiles record");
     }
     if (Object.prototype.hasOwnProperty.call(fixtureFiles, entryFile)) {
       throw new Error(`fixture graph collides with entry file: ${entryFile}`);
@@ -1332,11 +1572,13 @@ async function doCompile(
       // before semantic analysis.
       skipSemanticDiagnostics: negativePhase !== "resolution",
       target,
+      semanticProviders,
       inferModuleStrictArguments,
+      scriptGoal,
       ...deferOpt,
     });
   }
-  if (temporal && originalHarness && !hasFixtureGraph(fixtureFiles)) {
+  if (temporal && originalHarness && !moduleGraph) {
     // (#5353) Same options as the literal-harness branch below, routed through
     // `compileWithTemporalGlobal`: it prepends a ONE-line prelude binding bare
     // `Temporal` to the provider export, adds the declaration-only stub to the
@@ -1346,7 +1588,27 @@ async function doCompile(
     // This leaves the incremental Language Service (compileMulti builds its own
     // program), which is part of the per-row price #5248 measured; the
     // alternative — prepending the polyfill to each body — costs ~32 s a row.
-    return compilerBundle.compileWithTemporalGlobal(source, temporal, {
+    //
+    // (#6489) HONESTY STAMP. This branch is tested BEFORE the linked branch
+    // below, so inside a linked run a Temporal row is compiled by the honest
+    // path — it is not a linked measurement and must not be counted as linked
+    // agreement. Report it as a fallback with its own reason so the parity
+    // report attributes it correctly. (A real linked+Temporal co-link is a
+    // later slice; until then this is the accurate label, not a workaround.)
+    //
+    // In a linked run `source` is the BODY-ONLY unit (the provider carries the
+    // harness prefix), so the honest compile must reconstruct the honest
+    // assembly exactly as the linked fallback below does. Measured on the
+    // second full-corpus run (35144322208): without this, every Temporal row
+    // in the linked lane scored `assert is not defined` / `TemporalHelpers is
+    // not defined` (2,000 + 723 rows) — the harness was never in the unit.
+    let temporalSource = source;
+    if (linkedHarness) {
+      linkedHarness.fellBack = true;
+      linkedHarness.fallbackReason = "temporal row: honest compile (compileWithTemporalGlobal)";
+      temporalSource = linkedHarnessHonestSource(linkedHarness, source);
+    }
+    return compilerBundle.compileWithTemporalGlobal(temporalSource, temporal, {
       allowJs: true,
       fileName: "test.js",
       sourceMap: true,
@@ -1354,9 +1616,63 @@ async function doCompile(
       emitWat: false,
       skipSemanticDiagnostics: true,
       target,
+      semanticProviders,
       inferModuleStrictArguments,
+      scriptGoal,
       ...deferOpt,
     });
+  }
+  if (linkedHarness && originalHarness && !moduleGraph) {
+    // (#3451 slice 3) LINKED shadow lane. `source` is the body-only unit; the
+    // provider carries the harness prefix. Same option set as the literal
+    // branch below, so the only deliberate difference is where the harness
+    // came from.
+    //
+    // PER-ROW HONEST FALLBACK. A body may redeclare a harness name, or the
+    // getter prelude may fail to type — link-shape problems that say nothing
+    // about the test. Falling back keeps the row scored; NOT reporting the
+    // fallback would let a partly-degraded run be read as a linked
+    // measurement, which is the one thing a shadow oracle must never do. So
+    // the caller is told, and the row is stamped `linked-harness-fallback`.
+    const bodyOptions = {
+      ...HARNESS_HOST_BRIDGE, // (#6723 D4) same bridge as the provider and the honest lane
+      allowJs: true,
+      fileName: "test.js",
+      sourceMap: true,
+      sourceMapUrl: sourceMapUrl || "test.wasm.map",
+      emitWat: false,
+      skipSemanticDiagnostics: true,
+      target,
+      semanticProviders,
+      inferModuleStrictArguments,
+      scriptGoal,
+      // (#3451) A negative test's verdict IS the diagnostic, so the linked
+      // branch must ask for the same ones the honest branch gets. The honest
+      // single-file gate rejects syntax errors unconditionally and runs the JS
+      // early-error checks; `compileMulti` does neither unless asked, so
+      // without these a `negative: early` row compiles clean and scores
+      // "expected SyntaxError but compiled with no diagnostic".
+      strictJsSyntax: true,
+      enforceJsEarlyErrors: isNegative && negativePhase !== "resolution",
+      ...deferOpt,
+    };
+    const provider = await getWorkerHarnessProvider(linkedHarness.harnessPrefix, target);
+    if (provider) {
+      try {
+        const linked = await compilerBundle.compileHarnessLinkedBody(provider, linkedHarness.body, {
+          ...bodyOptions,
+          strict: linkedHarness.strict,
+        });
+        if (linked.success) return linked;
+        linkedHarness.fallbackReason = `linked compile failed: ${(linked.errors ?? [])[0]?.message ?? "unknown"}`;
+      } catch (error) {
+        linkedHarness.fallbackReason = `linked compile threw: ${error?.message ?? String(error)}`;
+      }
+    } else {
+      linkedHarness.fallbackReason = "no harness provider in this fork";
+    }
+    linkedHarness.fellBack = true;
+    return compileSingleSource(linkedHarnessHonestSource(linkedHarness, source), bodyOptions);
   }
   if (originalHarness) {
     // The authoritative sharded-CI and test262.fyi lanes both compile literal
@@ -1372,7 +1688,9 @@ async function doCompile(
       emitWat: false,
       skipSemanticDiagnostics: true,
       target,
+      semanticProviders,
       inferModuleStrictArguments,
+      scriptGoal,
       ...deferOpt,
     });
   }
@@ -1383,7 +1701,9 @@ async function doCompile(
     emitWat: false,
     skipSemanticDiagnostics: true,
     target,
+    semanticProviders,
     inferModuleStrictArguments,
+    scriptGoal,
     ...deferOpt,
   });
 }
@@ -1443,7 +1763,21 @@ function extractWasmExceptionMessage(err, instance) {
       const t = typeof payload;
       if (t === "object" || t === "function") {
         const native = tryNativeExnRender(instance, payload);
-        if (native != null) return native;
+        // (#6723 D4) The consumer renders a PROVIDER-minted `Test262Error`
+        // (a provider fnctor instance) as the generic "[object Object]": its
+        // `toString` lives on the provider's prototype. Treat that answer as
+        // "not mine" when a linked peer can do better.
+        if (native != null && (native !== "[object Object]" || currentLinkedPeers.length === 0)) return native;
+        // (#6723) A STANDALONE linked row: the payload may be minted by the
+        // harness provider (a `Test262Error` thrown by `assert.*`), whose GC
+        // layout only the provider's own `__exn_render_*` exports can read.
+        let generic = native;
+        for (const peer of currentLinkedPeers) {
+          const viaPeer = tryNativeExnRender({ exports: peer }, payload);
+          if (viaPeer != null && viaPeer !== "[object Object]") return viaPeer;
+          generic ??= viaPeer;
+        }
+        if (generic != null) return generic;
       }
       return safeStringifyThrown(payload);
     }
@@ -1496,6 +1830,27 @@ function extractWasmExceptionMessage(err, instance) {
 function drainAndCaptureNativeStdout(instance, append) {
   const exp = instance?.exports;
   if (!exp) return null;
+  // (#6723) A standalone linked row has one microtask ring and one stdout sink
+  // PER MODULE: `$DONE` lives in the harness provider, so its completion marker
+  // lands in the provider's sink, and a continuation can hop between rings.
+  // Drain every ring until none makes progress, then read every sink.
+  const peers = currentLinkedPeers;
+  if (peers.length > 0) {
+    let drainError = null;
+    const modules = [exp, ...peers];
+    for (let round = 0; round < 8; round++) {
+      for (const moduleExports of modules) {
+        if (typeof moduleExports.__drain_microtasks !== "function") continue;
+        try {
+          moduleExports.__drain_microtasks();
+        } catch (err) {
+          drainError ??= err;
+        }
+      }
+    }
+    for (const moduleExports of modules) captureNativeStdout(moduleExports, append);
+    return drainError;
+  }
   let drainError = null;
   if (typeof exp.__drain_microtasks === "function") {
     try {
@@ -1504,6 +1859,12 @@ function drainAndCaptureNativeStdout(instance, append) {
       drainError = err;
     }
   }
+  captureNativeStdout(exp, append);
+  return drainError;
+}
+
+/** Mirror one module's native `__stdout_*` sink into `append`, line by line. */
+function captureNativeStdout(exp, append) {
   if (typeof exp.__stdout_prepare === "function" && typeof exp.__stdout_char === "function") {
     let len = 0;
     try {
@@ -1521,7 +1882,20 @@ function drainAndCaptureNativeStdout(instance, append) {
       }
     }
   }
-  return drainError;
+}
+
+/**
+ * (#6723) Export objects of the linked provider instances of the row being
+ * executed (standalone linked-harness lane), for exception rendering and the
+ * host-free async drain. Empty for every unlinked row.
+ */
+let currentLinkedPeers = [];
+
+function standaloneLinkedPeers(target, result, importObj) {
+  if (target !== "standalone") return [];
+  return (result.linkedModules ?? [])
+    .map((artifact) => importObj[artifact.namespace])
+    .filter((exports) => exports && typeof exports === "object");
 }
 
 function originalHarnessExceptionMatches(err, instance, expectedErrorType) {
@@ -1639,6 +2013,7 @@ async function buildInvalidBinaryError(source, sourceMapUrl, result, target) {
     // actual validation error.
     await instantiateTest262Module(result.binary, imports, {
       target,
+      semanticProviders: parseTest262SemanticProviders(process.env.TEST262_SEMANTIC_PROVIDERS),
       providerLabel: RUNTIME_EVAL_PROVIDER_LABEL,
     });
   } catch (err) {
@@ -1674,6 +2049,8 @@ async function buildInvalidBinaryError(source, sourceMapUrl, result, target) {
 
 process.on("message", async (msg) => {
   runtimeIntrinsicCanarySnapshot = null;
+  currentLinkedFallback = false;
+  currentLinkedFallbackReason = undefined;
   const { id, source, execute, isNegative, isRuntimeNegative, expectedErrorType, originalHarness, asyncTest } = msg;
   // (#3461) Fast native-harness oracle (host lane). When set, `source` is the
   // body-only `bindingShim + body` unit (the harness was NOT concatenated into
@@ -1684,26 +2061,68 @@ process.on("message", async (msg) => {
   const nativeHarness = originalHarness && msg.nativeHarness === true && typeof msg.harnessPrefix === "string";
   const harnessPrefix = nativeHarness ? msg.harnessPrefix : "";
   const target = compileTargetFromMessage(msg.target);
-  const fixtureGraph = hasFixtureGraph(msg.fixtureFiles);
+  const semanticProviders = parseTest262SemanticProviders(msg.semanticProviders ?? process.env.TEST262_SEMANTIC_PROVIDERS);
+  const staticFixtureGraph = hasFixtureGraph(msg.fixtureFiles);
+  const selfNamespaceGraph = hasValidatedSelfNamespaceGraph({
+    selfModuleGraph: msg.selfModuleGraph,
+    originalHarness,
+    entryFile: msg.entryFile,
+    fixtureFiles: msg.fixtureFiles,
+    source,
+  });
+  const fixtureGraph = staticFixtureGraph || selfNamespaceGraph;
   const compileStart = performance.now();
 
-  // #3492/#3509 — Dynamic fixture discovery is transport metadata, not proof
-  // that a loader is needed during this test. Let the compiler distinguish an
-  // eager import (fatal #3494) from an ordinary deferred closure (host-free
-  // runtime trap, #3509). A blanket graph guard false-failed syntax-valid tests
-  // whose arrow was never invoked. No dynamic fixture is promoted to a static
-  // compileMulti edge here.
+  // #3492/#3509/#3494 — Dynamic fixture discovery is transport metadata, not
+  // proof that a loader is needed during this test. A standalone import() of a
+  // module outside the compiled graph settles as a rejected Promise at runtime
+  // (#3494). A blanket graph guard false-failed syntax-valid tests whose arrow
+  // was never invoked. No dynamic fixture is promoted to a static compileMulti
+  // edge here.
 
   // (#5353) The parent computes the PATH-or-`features:` gate (it is the side
   // that knows both) and this worker double-checks the two conditions it owns:
-  // the host lane, and a provider that is actually available in this fork. A
-  // provider is at most ONE per fork; `getWorkerTemporalProvider` memoises the
-  // null too, so a fork without a pre-warm stamp asks once and then costs
+  // the LANE (#5383 S3 — `test262TemporalLaneEnabled`, inside the getter), and
+  // a provider that is actually available in this fork. A provider is at most
+  // ONE per fork per target; `getWorkerTemporalProvider` memoises the null too,
+  // so a fork without a matching pre-warm stamp asks once and then costs
   // nothing per row.
   let temporal = null;
-  if (msg.temporal === true && target === undefined && originalHarness) {
-    temporal = await getWorkerTemporalProvider();
+  // (#6706) native-first rows link only the regime-compiled provider (their
+  // own stamp); the getter answers null — rows unlinked — without one.
+  if (msg.temporal === true && originalHarness) {
+    temporal = await getWorkerTemporalProvider(target, semanticProviders);
   }
+
+  // (#3451) Linked shadow lane. The parent owns the split (it is the side that
+  // parsed the metadata) and sends the strict-neutral prefix beside the
+  // body-only `source`; the worker owns the provider and the fallback. The
+  // descriptor is MUTATED by `doCompile` to report a fallback, so the row can
+  // be stamped honestly. Never for a fixture graph — that path has no provider
+  // seam and stays honest, as the native-harness lane does.
+  //
+  // `source` stays the honest BODY UNIT (directive + body), so the fallback can
+  // reconstruct `prefix + source` and get the honest assembly byte-for-byte.
+  // The raw body and the strictness flag come separately because the prelude
+  // must put `"use strict"` ahead of its own `import`: a directive that follows
+  // an import is not a directive prologue, so reusing `source` here would run
+  // every strict rerun SLOPPY while reporting it as strict.
+  const linkedHarness =
+    originalHarness &&
+    msg.linkedHarness === true &&
+    typeof msg.linkedHarnessPrefix === "string" &&
+    typeof msg.linkedHarnessBody === "string"
+      ? {
+          harnessPrefix: msg.linkedHarnessPrefix,
+          body: msg.linkedHarnessBody,
+          strict: msg.linkedHarnessStrict === true,
+          // (#6723 D3) The honest assembly of THIS variant. Absent (an older
+          // parent) ⇒ the pre-#6723 `prefix + source` reconstruction.
+          honestSource: typeof msg.linkedHarnessHonestSource === "string" ? msg.linkedHarnessHonestSource : undefined,
+          fellBack: false,
+          fallbackReason: undefined,
+        }
+      : null;
 
   let result;
   try {
@@ -1715,11 +2134,17 @@ process.on("message", async (msg) => {
       originalHarness,
       msg.fixtureFiles,
       msg.entryFile,
+      fixtureGraph,
       isNegative,
       msg.negativePhase,
       temporal,
+      semanticProviders,
+      linkedHarness,
+      msg.scriptGoal === true,
     );
+    if (linkedHarness?.fellBack) noteLinkedFallback(linkedHarness.fallbackReason);
   } catch (err) {
+    if (linkedHarness?.fellBack) noteLinkedFallback(linkedHarness.fallbackReason);
     // Thrown exception may have poisoned the incremental compiler's internal
     // state.  Recreate immediately so subsequent compilations don't cascade-fail.
     try {
@@ -1993,6 +2418,7 @@ process.on("message", async (msg) => {
       runtimeIntrinsicCanarySnapshot = snapshotRuntimeIntrinsicSurface(importObj);
     }
 
+    currentLinkedPeers = [];
     try {
       // (#4162) The ONE shared instantiate seam. Standalone goes module-first
       // (import list inspectable → #2928 E6 provider attachment); the host lane
@@ -2001,6 +2427,7 @@ process.on("message", async (msg) => {
       // instantiate — classification is unchanged.
       instance = await instantiateTest262Module(result.binary, importObj, {
         target,
+        semanticProviders,
         providerLabel: RUNTIME_EVAL_PROVIDER_LABEL,
         // (#5353) Empty on every non-Temporal row, so the shared finaliser
         // takes its existing path byte-for-byte. `linkedRuntime` pins the
@@ -2009,8 +2436,19 @@ process.on("message", async (msg) => {
         // scripts/test262-import-object.mjs.
         linkedModules: result.linkedModules ?? [],
         linkedRuntime: runtimeBundle,
+        // (#6475/#6476) Build the PROVIDER's adapter with this row's host
+        // context — the same two values the consumer's `buildImports` above
+        // received. Without them the provider resolves ambient intrinsics
+        // (so `assert.throws(TypeError, …)` sees a different constructor with
+        // the same name) and prints to the real console (so the `$DONE`
+        // completion marker never reaches `harnessOutput`).
+        linkedHost: originalHarness
+          ? { deps: { console: consoleProxy }, options: { globalSandbox: harnessSandbox } }
+          : undefined,
       });
+      currentLinkedPeers = standaloneLinkedPeers(target, result, importObj);
     } catch (err) {
+      currentLinkedPeers = standaloneLinkedPeers(target, result, importObj);
       const execMs = performance.now() - execStart;
       // Real Wasm compile/link failures stay as compile_error. A throw from
       // the module's start function — which surfaces as WebAssembly.Exception
@@ -2108,11 +2546,11 @@ process.on("message", async (msg) => {
         // the ring so they run, then mirror the native stdout sink into
         // `harnessOutput` so the marker poll below observes the completion marker.
         // No-op on the js-host lane (no such intrinsics; `consoleProxy` feeds
-        // `harnessOutput` directly).
-        let standaloneDrainError = null;
-        if (target === "standalone") {
-          standaloneDrainError = drainAndCaptureNativeStdout(instance, appendHarnessOutput);
-        }
+        // `harnessOutput` directly). (#6685) Keyed on the module's exports, never
+        // on the target name: a native-regime module in a JS environment drains
+        // its in-module microtask ring here but prints through the console
+        // capability (no `__stdout_*` exports), which `consoleProxy` observes.
+        const standaloneDrainError = drainAndCaptureNativeStdout(instance, appendHarnessOutput);
         const deadline = Date.now() + 1_000;
         const findMarker = (prefix) => {
           for (let i = 0; i < harnessOutput.length; i++) {
@@ -2440,6 +2878,19 @@ const REALM_CANARY_IGNORE = [
   // contamination — a fresh worker would just re-install them and recycle
   // forever.
   "globalThis.Symbol(",
+  // (#6492 r18) The two keyed combinators are a RUNTIME-OWNED surface: no
+  // engine ships them, `installAmbientCompatibility` installs them on every
+  // `buildImports`, and since r18 the sandbox shares the host `Promise`, so a
+  // row that deletes or patches one of them makes the re-install visible as
+  // drift. Evidence from a `TEST262_REALM_CANARY=log` run over a 168-row
+  // Promise slice (the discipline this list's header asks for): the only
+  // Promise lines are `allKeyed`/`allSettledKeyed` `:deleted` from the rows
+  // that delete them, followed by `:added` from the next instantiate's
+  // re-install — the same "lazy runtime install" class as the iterator
+  // helpers, not contamination. The VALUES are restored between rows by the
+  // `_STATIC_SNAPSHOTS` entry below, which now lists both keys.
+  "Promise.allKeyed",
+  "Promise.allSettledKeyed",
 ];
 
 function realmCanaryIgnored(label) {
@@ -2723,6 +3174,23 @@ function diffRealmSurface(snap) {
   return drift;
 }
 
+// (#6492 r5) Prime the runtime-owned `Promise.allKeyed` / `allSettledKeyed`
+// install BEFORE the baseline snapshot. `installAmbientCompatibility` writes
+// them onto the host `Promise` on every instantiate; a fresh worker that
+// snapshots first sees that write as drift, recycles, and the next fresh
+// worker does it again — a recycle-per-test loop that re-loaded the harness
+// provider for (nearly) every row and quadrupled shard wall-clock (merge-group
+// run 35313398232, +345 % aggregate compile time). Older bundles without the
+// export are unaffected.
+// (#6492 r20) The prime must hand over the SAME thenable mirror `buildImports`
+// would have passed. The install is first-wins (it skips a `Promise` that
+// already has the method), so priming with the identity default permanently
+// pinned the combinators to a mirror-less closure — seven rows of the family
+// return a COMPILED object literal from their `resolve`, and the polyfill then
+// threw `nextPromise.then is not a function` no matter what `buildImports`
+// passed later. Optional-chained on both arguments: an older bundle without
+// the export simply primes as before.
+runtimeBundle._installPromiseKeyedCombinators?.(Promise, runtimeBundle._mirrorPolyfillThenable);
 let realmCanarySnapshot = REALM_CANARY_MODE ? snapshotRealmSurface() : null;
 let realmCanaryChecks = 0;
 let realmCanaryCheckMsTotal = 0;
@@ -2758,7 +3226,39 @@ function realmDriftRecycleReason(payload) {
   return undefined;
 }
 
+/**
+ * (#3451) Did THIS row's linked compile fall back to the honest assembly?
+ *
+ * Stamped in the one result funnel rather than at each `sendResult` call site:
+ * a row can exit through a dozen of them (compile error, poison retry, negative
+ * match, vacuity correction), and a fallback that is reported on only some of
+ * them is worse than none — the run would under-count its own degradation and
+ * over-state the linked lane's parity.
+ */
+let currentLinkedFallback = false;
+// (#6486) The REASON travels with the row, not just the fork log. The parity
+// report histograms it: a linked lane whose misses are all one link-shape bug
+// is a different finding from one whose misses are spread, and a per-fork
+// stderr line cannot be joined back to the rows it degraded.
+let currentLinkedFallbackReason;
+const linkedFallbackReasonsSeen = new Set();
+
+/** Mark the row, and log each distinct reason ONCE per fork. */
+function noteLinkedFallback(reason) {
+  currentLinkedFallback = true;
+  currentLinkedFallbackReason = reason ?? "unknown";
+  const key = reason ?? "unknown";
+  if (linkedFallbackReasonsSeen.has(key)) return;
+  linkedFallbackReasonsSeen.add(key);
+  // Per-reason, not per-row: a handful of link-shape cases are expected, and a
+  // per-row log would bury them. Silence is not an option — an unreported
+  // fallback is a row the linked lane did not actually measure.
+  console.error(`[test262-worker] linked-harness fallback: ${key}`);
+}
+
 function sendResult(payload, forceRecycleReason) {
+  if (currentLinkedFallback && payload && typeof payload === "object")
+    payload = { ...payload, linkedFallback: true, linkedFallbackReason: currentLinkedFallbackReason };
   const cleanup = postCompileCleanup();
   const driftReason = realmDriftRecycleReason(payload);
   const recycle = Boolean(forceRecycleReason || driftReason || cleanup.recycle);

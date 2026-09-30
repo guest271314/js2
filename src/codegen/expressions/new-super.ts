@@ -1,11 +1,18 @@
 import type { FieldDef, Instr, ValType } from "../../ir/types.js";
+import { widenJsDefaultGuessSlot } from "../js-default-param-type-guess.js";
 import { materializeFnctorTwinCaptures } from "../fnctor-twin-captures.js";
+import { resolveStaticSpreadArgs } from "../static-spread-arity.js"; // (#6460)
+import { isDynamicGeneratorFunctionBinding, tryEmitDynamicGeneratorFunction } from "../generator-function-dynamic.js"; // (#6651 A9)
 import { emitLayoutSelectingStructNew, maybeEmitLayoutHint } from "../fnctor-layout-emit.js"; // (#3927) per-type layouts
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
  * new/super/class expression compilation.
  */
 import { forEachChild, ts } from "../../ts-api.js";
+import {
+  emitStandaloneUnavailableGlobalThrow,
+  standaloneUnavailableGlobalReference,
+} from "../standalone-unavailable-globals.js";
 import {
   collectReferencedIdentifiers,
   collectWrittenIdentifiers,
@@ -18,6 +25,7 @@ import { needsImplicitArgumentsObject } from "../helpers/body-uses-arguments.js"
 import { emitFnctorCtorArgumentsObject, fnctorCtorNeedsArguments } from "../fnctor-ctor-arguments.js";
 import {
   GLOBAL_NON_CONSTRUCTOR_FUNCTION_NAMES,
+  objectLiteralMethodWithoutConstruct,
   provablyNonConstructableStatically,
   resolvesToAmbientGlobal,
   resolvesToNamedAmbientGlobal,
@@ -25,7 +33,7 @@ import {
 } from "./non-constructable.js"; // (#4017)
 import { emitSymbolOperandCoercionThrow } from "../tonumber-symbol-throw.js"; // (#3481)
 import * as newConstructors from "./new-non-constructable-value.js"; // (#4246)
-import { getOrRegisterTaCtorType } from "../registry/types.js"; // (#4626) runtime $__ta_ctor gate in the ordinary-[[Construct]] arm
+import { getOrRegisterTaCtorType, taCtorIdentityTestInstrs } from "../registry/types.js"; // (#4626) runtime $__ta_ctor gate in the ordinary-[[Construct]] arm; (#5383 S14) its brand-checked identity twin
 import { tryNewBuiltinStaticAlias } from "./new-builtin-static-alias.js"; // (#4491 wave-5 T6)
 import { reportError } from "../context/errors.js";
 import { allocLocal, allocTempLocal, getLocalType, releaseTempLocal } from "../context/locals.js";
@@ -54,9 +62,11 @@ import {
   getOrRegisterDvWindowType,
   nativeBufferBuiltinOf,
 } from "../dataview-native.js"; // (#2159/#38) DataView windowing wrapper; (#3054 B1/B2) shared-backing TA views + windowing; (#3054 D) dynamic ctor construct
-import { emitBoundsCheckedArrayGet } from "../array-methods.js";
+import { compileArrayMethodCall, emitBoundsCheckedArrayGet } from "../array-methods.js";
+import { isStandaloneArraySubclass, withArraySubclassReceiverAsVec } from "../array-subclass-receiver.js"; // (#2917)
 import { emitObjectCoercion } from "./calls-guards.js"; // (#3118) shared Object(...) / new Object(...) ToObject coercion
-import { COLLECTION_KIND, ensureMapHelpers, coerceMapKeyToAnyref } from "../map-runtime.js";
+import { COLLECTION_KIND } from "../collection-kind.js"; // (#6419) import-free leaf — map-runtime.js is in an import cycle
+import { ensureMapHelpers, coerceMapKeyToAnyref } from "../map-runtime.js";
 import { ensureDisposableStackNew } from "../disposable-runtime.js";
 import { emitSetNewTargetBeforeCall, ensureNewTargetGlobal } from "../new-target.js"; // (#2023)
 import {
@@ -76,19 +86,36 @@ import {
 } from "../literals.js";
 import { stringConstantExternrefInstrs, ensureAnyToStringHelper } from "../native-strings.js";
 import {
+  MAX_DYNAMIC_CONSTRUCT_ARITY,
   MAX_NATIVE_CONSTRUCT_ARITY,
   reserveNativeConstructDriver,
+  reserveNativeConstructDriverArgv, // (#5383 S34)
   reserveTypedNativeConstructDriver,
 } from "../native-construct.js"; // (#3981 / #1058)
+import {
+  markClassValueConstructSite,
+  moduleHasF64TypedConstructFormal,
+  moduleHasRefTypedConstructFormal,
+} from "../standalone-class-construct.js"; // (#5383 S2g, #6615, #6619)
+import { armExternF64ArgTypeGuard, armExternRefArgTypeGuard } from "../extern-arg-marshal.js"; // (#6615 / #5383 S28, #6619 / #5383 S32)
+import { armConstructIsConstructorGuard } from "../construct-is-constructor-guard.js"; // (#6612 / #5383 S25)
 import { linkCompatibleDeclaredStructAncestor } from "../struct-hierarchy-layout.js";
 import { emitBoundConstructOnNull } from "../construct-bound.js"; // (#4196) §10.4.1.2
 import { emitRuntimeEvalConstructOnNull } from "../runtime-eval-construct.js"; // (#4438) §10.2.2
+import * as bcv from "../builtin-ctor-value-invoke.js"; // (#6713) RegExp / Error-family carriers as values
+import {
+  emitBuiltinCollectionConstructOnNull,
+  reserveBuiltinCollectionDynConstruct,
+} from "../builtin-collection-dyn-construct.js"; // (#6720)
 import { resolveDefaultExpressionImportGlobal } from "../default-expression-import-global.js";
+import { isValueSelectingNewCallee, isValueSelectingNewSite } from "./new-value-selecting-callee.js"; // (#6738)
 import { emitNativeNumberFormat } from "../number-format-native.js";
 import { compileStandaloneRegExpConstructor, isGlobalRegExpConstructorExpression } from "../regexp-standalone.js";
-import { tracesToProxyConstructorValue } from "../proxy-value-provenance.js"; // (#5196 R3-0)
+import { boundClassConstructArgs } from "../bound-class-construct-args.js"; // (#6651 C5)
+import { compileNewSiteBuiltinSubclass, newSiteBuiltinParent } from "../builtin-subclass-new-site.js"; // (#6651 C5)
+import { singleReturnExpressionOfCall, tracesToProxyConstructorValue } from "../proxy-value-provenance.js"; // (#5196 R3-0); (#6651 F4)
 import { emitStandaloneTest262Error, emitWasiErrorConstructor, isWasiErrorName } from "../registry/error-types.js";
-import type { InnerResult } from "../shared.js";
+import { VOID_RESULT, type InnerResult } from "../shared.js";
 import {
   emitDynamicNewFunctionHostEval,
   emitStandaloneDynamicFunctionStub,
@@ -149,6 +176,7 @@ import { ensureGetUndefined, ensureLateImport, flushLateImportShifts } from "./l
 import { holeToUndefinedInstrs } from "../array-holes.js";
 import { ensureCurrentThisGlobal } from "../statements/nested-declarations.js";
 import { SUPER_HOME_OBJECT_CAPTURE_NAME } from "../closures.js";
+import { emitClosedLiteralSuperBase } from "../object-literal-super-base.js"; // (#6651 A13)
 import { NEW_GLOBAL_FALLTHROUGH, tryCompileBuiltinGlobalNew } from "./new-builtin-globals.js"; // (#3281 slice 1) built-in global ctor dispatch
 import { tryCompileBuiltinPrototypeConstructorNew } from "./builtin-prototype-constructor.js";
 import {
@@ -303,15 +331,18 @@ function emitStaticNotAConstructorThrow(
  *
  * Generator functions have no `[[Construct]]` slot (§27.3.4), so `new g()`
  * throws. Kept to shapes that are provable without runtime information:
- * `new (function*(){})()`, a `function* g(){}` declaration name, and
- * `var g = function*(){}; new g()`.
+ * `new (function*(){})()`, a `function* g(){}` declaration name,
+ * `var g = function*(){}; new g()`, and (#6419) a generator/async METHOD value
+ * read off an object literal, `var m = { *m(){} }.m; new m()`.
  */
 function isStaticGeneratorFunctionTarget(ctx: CodegenContext, callee: ts.Expression): boolean {
   if (ts.isFunctionExpression(callee)) return !!callee.asteriskToken;
   if (!ts.isIdentifier(callee)) return false;
   if (ctx.generatorFunctions.has(callee.text)) return true;
   const init = ctx.oracle.variableInitializerOf(callee);
-  return init !== undefined && ts.isFunctionExpression(init) && !!init.asteriskToken;
+  if (init === undefined) return false;
+  if (ts.isFunctionExpression(init) && init.asteriskToken !== undefined) return true;
+  return objectLiteralMethodWithoutConstruct(init);
 }
 
 /**
@@ -714,6 +745,29 @@ function linkLateAssignedConstructResultAncestor(
  *  - it is NOT a known compiled class, registered extern class, or function
  *    constructor.
  */
+/**
+ * (#6607) Standalone-lane companion to `resolvesToDynamicAnyCtorValue` for a
+ * CALL-expression callee: `new (ce("%Temporal.Duration%"))(y, mo, w, d, …)`, the
+ * intrinsic-registry spelling `@js-temporal/polyfill` emits at three sites —
+ * including the string branch of `Duration.from`.
+ *
+ * `resolvesToDynamicAnyCtorValue` understands identifier and member callees
+ * only, so a call callee matched no dynamic-new arm at all and the site fell
+ * through to the `__new___unknown` host import. That import does not exist in
+ * any lane, and in standalone it cannot exist, so the emitted body was a bare
+ * `ref.null.extern`: the `new` evaluated to **null** and, because the legacy
+ * arm returns before the argument loop, **its arguments were never evaluated**.
+ *
+ * Deliberately narrower than the member lane: a call callee only, and only when
+ * the call's static result is genuinely dynamic. Anything with a concrete
+ * static result type still resolves through the static `new` paths above.
+ */
+function resolvesToDynamicCallCtorValue(ctx: CodegenContext, calleeExpr: ts.Expression): boolean {
+  if (!ts.isCallExpression(calleeExpr)) return false;
+  const fact = ctx.oracle.typeFactOf(calleeExpr);
+  return fact.kind === "any" || fact.kind === "unknown" || (fact.kind === "builtin" && fact.name === "Function");
+}
+
 function resolvesToDynamicAnyCtorValue(ctx: CodegenContext, calleeExpr: ts.Expression): boolean {
   // (#4616) Inline member-access ctor values: `new (Object.getPrototypeOf(arr)
   // .constructor)(n)` (jest-util deepCyclicCopyArray's keepPrototype lane) keeps
@@ -747,7 +801,8 @@ function resolvesToDynamicAnyCtorValue(ctx: CodegenContext, calleeExpr: ts.Expre
     );
   }
   if (!ts.isIdentifier(calleeExpr)) return false;
-  if (ctx.classSet.has(calleeExpr.text) || ctx.externClasses.has(calleeExpr.text)) return false;
+  const externClassName = ctx.externClasses.has(calleeExpr.text) && !bcv.shadowsExternClassName(ctx, calleeExpr);
+  if (ctx.classSet.has(calleeExpr.text) || externClassName) return false;
   if (ctx.funcConstructorMap?.has(calleeExpr.text)) return false;
   // (#1930) Destructured-alias form for the symbol lookup (out of ratchet scope);
   // the type-flags check routes through the oracle (`typeFactOf`) rather than a
@@ -1107,8 +1162,10 @@ function compileStandaloneObjectLiteralSuperMethodCall(
   const externref: ValType = { kind: "externref" };
   ensureObjectRuntime(ctx);
   ensureLateImport(ctx, "__apply_closure", [externref, externref, externref], [externref]);
-  // (#5350 r3 review, S2) IsCallable for the resolved super member.
-  ensureLateImport(ctx, "__typeof_function", [externref], [{ kind: "i32" }]);
+  // (#6420) IsCallable is deliberately distinct from `typeof === "function"`:
+  // class constructors must fail this EvaluateCall gate while still preserving
+  // their runtime typeof tag and their [[Construct]] path.
+  ensureLateImport(ctx, "__is_callable", [externref], [{ kind: "i32" }]);
   if (expr.arguments.length > 0) {
     ensureLateImport(ctx, "__objvec_new", [], [externref]);
     ensureLateImport(ctx, "__objvec_push", [externref, externref], []);
@@ -1131,7 +1188,7 @@ function compileStandaloneObjectLiteralSuperMethodCall(
   if (expr.arguments.length > 0 && (objVecNewIdx === undefined || objVecPushIdx === undefined)) return undefined;
   const currentThisIdx = ensureCurrentThisGlobal(ctx);
 
-  const methodValueType = compileStandaloneObjectLiteralSuperPropertyRead(ctx, fctx, key, "externref");
+  const methodValueType = compileStandaloneObjectLiteralSuperPropertyRead(ctx, fctx, key, "externref", expr);
   if (methodValueType === undefined) return undefined;
   const methodLocal = allocLocal(fctx, `__super_call_m_${fctx.locals.length}`, externref);
   fctx.body.push({ op: "local.set", index: methodLocal });
@@ -1168,22 +1225,21 @@ function compileStandaloneObjectLiteralSuperMethodCall(
     fctx.body.push({ op: "local.get", index: methodLocal });
     fctx.body.push({ op: "ref.is_null" });
     fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: buildNotCallableThrow() });
-    // (#5350 r3 review, S2) POSITIVE callable test. The r2 guard tested only
+    // (#5350 r3 review, S2 / #6420) POSITIVE callable test. The r2 guard tested only
     // absence plus the three primitive brands, so a resolved super member that
     // is a plain OBJECT (`{ v: { q: 1 } }`) or a CLASS fell through to
     // `__apply_closure`'s legacy `undefined` — probes xb6/xb7 answered
-    // undefined where node throws a TypeError. `__typeof_function` is the
-    // module's canonical standalone IsCallable predicate (the same one
-    // `ensureNativeArrayHof` uses for `callbackfn is not a function`), so it
-    // recognises every callable carrier — ordinary function, bound function,
-    // arrow, builtin, generator, async function, class — and the throw fires
-    // only on a genuine non-callable. When the module never registered it the
-    // primitive-brand guard stands in unchanged, so nothing regresses to a
-    // silent default.
-    const typeofFunctionIdx = ctx.funcMap.get("__typeof_function");
-    if (typeofFunctionIdx !== undefined) {
+    // undefined where node throws a TypeError. `__is_callable` shares the
+    // host-free carrier inventory with the typeof native but deliberately
+    // excludes class-object singletons, so it recognises ordinary, bound,
+    // arrow, builtin, generator and async callables without conflating a class
+    // with its `typeof "function"` tag. When the helper cannot be registered,
+    // retain the old primitive-brand fallback rather than manufacture a new
+    // callability classifier here.
+    const isCallableIdx = ctx.funcMap.get("__is_callable");
+    if (isCallableIdx !== undefined) {
       fctx.body.push({ op: "local.get", index: methodLocal });
-      fctx.body.push({ op: "call", funcIdx: typeofFunctionIdx });
+      fctx.body.push({ op: "call", funcIdx: isCallableIdx });
       fctx.body.push({ op: "i32.eqz" });
       fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: buildNotCallableThrow() });
     } else {
@@ -1196,7 +1252,7 @@ function compileStandaloneObjectLiteralSuperMethodCall(
       }
     }
     fctx.body.push({ op: "local.get", index: methodLocal });
-    fctx.body.push({ op: "global.get", index: currentThisIdx });
+    fctx.body.push(objectLiteralSuperReceiver(fctx, currentThisIdx));
     fctx.body.push({ op: "local.get", index: argsLocal });
     fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__apply_closure") ?? applyIdx });
   } else {
@@ -1208,7 +1264,7 @@ function compileStandaloneObjectLiteralSuperMethodCall(
       then: [{ op: "ref.null.extern" }],
       else: [
         { op: "local.get", index: methodLocal },
-        { op: "global.get", index: currentThisIdx },
+        objectLiteralSuperReceiver(fctx, currentThisIdx),
         { op: "local.get", index: argsLocal },
         { op: "call", funcIdx: applyIdx },
       ],
@@ -1229,7 +1285,7 @@ function compileSuperMethodCallCore(
   fctx: FunctionContext,
   expr: ts.CallExpression,
   methodName: string,
-): ValType | null {
+): InnerResult {
   // Degenerate fallback: evaluate args for side effects and leave a
   // return-typed default (0 / 0 / undefined) so a value remains for the
   // enclosing expression.
@@ -1276,6 +1332,27 @@ function compileSuperMethodCallCore(
   }
 
   if (funcIdx === undefined) {
+    // (#2917) Standalone `class X extends Array`: `super.m(…)` is the builtin
+    // Array method on `this` (a real vec) — array-subclass-receiver.ts.
+    const selfLocal = fctx.localMap.get("this");
+    const propAccess = expr.expression;
+    if (
+      selfLocal !== undefined &&
+      ts.isPropertyAccessExpression(propAccess) &&
+      isStandaloneArraySubclass(ctx, currentClassName)
+    ) {
+      const arrayResult = withArraySubclassReceiverAsVec(
+        ctx,
+        fctx,
+        propAccess.expression,
+        () => {
+          fctx.body.push({ op: "local.get", index: selfLocal });
+          return getLocalType(fctx, selfLocal) ?? null;
+        },
+        () => compileArrayMethodCall(ctx, fctx, propAccess, expr, undefined, methodName),
+      );
+      if (arrayResult !== undefined) return arrayResult === VOID_RESULT ? null : arrayResult;
+    }
     // (#1614) The parent may be a builtin extern class (Set/Map/Array/...)
     // whose methods are host-backed, not compiled into funcMap. Dispatch
     // `super.method(args)` dynamically via __extern_method_call(this, name, args).
@@ -1332,14 +1409,28 @@ function compileSuperMethodCallCore(
   fctx.body.push({ op: "call", funcIdx: finalSuperIdx });
 
   // Determine return type.
+  //
+  // (#6651 lane-I5) A void parent method returns VOID_RESULT, **never `null`**.
+  // `null` means "no usable value" to the #1919 speculative wrapper in
+  // `compileExpressionBody`, which then calls `rollbackSpeculative` — it
+  // TRUNCATES the `local.get this; call <Parent>_<m>` we just emitted and
+  // substitutes a default constant. The whole call disappeared: a statement
+  // `super.increment();` compiled to `i32.const 0; drop`, so every side effect
+  // of a void parent method (a `this` field write, an outer-scope mutation)
+  // was silently dropped while the program still compiled and ran. This is the
+  // exact hazard #1551 fixed for nested `super(...)`; the `super.m()` arm still
+  // carried the `null`. VOID_RESULT means "compiled, void result, KEEP the
+  // emitted instructions".
   const sig = ctx.checker.getResolvedSignature(expr);
   if (sig) {
     const retType = ctx.checker.getReturnTypeOfSignature(sig);
-    if (isEffectivelyVoidReturn(ctx, retType, resolvedName)) return null;
-    if (wasmFuncReturnsVoid(ctx, finalSuperIdx)) return null;
+    if (isEffectivelyVoidReturn(ctx, retType, resolvedName)) return VOID_RESULT;
+    if (wasmFuncReturnsVoid(ctx, finalSuperIdx)) return VOID_RESULT;
     return getWasmFuncReturnType(ctx, finalSuperIdx) ?? resolveWasmType(ctx, retType);
   }
-  return null;
+  // No resolved signature: the call IS emitted, so the instructions must be
+  // kept for the same reason. A wasm-void callee leaves nothing on the stack.
+  return wasmFuncReturnsVoid(ctx, finalSuperIdx) ? VOID_RESULT : null;
 }
 
 function compileSuperMethodCall(ctx: CodegenContext, fctx: FunctionContext, expr: ts.CallExpression): InnerResult {
@@ -1413,7 +1504,7 @@ function compileStandaloneSuperPropertyRead(
   fctx: FunctionContext,
   key: SuperReadKey,
   accessType: ts.Type | "externref",
-  emitHomeObject: () => boolean,
+  emitHomeObject: () => boolean | "base",
   emitReceiver: () => void,
 ): ValType | undefined {
   if (!ctx.standalone) return undefined;
@@ -1426,8 +1517,10 @@ function compileStandaloneSuperPropertyRead(
   const reflectGetReceiverIdx = ctx.funcMap.get("__reflect_get_receiver");
   if (getPrototypeOfIdx === undefined || reflectGetReceiverIdx === undefined) return undefined;
 
-  if (!emitHomeObject()) return undefined;
-  fctx.body.push({ op: "call", funcIdx: getPrototypeOfIdx });
+  const home = emitHomeObject();
+  if (home === false) return undefined;
+  // (#6651 A13) "base": the step pushed GetSuperBase()'s answer itself.
+  if (home === true) fctx.body.push({ op: "call", funcIdx: getPrototypeOfIdx });
   if (key.kind === "name") {
     // (#5153 C.1) §12.3.5.3 step 5: RequireObjectCoercible(GetSuperBase()).
     // With the home object's [[Prototype]] set to null the read must throw a
@@ -1452,7 +1545,7 @@ function compileStandaloneSuperPropertyRead(
   // The property receiver is the call-time `this`, not [[HomeObject]]. This
   // distinction is observable through an inherited accessor.
   emitReceiver();
-  fctx.body.push({ op: "call", funcIdx: reflectGetReceiverIdx });
+  fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__reflect_get_receiver") ?? reflectGetReceiverIdx });
 
   // (#5350 step 5) `"externref"` keeps the raw value — the method-call arm
   // invokes it and coerces the CALL's result, not the property's.
@@ -1816,6 +1909,7 @@ function compileStandaloneObjectLiteralSuperPropertyRead(
   fctx: FunctionContext,
   key: SuperReadKey,
   accessType: ts.Type | "externref",
+  anchor: ts.Node,
 ): ValType | undefined {
   if (!ctx.standalone) return undefined;
   const currentThisIdx = ensureCurrentThisGlobal(ctx);
@@ -1829,14 +1923,27 @@ function compileStandaloneObjectLiteralSuperPropertyRead(
       // [[HomeObject]]. Falling back to __current_this would make a borrowed
       // method resolve `super` against the call-time receiver.
       const homeObjectLocal = fctx.localMap.get(SUPER_HOME_OBJECT_CAPTURE_NAME);
-      if (homeObjectLocal === undefined) return false;
+      // (#6651 A13) No capture: a closed-struct literal's method, whose super base is static.
+      if (homeObjectLocal === undefined) return emitClosedLiteralSuperBase(ctx, fctx, anchor) && "base";
       fctx.body.push({ op: "local.get", index: homeObjectLocal });
       return true;
     },
-    () => {
-      fctx.body.push({ op: "global.get", index: currentThisIdx });
-    },
+    () => fctx.body.push(objectLiteralSuperReceiver(fctx, currentThisIdx)),
   );
+}
+
+/**
+ * (#6651 A10) The §12.3.5.3 `actualThis` of an object-literal method's `super`
+ * reference. A native generator method's body runs in its RESUME function,
+ * long after the call that bound `this` returned; its receiver is the one the
+ * factory snapshotted into the frame (`capturesDynamicThis`), rehydrated as the
+ * resume function's `this` local. Everywhere else it is `__current_this`.
+ */
+function objectLiteralSuperReceiver(fctx: FunctionContext, currentThisIdx: number): Instr {
+  const resumeThis = fctx.localMap.has("__gen_self") ? fctx.localMap.get("this") : undefined;
+  return resumeThis !== undefined
+    ? { op: "local.get", index: resumeThis }
+    : { op: "global.get", index: currentThisIdx };
 }
 
 /**
@@ -1944,7 +2051,7 @@ function compileSuperElementMethodCall(
   fctx: FunctionContext,
   expr: ts.CallExpression,
   methodName: string,
-): ValType | null {
+): InnerResult {
   return compileSuperMethodCallCore(ctx, fctx, expr, methodName);
 }
 
@@ -1977,6 +2084,7 @@ export function compileSuperPropertyAccess(
       fctx,
       { kind: "name", name: propName },
       accessType,
+      expr,
     );
     if (runtimeReadType !== undefined) return runtimeReadType;
 
@@ -2174,7 +2282,7 @@ export function compileSuperElementAccess(
       const dynClassName = resolveEnclosingClassName(fctx);
       const dynRead =
         dynClassName === undefined
-          ? compileStandaloneObjectLiteralSuperPropertyRead(ctx, fctx, dynamicKey, accessType)
+          ? compileStandaloneObjectLiteralSuperPropertyRead(ctx, fctx, dynamicKey, accessType, expr)
           : compileStandaloneClassSuperPropertyRead(
               ctx,
               fctx,
@@ -2219,6 +2327,7 @@ export function compileSuperElementAccess(
       fctx,
       { kind: "name", name: propName },
       accessType,
+      expr,
     );
     if (runtimeReadType !== undefined) return runtimeReadType;
 
@@ -2773,7 +2882,7 @@ function compileNewFunctionDeclaration(
   for (let i = 0; i < funcDecl.parameters.length; i++) {
     const param = funcDecl.parameters[i]!;
     const paramType = ctx.checker.getTypeAtLocation(param);
-    userCtorParams.push(resolveWasmType(ctx, paramType));
+    userCtorParams.push(widenJsDefaultGuessSlot(param, resolveWasmType(ctx, paramType)));
   }
   // (fnctor-ctor-arguments.ts) Asked ONCE and shared by both halves of the
   // `arguments` protocol — the ctor-body materialization below and the call
@@ -3125,7 +3234,7 @@ function compileNewFunctionExpression(
   if (funcExpr.parameters.length > 0) {
     for (const p of funcExpr.parameters) {
       const paramType = ctx.checker.getTypeAtLocation(p);
-      formalParams.push(resolveWasmType(ctx, paramType));
+      formalParams.push(widenJsDefaultGuessSlot(p, resolveWasmType(ctx, paramType)));
     }
   } else if (!hasDynamicSpread) {
     // No formal params — create f64 params for each call-site arg
@@ -3737,7 +3846,19 @@ function compileClassExpression(ctx: CodegenContext, fctx: FunctionContext, expr
   // this exact `=` RHS site. Keeping the gate here avoids changing inline class
   // expressions used as Proxy targets or call arguments, which require the
   // ordinary callable-closure representation.
-  if (syntheticName !== undefined && assignment !== undefined && ctx.classObjectGlobals?.has(syntheticName)) {
+  // (#4376 deno bootstrap) On the standalone/wasi lanes the gate widens to
+  // EVERY value position: an inline class value has no singleton identity in
+  // the callable-closure representation, so a callee's `safe.prototype` read
+  // (`makeSafe(Map, class SafeMap … )` in deno_core's primordials) answered
+  // undefined and its gOPD threw "called on non-object". The class-object
+  // singleton carries the prototype edge; native dispatch constructs it the
+  // same way it constructs `const C = class {}` values. The host lane keeps
+  // the assignment-only gate — its inline class values must stay host-callable.
+  if (
+    syntheticName !== undefined &&
+    (assignment !== undefined || ctx.standalone || ctx.wasi) &&
+    ctx.classObjectGlobals?.has(syntheticName)
+  ) {
     // Heritage evaluation belongs at ClassDefinitionEvaluation, before the
     // class value is produced. The singleton registration deliberately keeps
     // dynamic parents lazy, so registering it here remains valid even when a
@@ -3830,7 +3951,27 @@ function resolvesToNativeProxyValue(ctx: CodegenContext, expression: ts.Expressi
   };
   const isProxyFactory = (value: ts.Expression): boolean => {
     const current = unwrap(value);
-    if (ts.isNewExpression(current) && ts.isIdentifier(current.expression) && current.expression.text === "Proxy") {
+    // (#6651 F4) `var mc = mkc(); new mc()` where `mkc`'s whole body is
+    // `return new Proxy(function(){}, h);`. F3 measured this as invisible to
+    // BOTH admissions: re-measured on this branch's base, the construct trap
+    // ran ZERO times for the helper-returned proxy while the direct spelling
+    // ran it. The hop and its single-assignment proof live in
+    // `proxy-value-provenance.ts` so the read, write and construct sites all
+    // ask the same question. Still NOT covered, deliberately: `new (mkc())()`
+    // with the call written in callee position — `tryCompileNativeConstructFromValue`
+    // gates on `ts.isIdentifier(calleeExpr)` before reaching here, and widening
+    // that gate is a much larger blast radius than this slice.
+    const returnedFromHelper = singleReturnExpressionOfCall(ctx, current);
+    if (returnedFromHelper !== undefined) return isProxyFactory(returnedFromHelper);
+    // (#6651 F3) `new <Proxy-constructor value>(t, h)` — not just the spelling
+    // `new Proxy(t, h)`. `var P = new OProxy(f, h); new P()` reached NO proxy
+    // arm at all: this admission declined, so `tryCompileNativeConstructFromValue`
+    // returned `undefined` and the §10.5.14 dispatch (which the driver already
+    // carries, and which answers correctly when the SAME proxy arrives through a
+    // parameter) was never reached. Probed on base: `new P()` direct ran zero
+    // trap calls and threw nothing, while `function nn(x){return new x();}
+    // nn(P)` ran the trap and threw the step-11 TypeError.
+    if (ts.isNewExpression(current) && tracesToProxyConstructorValue(ctx, current.expression)) {
       return true;
     }
     if (
@@ -3866,7 +4007,21 @@ function tryCompileNativeConstructFromValue(
 ): ValType | undefined {
   if (!noJsHost(ctx) && ctx.targetProfile.semanticProviders !== "native-first") return undefined;
   const runtimeEvalCallableResult = isRuntimeEvalCallableResultExpression(ctx, calleeExpr);
-  if (!ts.isIdentifier(calleeExpr) && !runtimeEvalCallableResult) return undefined;
+  // (#5383 S2g) A MEMBER callee holding a genuinely-dynamic ctor value —
+  // `new NS.PlainDate(…)`, the shape EVERY linked-provider namespace has. The
+  // host lane already routes it through `__construct_closure`
+  // (`usesHostConstructClosureBase`); standalone had no equivalent, so it fell
+  // through to the legacy `__new_<name>` extern-class import and evaluated to
+  // NULL. `resolvesToDynamicAnyCtorValue` is the same admission the host lane
+  // uses, and it declines an UNDECLARED base (#4728) — so the host-global
+  // `new Temporal.X(…)` lane is untouched.
+  // (#6738) …and a callee that SELECTS a ctor value at run time, `new (a || B)()`.
+  const dynamicCtorValue =
+    noJsHost(ctx) &&
+    (((ts.isPropertyAccessExpression(calleeExpr) || ts.isElementAccessExpression(calleeExpr)) &&
+      resolvesToDynamicAnyCtorValue(ctx, calleeExpr)) ||
+      isValueSelectingNewCallee(calleeExpr));
+  if (!ts.isIdentifier(calleeExpr) && !runtimeEvalCallableResult && !dynamicCtorValue) return undefined;
   // A compiled fnctor for this binding means the typed-struct path owns it.
   if (ts.isIdentifier(calleeExpr) && ctx.funcConstructorMap.has(calleeExpr.text)) return undefined;
   const runtimeFunctionAlias =
@@ -3882,8 +4037,10 @@ function tryCompileNativeConstructFromValue(
     !runtimeEvalCallableResult &&
     !proxyValue &&
     !proxyCtorValue &&
+    !dynamicCtorValue &&
     !resolvesToConstructableFunctionValue(ctx, calleeExpr) &&
-    !resolvesToLateAssignedConstructSignatureValue(ctx, calleeExpr)
+    !resolvesToLateAssignedConstructSignatureValue(ctx, calleeExpr) &&
+    !(noJsHost(ctx) && isDefaultExpressionImport(ctx, calleeExpr)) // (#6720) the snapshot cell's VALUE
   )
     return undefined;
 
@@ -3901,9 +4058,51 @@ function tryCompileNativeConstructFromValue(
 
   // A non-flattenable spread has a RUNTIME argument count, so no fixed-arity
   // driver fits; decline rather than construct with the wrong argument list.
-  const args = flattenCallArgs(rawArgs) ?? rawArgs;
-  if (args.some((a) => ts.isSpreadElement(a))) return undefined;
-  if (args.length > MAX_NATIVE_CONSTRUCT_ARITY) return undefined;
+  //
+  // (#6460) …but "non-flattenable" was reading `flattenCallArgs`, which only
+  // understands an INLINE array literal. `const args = [1, 1, 1]` followed by
+  // `new Temporal.Duration(...args)` — the shape every
+  // `built-ins/Temporal/Duration/*-undefined.js` row uses — has a perfectly
+  // static arity, and declining it here is what made that `new` answer `null`
+  // (the corpus then reports `Cannot access property on null or undefined`
+  // from the harness's `duration.years`). Resolve the static arity first;
+  // genuinely runtime-length spreads still decline.
+  const args =
+    flattenCallArgs(rawArgs) ??
+    (ctx.standalone || ctx.wasi ? (resolveStaticSpreadArgs(ctx, rawArgs) ?? rawArgs) : rawArgs);
+  if (args.some((a) => ts.isSpreadElement(a))) {
+    // (#5383 S34) A genuinely runtime-length spread (`new construct(...args)`
+    // where `args` is a parameter, not a literal or a resolvable local) used to
+    // decline HERE unconditionally — for a callee this module does not own
+    // (every linked-provider class, reached either as a bare identifier or a
+    // member access), no other arm ever attempts the construct, so `new`
+    // silently evaluated to null with its arguments never run
+    // (test262 `built-ins/Temporal/**/subclassing-ignored.js`'s
+    // `checkSubclassConstructorNotObject`, `new construct(...constructArgs)`).
+    // Standalone/WASI route through the arity-generic argv driver instead; the
+    // JS-host lane is unaffected (it constructs through `__construct_closure`,
+    // which already accepts a JS array built from an arbitrary spread).
+    if (!noJsHost(ctx)) return undefined;
+    return compileNativeConstructRuntimeArgv(ctx, fctx, calleeExpr, rawArgs);
+  }
+  // (#5383 S24) The ceiling used to be `MAX_NATIVE_CONSTRUCT_ARITY` (8) because
+  // the driver's ordinary tail dispatches through `__call_fn_method_<N>`, which
+  // only exists for 0…8. But declining here is not a fallback: for a callee the
+  // module does not own — every linked-provider class — the no-match base is
+  // `ref.null.extern`, and the argument expressions are never evaluated at all.
+  // `new Temporal.Duration(0, 0, 0, 5, 5, 5, 5, 5, 5, 5)` (ten arguments, the
+  // spelling most of the Temporal corpus uses) therefore answered null. The
+  // driver's other arms — class, boundary, proxy, runtime-marker — already pack
+  // an argument VECTOR and are arity-generic; only the ordinary tail was bound
+  // to 8, and above 8 it now uses `__apply_closure` instead.
+  if (args.length > MAX_DYNAMIC_CONSTRUCT_ARITY) return undefined;
+  if (args.length > MAX_NATIVE_CONSTRUCT_ARITY) {
+    // The above-8 tail needs the argv builders and the generic apply bridge.
+    // No driver of that arity could exist before this change, so arming them
+    // here cannot alter a module that compiled previously.
+    ensureObjVecBuilders(ctx);
+    reserveApplyClosure(ctx);
+  }
 
   // Register the object-model helpers the driver body calls and flush ONCE,
   // before any emission — the driver bakes `call <funcIdx>` values that a later
@@ -3912,7 +4111,28 @@ function tryCompileNativeConstructFromValue(
   ensureLateImport(ctx, "__object_create", [{ kind: "externref" }], [{ kind: "externref" }]);
   flushLateImportShifts(ctx, fctx);
   addStringConstantGlobal(ctx, "prototype");
+  // (#5383 S2g) This is a construct from a runtime VALUE, so the callee may be
+  // a class-object singleton — arm the class trampolines for this module.
+  markClassValueConstructSite(ctx);
+  // (#6612 / #5383 S25) Arm §13.3.5.1 step 5 (IsConstructor) for this module's
+  // construct drivers. Built HERE, mid-compile, for the same reason
+  // `protoKeyInstrs` is: the throw materialises a TypeError instance and a
+  // string constant, neither of which may be created at fill time.
+  armConstructIsConstructorGuard(ctx, fctx);
+  // (#6615 / #5383 S28) Arm the lenient ref-argument marshal for the class
+  // construct trampolines this site turns on. Same reserve-then-fill reason as
+  // the two lines above: the TypeError instance and its message string-constant
+  // cannot be created at fill time. Gated on a REF-typed construct formal
+  // existing at all — a module whose classes take only `f64`/`i32` has no hard
+  // `ref.cast` to make lenient and must keep its previous bytes.
+  if (moduleHasRefTypedConstructFormal(ctx)) armExternRefArgTypeGuard(ctx, fctx);
+  // (#6619) Same arming, f64 twin: a Symbol/BigInt argument into an f64
+  // construct formal must throw TypeError (§7.1.4 ToNumber) rather than
+  // silently unbox to NaN. Gated the same way — no f64 construct formal, no
+  // bytes.
+  if (moduleHasF64TypedConstructFormal(ctx)) armExternF64ArgTypeGuard(ctx, fctx);
   const driverIdx = reserveNativeConstructDriver(ctx, args.length, stringConstantExternrefInstrs(ctx, "prototype"));
+  reserveBuiltinCollectionDynConstruct(ctx); // (#6720) the driver's collection-carrier arm
 
   // Evaluate the callee, then each argument, exactly once and in source order.
   const calleeTy = compileExpression(ctx, fctx, calleeExpr, { kind: "externref" });
@@ -3997,8 +4217,12 @@ function tryCompileNativeConstructFromValue(
       // identity into one i32 condition.  The native construct driver remains
       // the fallback for all other values.
       const taMatch = allocLocal(fctx, `__nc_tamatch_${fctx.locals.length}`, { kind: "i32" });
-      fctx.body.push({ op: "local.get", index: descLocal });
-      fctx.body.push({ op: "ref.test", typeIdx: taCtorTypeIdx });
+      // (#5383 S14) IDENTITY, not a bare `ref.test` — see the same substitution
+      // in `call-receiver-method.ts`. `$__ta_ctor` is structurally the shape a
+      // field-less class ROOT gets, so in a module that links the standalone
+      // Temporal provider every provider class OBJECT passes the bare test and
+      // `new <ProviderClass>(…)` builds a typed array instead of an instance.
+      fctx.body.push(...taCtorIdentityTestInstrs(ctx, [{ op: "local.get", index: descLocal }]));
       fctx.body.push({ op: "local.set", index: taMatch });
       fctx.body.push(
         ...buildInt8ArrayCarrierMatch(ctx, descLocal, [
@@ -4008,8 +4232,8 @@ function tryCompileNativeConstructFromValue(
       );
       fctx.body.push({ op: "local.get", index: taMatch });
     } else {
-      fctx.body.push({ op: "local.get", index: descLocal });
-      fctx.body.push({ op: "ref.test", typeIdx: taCtorTypeIdx });
+      // (#5383 S14) IDENTITY, not a bare `ref.test` — see above.
+      fctx.body.push(...taCtorIdentityTestInstrs(ctx, [{ op: "local.get", index: descLocal }]));
     }
     fctx.body.push({
       op: "if",
@@ -4021,6 +4245,195 @@ function tryCompileNativeConstructFromValue(
     fctx.body.push(...nativeDriverCall);
   }
   return { kind: "externref" };
+}
+
+/**
+ * (#5383 S34) Build a runtime `$ObjVec` (the SAME externref carrier
+ * `buildArgsVec()` builds for the fixed-arity drivers in `native-construct.ts`
+ * — `__extern_length`/`__extern_get_idx`-readable, which is what
+ * `__class_construct_dispatch`/`__js2wasm_link_construct` already expect) from
+ * a call site's RAW arguments, evaluating each exactly once in source order.
+ * A positional argument is pushed directly; a `SpreadElement`'s source is
+ * compiled once, then copied element-by-element via the generic
+ * `__extern_length`/`__extern_get_idx` reader pair — the same protocol
+ * `Object.groupBy`'s native helper uses for an arbitrary array-like source, so
+ * this also accepts an untyped JS array PARAMETER (the test262 harness's
+ * `constructArgs`/`methodArgs` shape), not only a compile-time-typed vec.
+ */
+function buildRuntimeConstructArgvVec(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  rawArgs: readonly ts.Expression[],
+): { argvLocal: number; argcLocal: number } {
+  const { newIdx: objVecNewIdx, pushIdx: objVecPushIdx } = ensureObjVecBuilders(ctx);
+  const externLengthIdx = ensureLateImport(ctx, "__extern_length", [{ kind: "externref" }], [{ kind: "f64" }]);
+  const externGetIdxIdx = ensureLateImport(
+    ctx,
+    "__extern_get_idx",
+    [{ kind: "externref" }, { kind: "f64" }],
+    [{ kind: "externref" }],
+  );
+  flushLateImportShifts(ctx, fctx);
+
+  const argvLocal = allocLocal(fctx, `__ncargv_${fctx.locals.length}`, { kind: "externref" });
+  const argcLocal = allocLocal(fctx, `__ncargc_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__objvec_new") ?? objVecNewIdx });
+  fctx.body.push({ op: "local.set", index: argvLocal });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "local.set", index: argcLocal });
+
+  const bumpArgc = (): void => {
+    fctx.body.push({ op: "local.get", index: argcLocal });
+    fctx.body.push({ op: "i32.const", value: 1 });
+    fctx.body.push({ op: "i32.add" });
+    fctx.body.push({ op: "local.set", index: argcLocal });
+  };
+
+  for (const arg of rawArgs) {
+    if (!ts.isSpreadElement(arg)) {
+      fctx.body.push({ op: "local.get", index: argvLocal });
+      const aTy = compileExpression(ctx, fctx, arg, { kind: "externref" });
+      if (aTy && aTy.kind !== "externref") coerceType(ctx, fctx, aTy, { kind: "externref" });
+      else if (aTy === null) fctx.body.push({ op: "ref.null.extern" });
+      fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__objvec_push") ?? objVecPushIdx });
+      bumpArgc();
+      continue;
+    }
+    const srcTy = compileExpression(ctx, fctx, arg.expression, { kind: "externref" });
+    if (srcTy && srcTy.kind !== "externref") coerceType(ctx, fctx, srcTy, { kind: "externref" });
+    else if (srcTy === null) fctx.body.push({ op: "ref.null.extern" });
+    const srcLocal = allocLocal(fctx, `__ncsrc_${fctx.locals.length}`, { kind: "externref" });
+    fctx.body.push({ op: "local.set", index: srcLocal });
+
+    const lenLocal = allocLocal(fctx, `__nclen_${fctx.locals.length}`, { kind: "i32" });
+    fctx.body.push({ op: "local.get", index: srcLocal });
+    fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__extern_length") ?? externLengthIdx! });
+    fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+    fctx.body.push({ op: "local.set", index: lenLocal });
+
+    const jLocal = allocLocal(fctx, `__ncj_${fctx.locals.length}`, { kind: "i32" });
+    fctx.body.push({ op: "i32.const", value: 0 });
+    fctx.body.push({ op: "local.set", index: jLocal });
+
+    // Loop body: `j >= len` breaks out (br_if depth 1, out of the enclosing
+    // `block`); otherwise push `srcLocal[j]`, bump argc, bump j, loop again
+    // (`br` depth 0, back to the `loop`'s own top).
+    const loopBody: Instr[] = [];
+    const savedBody = fctx.body;
+    fctx.body = loopBody;
+    fctx.body.push({ op: "local.get", index: jLocal });
+    fctx.body.push({ op: "local.get", index: lenLocal });
+    fctx.body.push({ op: "i32.ge_s" });
+    fctx.body.push({ op: "br_if", depth: 1 });
+    fctx.body.push({ op: "local.get", index: argvLocal });
+    fctx.body.push({ op: "local.get", index: srcLocal });
+    fctx.body.push({ op: "local.get", index: jLocal });
+    fctx.body.push({ op: "f64.convert_i32_s" });
+    fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__extern_get_idx") ?? externGetIdxIdx! });
+    fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__objvec_push") ?? objVecPushIdx });
+    bumpArgc();
+    fctx.body.push({ op: "local.get", index: jLocal });
+    fctx.body.push({ op: "i32.const", value: 1 });
+    fctx.body.push({ op: "i32.add" });
+    fctx.body.push({ op: "local.set", index: jLocal });
+    fctx.body.push({ op: "br", depth: 0 });
+    fctx.body = savedBody;
+
+    fctx.body.push({
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody }],
+    });
+  }
+  return { argvLocal, argcLocal };
+}
+
+/**
+ * (#5383 S34) The runtime-argv twin of `tryCompileNativeConstructFromValue`'s
+ * fixed-arity body, for a call site whose spread length cannot be resolved at
+ * compile time. Reused prelude (imports, arming, `markClassValueConstructSite`)
+ * is IDENTICAL to the fixed-arity path — only the argument marshal and the
+ * driver differ.
+ */
+function compileNativeConstructRuntimeArgv(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  calleeExpr: ts.Expression,
+  rawArgs: readonly ts.Expression[],
+): ValType {
+  emitNativeConstructRuntimeArgv(
+    ctx,
+    fctx,
+    rawArgs,
+    () => {
+      const calleeTy = compileExpression(ctx, fctx, calleeExpr, { kind: "externref" });
+      if (calleeTy && calleeTy.kind !== "externref") coerceType(ctx, fctx, calleeTy, { kind: "externref" });
+      else if (calleeTy === null) fctx.body.push({ op: "ref.null.extern" });
+      return true;
+    },
+    calleeExpr,
+  );
+  return { kind: "externref" };
+}
+
+/**
+ * (#5383 S34, opened up in S67) The same runtime-argv construct, with the
+ * CALLEE supplied by the caller rather than compiled from an expression.
+ *
+ * `super(...<runtime spread>)` through a LINKED provider heritage (#6644
+ * residual 4) needs exactly this body but cannot name its callee as an
+ * expression: a captured IDENTIFIER heritage lives in a module global, and a
+ * property-access heritage has to be re-compiled through
+ * `pushLinkedDynamicParent`. Everything else — the driver, the prelude, the
+ * guards and the argv vector — is identical, so it is parameterised here
+ * instead of copied.
+ *
+ * `protoSource` is the expression a user fnctor prototype would be read from;
+ * pass `undefined` for a null NewTarget-prototype, which is what the boundary
+ * arm wants (the PROVIDER picks the prototype its own constructor would).
+ *
+ * Returns false having emitted nothing when the callee could not be pushed.
+ */
+export function emitNativeConstructRuntimeArgv(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  rawArgs: readonly ts.Expression[],
+  pushCallee: () => boolean,
+  protoSource: ts.Expression | undefined,
+): boolean {
+  ensureLateImport(ctx, "__extern_get", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+  ensureLateImport(ctx, "__object_create", [{ kind: "externref" }], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
+  addStringConstantGlobal(ctx, "prototype");
+  markClassValueConstructSite(ctx);
+  armConstructIsConstructorGuard(ctx, fctx);
+  if (moduleHasRefTypedConstructFormal(ctx)) armExternRefArgTypeGuard(ctx, fctx);
+  if (moduleHasF64TypedConstructFormal(ctx)) armExternF64ArgTypeGuard(ctx, fctx);
+  ensureObjVecBuilders(ctx);
+  reserveApplyClosure(ctx);
+  const driverIdx = reserveNativeConstructDriverArgv(ctx, stringConstantExternrefInstrs(ctx, "prototype"));
+
+  if (!pushCallee()) return false;
+  const calleeLocal = allocLocal(fctx, `__ncv_callee_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: calleeLocal });
+
+  const fnctorName = protoSource === undefined ? undefined : resolveUserFnctorName(ctx, protoSource);
+  if (fnctorName === undefined || !emitFnctorProtoGet(ctx, fctx, fnctorName)) {
+    fctx.body.push({ op: "ref.null.extern" });
+  }
+  const protoLocal = allocLocal(fctx, `__ncv_proto_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: protoLocal });
+
+  const { argvLocal, argcLocal } = buildRuntimeConstructArgvVec(ctx, fctx, rawArgs);
+
+  fctx.body.push(
+    { op: "local.get", index: calleeLocal },
+    { op: "local.get", index: protoLocal },
+    { op: "local.get", index: argvLocal },
+    { op: "local.get", index: argcLocal },
+    { op: "call", funcIdx: ctx.funcMap.get("__native_construct_argv") ?? driverIdx },
+  );
+  return true;
 }
 
 /**
@@ -4087,6 +4500,12 @@ function emitDynamicNewFallback(
   expr: ts.NewExpression,
   calleeExpr: ts.Expression,
   ctorName: string,
+  /**
+   * (#6607) Keep the pre-existing `ref.null.extern` no-match outcome instead of
+   * the standalone TypedArray-construct base. Set only by the call-callee arm —
+   * see the base selection below for why the size matters.
+   */
+  plainNullNoMatchBase = false,
 ): boolean {
   // (#1058) A construct-signature-only binding exposes its declared RESULT
   // type at the NewExpression. When that result is a structural interface,
@@ -4144,9 +4563,16 @@ function emitDynamicNewFallback(
   const hasSpread = rawArgs.some((a) => ts.isSpreadElement(a));
   let useRuntimeArgv = false;
   if (hasSpread) {
-    const flat = flattenCallArgs(rawArgs);
+    // (#6460) `flattenCallArgs` only understands an INLINE array literal. In
+    // the standalone lane a named `const args = [1, 1, 1]` source is the
+    // corpus's dominant spelling (`Temporal/Duration/*-undefined.js`), and the
+    // runtime-argv arm below cannot serve a callee the module does not own —
+    // the construct drivers are minted per ARITY. Resolve the static arity
+    // first; only the genuinely runtime-length spreads fall through.
+    const flat =
+      flattenCallArgs(rawArgs) ?? (ctx.standalone || ctx.wasi ? (resolveStaticSpreadArgs(ctx, rawArgs) ?? null) : null);
     if (flat !== null) {
-      args = flat; // all spreads were array literals — flatten at compile time
+      args = flat; // all spreads had a statically-known element list
     } else {
       useRuntimeArgv = true; // a non-literal spread is present — runtime argv
     }
@@ -4700,6 +5126,23 @@ function emitDynamicNewFallback(
     fctx.body.push({ op: "call", funcIdx: hostFuncIdx });
     fctx.body = savedBody2;
     noMatchBase = base;
+  } else if (plainNullNoMatchBase) {
+    // (#6607) The call-callee arm keeps the PRE-EXISTING no-match outcome
+    // verbatim. Two reasons, and the second is the load-bearing one:
+    //  - a value fetched from an intrinsic registry is never a `$__ta_ctor`, so
+    //    the TA arm below could only ever decline for this shape; and
+    //  - it is not free. Inlining the TA construct + IsConstructor guard at
+    //    each site is the bulk of this arm's code size, and the Temporal
+    //    provider links into EVERY consumer compile. Three prewarm builds of
+    //    the real provider on 2026-09-14, fresh `JS2WASM_TEMPORAL_CACHE` and
+    //    `cacheHit=false` on each: 3,277,842 B without this arm at all,
+    //    3,291,080 B with it and the pinned null base (+0.40 %), and
+    //    3,435,885 B with it and the TA base (+4.8 %). The TA base costs
+    //    ~145 KB in the artifact every consumer links, to serve a shape that
+    //    cannot reach it.
+    // Emitting null here means a non-constructor callee behaves exactly as it
+    // did before this change — no new throw, no new outcome to regress.
+    noMatchBase = [{ op: "ref.null.extern" }];
   } else if (noJsHost(ctx) && !useRuntimeArgv) {
     // (#2872) Standalone/WASI unknown-ctor base: the runtime value may be a
     // first-class `$__ta_ctor` (the TypedArray-harness `function (TA) { new
@@ -4711,6 +5154,8 @@ function emitDynamicNewFallback(
     fctx.body = base;
     emitBuiltinFnNotAConstructorGuard(ctx, fctx, descLocal);
     emitTaDynCtorConstructFromLocals(ctx, fctx, descLocal, argLocals);
+    bcv.emitBuiltinCtorValueConstructOnNull(ctx, fctx, calleeExpr, descLocal, argLocals);
+    emitBuiltinCollectionConstructOnNull(ctx, fctx, descLocal, argLocals); // (#6720)
     fctx.body = savedBase;
     noMatchBase = base;
   } else if (noJsHost(ctx) && useRuntimeArgv) {
@@ -5002,14 +5447,18 @@ function emitCollectionAdderGuard(
   } else {
     thenArm.push({ op: "local.get", index: adderLocal });
   }
+  // (#6682/#2182) Real body rides savedBodies; both detached arms stay live until attached.
   const throwArm: Instr[] = [];
   const savedBody = fctx.body;
+  fctx.savedBodies.push(savedBody);
+  for (const arm of [thenArm, throwArm]) ctx.liveBodies.add(arm);
   fctx.body = throwArm;
-  ctx.liveBodies.add(throwArm);
   try {
     emitThrowTypeError(ctx, fctx, `${adderName} is not a function`);
   } finally {
+    fctx.savedBodies.pop();
     fctx.body = savedBody;
+    for (const arm of [thenArm, throwArm]) ctx.liveBodies.delete(arm);
   }
   thenArm.push({ op: "ref.is_null" }, { op: "if", blockType: { kind: "empty" }, then: throwArm });
   fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: thenArm });
@@ -6130,6 +6579,14 @@ function usesHostConstructClosureBase(ctx: CodegenContext, expression: ts.Expres
 }
 
 function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: ts.NewExpression): ValType | null {
+  // (#6664) `new MessageChannel()` in a host-free module: evaluating the
+  // constructor reference throws before any argument is evaluated.
+  {
+    const unavailable = standaloneUnavailableGlobalReference(ctx, fctx, expr.expression);
+    if (unavailable !== undefined) return emitStandaloneUnavailableGlobalThrow(ctx, fctx, unavailable);
+  }
+  const ctorAlias = bcv.tryCompileBuiltinCtorAliasInvoke(ctx, fctx, expr); // typed `var R = globalThis.RegExp`
+  if (ctorAlias !== undefined) return ctorAlias;
   // (#3927 per-type layouts) Publish the allocation-label hint when this `new`
   // is a recorded label site of a split family. BEFORE the arguments compile —
   // a labelled allocation nested in them consumes and resets the hint, so the
@@ -6151,6 +6608,10 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     emitSymbolOperandCoercionThrow(ctx, fctx, expr.arguments![0]!, "number")
   ) {
     return { kind: "externref" };
+  }
+  {
+    const r = tryEmitDynamicGeneratorFunction(ctx, fctx, expr); // (#6651 A9) `new %GeneratorFunction%(…)`
+    if (r !== undefined) return r;
   }
 
   // (#1528b) Unwrap parens AND `as`/`!`/type-assertion wrappers so the static
@@ -6197,9 +6658,15 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     // lifted closure registers under its synthetic `__closure_N` name), so also
     // resolve the initializer through the oracle (#1930 — never the raw TS
     // checker).
+    // (#6419) …and a generator/async METHOD value read off an object literal
+    // (`var m = { *m(){} }.m`). Same §15.x "no [[Construct]] slot" conclusion;
+    // without it the `any`-typed binding reached the dynamic-ctor gate and the
+    // `__construct_closure` bridge constructed the method.
     const initIsGenerator = (id: ts.Identifier): boolean => {
       const init = ctx.oracle.variableInitializerOf(id);
-      return !!init && ts.isFunctionExpression(init) && init.asteriskToken !== undefined;
+      if (init === undefined) return false;
+      if (ts.isFunctionExpression(init) && init.asteriskToken !== undefined) return true;
+      return objectLiteralMethodWithoutConstruct(init) || isDynamicGeneratorFunctionBinding(ctx, id); // (#6651 A9)
     };
     const namedGenerator =
       ts.isIdentifier(gen) &&
@@ -6244,6 +6711,9 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
   // explicitly until their dynamic construct carrier accepts this exact cell.
   if (isDefaultExpressionImport(ctx, unwrappedLiteralCtor)) {
     if (noJsHost(ctx)) {
+      // (#6720) lodash-es `import Set from './_Set.js'`: construct the snapshot's runtime VALUE.
+      const fromValue = tryCompileNativeConstructFromValue(ctx, fctx, unwrappedLiteralCtor, expr.arguments ?? []);
+      if (fromValue) return fromValue;
       reportError(ctx, expr, "Constructing an imported default-expression snapshot is not available without a host");
       return null;
     }
@@ -7127,7 +7597,13 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
   // `!className` block because inferred names can still identify function values.
   if (
     (calleeIdent && !ctx.classSet.has(calleeIdent.text) && !(className && ctx.classSet.has(className))) ||
-    isRuntimeEvalCallableResultExpression(ctx, expr.expression)
+    isRuntimeEvalCallableResultExpression(ctx, expr.expression) ||
+    // (#5383 S2g) the standalone member-callee form; the helper re-checks the
+    // admission itself, so this only opens the door.
+    (noJsHost(ctx) &&
+      (ts.isPropertyAccessExpression(expr.expression) || ts.isElementAccessExpression(expr.expression)) &&
+      resolvesToDynamicAnyCtorValue(ctx, expr.expression)) ||
+    isValueSelectingNewSite(ctx, expr.expression, className) // (#6738)
   ) {
     const nativeCtor = tryCompileNativeConstructFromValue(ctx, fctx, expr.expression, expr.arguments ?? []);
     if (nativeCtor) return nativeCtor;
@@ -7524,7 +8000,16 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       // exactly this case). Standalone keeps the pre-existing member handling.
       const dynMemberCallee =
         !ts.isIdentifier(dynCallee) && !noJsHost(ctx) && resolvesToDynamicAnyCtorValue(ctx, dynCallee);
-      if ((ts.isIdentifier(dynCallee) && !ctx.classSet.has(dynCallee.text)) || dynMemberCallee) {
+      // (#6607) …and, in the HOST-FREE lane only, a CALL-expression callee —
+      // `new (ce("%Temporal.Duration%"))(…)`. It matched no arm before and fell
+      // through to `__new___unknown` → `ref.null.extern` (a silent null, with
+      // the arguments never evaluated). The tag dispatch below is callee-shape
+      // agnostic: it compiles `calleeExpr` once into an anyref descriptor and
+      // `ref.test`s it, so a call callee needs no new machinery. Gated to
+      // `noJsHost` so the JS-host lane's byte output is untouched — there the
+      // legacy `__new_` path still reaches a real host global.
+      const dynCallCallee = noJsHost(ctx) && resolvesToDynamicCallCtorValue(ctx, dynCallee);
+      if ((ts.isIdentifier(dynCallee) && !ctx.classSet.has(dynCallee.text)) || dynMemberCallee || dynCallCallee) {
         // (#3054 D) Dynamic `new <ctorVal>(buffer[, off[, len]])` where `ctorVal`
         // is a first-class `$__ta_ctor` value (a TA constructor held in a var /
         // array element — test262 `CreateRabForTest`, `for (ctor of ctors) new
@@ -7549,7 +8034,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
             if (dtav) return dtav;
           }
         }
-        if (emitDynamicNewFallback(ctx, fctx, expr, dynCallee, ctorName)) {
+        if (emitDynamicNewFallback(ctx, fctx, expr, dynCallee, ctorName, dynCallCallee)) {
           return { kind: "externref" };
         }
         // (#2872) Standalone/WASI class-free module: emitDynamicNewFallback
@@ -7598,6 +8083,8 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
           // [[Construct]]. Each retry declines for the other's carrier shape,
           // so the chain has no ordering hazard.
           emitRuntimeEvalConstructOnNull(ctx, fctx, expr, taDescLocal, taArgLocals);
+          bcv.emitBuiltinCtorValueConstructOnNull(ctx, fctx, dynCallee, taDescLocal, taArgLocals);
+          emitBuiltinCollectionConstructOnNull(ctx, fctx, taDescLocal, taArgLocals); // (#6720) Map/Set carrier value
           return { kind: "externref" };
         }
       }
@@ -7694,6 +8181,21 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     return { kind: "externref" };
   }
 
+  // (#6651 C5) `new D(…)` for a member-less `class D extends Date|RegExp|DataView {}`
+  // IS `new <Parent>(…)`, standalone — see builtin-subclass-new-site.ts.
+  const newSiteParent = newSiteBuiltinParent(ctx, className);
+  if (newSiteParent !== undefined) {
+    const built = compileNewSiteBuiltinSubclass(ctx, fctx, className, () => {
+      if (newSiteParent === "RegExp") return compileStandaloneRegExpConstructor(ctx, fctx, expr.arguments ?? [], expr);
+      const r =
+        newSiteParent === "DataView"
+          ? tryCompileIndexedBuiltinNew(ctx, fctx, expr, newSiteParent)
+          : tryCompileBuiltinGlobalNew(ctx, fctx, expr, newSiteParent);
+      return r === NEW_INDEXED_FALLTHROUGH || r === NEW_GLOBAL_FALLTHROUGH ? undefined : r;
+    });
+    if (built !== undefined) return built;
+  }
+
   // Handle local class constructors
   if (ctx.classSet.has(className)) {
     const ctorName = `${className}_new`;
@@ -7705,7 +8207,8 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
 
     // Compile constructor arguments with type hints
     const paramTypes = getFuncParamTypes(ctx, funcIdx);
-    const args = expr.arguments ?? [];
+    // (#6651 C5) `new (C.bind(o, 1))(8)` → `C_new(1, 8)`: bound args first.
+    const args = boundClassConstructArgs(ctx, expr, className) ?? expr.arguments ?? [];
     const forceCollectionArrayVec =
       ctx.classBuiltinParentMap.get(className) === "Map" || ctx.classBuiltinParentMap.get(className) === "Set";
     const ctorRestInfo = ctx.funcRestParams.get(ctorName);
@@ -7769,8 +8272,17 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       for (let i = 0; i < args.length && i < positionalParamCount; i++) {
         compileCtorArgument(ctx, fctx, args[i]!, paramTypes?.[i], forceCollectionArrayVec && i === 0);
       }
-      for (let i = positionalParamCount; i < args.length; i++) {
-        evaluateCtorExtraArgument(ctx, fctx, args[i]!);
+      if (args.length > positionalParamCount && ctx.funcUsesArguments.has(ctorName)) {
+        // (#6651 C5) A constructor that reads `arguments` sees the surplus
+        // arguments through `__extras_argv`, exactly as a function call's
+        // (call-identifier.ts) — they used to be evaluated and dropped, so
+        // `class A { constructor() { args = arguments } }; new A(0, 1)` saw
+        // an empty arguments object on both lanes.
+        emitSetExtrasArgv(ctx, fctx, [...args], positionalParamCount);
+      } else {
+        for (let i = positionalParamCount; i < args.length; i++) {
+          evaluateCtorExtraArgument(ctx, fctx, args[i]!);
+        }
       }
       // Pad missing constructor arguments with defaults (arity mismatch)
       if (paramTypes) {
