@@ -267,6 +267,7 @@ import { ensureTaToStringHelper, taToStringApplies } from "../ta-to-string.js"; 
 import { reserveTaToLocaleString, taToLocaleStringApplies } from "../to-locale-string-element.js"; // (#6651 TA1)
 import { isHostResolvedBuiltinReceiver } from "../standalone-unavailable-globals.js"; // (#1472)
 import { guardedCastBackup, publishNonInstanceSuperReceiver } from "./super-receiver-publish.js"; // (#5350 r2)
+import { tryEmitPrimitiveToLocaleStringInvoke } from "../object-proto-to-locale-string.js"; // (#6770 S5)
 import {
   BUILTIN_CLASS_NAMES,
   coerceNumberMethodArgToF64,
@@ -875,6 +876,9 @@ export function compileReceiverMethodCall(
     );
     if (__r !== undefined) return __r;
   }
+  // (#6770 S5) §20.1.3.5 Invoke(<primitive>, "toString") after a wrapper `toString` override.
+  const primitiveToLocaleString = tryEmitPrimitiveToLocaleStringInvoke(ctx, fctx, expr, propAccess);
+  if (primitiveToLocaleString !== undefined) return primitiveToLocaleString;
 
   if (ctx.standalone && propAccess.name.text === "concat" && ts.isIdentifier(propAccess.expression)) {
     const text = propAccess.getSourceFile().text;

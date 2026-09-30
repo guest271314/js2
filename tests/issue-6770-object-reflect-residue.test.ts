@@ -263,3 +263,60 @@ if (Reflect.hasOwnProperty("ownKeys") === true) __r |= 4;\n${END}`;
     T,
   );
 });
+
+describe("#6770 S5 — Object.prototype members: __proto__ own-ness, the literal getPrototypeOf fold, toLocaleString", () => {
+  it(
+    "Object.prototype.__proto__ is an own configurable accessor on every own-property surface (RED on base)",
+    async () => {
+      const src = `var __r = 0;\n${SV}
+var desc = Object.getOwnPropertyDescriptor(Object.prototype, "__proto__");
+if (sv(typeof desc.get, "function") && sv(typeof desc.set, "function")) __r |= 1;
+if (sv(desc.enumerable, false) && sv(desc.configurable, true)) __r |= 2;
+if (sv(Object.prototype.hasOwnProperty("__proto__"), true)) __r |= 4;
+if (Object.getOwnPropertyNames(Object.prototype).indexOf("__proto__") >= 0) __r |= 8;
+if (sv("__proto__" in Object.prototype, true)) __r |= 16;
+if (sv(Object.prototype.propertyIsEnumerable("__proto__"), false)) __r |= 32;
+if (sv(Object.prototype.hasOwnProperty("toString"), true)) __r |= 64;\n${END}`;
+      expect(await probe(src)).toBe(127);
+    },
+    T,
+  );
+
+  it(
+    "Object.getPrototypeOf(<{} binding>) sees a reflective / Annex B prototype write (RED on base)",
+    async () => {
+      const src = `var __r = 0;\n${SV}
+var set = Object.getOwnPropertyDescriptor(Object.prototype, "__proto__").set;
+var proto = {}; var subject = {};
+set.call(subject, proto);
+if (sv(Object.getPrototypeOf(subject), proto)) __r |= 1;
+if (sv(proto.isPrototypeOf(subject), true)) __r |= 2;
+var subject2 = {}; Object.setPrototypeOf(subject2, proto);
+if (sv(Object.getPrototypeOf(subject2), proto)) __r |= 4;
+var subject3 = {}; subject3.__proto__ = proto;
+if (sv(Object.getPrototypeOf(subject3), proto)) __r |= 8;
+var plain = {}; if (sv(Object.getPrototypeOf(plain), Object.prototype)) __r |= 16;\n${END}`;
+      expect(await probe(src)).toBe(31);
+    },
+    T,
+  );
+
+  it(
+    "toLocaleString on a primitive this is Invoke(O, 'toString') with the primitive receiver (RED on base)",
+    async () => {
+      const src = `"use strict";\nvar __r = 0;\n${SV}
+var f = function () { return typeof this; };
+Boolean.prototype.toString = f;
+if (sv(Boolean.prototype.toString, f)) __r |= 1;
+if (sv(true.toString(), "boolean")) __r |= 2;
+if (sv(true.toLocaleString(), "boolean")) __r |= 4;
+if (sv(Object.prototype.toLocaleString.call(true), "boolean")) __r |= 8;
+function h(v) { return v.toString(); } if (sv(h(true), "boolean")) __r |= 16;
+Object.defineProperty(Number.prototype, "toString", { get: function () { var v = typeof this; return function () { return v; }; } });
+if (sv(Object.prototype.toLocaleString.call(5), "number")) __r |= 32;
+var o = { toString: function () { return "o!"; } }; if (sv(o.toLocaleString(), "o!")) __r |= 64;\n${END}`;
+      expect(await probe(src)).toBe(127);
+    },
+    T,
+  );
+});

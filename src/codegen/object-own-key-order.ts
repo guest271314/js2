@@ -22,7 +22,10 @@
  * (no sign, no leading zero, `"0"` alone), else `-1`.
  */
 import type { Instr, ValType } from "../ir/types.js";
-import type { CodegenContext } from "./context/types.js";
+import { ts } from "../ts-api.js";
+import type { CodegenContext, FunctionContext } from "./context/types.js";
+import { withArraySubclassReceiverAsVec } from "./array-subclass-receiver.js";
+import { compileExpression } from "./shared.js";
 import { getFuncRefWrapperRootTypeIdx } from "./closures/funcref-wrapper-types.js";
 import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
 import { nativeStringLiteralInstrs } from "./native-strings.js";
@@ -51,6 +54,43 @@ function staticArrayIndexOf(name: string): number {
  * of the declared names — indices first by value, the rest untouched — is the
  * whole fix; field INDICES are not affected, only the enumeration order.
  */
+/**
+ * (#6770 S5) `Object.getOwnPropertyNames(o).indexOf(k)` — a chained array
+ * method on an own-key LIST call whose standalone result is the runtime
+ * `$ObjVec` (externref), while the checker says `string[]`. The array-method
+ * lowering then `ref.cast`s that externref to the string vec and traps
+ * (`illegal cast`); a `var` binding in between worked because its initializer
+ * coercion materializes the vec. The caller materializes the receiver the same
+ * way (`withArraySubclassReceiverAsVec`) when this answers true.
+ */
+function isStandaloneOwnKeyListCall(ctx: CodegenContext, expr: ts.Expression): boolean {
+  if (!ctx.standalone || !ts.isCallExpression(expr) || !ts.isPropertyAccessExpression(expr.expression)) return false;
+  const callee = expr.expression;
+  return (
+    ts.isIdentifier(callee.expression) &&
+    callee.expression.text === "Object" &&
+    (callee.name.text === "keys" || callee.name.text === "getOwnPropertyNames")
+  );
+}
+
+/** Lower `<own-key list call>.<array method>(…)` over the materialized vec; `undefined` = not this shape. */
+export function withOwnKeyListReceiverAsVec<T>(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  receiverExpr: ts.Expression,
+  eligible: boolean,
+  lower: () => T | undefined,
+): T | undefined {
+  if (!eligible || !isStandaloneOwnKeyListCall(ctx, receiverExpr)) return undefined;
+  return withArraySubclassReceiverAsVec(
+    ctx,
+    fctx,
+    receiverExpr,
+    () => compileExpression(ctx, fctx, receiverExpr),
+    lower,
+  );
+}
+
 export function inOwnKeyOrder<T>(items: readonly T[], nameOf: (item: T) => string): T[] {
   const indexed = items.map((item, pos) => ({ item, pos, idx: staticArrayIndexOf(nameOf(item)) }));
   indexed.sort((a, b) => {

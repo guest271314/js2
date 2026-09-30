@@ -4,6 +4,11 @@
  * property method calls, IIFEs, and conditional callees.
  */
 import { ts, forEachChild } from "../../ts-api.js";
+import {
+  emitOverriddenProtoMemberCall,
+  protoMemberReadIsOverridden,
+  tryEmitPrimitiveToLocaleStringInvoke,
+} from "../object-proto-to-locale-string.js"; // (#6770 S5)
 import { widenJsDefaultGuessSlot, widenJsDefaultGuessSymbolSlot } from "../js-default-param-type-guess.js";
 import { profilePhase } from "../../compile-profile.js";
 import {
@@ -1233,6 +1238,11 @@ function tryEmitNativeProtoReflectiveCall(
 ): ValType | undefined {
   if (!ctx.standalone) return undefined;
   if (expr.arguments.length === 0) return undefined; // need at least a thisArg
+  // (#6770 S5) `Object.prototype.toLocaleString.call(<primitive>)` — Invoke(O, "toString").
+  if (isCall && ts.isPropertyAccessExpression(expr.expression)) {
+    const invoked = tryEmitPrimitiveToLocaleStringInvoke(ctx, fctx, expr, expr.expression);
+    if (invoked !== undefined) return invoked;
+  }
 
   // Resolve the member name + declaring builtin from the receiver's symbol.
   let sym: ts.Symbol | undefined;
@@ -1279,6 +1289,10 @@ function tryEmitNativeProtoReflectiveCall(
   {
     const syntactic = wrapperProtoSyntacticMember(ctx, unwrapTransparent(receiver), member);
     if (syntactic !== undefined) ({ member, ifaceName } = syntactic);
+  }
+  // (#6770 S5) A source-overridden member's value is no longer the intrinsic closure this lowering casts to.
+  if (protoMemberReadIsOverridden(ctx, unwrapTransparent(receiver))) {
+    return emitOverriddenProtoMemberCall(ctx, fctx, expr, unwrapTransparent(receiver), isCall);
   }
 
   // TypeScript declares `Error.prototype.toString` through the broad Object

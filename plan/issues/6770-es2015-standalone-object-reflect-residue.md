@@ -71,6 +71,25 @@ loc-budget-allow:
   - src/codegen/object-integrity-proxy.ts
   - src/codegen/object-runtime-prototype.ts
   - src/stdlib/object-runtime.ts
+  # S5 (2026-09-30, Opus): wiring only — the own-key-list receiver
+  # materialization (array-methods), the `__proto__` accessor glue member
+  # (array-object-proto), the overridden-member value read (builtin-value-read),
+  # the primitive Invoke hook (call-receiver-method), the strict-wrapper `typeof
+  # this` un-fold (typeof-delete), the Annex B setter-receiver scan
+  # (object-get-prototype-of), the unseeded-companion consult
+  # (native-proto-instance-method-read), the unseeded `__proto__` own arm
+  # (native-proto-own-props), the glue member bodies (object-proto-proto-accessor),
+  # the per-file memo (builtin-proto-member-override). Logic lives in the new
+  # leaf object-proto-to-locale-string.ts.
+  - src/codegen/array-methods.ts
+  - src/codegen/array-object-proto.ts
+  - src/codegen/builtin-value-read.ts
+  - src/codegen/expressions/call-receiver-method.ts
+  - src/codegen/typeof-delete.ts
+  - src/codegen/native-proto-instance-method-read.ts
+  - src/codegen/native-proto-own-props.ts
+  - src/codegen/object-proto-proto-accessor.ts
+  - src/codegen/builtin-proto-member-override.ts
 func-budget-allow:
   # 2026-09-30 (#6770 S1, Opus): +10 in the enumeration-helper builder (the
   # string-source arm call, built in the new leaf), +1 in compileElementAccess
@@ -97,6 +116,16 @@ func-budget-allow:
   - src/codegen/expressions/call-namespace-static.ts::compileNamespaceStaticCall
   - src/codegen/declarations/object-shape-widening.ts::collectEmptyObjectWidening
   - src/codegen/declarations/object-shape-widening.ts::scanStatements
+  # 2026-09-30 (#6770 S5, Opus): one hook call each — the own-key-list receiver
+  # (compileArrayMethodCall, +5; the arm itself is in object-own-key-order.ts),
+  # the unseeded `__proto__` own arm (registerNativeProtoHasOwn), the primitive
+  # Invoke hook (compileReceiverMethodCall), the strict-wrapper `typeof this`
+  # un-fold (compileTypeofExpression / compileTypeofComparison, +1 each).
+  - src/codegen/array-methods.ts::compileArrayMethodCall
+  - src/codegen/native-proto-own-props.ts::registerNativeProtoHasOwn
+  - src/codegen/expressions/call-receiver-method.ts::compileReceiverMethodCall
+  - src/codegen/typeof-delete.ts::compileTypeofExpression
+  - src/codegen/typeof-delete.ts::compileTypeofComparison
 ---
 
 ## Problem

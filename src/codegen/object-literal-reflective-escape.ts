@@ -64,6 +64,20 @@ export function markStandaloneReflectiveWriteTargets(node: ts.Node, varName: str
       const first = stripped(n.arguments[0]!);
       if (ts.isIdentifier(first) && first.text === varName) poisonSet.add(varName);
     }
+    // (#6770 S5) `o.__proto__ = p` is [[SetPrototypeOf]] through the inherited
+    // Annex B accessor, not a field add — a widened closed struct stored `p` in
+    // a `__proto__` FIELD and the prototype never moved.
+    if (
+      ts.isBinaryExpression(n) &&
+      n.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isPropertyAccessExpression(n.left) &&
+      ts.isIdentifier(n.left.name) &&
+      n.left.name.text === "__proto__" &&
+      ts.isIdentifier(n.left.expression) &&
+      n.left.expression.text === varName
+    ) {
+      poisonSet.add(varName);
+    }
     ts.forEachChild(n, visit);
   };
   visit(node);
