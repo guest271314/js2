@@ -61,6 +61,7 @@ import { emitLazyNativeProtoGet } from "./native-proto.js";
 import { buildTaCtorInheritedFromOfGetArm } from "./ta-static-from-of-body.js";
 import { fillHofTaDynViewPresenceBypass } from "./hof-native.js"; // (#6651 E6)
 import { fillOrdinarySetTypedArrayArm } from "./object-runtime-ordinary-set.js"; // (#6651 E6)
+import { taDynViewOwnLengthArm } from "./array-like-exotic-arms.js"; // (#6771 S2c)
 
 /** Fresh synthetic FunctionContext for a native helper (the #2872 pattern). */
 function makeFctx(name: string, params: { name: string; type: ValType }[], returnType: ValType): FunctionContext {
@@ -1090,6 +1091,7 @@ export function fillTaDynViewMopArms(ctx: CodegenContext): void {
     inner.push({ op: "local.get", index: lAny });
     inner.push({ op: "ref.cast", typeIdx: dynIdx });
     inner.push({ op: "local.set", index: lDv });
+    inner.push(...taDynViewOwnLengthArm(ctx, lenFn, lDv, dynIdx)); // (#6771 S2c)
     inner.push({ op: "local.get", index: lDv });
     inner.push({ op: "ref.as_non_null" });
     inner.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 });

@@ -440,6 +440,7 @@ import { fillHoleyArrayHasIdxArm } from "./holey-array-presence.js"; // (#4222) 
 import { fillSparseHoleHasIdxArms } from "./vec-externref-hole-presence.js"; // (#4491/#2001) sparse absence markers
 import { finalizeFunctionPoisonPillCalls } from "./function-poison-pill.js";
 import { fillDataViewConstructProtoArm, fillTaDynViewMopArms } from "./ta-dyn-mop.js"; // (#3177/#3371) native view prototype arms
+import { fillArrayLikeExoticArms } from "./array-like-exotic-arms.js"; // (#6771 S2)
 import { fillTaStaticViewMopArms } from "./ta-static-view-mop.js"; // (#6651 E7) static view in a generic slot
 import { fillTaDynViewOwnKeyArms } from "./ta-dyn-own-keys.js"; // (#6651 E2) §10.4.5.6 own-key surface
 import { fillObjVecReflectionHelpers } from "./objvec-array-proto.js"; // (#3666) RegExp indices Array reflection
@@ -6708,6 +6709,7 @@ export function generateModule(
     // `fillTaDynViewMopArms` below so the TypedArray dyn-view arm keeps the
     // front slot (TA receivers must exit before the overlay consult). Standalone only.
     fillObjVecReflectionHelpers(ctx);
+    fillArrayLikeExoticArms(ctx); // (#6771 S2) closure / String-wrapper array-like arms
 
     // (#3177) `$__ta_dyn_view` §10.4.5 MOP arms — AFTER every vec fill above
     // (each fill prepends at body[0]; last fill wins the front slot, and the
@@ -11372,6 +11374,7 @@ export function generateMultiModule(multiAst: MultiTypedAST, options?: CodegenOp
     // classifier and native-view prototype overrides in project compilation as
     // in the single-source pipeline. Keep native views after generic vec fills
     // so they retain front precedence.
+    profilePhase("fill-array-like-exotic-arms", () => fillArrayLikeExoticArms(ctx)); // (#6771 S2)
     profilePhase("fill-ta-dyn-view-mop-arms", () => fillTaDynViewMopArms(ctx));
     // (#6651 E2) Multi-source parity with the single-source call above.
     profilePhase("fill-ta-dyn-view-own-key-arms", () => fillTaDynViewOwnKeyArms(ctx));

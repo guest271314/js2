@@ -47,6 +47,7 @@ import { isBrandedBuiltinName } from "./builtin-brands.js"; // (#4176) named pro
 import { isRegExpProtoSymbolWrite } from "./regexp-proto-symbol-writes.js"; // (#6651 B9)
 import { planHoleyArrayCarrier } from "./holey-array-plan.js"; // (#4222) isolated sparse-carrier proof
 import { recordDescriptorArrayReceiver } from "./declarations/descriptor-array-carrier.js"; // (#4670)
+import { armExhaustiveForNonCallableMemberLiteral } from "./class-to-primitive.js"; // (#6771 S2d)
 
 /**
  * Cheap AST pre-scan: set `ctx.usesArrayHoles` when the program contains any
@@ -63,7 +64,11 @@ import { recordDescriptorArrayReceiver } from "./declarations/descriptor-array-c
 export function scanForArrayHoles(ctx: CodegenContext, root: ts.Node): void {
   const pendingBagIdents = new Set<string>();
   const visit = (node: ts.Node): void => {
+    // (#6771 S2d) Not a flag of this pass, so it must not be cut off by the
+    // all-flags-set early-out below: that early-out also waits for it.
+    const exhaustiveArmed = armExhaustiveForNonCallableMemberLiteral(ctx, node);
     if (
+      exhaustiveArmed &&
       ctx.usesArrayHoles &&
       ctx.protoIndexDirty &&
       ctx.protoNamedDirty &&
