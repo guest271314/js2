@@ -159,3 +159,58 @@ if (sv(Object.prototype.toString.call([]), "[object Array]")) __r |= 16;\n${END}
     T,
   );
 });
+
+const EQ = `function eq(a, b) { if (a.length !== b.length) return false; for (var i = 0; i < a.length; i++) if (a[i] !== b[i]) return false; return true; }\n`;
+
+describe("#6770 S3 — own-key ORDER (§10.1.11.1, §10.4.3.6, function intrinsics)", () => {
+  it(
+    "array indices up to 2^32-2 sort first; 2^32-1 keeps its insertion slot (RED on base)",
+    async () => {
+      const src = `var __r = 0;\n${EQ}
+var o5 = {}; o5[4294967295] = 1; o5[4294967294] = 1; o5[1] = 1;
+if (eq(Reflect.ownKeys(o5), ["1", "4294967294", "4294967295"])) __r |= 1;
+var o2 = {}; o2[12345678900] = 1; o2.b = 1; o2[4294967294] = 1;
+if (eq(Reflect.ownKeys(o2), ["4294967294", "12345678900", "b"])) __r |= 2;
+var o3 = { b: 1, 2: 1, a: 1, 1: 1 };
+if (eq(Reflect.ownKeys(o3), ["1", "2", "b", "a"])) __r |= 4;
+if (eq(Object.keys(o3), ["1", "2", "b", "a"])) __r |= 8;\n${END}`;
+      expect(await probe(src)).toBe(15);
+    },
+    T,
+  );
+
+  it(
+    "String wrapper length precedes expandos; RegExp owns lastIndex (RED on base)",
+    async () => {
+      const src = `var __r = 0;\n${EQ}
+var s = new String("ab"); s.z = 1; if (eq(Reflect.ownKeys(s), ["0", "1", "length", "z"])) __r |= 1;
+var st = new String(""); st.a = 1; st.b = 2; if (eq(Reflect.ownKeys(st), ["length", "a", "b"])) __r |= 2;
+var s5 = new String("xy"); s5[5] = "i"; if (eq(Object.getOwnPropertyNames(s5), ["0", "1", "5", "length"])) __r |= 4;
+var re = /x/g; re.a = 1; if (eq(Reflect.ownKeys(re), ["lastIndex", "a"])) __r |= 8;
+var d = Object.getOwnPropertyDescriptor(re, "lastIndex");
+if (d !== undefined && d.value === 0 && d.writable === true && d.enumerable === false && d.configurable === false) __r |= 16;
+Object.defineProperty(re, "lastIndex", { value: 2 });
+if (eq(Reflect.ownKeys(Object.getOwnPropertyDescriptors(re)), ["lastIndex", "a"])) __r |= 32;
+if (eq(Object.keys(re), ["a"])) __r |= 64;\n${END}`;
+      expect(await probe(src)).toBe(127);
+    },
+    T,
+  );
+
+  it(
+    "a function's redefined length/name lead its expandos; entries/values see them (RED on base)",
+    async () => {
+      const src = `var __r = 0;\n${EQ}
+var fn = () => {}; fn.a = 1; Object.defineProperty(fn, "length", { enumerable: true });
+if (eq(Object.keys(fn), ["length", "a"])) __r |= 1;
+if (eq(Object.getOwnPropertyNames(fn), ["length", "name", "a"])) __r |= 2;
+var fn2 = () => {}; fn2.a = 1; Object.defineProperty(fn2, "name", { enumerable: true });
+if (eq(Object.entries(fn2).map(function (e) { return e[0]; }), ["name", "a"])) __r |= 4;
+var fn3 = () => {}; fn3.a = 1;
+if (Object.entries(fn3).length === 1 && Object.values(fn3)[0] === 1) __r |= 8;
+var o = {}; o.name = 1; o.length = 2; if (eq(Object.keys(o), ["name", "length"])) __r |= 16;\n${END}`;
+      expect(await probe(src)).toBe(31);
+    },
+    T,
+  );
+});

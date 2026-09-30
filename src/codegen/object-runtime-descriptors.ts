@@ -53,6 +53,7 @@ import {
 import { reserveVecPropsKeySource, vecPropertiesKeySourceArm } from "./vec-props-key-source.js";
 import { protoIndexOwnViewSubstituteInstrs } from "./proto-index-store.js"; // (#2175 P2) own-view companion substitution
 import { CLOSURE_PROTO_OF } from "./closure-prototype-edge.js";
+import { stringExoticLengthBeforeNamedKeyInstrs } from "./object-own-key-order.js"; // (#6770 S3)
 
 function closurePrototypeDescriptorArm(
   ctx: CodegenContext,
@@ -2647,6 +2648,7 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
                 op: "if",
                 blockType: { kind: "empty" },
                 then: [
+                  ...stringExoticLengthBeforeNamedKeyInstrs(ctx, strExoticLocal, 6, 7), // (#6770 S3)
                   { op: "local.get", index: 7 },
                   { op: "local.get", index: 6 },
                   { op: "ref.as_non_null" },

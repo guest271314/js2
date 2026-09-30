@@ -37,6 +37,7 @@ import { stringExoticPushKeysPrologue } from "./string-exotic-own-props.js"; // 
 import { definedFuncAt } from "./func-space.js";
 import { orProxyArrayLikeTest, proxyArrayLikeTypeIdx } from "./proxy-array-like.js"; // (#6651 H6)
 import { stringExoticAssignSourceInstrs } from "./object-assign-primitive-operands.js"; // (#6770 S1)
+import { nonObjectEnumerableOwnInstrs } from "./object-own-key-order.js"; // (#6770 S3)
 
 /**
  * Everything the enumeration/array-like/object-static block reads from the
@@ -804,7 +805,12 @@ export function buildObjectEnumerationHelpers(ctx: CodegenContext, s: ObjectEnum
       {
         op: "if",
         blockType: { kind: "empty" },
-        then: [{ op: "local.get", index: 7 }, { op: "return" }],
+        then: [
+          // (#6770 S3) EnumerableOwnProperties over the receiver's own keys
+          ...nonObjectEnumerableOwnInstrs(ctx, false),
+          { op: "local.get", index: 7 },
+          { op: "return" },
+        ],
       },
       // o = cast<$Object>(any) ; arr = __obj_ordered(o) ; cap = arr.len (#1837)
       { op: "local.get", index: 1 },
@@ -865,6 +871,8 @@ export function buildObjectEnumerationHelpers(ctx: CodegenContext, s: ObjectEnum
         { name: "i", type: { kind: "i32" } },
         { name: "e", type: entryRefNull },
         { name: "vec", type: { kind: "externref" } },
+        { name: "keys", type: { kind: "externref" } },
+        { name: "key", type: { kind: "externref" } },
       ],
       body,
     );
@@ -893,7 +901,12 @@ export function buildObjectEnumerationHelpers(ctx: CodegenContext, s: ObjectEnum
       {
         op: "if",
         blockType: { kind: "empty" },
-        then: [{ op: "local.get", index: 7 }, { op: "return" }],
+        then: [
+          // (#6770 S3) EnumerableOwnProperties over the receiver's own keys
+          ...nonObjectEnumerableOwnInstrs(ctx, true),
+          { op: "local.get", index: 7 },
+          { op: "return" },
+        ],
       },
       // o = cast<$Object>(any) ; arr = __obj_ordered(o) ; cap = arr.len (#1837)
       { op: "local.get", index: 1 },
@@ -969,6 +982,8 @@ export function buildObjectEnumerationHelpers(ctx: CodegenContext, s: ObjectEnum
         { name: "e", type: entryRefNull },
         { name: "vec", type: { kind: "externref" } },
         { name: "pair", type: { kind: "externref" } },
+        { name: "keys", type: { kind: "externref" } },
+        { name: "key", type: { kind: "externref" } },
       ],
       body,
     );
