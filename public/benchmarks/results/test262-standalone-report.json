@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-09-30T02:44:35.066Z",
-  "baseline_generated_at": "2026-09-30T02:44:35.067Z",
-  "baseline_sha": "e63424fafa58710dfa1bf6d34276dc3c0b409e3f",
+  "timestamp": "2026-09-30T06:16:35.778Z",
+  "baseline_generated_at": "2026-09-30T06:16:35.778Z",
+  "baseline_sha": "28abc9a09761a00e11d2ecf5b15ba9b95b9cb5ba",
   "oracle_version": 14,
   "mode": {
     "target": "standalone",
@@ -11,24 +11,24 @@
   },
   "summary": {
     "total": 48232,
-    "pass": 41292,
-    "fail": 5004,
-    "compile_error": 1900,
-    "compile_timeout": 18,
+    "pass": 41293,
+    "fail": 5003,
+    "compile_error": 1899,
+    "compile_timeout": 19,
     "skip": 18,
     "compilable": 46296,
-    "host_free_pass": 41292,
+    "host_free_pass": 41293,
     "stale": 0,
     "by_category": {
       "standard": {
         "total": 47146,
-        "pass": 40251,
-        "fail": 4975,
-        "compile_error": 1884,
-        "compile_timeout": 18,
+        "pass": 40252,
+        "fail": 4974,
+        "compile_error": 1883,
+        "compile_timeout": 19,
         "skip": 18,
         "compilable": 45226,
-        "host_free_pass": 40251,
+        "host_free_pass": 40252,
         "stale": 0,
         "label": "ECMAScript current standard"
       },
@@ -58,25 +58,25 @@
       },
       "official": {
         "total": 48232,
-        "pass": 41292,
-        "fail": 5004,
-        "compile_error": 1900,
-        "compile_timeout": 18,
+        "pass": 41293,
+        "fail": 5003,
+        "compile_error": 1899,
+        "compile_timeout": 19,
         "skip": 18,
         "compilable": 46296,
-        "host_free_pass": 41292,
+        "host_free_pass": 41293,
         "stale": 0,
         "label": "standard + annex_b (default)"
       },
       "full": {
         "total": 48735,
-        "pass": 41528,
-        "fail": 5020,
-        "compile_error": 2055,
-        "compile_timeout": 18,
+        "pass": 41529,
+        "fail": 5019,
+        "compile_error": 2054,
+        "compile_timeout": 19,
         "skip": 114,
         "compilable": 46548,
-        "host_free_pass": 41528,
+        "host_free_pass": 41529,
         "stale": 0,
         "label": "standard + annex_b + proposals"
       }
@@ -84,35 +84,35 @@
   },
   "official_summary": {
     "total": 48232,
-    "pass": 41292,
-    "fail": 5004,
-    "compile_error": 1900,
-    "compile_timeout": 18,
+    "pass": 41293,
+    "fail": 5003,
+    "compile_error": 1899,
+    "compile_timeout": 19,
     "skip": 18,
     "compilable": 46296,
-    "host_free_pass": 41292,
+    "host_free_pass": 41293,
     "stale": 0
   },
   "full_summary": {
     "total": 48735,
-    "pass": 41528,
-    "fail": 5020,
-    "compile_error": 2055,
-    "compile_timeout": 18,
+    "pass": 41529,
+    "fail": 5019,
+    "compile_error": 2054,
+    "compile_timeout": 19,
     "skip": 114,
     "compilable": 46548,
-    "host_free_pass": 41528,
+    "host_free_pass": 41529,
     "stale": 0
   },
   "strict_summary": {
     "total": 45721,
-    "pass": 38960,
-    "fail": 4880,
-    "compile_error": 1845,
-    "compile_timeout": 18,
+    "pass": 38961,
+    "fail": 4879,
+    "compile_error": 1844,
+    "compile_timeout": 19,
     "skip": 18,
     "compilable": 43840,
-    "host_free_pass": 38960,
+    "host_free_pass": 38961,
     "stale": 0
   },
   "scope_summaries": {
@@ -140,13 +140,13 @@
     },
     "standard": {
       "total": 47146,
-      "pass": 40251,
-      "fail": 4975,
-      "compile_error": 1884,
-      "compile_timeout": 18,
+      "pass": 40252,
+      "fail": 4974,
+      "compile_error": 1883,
+      "compile_timeout": 19,
       "skip": 18,
       "compilable": 45226,
-      "host_free_pass": 40251,
+      "host_free_pass": 40252,
       "stale": 0
     }
   },
@@ -660,13 +660,13 @@
     {
       "name": "built-ins/Reflect",
       "path": "built-ins/Reflect",
-      "pass": 144,
-      "fail": 7,
+      "pass": 145,
+      "fail": 6,
       "compile_error": 2,
       "compile_timeout": 0,
       "skip": 0,
       "total": 153,
-      "host_free_pass": 144
+      "host_free_pass": 145
     },
     {
       "name": "built-ins/RegExp",
@@ -805,8 +805,8 @@
       "path": "built-ins/TypedArray",
       "pass": 1044,
       "fail": 391,
-      "compile_error": 11,
-      "compile_timeout": 0,
+      "compile_error": 10,
+      "compile_timeout": 1,
       "skip": 0,
       "total": 1446,
       "host_free_pass": 1044
@@ -1198,14 +1198,14 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 3019,
+    "assertion_fail": 3018,
     "host_import_leak": 1231,
     "illegal_cast": 233,
     "missing_builtin": 3,
     "negative_test_fail": 4,
     "null_deref": 14,
     "oob": 7,
-    "other": 1241,
+    "other": 1240,
     "promise_error": 44,
     "range_error": 29,
     "runtime_error": 337,
@@ -1221,8 +1221,8 @@
   },
   "root_cause_map": {
     "target": "standalone",
-    "total_non_pass_non_skip": 7093,
-    "classified": 7093,
+    "total_non_pass_non_skip": 7092,
+    "classified": 7092,
     "unclassified_threshold": null,
     "has_edition_breakdown": true,
     "buckets": [
@@ -1255,8 +1255,8 @@
           "test/language/expressions/dynamic-import/syntax/valid/top-level-import-defer-script-code-valid.js",
           "test/language/expressions/dynamic-import/catch/nested-async-gen-await-import-source-source-text-module.js",
           "test/language/expressions/dynamic-import/syntax/valid/nested-if-import-source-script-code-valid.js",
-          "test/language/expressions/dynamic-import/syntax/valid/nested-async-gen-await-import-defer-script-code-valid.js",
-          "test/language/expressions/dynamic-import/catch/nested-if-import-catch-import-source-specifier-tostring.js"
+          "test/language/expressions/dynamic-import/catch/nested-if-import-catch-import-source-specifier-tostring.js",
+          "test/language/expressions/dynamic-import/syntax/valid/nested-async-gen-await-import-defer-script-code-valid.js"
         ],
         "sample_signatures": [
           "other:L#:## SyntaxError: import.defer(...) is not supported (Stage # proposal — import-defer / source-phase-imports); L#:## 'import.meta' is only allowed in a module",
@@ -1707,7 +1707,7 @@
           "type_error:TypeError: Proxy trap result violates a Proxy invariant",
           "host_import_leak:standalone target emitted host imports: env::__get_builtin (##)",
           "assertion_fail:Test262Error: Expected true but got false",
-          "assertion_fail:Test262Error: Expected SameValue(«[object Object]», «undefined») to be true"
+          "assertion_fail:Test262Error: handler object is the trap context Expected SameValue(«undefined», «[object Object]») to be true"
         ]
       },
       {
@@ -1716,24 +1716,24 @@
           "#1472"
         ],
         "label": "Reflect.* refused in standalone mode (#1472 Phase C)",
-        "count": 16,
+        "count": 15,
         "statuses": {
           "pass": 0,
-          "fail": 8,
+          "fail": 7,
           "compile_error": 8,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 16,
+          "total": 15,
           "host_free_pass": 0
         },
         "error_categories": {
-          "assertion_fail": 7,
+          "assertion_fail": 6,
           "runtime_error": 6,
           "other": 2,
           "type_error": 1
         },
         "by_edition": {
-          "ES2015": 13,
+          "ES2015": 12,
           "ES2021": 2,
           "ES2020": 1
         },
@@ -1974,8 +1974,8 @@
         "statuses": {
           "pass": 0,
           "fail": 1353,
-          "compile_error": 191,
-          "compile_timeout": 11,
+          "compile_error": 190,
+          "compile_timeout": 12,
           "skip": 0,
           "total": 1555,
           "host_free_pass": 0
@@ -1986,7 +1986,7 @@
           "assertion_fail": 978,
           "host_import_leak": 179,
           "oob": 5,
-          "other": 21,
+          "other": 20,
           "wasm_compile": 4,
           "null_deref": 4
         },

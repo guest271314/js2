@@ -4,7 +4,7 @@ title: "ES2015 standalone super property access — r1: class [[HomeObject]] rea
 status: in-progress
 sprint: current
 created: 2026-09-05
-updated: 2026-09-06
+updated: 2026-09-30
 priority: high
 horizon: m
 feasibility: medium
@@ -1005,4 +1005,167 @@ its body before the fallthrough ReferenceError, which is what
 pins in `tests/issue-5350-super-property-r1.test.ts`. The #5839 pin for
 compound `C["prototype"]["x"] += v` writes was dropped: main's C2-a keep covers
 only the `C.prototype.name = v` form, and no test262 row needs the wider form.
+
+## Implementation Plan — r2: super property WRITES (2026-09-30, Fable lane; Opus-high implements)
+
+The r1 record's step 6 blocker is gone: #5316 r5 landed
+`__reflect_set_receiver(target, key, value, receiver) -> i32`
+(`src/codegen/object-runtime-ordinary-set.ts` — `REFLECT_SET_RECEIVER` `:81`,
+`reserveOrdinarySetWithReceiver` `:212`, `fillOrdinarySetWithReceiver` `:238`,
+`noteReflectSetReceiverCall` `:495`; reference consumer: the 4-argument
+`Reflect.set` arm at `src/codegen/expressions/call-namespace-static.ts:1307-1328`).
+This round builds the `super` WRITE on top of it. Claimed
+`ttraenkler/opus-5350`, branch `issue-5350-r2-super-property-write`.
+
+Measured on `origin/main` @ `eb57f327` (2026-09-30), standalone (probe
+`.tmp/5350/p10.js`, `__r` bit sum):
+
+| bit | program | main | node |
+| --- | --- | --- | --- |
+| 1 | `obj = { method() { super.x = 8; return this; } }`; `obj.method() === obj` | 1 | 1 |
+| 2 | …then `hasOwnProperty.call(obj, 'x')` | **0** | 2 |
+| 4 | `getPrototypeOf(obj).x === undefined` (the write did not land on the proto either) | 4 | 4 |
+| 8 | `class C { method() { super.x = 8; Object.freeze(C.prototype); try { super.y = 9 } catch (e) { TypeError? } } }`, `C.prototype.method()` — caught a TypeError | **0** | 8 |
+| 16 | …and `hasOwnProperty.call(C.prototype, 'x')` (receiver is `C.prototype`, the call-time `this`) | **0** | 16 |
+| 32 | `class Q extends P { m() { super.m(); } }` — `this` seen by `P.prototype.m` is the `Q` instance (control) | 32 | 32 |
+| 64 | `class D extends Object { constructor() { try { super(evaluatedArg = true) } catch (err) { TypeError? } } }`, `Object.setPrototypeOf(D, parseInt)`, `new D()` | **0** | 64 |
+
+main **37**, node **127**. Bits 2, 8, 16 are the write (§13.15.2 PutValue on
+a SuperProperty reference: `base.[[Set]](key, value, thisValue)`, i.e. the
+property is created on the RECEIVER, and a false result throws a TypeError in
+strict code); bit 64 is `super()` on a non-constructor parent.
+
+### Rows (`.tmp/5350/rows.txt`, 13; standalone non-pass on the 2026-09-29 22:47 UTC baseline)
+
+Step 1 (the write, 6 rows — all must pass):
+`language/expressions/super/prop-{dot,expr}-obj-ref-non-strict.js`,
+`prop-{dot,expr}-cls-ref-strict.js`, `prop-{dot,expr}-cls-ref-this.js`
+(the `-this` rows also read `super.getThis()` / `super.This` with `this ===
+C.prototype` — r1 step 6 called the `C.prototype` narrowing a blocker; measure
+whether the r1 rounds' `__reflect_get_receiver` read already carries the
+receiver when the method is invoked ON `C.prototype`, and fix the narrowing
+only if the write half passes and the read half is the single residual).
+
+Step 2 (`super()` on a non-constructor, 1 row): `call-proto-not-ctor.js`.
+
+Measure only (eval [[HomeObject]] bridge, derived-`this` rebinding — recorded
+by r1 step 6, unchanged): `prop-{dot,expr}-obj-val-from-eval.js`,
+`prop-dot-cls-val-from-eval.js`, `call-bind-this-value.js`,
+`call-bind-this-value-twice.js`, `call-expr-value.js`.
+
+### Step 0 — base copies and before-state
+
+`mkdir -p .tmp/5350 && git archive origin/main src | tar -x -C .tmp/5350/base-src`;
+run `rows.txt` on the unmodified tree
+(`flock /tmp/claude-0/t262.lock npx tsx scripts/run-test262-paths.mts .tmp/5350/rows.txt --isolate --standalone > .tmp/5350/rows-base.log`);
+record p10 = 37.
+
+### Step 1 — `super.x = v` / `super[k] = v` → `__reflect_set_receiver(base, key, v, this)`
+
+- Sites: `compilePropertyAssignment` (`src/codegen/expressions/assignment.ts:4179`)
+  and `compileElementAssignment` (`:5641`); the element form already has the
+  #2709 `super[super()]` guard at `:5648-5660` (`emitSuperUninitializedThisGuard`)
+  — the new arm goes right AFTER it, before any struct lowering. Add a
+  `target.expression.kind === ts.SyntaxKind.SuperKeyword` arm to the dot form
+  at the same relative position (after the poison/uninitialised-`this` checks,
+  before the frozen/non-writable static folds), standalone only
+  (`ctx.standalone`); other lanes keep their bytes.
+- Base and receiver: reuse the EMITTERS r1 built for reads —
+  `compileStandaloneSuperPropertyRead(ctx, fctx, key, …, homeObjectEmitter,
+  receiverEmitter)` in `src/codegen/expressions/new-super.ts:1502` and its two
+  callers (`compileStandaloneObjectLiteralSuperPropertyRead` `:1907`, the class
+  caller at `:1992`) show how the home object (`emitClosedLiteralSuperBase` for
+  an object literal, `emitLazyProtoGet` of `C.prototype` for a class) and the
+  receiver (`this`) are materialised. Factor the two emitters into a shared
+  `resolveStandaloneSuperBase(ctx, fctx, anchor)` (base = `__getPrototypeOf(home)`,
+  receiver = current `this`) if they are not already separable; do not
+  duplicate the [[HomeObject]] lookup.
+- Order §13.15.2 / §13.3.7.1: GetThisBinding first (the existing guard), then
+  the base (spill `__getPrototypeOf(home)` to a local BEFORE the key, as r1
+  step 2 did for reads), then ToPropertyKey of the element key
+  (`__to_property_key`, `object-runtime.ts:1509`), then the RHS, then
+  `reserveOrdinarySetWithReceiver(ctx)` + `noteReflectSetReceiverCall(ctx)` and
+  `call __reflect_set_receiver(base, key, value, receiver)`.
+- Result: in strict code — `isStrictContext(target, ctx.inferModuleStrictArguments)`;
+  class bodies are always strict — an `i32 0` result throws
+  `emitThrowTypeError(ctx, fctx, "Cannot assign to read only property '<key>' of object")`
+  (the frozen-prototype row); sloppy code drops it. The assignment expression's
+  value is the RHS (keep it in a local; the write consumes the stack copy).
+- A base class (`class C { method() { super.x = 8 } }`, no `extends`) has
+  `%Object.prototype%` as the base (r1 step 3's "undefined-shaped default" was
+  for READS of a base class; the WRITE must reach `__reflect_set_receiver` with
+  the `%Object.prototype%` singleton — `object-runtime-prototype.ts:504-510`
+  `OBJECT_PROTO_SINGLETON` — as base; `prop-dot-cls-ref-strict.js` uses exactly
+  this shape). `class C extends null` → TypeError on the write (mirror r1 step 3).
+- Compound (`super.x += v`, `operator-assignment.ts:1881`) and update
+  (`super.x++`) forms: record, do not build, unless a row needs them (none in
+  the list).
+
+### Step 2 — `super(...)` on a non-constructor parent throws a TypeError after ArgumentsListEvaluation
+
+`call-proto-not-ctor.js`: `class C extends Object {}`, then
+`Object.setPrototypeOf(C, parseInt)`, then `new C()` — GetSuperConstructor
+(§13.3.7.2 step 3: `activeFunction.[[GetPrototypeOf]]()`) yields `parseInt`,
+which is not a constructor → TypeError, and the arguments were already
+evaluated (step 5 of SuperCall evaluation: ArgumentListEvaluation runs BEFORE
+the IsConstructor check). Find where a derived constructor's `super(...)` call
+resolves its parent on standalone (`src/codegen/expressions/new-super.ts`,
+the `extends Object` / builtin-parent arm) and, when the class object's
+prototype has been REBOUND at runtime (`__object_setPrototypeOf` on a class
+value — grep `setPrototypeOf` in `class-static-*.ts` / `dynamic-proto.ts:870`
+`prependArms("__object_setPrototypeOf"`), read the live parent, test
+`__reflect_is_constructor` (`src/codegen/reflect-construct-native.ts`,
+`ensureReflectIsConstructor`), and throw. If the class object's prototype is
+not runtime-mutable today (the static parent is baked), record the mechanism
+and leave the row: this step is measure-first and must not widen into
+#3371's NewTarget carrier.
+
+### Step 3 — pins, controls, gates, record
+
+- Extend `tests/issue-5350-super-property-r1.test.ts` (or add
+  `tests/issue-5350-r2-super-property-write.test.ts`): p10's bits 2, 8, 16 as
+  "RED on base" pins, bit 32 as a guard, plus a sloppy object-literal frozen
+  write (no throw, no own property) and a `super[k] = v` element pin. Red on
+  `.tmp/5350/base-src`, recorded.
+- Controls (0 pass → non-pass, per-path set diff, `--isolate`): the r1 plan's
+  lists — every currently-passing ES2015 standalone row under
+  `language/expressions/super/**` (~80), `language/expressions/object/**`
+  (~250) and `language/statements/class/**` + `language/expressions/class/**`
+  (~1,000; run once, at the end, on the merged tree, under the lock), and the
+  suites `tests/issue-5350*.test.ts`, `issue-5195*`, `issue-3522-super-accessor`,
+  `issue-3024-static-super-arity`, `issue-2709*`.
+- Gates: `node scripts/check-loc-budget.mjs && node scripts/check-func-budget.mjs && node scripts/check-coercion-sites.mjs && npm run -s check:oracle-ratchet && npm run -s check:dead-exports`,
+  then loc/func again with `LOC_GATE_BASE=$(git rev-parse origin/main)`, `npm
+  run -s typecheck`. Growth grants: add the touched files to THIS file's
+  `loc-budget-allow` with a dated r2 rationale (`assignment.ts`,
+  `new-super.ts`, and the new helper module if any).
+- Record: append `## 2026-09-30 r2 implementation (Opus)` to THIS file with
+  the before/after row table, p10 before/after, the pins' base verdict, the
+  control diff and the gates; set `status: done` with `completed:` ONLY if the
+  six step-1 rows pass and zero rows are lost — otherwise leave
+  `in-progress` and say which criterion fails. Add a one-paragraph pointer in
+  `plan/issues/6651-es2015-standalone-100pct-execution-plan.md`.
+
+### Acceptance criteria (r2)
+
+- The six step-1 rows pass on standalone, `--isolate`, on the branch with
+  `origin/main` merged in; p10 ≥ 63 (127 with step 2).
+- 0 pass → non-pass across the super/object/class controls; non-standalone
+  bytes identical on the pin programs (A/B sha256 with `target` omitted).
+- All gates green; `src/ir/select.ts` untouched.
+
+### Lane protocol (r2)
+
+Worktree `/home/user/js2/.claude/worktrees/issue-5350-r2` on branch
+`issue-5350-r2-super-property-write` off `origin/main`; `ln -s
+/home/user/js2/node_modules` and `ln -s /home/user/js2/test262` into it;
+never edit `/home/user/js2` (the lead's base tree). One runner at a time:
+`flock /tmp/claude-0/t262.lock` around every `run-test262-paths.mts`. Push the
+branch early (`git push -u origin <branch>`, hook output to a log, confirm
+with `git ls-remote`); no PR — the lead opens it. Commit subject ends ` ✓`;
+author `Thomas Tränkler <git@thomas.traenkler.com>`, committer `Claude
+<noreply@anthropic.com>`; trailers `Co-Authored-By: Claude Opus 5.5
+<noreply@anthropic.com>`, `Claude-Session:
+https://claude.ai/code/session_01FEGi3DmyPRPD5dx4kWU8hs`, `Model: Claude Opus
+5.5 High`; never `--no-verify`; no `git stash`.
 

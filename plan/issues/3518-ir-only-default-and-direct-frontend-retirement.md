@@ -15416,3 +15416,157 @@ and both issue histories. No legacy retirement or public Number parity is claime
 See plan/log/ir-migration-handoff-2026-09-30.md for preserved worktrees, claims,
 validation failures and exact continuation steps. The pending effects suite ended
 with115 passed and10 skipped due to setup failure; it is not ready for integration.
+
+### 2026-09-30 Host UTF8 literal-key parity implementation plan
+
+Upstream slice `3518:host-utf8-literal-key-parity-20260930` is claimed by `ttraenkler/codex-host-utf8-literal-key-parity-20260930`; isolated branch codex/3518-host-utf8-literal-keys-20260930 starts at fresh upstream c72cb7bee008b28531ea2879f0fe7a02971bc64a. The complete13-PR/789-file census found literals.ts overlap only in import sections and unrelated functions of held PR5753/5784, with no overlapping static key blocks. Preserve those independent fixes and do not adopt or update their PRs.
+
+Pass-through import instrumentation on the exact original Number712 source observes UTF16 keys valueOf/toString and result712; UTF8 passes opaque native String carriers, normalizes both names to `[object Object]` and returnsNaN. Repair constant-key emission at the actual open-object-literal host import boundary. Use existing addHostStringConstantGlobal to supply a real host String while allowing source values to retain their native carrier. Apply to data, method and accessor constant keys in compileOpenObjectLiteral; keep native standalone/WASI/strict-no-host key emission through the original native helper. Do not change generic ToPropertyKey, numeric coercion, fixture text/expected712, exception handling or the incomplete IR consumer.
+
+Add a focused regression suite with actual import key/descriptors and runtime observations: original712 on host/standalone and both encodings; separate static keys for getters/setters/data/methods; source-order key/effect behavior; Unicode/lone-surrogate property names; abrupt getters; module initialization; and a genuine computed-key control that remains outside this static-key branch. Compare source semantics with the JS oracle and validate positive populations, actual imports and native no-import lanes. Capture reporting errors and preserve all pre-fix failures. Use one nice10 4GB worker for focused tests, typecheck, gates and normal hooks. Retain legacy and the IR gaps; only protected-queue verified main delivery can complete this slice.
+
+### Host key boundary and abrupt Get repair — 2026-09-30
+
+Claim `3518:host-utf8-literal-key-parity-20260930` covers static keys in
+`compileObjectLiteralWithAccessors` (the earlier `compileOpenObjectLiteral` name
+was inaccurate), plus the actual terminal host read/write/method boundaries.
+Use existing host string-constant globals only for keys passed to host operations;
+retain native key carriers on standalone/WASI paths and native operations. String
+literal computed reads use the same boundary; evaluated keys retain evaluation.
+Preserve peer PR5753/5784 blocks; fresh authoritative claims and all file pages of
+13 open PRs (789 entries) were audited before expansion.
+
+Claim `3518:host-coercion-get-abrupt-20260930` owns only the ordinary property Get
+in `_hostToPrimitive`: skip direct JS Get on the raw opaque carrier, retain real
+Get for host objects and runtime proxy facades, and propagate the original thrown
+value. Retain sidecar/compiled fallback order; no exception-class-based swallowing.
+The legacy heuristic does not prove arbitrary external proxy classification safe.
+
+Exact-main c72cb7b baseline: 21/29, eight failing rows, zero unhandled errors.
+Definition-only repair: 23/29, six failing rows. Both original Number712 rows
+now pass; failed broader controls remain preserved. Abrupt getter UTF16 is also
+broken on main. Keep all original sources and assertions, then add actual raw
+carrier, proxy and abrupt identity controls. This is a legacy oracle repair, not
+a native IR provider grant or retirement proof.
+
+Validation of the expanded 45-case set: exact-main28/45 versus repaired45/45,
+17 measured fail-to-pass and zero pass-to-fail, zero skipped/unhandled. TS7 and
+LOC/function/oracle/coercion/tag/inventory/dead-export gates passed. Inventory
+1710 modules remains architecture-incomplete; the new helper is honest legacy
+debt. Five nearby suites measured156/157; the one failure is the old exact
+frontend layer assertion expecting contracts-only roots/floor1, while current
+main already has three active entry roots/floor3. Preserve and verify this old
+failure on main. Four nearby semantic suites passed without errors.
+
+Independent review found one additional index hazard: deferred member-get fill
+snapshots method singleton global indices before emitting its fallback key.
+Reserve real host key imports during member-get/member-set reservation, before
+any detached method-arm snapshot; fill must not mint host imports. Add an actual
+UTF8 class-method-value cache control and measure it against the missing-reserve
+mutation. No budget exemptions or timeout changes.
+
+The broader class-prototype identity control is not a positive witness in the
+host-first legacy oracle: the full two-method module-global source returns-1 in
+both UTF16/UTF8 before invoking its method. Preserve the full source and failed
+validation8 report separately; do not claim class/prototype equality repaired.
+The cache control below therefore checks actual repeated-read identity, distinct
+method values, callable result and module-global counter across fresh instances.
+Mutation attribution is required for the specific reserve/fill index hazard.
+
+Final reviewed set: exact-main30/47 versus repaired47/47;17 fail-to-pass, zero
+regressions/skipped/unhandled errors. Reservation-removal mutation fails only
+the UTF8 cache control with Wasm validation of an immutable-global assignment;
+UTF16 remains passing. All source/test hashes restored. Final seven gates pass.
+The historical frontend exact-policy assertion reproduces on exact main124/125
+and repaired124/125 (same sole failure), so no original assertion or activation
+record was changed to green this slice. Published handoff is
+plan/log/ir-host-key-parity-handoff-2026-09-30.md.
+
+Final neighboring semantic recheck after reservation:32/32, no skip/unhandled
+errors or source drift. Fresh upstream remains c72cb7b; both claims and all13
+open PRs/789file entries reverified before publication. Shared hunks remain
+disjoint; no other PR or pending integration was adopted.
+
+### Native String exotic own-descriptor implementation — 2026-09-30
+
+Claim `3518:string-exotic-own-descriptors-20260930` is held on upstream
+issue-assignments by `ttraenkler/codex-string-exotic-own-descriptors-20260930`,
+branch `codex/3518-string-exotic-descriptors-20260930`, isolated from the pending
+Number integration. Fresh base c72cb7bee008b28531ea2879f0fe7a02971bc64a; all14 open
+PRs/all805 file rows checked. Shared issue/history and inventory row additions
+remain disjoint; no competing new source/test path.
+
+Implement checked native canonical decimal index parsing through2^32-2 (i64
+result with-1 absence, without coercing canonical keys), virtual String index
+descriptors using the authentic String wrapper's immutable private payload and
+one UTF16 code unit, and ordinary-first shared own lookup. Authenticate exact
+wrapper layout, ordinary lookup, native String/Symbol and flatten owners in one
+reserve/freeze/fill/completion protocol. Runtime tests must use real native
+carriers and functions, shifted spaces, UTF8/UTF16/rope/slice/surrogates, ordinary
+entries and prototype-cursor traversal; forged/copied/stale/mutated dependencies
+and bodies must refuse. Source: ECMA26210.4.3.1–5,
+https://tc39.es/ecma262/multipage/ordinary-and-exotic-objects-behaviours.html#sec-string-exotic-objects.
+
+This is an algorithm/issued resource prerequisite, not complete StringCreate,
+Object realm or consumer completion. Next complete actual own length creation,
+compatible definition/Set/Delete integration and full OwnPropertyKeys ordering
+(including2147483648..4294967294); then join the shared own lookup at every
+prototype cursor and mutation path and authenticate real String.prototype.
+The legacy donors' appended-length ordering and signed-i32 index cap are not
+certificates. Original public Number9 fixtures, pending56 paths and legacy
+retirement policy remain unchanged. No status2-to-absence shortcut.
+
+
+Validation and delivery checkpoint: the branch was refreshed through main
+28abc9a09761a00e11d2ecf5b15ba9b95b9cb5ba, preserving both shared histories and
+all four new source/test file hashes. That main commit delivers host repair
+PR6342: all 16 committed blobs and ancestry verified. This String slice is
+still pending publication and protected queue delivery.
+
+The String execution/authority suite passes 146/146 with no skipped rows in
+both UTF8 and UTF16 configurations. Wrapper storage comparison adds 178/178;
+ordinary lookup comparison adds 35/35. These are separate runs, not a combined
+conformance denominator. TS7 and LOC/function/oracle/coercion/tag/dead-export
+gates pass. Inventory is valid with zero errors and architectureIncomplete;
+this addition does not claim completion of the broader architecture.
+
+Mutation control: replacing the unsigned index maximum with the signed-i32
+maximum causes all 8 selected boundary tests to fail (138 other rows filtered
+by the test pattern); canonical source restored with no source-pin drift.
+Fresh-process native fixture resolves the same 45 repository source modules
+with no TypeScript library/frontend module. The hardened detector checks the
+inventory and refuses a real frontend import before any emission (exit2,
+one blocked import, emitted0). Total loader counts vary with the tsx cache
+(81 cold,48 warm); the repository closure is identical. The original failed
+loader-count run is retained, and the floor now measures that actual source
+closure rather than variable loader internals. This is a recipe fixture
+census, not public prepared-program replay.
+
+Earlier evidence is preserved: the first fixture setup incorrectly wrote
+exports outside the reservation ledger; the JSON report then showed132
+pending rows. The corrected fixture uses issued export reservations. The
+first inventory classification was invalid and was corrected to the existing
+native-runtime layer without an exemption. No original failure was erased.
+
+The next authenticated descriptor join must select shared String own lookup
+while keeping raw ordinary hash/find/storage independent. Compatible virtual
+data/attribute definitions should return after compatibility preflight and
+before even detached descriptor writes; accessor conversion must refuse.
+Delete must return false for virtual nonconfigurable indices without table
+mutation. Set must check shared own descriptors at every prototype cursor and
+on the distinct receiver, preserve the original receiver for setters, and
+propagate abrupt completion. StringCreate's real length entry, canonical
+String.prototype, full key order and public consumer completion remain open.
+See plan/log/ir-string-exotic-handoff-2026-09-30.md for continuation details.
+
+
+Final refreshed-base validation: TS7 passes; 359/359 tests across the String
+descriptor146, wrapper storage178 and ordinary access35 suites, zero skips.
+All seven gates pass on main28abc9a with no source-pin drift. These measure
+this native dependency slice, not the unchanged public Number nine-case bar.
+
+
+Publication base refresh: main advanced to
+88c33c80a89a2f722ada8882f69ae947d30d7180 with baseline/documentation promotion
+artifacts only, no src/tests changes. Fast-forward preserved all seven pending
+file hashes; the measured validation source graph remains identical.
