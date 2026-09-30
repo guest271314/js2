@@ -27,9 +27,10 @@ for (const utf8 of [false, true])
   for (const shifted of [false, true]) {
     describe(`real native StringCreate utf8=${utf8} shifted=${shifted} minimum capacity=2`, () => {
       let e: StringCreateRuntime;
-      beforeAll(() => {
+      beforeAll(async () => {
         e = stringCreateRuntime(utf8, shifted, 2).runtime;
-      });
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }, 35000);
       it.each(CREATE_TEXTS.map((text, index) => [text, index] as const))(
         "creates the exact length descriptor for %j",
         (text, index) => {

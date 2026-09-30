@@ -15676,3 +15676,13 @@ oracle/coercion/tag seams, boundary inventory and moved-export preservation.
 Inventory1714 modules is valid with zero errors; architecture remains incomplete.
 All6527 source pins are unchanged. Conformance documentation sync reports
 zero updates. Independent test262 corpus is clean at pinnedb363f29d,56970 files.
+
+
+Constructor PR6345 CI setup repair: exact head7c78d759 failed quality in run
+36682317965/job109780278178. Four default10s fixture hooks timed out;22 tests
+passed,68 skipped, one worker RPC error. Preserve that original log; those rows
+are not passing evidence. Disarmed auto-merge and verified no queue entry, then
+held the existing PR before edits. The constructor slice claim remains ours.
+Only its fixture hook now uses the repository's existing35s test budget and
+yields after construction, like the definition fixture. Keep all90 semantic
+checks, production providers, normal hooks and protected gates unchanged.
