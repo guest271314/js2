@@ -43,6 +43,11 @@ loc-budget-allow:
   - src/codegen/regexp-lastindex-carrier.ts
   - src/codegen/function-instance-props.ts
   - src/codegen/object-own-key-order.ts
+  # S4: the new leaf define-rejection-channel.ts, the empty-literal proto arg
+  # (calls.ts compileProtoArg), the rejection-park hook in the descriptor
+  # TypeError builder (runtime layer).
+  - src/codegen/define-rejection-channel.ts
+  - src/runtime/wasmgc/values/ordinary-object-descriptor-common.ts
   - src/codegen/object-literal-reflective-escape.ts
   - src/codegen/proxy-trap-read.ts
   - src/codegen/object-proto-to-locale-string.ts
@@ -86,6 +91,12 @@ func-budget-allow:
   # String-wrapper `length` placement call in the gOPN walk (+1).
   - src/codegen/object-runtime.ts::ensureObjectRuntime
   - src/codegen/object-runtime-descriptors.ts::buildObjectDescriptorHelpers
+  # 2026-09-30 (#6770 S4, Opus): the Reflect.defineProperty boolean hook and
+  # the non-Reflect-function decline (compileNamespaceStaticCall), the
+  # Reflect-writer marker in the EMPTY-literal widening arm (+1 each).
+  - src/codegen/expressions/call-namespace-static.ts::compileNamespaceStaticCall
+  - src/codegen/declarations/object-shape-widening.ts::collectEmptyObjectWidening
+  - src/codegen/declarations/object-shape-widening.ts::scanStatements
 ---
 
 ## Problem

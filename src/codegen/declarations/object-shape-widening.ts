@@ -595,6 +595,7 @@ export function collectEmptyObjectWidening(
           if (ctx.standalone && !ctx.objectHashConsumerVars.has(varName)) {
             for (const s of stmts) {
               markStandaloneObjectMutationTargets(ctx, s, varName, ctx.objectHashConsumerVars);
+              markStandaloneReflectiveWriteTargets(s, varName, ctx.objectHashConsumerVars); // (#6770 S2/S4)
             }
           }
 

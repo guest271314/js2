@@ -758,8 +758,11 @@ export function compileObjectAssignArg(ctx: CodegenContext, fctx: FunctionContex
 export function compileProtoArg(ctx: CodegenContext, fctx: FunctionContext, arg: ts.Expression): void {
   if (
     ctx.standalone &&
+    // (#6770 S4) an EMPTY `{}` too: compiled as anything but a `$Object` the
+    // writers coerce it to null, the encoding of the `%Object.prototype%`
+    // terminal, so `Reflect.setPrototypeOf(nonExtensible, {})` read as a
+    // same-prototype no-op and answered `true`.
     ts.isObjectLiteralExpression(arg) &&
-    arg.properties.length > 0 &&
     arg.properties.every(
       (p) => ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p) || ts.isSpreadAssignment(p),
     ) &&

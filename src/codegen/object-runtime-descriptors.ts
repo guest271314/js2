@@ -54,6 +54,7 @@ import { reserveVecPropsKeySource, vecPropertiesKeySourceArm } from "./vec-props
 import { protoIndexOwnViewSubstituteInstrs } from "./proto-index-store.js"; // (#2175 P2) own-view companion substitution
 import { CLOSURE_PROTO_OF } from "./closure-prototype-edge.js";
 import { stringExoticLengthBeforeNamedKeyInstrs } from "./object-own-key-order.js"; // (#6770 S3)
+import { ensureDefineRejectionGlobal } from "./define-rejection-channel.js"; // (#6770 S4)
 
 function closurePrototypeDescriptorArm(
   ctx: CodegenContext,
@@ -340,6 +341,7 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
       errors: {
         constructorIdx: s4TypeErrorCtorIdx,
         tagIdx: s4ExnTagIdx,
+        rejectionGlobal: ensureDefineRejectionGlobal(ctx), // (#6770 S4)
         messages: [
           s4Literal("TypeError: Cannot define property, object is not extensible"),
           s4Literal("TypeError: Cannot redefine property: configurable attribute of a non-configurable property"),
@@ -519,6 +521,7 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
       errors: {
         constructorIdx: accTypeErrorCtorIdx,
         tagIdx: accExnTagIdx,
+        rejectionGlobal: ensureDefineRejectionGlobal(ctx), // (#6770 S4)
         messages:
           accOwnKeyIdx === undefined
             ? [accLiteral("TypeError: Cannot define property, object is not extensible")]
@@ -599,6 +602,7 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
         errors: {
           constructorIdx: accTypeErrorCtorIdx,
           tagIdx: accExnTagIdx,
+          rejectionGlobal: ensureDefineRejectionGlobal(ctx), // (#6770 S4)
           messages: [
             accLiteral("TypeError: Cannot redefine property: configurable attribute of a non-configurable property"),
             accLiteral("TypeError: Cannot redefine property: enumerable attribute of a non-configurable property"),

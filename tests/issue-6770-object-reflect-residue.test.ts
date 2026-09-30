@@ -214,3 +214,52 @@ var o = {}; o.name = 1; o.length = 2; if (eq(Object.keys(o), ["name", "length"])
     T,
   );
 });
+
+describe("#6770 S4 — Reflect residue", () => {
+  it(
+    "Reflect.setPrototypeOf answers false on a non-extensible target, even for a fresh {} (RED on base)",
+    async () => {
+      const src = `var __r = 0;\n${SV}
+var o1 = {}; Object.preventExtensions(o1);
+if (sv(Reflect.setPrototypeOf(o1, {}), false)) __r |= 1;
+if (sv(Object.getPrototypeOf(o1), Object.prototype)) __r |= 2;
+var fresh = Object.create({ tag: 1 }); if (sv(Object.getPrototypeOf(fresh).tag, 1)) __r |= 4;
+var p = {}; var c = Object.create(p); if (sv(Object.getPrototypeOf(c), p)) __r |= 8;\n${END}`;
+      expect(await probe(src)).toBe(15);
+    },
+    T,
+  );
+
+  it(
+    "Reflect.defineProperty returns false for a rejected define, rethrows everything else (RED on base)",
+    async () => {
+      const src = `var __r = 0;\n${SV}
+var o = {}; o.p1 = "foo";
+if (sv(Reflect.defineProperty(o, "p1", {}), true)) __r |= 1;
+if (sv(Reflect.defineProperty(o, "p2", { value: 42 }), true)) __r |= 2;
+Object.freeze(o);
+if (sv(Reflect.defineProperty(o, "p2", { value: 43 }), false)) __r |= 4;
+if (sv(o.p2, 42)) __r |= 8;
+if (sv(Reflect.defineProperty(o, "p4", { value: 1 }), false)) __r |= 16;
+var threw = 0; try { Object.defineProperty(o, "p5", { value: 1 }); } catch (e) { if (e instanceof TypeError) threw = 1; }
+if (threw) __r |= 32;
+var d = {}; Object.defineProperty(d, "value", { get: function () { throw new RangeError("x"); } });
+var kind = 0; try { Reflect.defineProperty({}, "q", d); } catch (e) { kind = e instanceof RangeError ? 1 : 2; }
+if (sv(kind, 1)) __r |= 64;\n${END}`;
+      expect(await probe(src)).toBe(127);
+    },
+    T,
+  );
+
+  it(
+    "Reflect's Object.prototype members are ordinary method calls (compile refusal on base)",
+    async () => {
+      const src = `var __r = 0;
+if (Reflect.enumerate === undefined) __r |= 1;
+if (Reflect.hasOwnProperty("enumerate") === false) __r |= 2;
+if (Reflect.hasOwnProperty("ownKeys") === true) __r |= 4;\n${END}`;
+      expect(await probe(src)).toBe(7);
+    },
+    T,
+  );
+});
