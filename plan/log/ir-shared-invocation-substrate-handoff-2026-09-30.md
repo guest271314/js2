@@ -50,3 +50,30 @@ SKIP_SLOW_PRECOMMIT or protection bypasses. Integration metadata/handoff commit
 and publication follow; no main delivery is claimed in this source checkpoint.
 Only verified main delivery completes this claim. Preserve every existing
 fixture, failure and prepared lane. No polling loops or protection bypasses.
+
+
+## Main refresh in progress — 2026-09-30
+
+Dependency6358 is verified delivered as a37e18b9, with all16 blobs and102 actual
+protected shards. Root integration worktree:
+/private/tmp/js2-ir-shared-invocation-main-delivery-20260930; branch
+codex/3518-shared-invocation-main-delivery-20260930. Existing PR6359 is held,
+auto-admission disabled and unqueued by effect; head8f286442 remains remote.
+Local noncommitting merge uses freshly fetched main1df04af5. All four worker
+files and93 incoming nonmetadata paths are exact. Three metadata conflicts are
+resolved by retaining main and the substrate record;1737 inventory rows, backend
+floor44. Formatter caught an incomplete metadata resolution before tests;
+original conflict sides and diagnostic are retained and complete content restored.
+Scoped validation and normal hooks remain pending. Preserve original
+receipts and all unrelated work. No substrate main delivery is claimed.
+
+
+The final refresh passed TS7, all 677/677 tests in ten suites and all seven
+required preservation gates. All 14,562 tracked/source/control pins matched
+before/after; zero skipped, todo, pending or worker errors. The independent
+composition review pins 101 exact files, preserving every main inventory
+record and incoming source change. See the integration worktree's
+.tmp/invocation-main-delivery/validation-_kocypuz and astra-composition-review.
+Normal signed hooks and existing-PR publication are the next steps. Do not
+count this as main delivery or complete the claim until the exact captured
+head and protected queue evidence are independently verified on main.

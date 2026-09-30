@@ -94,9 +94,11 @@ import {
 } from "../native-construct.js"; // (#3981 / #1058)
 import {
   markClassValueConstructSite,
+  markPromiseSubclassValueRead,
   moduleHasF64TypedConstructFormal,
   moduleHasRefTypedConstructFormal,
 } from "../standalone-class-construct.js"; // (#5383 S2g, #6615, #6619)
+import { resolvePromiseSubclassName } from "./promise-subclass.js"; // (#5197 r3)
 import { armExternF64ArgTypeGuard, armExternRefArgTypeGuard } from "../extern-arg-marshal.js"; // (#6615 / #5383 S28, #6619 / #5383 S32)
 import { armConstructIsConstructorGuard } from "../construct-is-constructor-guard.js"; // (#6612 / #5383 S25)
 import { linkCompatibleDeclaredStructAncestor } from "../struct-hierarchy-layout.js";
@@ -171,6 +173,8 @@ import {
   wasmFuncReturnsVoid,
 } from "./helpers.js";
 import { buildThrowJsErrorInstrs } from "../js-errors.js"; // (#5350 r2, R2) super-call callable guard
+import { TA_INTRINSIC_ABSTRACT_MSG } from "./calls.js"; // (#6769 S7d)
+import { buildTypedArrayIntrinsicCarrierMatch } from "../ta-static-from-of-spec.js"; // (#6769 S7d)
 import { localGlobalIdx } from "../registry/imports.js";
 import { ensureGetUndefined, ensureLateImport, flushLateImportShifts } from "./late-imports.js";
 import { holeToUndefinedInstrs } from "../array-holes.js";
@@ -4531,6 +4535,19 @@ export function emitNativeConstructRuntimeArgv(
  * construction.
  */
 /**
+ * (#6769 S7d) §23.2.1.1: `new %TypedArray%(…)` throws TypeError. The intrinsic
+ * is an ordinary `$Object` carrier, so the construct arms below built an object
+ * from it and returned normally. Only in a module that deals in TypedArray
+ * constructor values (the match reserves the carrier's global); every other
+ * dynamic `new` keeps its bytes. `descLocal` holds the evaluated callee (anyref).
+ */
+function emitTaIntrinsicConstructThrow(ctx: CodegenContext, fctx: FunctionContext, descLocal: number): void {
+  if (ctx.taCtorTypeIdx < 0 && !ctx.moduleUsesDynTaView) return;
+  const abstractThrow = buildThrowJsErrorInstrs(ctx, "TypeError", TA_INTRINSIC_ABSTRACT_MSG, { flush: fctx });
+  fctx.body.push(...buildTypedArrayIntrinsicCarrierMatch(ctx, descLocal, abstractThrow));
+}
+
+/**
  * (#5197 Slice B) §7.2.4 IsConstructor for a runtime callee that turned out to
  * be one of the compiler's own §17 built-in function objects — a promise
  * `resolve`/`reject`, a GetCapabilitiesExecutor, a reified `Array.isArray`, …
@@ -4550,6 +4567,7 @@ export function emitNativeConstructRuntimeArgv(
  * `descLocal` is the `anyref` slot already holding the evaluated callee.
  */
 function emitBuiltinFnNotAConstructorGuard(ctx: CodegenContext, fctx: FunctionContext, descLocal: number): void {
+  emitTaIntrinsicConstructThrow(ctx, fctx, descLocal); // (#6769 S7d) `%TypedArray%` has a throwing [[Construct]]
   const isBuiltinIdx = ctx.funcMap.get("__builtinfn_is_builtin");
   if (isBuiltinIdx === undefined) return;
   const guardBody: Instr[] = [];
@@ -7154,6 +7172,14 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         }
 
         fctx.body.push({ op: "call", funcIdx });
+        // (#5197 r3 Step 1d) a standalone Promise-rooted class's `<C>_new` answers the
+        // `$Promise` carrier as externref (D4), not the class struct: report what it returns.
+        const promiseRooted = ctx.standalone && resolvePromiseSubclassName(ctx, syntheticName) !== undefined;
+        const ctorResult = promiseRooted ? funcSignatureOf(ctx, funcIdx)?.results[0] : undefined;
+        if (ctorResult?.kind === "externref") {
+          markPromiseSubclassValueRead(ctx);
+          return ctorResult;
+        }
         const structTypeIdx = ctx.structMap.get(syntheticName)!;
         return { kind: "ref", typeIdx: structTypeIdx };
       }
@@ -8105,6 +8131,9 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
             const dtav = emitDynamicTaViewConstruct(ctx, fctx, ctorAnyLocal, args[0]!, args[1], args[2], (e, h) =>
               compileExpression(ctx, fctx, e, h),
             );
+            // (#6769 S7d) …after the arguments are evaluated (the view arm
+            // declines for a non-`$__ta_ctor` callee, so it built nothing).
+            if (dtav) emitTaIntrinsicConstructThrow(ctx, fctx, ctorAnyLocal);
             if (dtav) return dtav;
           }
         }
