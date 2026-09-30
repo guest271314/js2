@@ -1746,6 +1746,7 @@
     }
   ],
   "files": [
+    { "path": "src/backend/wasmgc/resources/native-string-own-keys.ts", "state": "clean", "layer": "backend-wasmgc" },
     {
       "path": "src/runtime/wasmgc/values/string-create-body.ts",
       "state": "clean",
@@ -1846,6 +1847,8 @@
       "state": "clean",
       "layer": "backend-wasmgc"
     },
+    { "path": "src/runtime/wasmgc/values/string-index-key-body.ts", "state": "clean", "layer": "native-runtime" },
+    { "path": "src/runtime/wasmgc/values/string-own-keys-body.ts", "state": "clean", "layer": "native-runtime" },
     {
       "path": "src/wasm/model/instruction-walk.ts",
       "state": "clean",
