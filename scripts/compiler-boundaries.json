@@ -365,9 +365,10 @@
         "src/runtime/wasmgc/values/prototype-seeder-bodies.ts",
         "src/runtime/wasmgc/values/prototype-chain-bodies.ts",
         "src/runtime/wasmgc/values/primitive-wrapper-layouts.ts",
-        "src/runtime/wasmgc/values/primitive-wrapper-bodies.ts"
+        "src/runtime/wasmgc/values/primitive-wrapper-bodies.ts",
+        "src/runtime/wasmgc/values/to-object-body.ts"
       ],
-      "minModules": 85
+      "minModules": 86
     },
     {
       "id": "standalone-platform",
@@ -14448,6 +14449,11 @@
     },
     {
       "path": "src/runtime/wasmgc/values/primitive-wrapper-bodies.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/to-object-body.ts",
       "state": "clean",
       "layer": "native-runtime"
     }

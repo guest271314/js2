@@ -753,7 +753,7 @@
     {
       "name": "JSON",
       "testCategories": ["built-ins/JSON"],
-      "passCount": 118,
+      "passCount": 119,
       "totalCount": 165,
       "editionSpread": [
         {
@@ -763,7 +763,7 @@
         },
         {
           "edition": "ES2015",
-          "pass": 23,
+          "pass": 24,
           "total": 28
         },
         {
@@ -839,7 +839,7 @@
     {
       "name": "Arrays",
       "testCategories": ["built-ins/Array", "built-ins/ArrayIteratorPrototype", "language/expressions/array"],
-      "passCount": 2330,
+      "passCount": 2336,
       "totalCount": 3161,
       "editionSpread": [
         {
@@ -849,12 +849,12 @@
         },
         {
           "edition": "ES2015",
-          "pass": 215,
+          "pass": 220,
           "total": 263
         },
         {
           "edition": "ES2016",
-          "pass": 27,
+          "pass": 28,
           "total": 45
         },
         {
@@ -1151,7 +1151,7 @@
     {
       "name": "Proxy / Reflect",
       "testCategories": ["built-ins/Proxy", "built-ins/Reflect"],
-      "passCount": 889,
+      "passCount": 896,
       "totalCount": 1072
     },
     {
@@ -1282,7 +1282,7 @@
     {
       "name": "Array.prototype.includes",
       "testCategories": ["built-ins/Array/prototype/includes"],
-      "passCount": 24,
+      "passCount": 25,
       "totalCount": 29
     },
     {
@@ -1564,12 +1564,12 @@
     {
       "name": "Temporal",
       "testCategories": ["built-ins/Temporal"],
-      "passCount": 4495,
+      "passCount": 4494,
       "totalCount": 4603,
       "editionSpread": [
         {
           "edition": "ES2026",
-          "pass": 4495,
+          "pass": 4494,
           "total": 4603
         }
       ]

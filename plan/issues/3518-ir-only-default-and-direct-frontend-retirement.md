@@ -15375,3 +15375,44 @@ This provides wrapper storage, not completed canonical realm prototypes, native
 String exotic behavior, ToObject factory population, or public Number parity.
 No legacy retirement is authorized by this slice. Completion requires verified
 upstream main ancestry and reviewed file content; a local test pass is not delivery.
+
+### ToObject algorithm body (claimed 2026-09-28)
+
+Upstream `issue-assignments` claim `3518:to-object-body-20260928` belongs to
+`ttraenkler/codex-to-object-body-20260928`. Independent delivery branch:
+`codex/3518-to-object-body-20260928`, based on verified upstream main
+`17fd40474db1b61caec1b4920fb056cc690e4a32`. The pending Number integration
+work and its original failing parity fixture are preserved separately.
+
+Implementation follows the full ToObject control flow from
+https://tc39.es/ecma262/multipage/abstract-operations.html#sec-toobject:
+throw TypeError for undefined/null; wrap Boolean, Number, String, Symbol and
+BigInt using brand-specific factories; preserve every existing object by
+identity. Factories receive unchanged primitives, and the body performs no
+property access or public-constructor lookup. Error operands and coordinates
+are captured; abrupt completions propagate without later work.
+
+The body consumes explicit semantic bindings. Native realm prototypes and
+complete native String exotic factories are required from physical owners;
+ordinary wrapper storage alone does not satisfy that contract. Tests execute
+actual Wasm with imported semantic controls, covering primitive payloads,
+fresh identity, UTF-16 descriptors, nullish tagged errors, revoked proxies,
+foreign objects, shifted coordinates, abrupt propagation and metadata refusal.
+This addition registers one native runtime module (floor 83 to 84) without
+rewriting the historical boundary receipts.
+
+Initial integration-tree evidence: 96/96 focused tests, TS7, two selected
+boundary checks and six gates passed. The isolated main-based branch also passes 96/96 focused tests, TS7 and all
+six gates; logs are in `.tmp/to-object/`. Normal commit hooks and queue delivery
+remain pending. These results do not certify native provider
+completion, public Number equality, full IR coverage or legacy retirement.
+
+### 2026-09-30 delivery wrap-up
+
+Primitive wrapper PR6276 merged as1c38da1cc82be1917006136903cb8e70edd711ce;
+ancestry verified against main eb57f327340aaecb4ffd664417ff15fe4ba13905.
+ToObject PR6273 is refreshed on that exact base, retaining both inventory additions
+and both issue histories. No legacy retirement or public Number parity is claimed.
+See plan/log/ir-migration-handoff-2026-09-30.md for preserved worktrees, claims,
+validation failures and exact continuation steps. The pending effects suite ended
+with115 passed and10 skipped due to setup failure; it is not ready for integration.
