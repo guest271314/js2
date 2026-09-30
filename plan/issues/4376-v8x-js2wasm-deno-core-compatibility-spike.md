@@ -25,6 +25,7 @@ loc-budget-allow:
   - src/codegen/module-namespace-value.ts
   - src/codegen/expressions/call-namespace-static.ts
   - src/checker/usage-inference.ts
+  - src/codegen/map-runtime.ts
   # 2026-08-28: PR #5148 checkpoint (Deno runtime integration — linked
   # shared-realm/callable boundaries, runtime-eval + exception transport,
   # Promise/reflection/buffer-view/finalizer behavior). Broad, measured
@@ -83,6 +84,8 @@ loc-budget-allow:
   - src/codegen/expressions/late-imports.ts
   - src/codegen/async-scheduler.ts
 func-budget-allow:
+  # Hash the logical native-string view instead of the backing allocation.
+  - src/codegen/map-runtime.ts::ensureMapHelpers
   # Runtime operand validation reuses the shared Reflect object classifier.
   - src/codegen/expressions/call-namespace-static.ts::compileNamespaceStaticCall
   - src/codegen/expressions/calls-closures.ts::compileCallablePropertyCall
@@ -561,6 +564,33 @@ without the composed patch (10,007,948 bytes), the patch reduces the artifact
 by 3,006 bytes; the larger artifact size predates it.
 
 ## Handover
+
+### 2026-09-30: string-handle lookup verification
+
+- The bridge decodes an empty string with the correct string brand and length,
+  but receives a new handle instead of reusing the literal's Map entry.
+- A minimal decode/delete control passes. Testing sliced strings to check
+  whether collection hashing wrongly uses the whole backing array rather than
+  the native string's logical length and offset. NativeString layout is
+  `{len, off, data}`; the current Map hash scans `data.length` from index zero.
+- Confirmed by a substring Map-key regression: 2/3 controls pass on the parent,
+  the nonzero-offset substring lookup fails. Hashing logical length and offset
+  makes 3/3 pass and the full context bridge fixture passes all assertions,
+  including 512 transient-packet retirement checks. Native adapter verification
+  is now running against the freshly compiled artifact, not a stale binary.
+- Expanded Map/Set logical-view coverage including a surrogate-pair substring:
+  4/4 regressions pass. Collection controls pass 24/24, and the exact Deno
+  bootstrap remains passing (1/1). The native debug suite is live in session
+  `12218`, process `22093`; it was using 572% CPU after 2m32s, not stalled.
+  One selected function-name test failed immediately because its separate
+  `V8X_JS2WASM_FUNCTION_NAMES_WASM` variable was missing. Its source fixture is
+  included in the same context artifact; rerun with that variable after the
+  current run completes. Do not restart the running suite on a wait timeout.
+- Native run is now terminal (exit 101/SIGABRT), not still compiling. Numeric
+  coercion/exception identity passed in Rust. Reentrant callback test aborts at
+  `realm_host_mutate`: `args.this()` is not strictly equal to argument zero.
+  This is an unresolved receiver-identity boundary defect; the aborted suite
+  does not establish results for the other still-running tests.
 
 ### 2026-09-30: coercion exception ordering
 
