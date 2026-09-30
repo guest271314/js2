@@ -2582,6 +2582,13 @@ function compileClassBodiesInner(
       savedBodies: [],
       isConstructor: true,
       isDerivedConstructor: ctx.classParentMap.has(className),
+      // (#5197 r3) `resolveEnclosingClassName` reads the class off the `<C>_new`
+      // prefix, which a synthetic `__anonClass_N` name defeats: a nested
+      // `return super(executor)` in an anonymous class then lowered to nothing.
+      // Scoped to the standalone Promise-rooted (D4 carrier) classes this round.
+      ...(ctx.standalone && ctx.classBuiltinParentMap.get(className) === "Promise" && className.indexOf("_") <= 0
+        ? { enclosingClassName: className }
+        : {}),
     };
     fctx.activationEntryBody = fctx.body;
 

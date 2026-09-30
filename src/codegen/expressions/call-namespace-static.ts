@@ -87,7 +87,7 @@ import {
 } from "../promise-combinators.js";
 import { isCustomCombinatorMethod, tryEmitCustomCombinatorCall } from "../promise-custom-combinator.js";
 import { tryEmitClassReceiverCombinatorCall } from "../promise-class-receiver-drive.js"; // (#6651 D3)
-import { tryEmitClassReceiverSettleCall } from "../promise-class-receiver-settle.js"; // (#6651 D4)
+import { emitClassReceiverSettle, tryEmitClassReceiverSettleCall } from "../promise-class-receiver-settle.js"; // (#6651 D4)
 import { emitStandalonePromiseCombinatorDrive } from "../promise-combinator-drive.js";
 import type { InnerResult } from "../shared.js";
 import { brandExternMethodResult, coerceType, compileExpression, VOID_RESULT } from "../shared.js";
@@ -3164,6 +3164,18 @@ export function compileNamespaceStaticCall(
     }
     if (isResolveReject) {
       const methodName = propAccess.name.text;
+      // (#5197 r3 Step 1f) `P.resolve(x)` on a Promise subclass: the inherited static's
+      // `this` is `P`, so NewPromiseCapability(P) — not the intrinsic `%Promise%` path.
+      if (isPromiseSubclassReceiver && expr.arguments.length <= 1) {
+        const settled = emitClassReceiverSettle(
+          ctx,
+          fctx,
+          propAccess.expression,
+          expr.arguments[0],
+          methodName === "reject" ? "reject" : "resolve",
+        );
+        if (settled !== undefined) return settled;
+      }
       // (#1326 Phase 1B) Standalone-mode `Promise.resolve(v)` /
       // `Promise.reject(r)` — emit Wasm-native `$Promise` struct.new instead
       // of the JS-host `Promise_{resolve,reject}_import` (unsatisfiable in

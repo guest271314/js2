@@ -72,9 +72,24 @@ export function tryEmitClassReceiverSettleCall(
   expr: ts.CallExpression,
   settle: "resolve" | "reject",
 ): ValType | undefined {
-  if (!isStandalonePromiseActive(ctx)) return undefined;
   const ctorArg = expr.arguments[0];
   if (ctorArg === undefined || expr.arguments.length > 2) return undefined;
+  return emitClassReceiverSettle(ctx, fctx, ctorArg, expr.arguments[1], settle);
+}
+
+/**
+ * (#5197 r3 Step 1f) The shared body: `C` is `ctorArg` (the `.call` receiver, or the
+ * `P` of a direct `P.resolve(x)` / `P.reject(r)` on a Promise subclass — a static
+ * inherited from `%Promise%`, so its `this` is `P`), `valueArg` the settled value.
+ */
+export function emitClassReceiverSettle(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  ctorArg: ts.Expression,
+  valueArg: ts.Expression | undefined,
+  settle: "resolve" | "reject",
+): ValType | undefined {
+  if (!isStandalonePromiseActive(ctx)) return undefined;
   if (resolveCompiledClassReceiver(ctx, ctorArg) === undefined || shadowsGlobalValueName(ctorArg)) return undefined;
 
   const snap = snapshotSpeculative(ctx, fctx);
@@ -116,7 +131,7 @@ export function tryEmitClassReceiverSettleCall(
   // Argument evaluation (C, then x) completes before the builtin runs.
   for (const [arg, into] of [
     [ctorArg, ctorLocal],
-    [expr.arguments[1], valueLocal],
+    [valueArg, valueLocal],
   ] as const) {
     if (arg === undefined) {
       fctx.body.push(...absentValue);

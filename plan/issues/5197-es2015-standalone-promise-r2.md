@@ -35,6 +35,20 @@ loc-budget-allow:
   - src/codegen/closed-method-dispatch.ts
   - src/codegen/index.ts
   - scripts/compiler-boundaries.json
+  # 2026-09-30 (r3 implementation, Opus): three owners the plan did not name.
+  # The anonymous `new class extends Promise {…}(fn)` rows need (a) the ctor
+  # fctx of a standalone Promise-rooted class to carry `enclosingClassName`
+  # (class-bodies ~+7: the `<C>_new` prefix heuristic returns undefined for a
+  # synthetic `__anonClass_N`, so a nested `return super(executor)` lowered to
+  # nothing), (b) the receiver classifier to see an anonymous Promise-subclass
+  # type (promise-subclass ~+20 helper, call-receiver-method rewires to it), and
+  # (c) `isAsyncCallExpression` to exempt a native-lane Promise-subclass `then`
+  # from the async-call rejection wrap (expressions ~+11): §27.2.5.4 requires a
+  # throwing species constructor to propagate synchronously.
+  - src/codegen/class-bodies.ts
+  - src/codegen/expressions.ts
+  - src/codegen/expressions/call-receiver-method.ts
+  - src/codegen/expressions/promise-subclass.ts
   # Live iteration prerequisite: keep descriptor admission (+6), validated
   # assignment wiring (+11), and overlay length-deletion wiring (+30) at
   # their existing owners. The fill implementation is shared in the separate
@@ -130,6 +144,12 @@ func-budget-allow:
   - src/codegen/promise-class-receiver-drive.ts::tryEmitClassReceiverCombinatorCall
   - src/codegen/expressions/new-super.ts::compileNewExpression
   - src/codegen/array-object-proto.ts::emitPromiseProtoCatchBody
+  # 2026-09-30 (r3 implementation): the class-bodies ctor fctx gains one
+  # conditional `enclosingClassName` field (+7); the two finalize fills gain
+  # one `fillPromiseSpeciesOfClass` call each (+1).
+  - src/codegen/class-bodies.ts::compileClassBodiesInner
+  - src/codegen/index.ts::generateModule
+  - src/codegen/index.ts::generateMultiModule
   # Same validated ArraySetLength owner wiring as the LOC allowances above;
   # dynamic-length growth additionally guards null backing before copying.
   - src/codegen/vec-overlay.ts::fillVecOverlayHelpers
