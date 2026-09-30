@@ -48,8 +48,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11178,
-    "fail": 497,
+    "pass": 11185,
+    "fail": 490,
     "ce": 29,
     "skip": 0,
     "total": 11704,
@@ -120,12 +120,12 @@
       },
       {
         "name": "Proxy",
-        "pass": 322,
-        "fail": 106,
+        "pass": 329,
+        "fail": 99,
         "ce": 3,
         "skip": 0,
         "total": 431,
-        "pct": 75
+        "pct": 76
       },
       {
         "name": "Reflect.construct",
@@ -689,12 +689,12 @@
   },
   {
     "edition": "ES2016",
-    "pass": 104,
-    "fail": 12,
+    "pass": 105,
+    "fail": 11,
     "ce": 8,
     "skip": 0,
     "total": 124,
-    "pct": 84,
+    "pct": 85,
     "features": [
       {
         "name": "exponentiation",
@@ -707,12 +707,12 @@
       },
       {
         "name": "Array.prototype.includes",
-        "pass": 24,
-        "fail": 4,
+        "pass": 25,
+        "fail": 3,
         "ce": 1,
         "skip": 0,
         "total": 29,
-        "pct": 83
+        "pct": 86
       },
       {
         "name": "u180e",
@@ -752,12 +752,12 @@
       },
       {
         "name": "Proxy",
-        "pass": 0,
-        "fail": 2,
+        "pass": 1,
+        "fail": 1,
         "ce": 0,
         "skip": 0,
         "total": 2,
-        "pct": 0
+        "pct": 50
       },
       {
         "name": "Reflect",
@@ -3571,18 +3571,18 @@
   },
   {
     "edition": "ES2026",
-    "pass": 4597,
+    "pass": 4596,
     "fail": 192,
-    "ce": 132,
+    "ce": 133,
     "skip": 0,
     "total": 4921,
     "pct": 93,
     "features": [
       {
         "name": "Temporal",
-        "pass": 4498,
+        "pass": 4497,
         "fail": 107,
-        "ce": 6,
+        "ce": 7,
         "skip": 0,
         "total": 4611,
         "pct": 98
