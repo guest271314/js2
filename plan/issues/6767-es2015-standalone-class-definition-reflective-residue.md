@@ -378,9 +378,30 @@ type externref"), base-class prototypes 0, heritage 0; the 2 guards and the
 6 failures on both trees, the same 6 (none new).
 `tests/issue-{1472-es5-getprototypeof,3037-cs1c-getprototypeof-carrier,4098-error-expando,4194-*,4616,5169,5325,5347,6457,6464,6609,6617,6625,6651-c-class-expando-mop,6651-c5-builtin-subclass}`:
 4 failures on both trees, the same 4. The 9 class files under
-`tests/equivalence/` pass.
+`tests/equivalence/` pass. The one change that is not standalone-gated (the
+`compileTailDispatch` element-call yield) was probed on the host lane too:
+`.tmp/6767/p27.js` answers 220 on base and 0 (all five shapes right) on the
+branch.
 
-#### Control — running (chunks 00-01: 539/539 pass); final numbers in the next commit
+#### Control — 0 pass → non-pass attributable to the branch
+
+Population: every ES2015 row under `language/{statements,expressions}/class/**`
+that is `pass` in the 2026-09-29 22:47 standalone baseline
+(`.test262-cache/test262-standalone-current.jsonl`, edition by
+`scripts/generate-editions.ts::classifyEdition`) — **2203 rows**
+(`.tmp/6767/control.txt`, built by `.tmp/6767/control.mts`). Run on the
+merged tree, each row in a fresh child (`scripts/run-test262-paths.mts`
+`JS2WASM_ROW_ONE` mode, 3 at a time, `.tmp/6767/prun.mts`), in chunks under
+`flock /tmp/claude-0/t262.lock`.
+
+**2201 pass, 2 fail.** The two —
+`definition/methods-gen-yield-star-after-newline.js` and
+`definition/methods-gen-yield-weak-binding.js` (parse-phase negatives,
+"This statement should not be evaluated") — fail identically with the 11 src
+files swapped back to `eb57f327` (`.tmp/6767/ctl-fails-base.log`): the
+compiler accepts both sources on both trees, so they are an in-process-runner
+vs sharded-worker scoring difference on the baseline, not a regression of
+this change-set.
 
 #### Gates (bare, chained, exit code read directly)
 
@@ -388,8 +409,9 @@ type externref"), base-class prototypes 0, heritage 0; the 2 guards and the
 `param-return-inference.ts`), `check-func-budget` (no function grew: the
 edits inside `compileBuiltinStaticCall`, `compileTailDispatch` and
 `inferParamTypeFromCallSites` are line-neutral), `check-coercion-sites`,
-`check:oracle-ratchet` (+0), `check:dead-exports` — exit 0, also with
-`LOC_GATE_BASE=$(git rev-parse origin/main)`; `check-compiler-boundaries
+`check:oracle-ratchet` (+0), `check:dead-exports` — exit 0; loc/func also
+exit 0 with `LOC_GATE_BASE=c72cb7be` (main after the merged `60824ac4`
+advanced; its new commits touch none of this lane's files); `check-compiler-boundaries
 --mode inventory` exit 0 (the new leaf classified next to its siblings in
 `scripts/compiler-boundaries.json`); `check:host-import-policy` exit 0;
 `npm run typecheck` exit 0.
