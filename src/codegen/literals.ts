@@ -1483,11 +1483,17 @@ function compileObjectLiteralWithAccessors(
           currentAccIdx,
           (expression) => compileRuntimeComputedPropertyKey(ctx, fctx, expression),
           (half, isGetter) =>
-            emitObjectLiteralAccessorFn(ctx, fctx, half as unknown as ts.FunctionExpression, {
-              forceMutableCaptures: accessorForceMutable,
-              sharedRefCells: accessorSharedRefCells,
-              ...(isGetter ? {} : { forceExternrefParams: true }),
-            }),
+            emitObjectLiteralAccessorFn(
+              ctx,
+              fctx,
+              half as unknown as ts.FunctionExpression,
+              {
+                forceMutableCaptures: accessorForceMutable,
+                sharedRefCells: accessorSharedRefCells,
+                ...(isGetter ? {} : { forceExternrefParams: true }),
+              },
+              objLocal,
+            ), // (#6774 S1) [[HomeObject]] for a runtime key too
         );
         continue;
       }
