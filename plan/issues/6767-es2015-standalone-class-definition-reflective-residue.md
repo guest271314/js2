@@ -28,6 +28,12 @@ loc-budget-allow:
   - src/codegen/class-static-metadata.ts
   - src/codegen/object-runtime-prototype.ts
   - scripts/compiler-boundaries.json
+  # 2026-09-30 (#6767 implementation): ONE import line. The call-site
+  # parameter inference must withdraw its `$C` narrowing for a
+  # `<Class>.prototype` argument (the standalone prototype is an `$Object`,
+  # never a `$C`) — the predicate lives in class-proto-object.ts; the
+  # consuming condition is edited in place (line-neutral).
+  - src/codegen/declarations/param-return-inference.ts
 ---
 
 ## Problem

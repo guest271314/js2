@@ -88,6 +88,8 @@
 
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import type { Instr } from "../ir/types.js";
+import { ts } from "../ts-api.js";
+import { classIdentityFromExpression } from "./class-static-metadata.js";
 import { allocLocal } from "./context/locals.js";
 import { ensureObjectRuntime } from "./object-runtime.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
@@ -171,6 +173,34 @@ export function standaloneClassProtoObjectApplies(ctx: CodegenContext, className
   // accident through `tryEmitConstructorViaTag`'s `__tag` route and the
   // descriptor read `undefined` (`definition/constructor{,-property}.js`).
   return true;
+}
+
+/**
+ * (#6767) True when `expression` is `<Class>.prototype` for a class whose
+ * standalone prototype is the `$Object` singleton above.
+ *
+ * Its checker type is the INSTANCE type `C`, which lowers to the `$C` struct —
+ * but the value is never one. A slot typed from that expression therefore
+ * guard-casts the prototype to `ref.null $C`. The measured case is the
+ * call-site parameter inference (`declarations/param-return-inference.ts`):
+ * test262's `assertMethodDescriptor(C.prototype, 'm'); assertMethodDescriptor(C,
+ * 'sm')` agreed on `$C` for `object` (the class OBJECT is a `$C` struct too,
+ * #3976), so the prototype arrived as null and `gOPD` threw "Cannot convert
+ * undefined or null to object" (`definition/methods.js` and its five siblings).
+ * The inference withdraws the narrowing for such an argument, exactly as it
+ * does for a collection's `$NativeProto` (#5151). Name-resolved and
+ * scope-blind on purpose: a false match only keeps a parameter on `externref`,
+ * which carries every value.
+ */
+export function isStandaloneClassProtoObjectExpression(ctx: CodegenContext, expression: ts.Expression): boolean {
+  if (!ctx.standalone) return false;
+  let bare = expression;
+  while (ts.isParenthesizedExpression(bare) || ts.isAsExpression(bare) || ts.isNonNullExpression(bare)) {
+    bare = bare.expression;
+  }
+  if (!ts.isPropertyAccessExpression(bare) || bare.name.text !== "prototype") return false;
+  const className = classIdentityFromExpression(ctx, bare.expression);
+  return className !== undefined && standaloneClassProtoObjectApplies(ctx, className);
 }
 
 /**
