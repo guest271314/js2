@@ -15570,3 +15570,109 @@ Publication base refresh: main advanced to
 88c33c80a89a2f722ada8882f69ae947d30d7180 with baseline/documentation promotion
 artifacts only, no src/tests changes. Fast-forward preserved all seven pending
 file hashes; the measured validation source graph remains identical.
+
+
+### Native StringCreate implementation — 2026-09-30
+
+Claim `3518:string-create-factory-20260930` is held on upstream
+issue-assignments by `ttraenkler/codex-string-create-factory-20260930`, branch
+`codex/3518-string-create-factory-20260930`, isolated worktree
+`/private/tmp/js2-ir-string-create-20260930`. Fresh main88c33c80; all13 open
+PRs/all790 file rows checked. The worktree consumes exact descriptor checkpoint
+6f9f4a6e (PR6343 awaiting protected delivery); it does not edit that armed branch.
+
+Implement StringCreate construction state for an explicit ordinary-object
+prototype, with an internal nullable-prototype constructor extension, an
+unchanged authentic native AnyString
+payload, a fresh String subtype/property map, and an own length property with
+all three attributes false. Use unsigned UTF16 length conversion, the actual
+completed native numeric boxing owner, the issued shared length literal and
+ordinary storage insertion. Reserve all resources before freeze and authenticate
+exact layouts, ordinary lookup/storage, String/Symbol/flatten, native value plan
+and scanner plus String own-descriptor owners on completion.
+
+The general wrapper allocator's nonnull-prototype contract remains intact;
+a dedicated String constructor supports object and explicit null without
+claiming that null is part of the spec abstract operation's Object argument. Enforce a power-of-two initial capacity of at least2 before reservation
+and again on completion. After length insertion, one empty bucket must remain
+so raw ordinary lookup can terminate for an absent key. Length is sequence0,
+count1, tombstones0 and nextSeq1. Virtual indices never enter the table.
+
+Derive NativeValueResourcePlan from a complete program and exact selected
+standalone WasmGC projection with native-string representation, rather than
+ad hoc fixture flags or host semantic imports. Native tests must cover null and
+object prototypes, UTF8/UTF16, shifted spaces, slices/ropes/surrogate halves,
+original payload/table identity, exact descriptor attributes and sequencing,
+missing-key lookup at capacity2, ordinary expandos and virtual reads. Pin a
+signed-length mutation and capacity/owner/dependency/body refusals without
+executing an intentionally full one-slot table. Fresh-process resource replay
+must refuse actual frontend imports before emission and state its scope.
+
+This closes native construction and length storage; remaining Define/Set/Delete,
+key ordering, actual realm population and public prepared-program wiring stay
+part of the full migration. Keep the original public Number fixture and legacy
+path until full tested equality. No retirement or status2-to-absence shortcut.
+
+
+Fixture-only dependency access: the child branch exposes the existing exact
+storageDependencies record from the parent-owned String descriptor fixture,
+without changing its reservations or runtime behavior. The parent branch/PR
+remains untouched. Inspection also found that its utf8Storage=true fixtures
+request default WTF16 literals; that proves two layout policies, not execution
+on actual UTF8 payloads. This increment adds explicit real UTF8 payloads and
+representation assertions, preserving the original controls and denominators.
+
+
+Primary spec recheck: current ECMA26210.4.3.4 states an Object prototype
+argument. Explicit null support is an internal constructor extension and
+preserves the representation needed for nullable prototype operations; it
+is not presented as the spec argument domain. The construction resource
+does not attest installed DefineOwnProperty or OwnPropertyKeys handlers.
+Source: https://tc39.es/ecma262/multipage/ordinary-and-exotic-objects-behaviours.html#sec-stringcreate.
+Initial probe failure is preserved in validation2: exports were registered
+before freeze and the ledger refused the phase. Registration is now performed
+during filling, before seal, using the same issued observer functions.
+
+
+Validation3: TS7 and the four emitted native fixture probes pass, with actual
+UTF8 carrier assertions true in the UTF8 rows. The combined suite measures
+410/414 passing, four failures from the assertion library trying to inspect
+opaque WebAssembly references for negative toBe assertions. Original output
+is preserved. Identity controls now use Object.is boolean observations plus
+actual Wasm ref.eq for both objects and property maps, with positive self
+identity controls; no identity expectation was relaxed.
+
+
+Validation4 passes414/414 with zero skips: StringCreate90, String descriptors146,
+wrapper storage178. TS7 passes; all four emitted probes confirm exact length,
+null flags and terminating capacity2 lookup; actual UTF8 payloads are asserted.
+Signed-length mutation fails8/8 selected controls and implicit-null mutation
+fails4/4; all6527 source pins restored with no drift. Read-only review found no
+concrete resource-authentication or construction defects.
+
+Initial fresh-process census failed closed on src/ts-api.ts before emission: the
+existing synthetic codec fixture builder imports the AST-facing identity module.
+Preserve that failure. A canonical codec data fixture now stores the complete
+six-owner synthetic program, produced from that original builder and round-trip
+validated. Runtime tests decode it with projection regeneration and the full
+validator; no builder import occurs in replay. This is synthetic prepared data,
+not frontend-produced application evidence. No frontend refusal is weakened.
+
+
+Native String descriptor parent PR6343 delivered as0388aad59f56a1e23ec99457857de0745abcf0c4.
+All seven checkpoint blobs match upstream54a85ebd; ancestry verified. Only its
+scoped claim was completed. Current branch fast-forwarded to that main; eight
+pending file hashes preserved and no src/tests changes arrived from main.
+Fresh native fixture census after canonical data separation:145 unique modules,
+141 repository source modules, zero TS/frontend; actual forbidden-import probe
+exits2, blocks one resolution and emits zero bytes. This is resource fixture
+evidence, not public prepared-IR replay. Full migration remains open.
+
+
+Final current-main validation on54a85ebd: TS7 passes and414/414 tests pass
+with zero skips (90 constructor,146 descriptor,178 wrapper storage). Four
+actual emitted fixture probes pass. Seven quality gates pass: LOC/functions,
+oracle/coercion/tag seams, boundary inventory and moved-export preservation.
+Inventory1714 modules is valid with zero errors; architecture remains incomplete.
+All6527 source pins are unchanged. Conformance documentation sync reports
+zero updates. Independent test262 corpus is clean at pinnedb363f29d,56970 files.
