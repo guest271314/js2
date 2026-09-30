@@ -38,7 +38,9 @@ import {
   ITER_FAMILY_ARRAY,
   ITER_KIND_VEC,
 } from "./iterator-native.js";
-import { buildThrowJsErrorInstrs, noJsHost } from "./js-errors.js";
+import { buildThrowJsErrorInstrs, emitThrowTypeError, noJsHost } from "./js-errors.js";
+import { undefinedExternInstrs } from "./any-helpers.js";
+import { emitStableMergeSort } from "./merge-sort.js"; // (#6769 S6)
 import { ensureObjectRuntime, ensureObjVecBuilders } from "./object-runtime.js";
 import { addFuncType, getOrRegisterTaDynViewType, getOrRegisterVecType } from "./registry/types.js";
 import { ensureTaDynMopElemHelpers } from "./ta-dyn-mop.js";
@@ -75,11 +77,12 @@ export function ensureTaDynProtoMethodHelper(ctx: CodegenContext, method: string
   if (method === "subarray") return ensureTaDynSubarrayHelper(ctx);
   if (method === "map" || method === "filter") return ensureTaDynMapFilterHelper(ctx, method);
   if (method === "slice") return ensureTaDynSliceHelper(ctx);
+  if (method === "sort") return ensureTaDynSortHelper(ctx);
   return undefined;
 }
 
-/** (#6769 S4) The species producers served on the live receiver. */
-const PRODUCER_METHODS = new Set(["map", "filter", "slice"]);
+/** (#6769 S4/S6) The live-receiver producers (`sort` rewrites in place). */
+const PRODUCER_METHODS = new Set(["map", "filter", "slice", "sort"]);
 
 /**
  * (#6769 S4) Call-site half of the producers: `helper(recv, a0, a1, a2, argc)`
@@ -529,6 +532,197 @@ function ensureTaDynSliceHelper(ctx: CodegenContext): number | undefined {
     { op: "if", blockType: { kind: "empty" }, then: copy },
   );
   return finishTaDynProducer(ctx, kit, result);
+}
+
+/**
+ * (#6769 S6) §23.2.3.29 `%TypedArray%.prototype.sort(comparefn)` over a
+ * `$__ta_dyn_view`.
+ *
+ * The receiver used to fall to the dispatcher's generic `$__vec_base` arm — an
+ * ARRAY sort: the default comparator compared the ToString forms (`[20, 100,
+ * 3]` → `[100, 20, 3]`, and `-0`/`+0` kept input order), and a comparator's
+ * object result became NaN without ever running its `@@toPrimitive`.
+ *
+ * Steps, in order: (1) a present, non-`undefined`, non-callable `comparefn`
+ * throws TypeError — BEFORE ValidateTypedArray; (3) ValidateTypedArray; then
+ * SortIndexedProperties: read every element once (the f64 snapshot), sort it
+ * with the stable merge sort, and write each value back through the element
+ * setter. §23.2.4.7 TypedArraySortCompare with no comparator: numeric order,
+ * `-0` before `+0`, NaN last; with one: `ToNumber(Call(comparefn, undefined,
+ * «x, y»))`, NaN as `+0`. The write-back is `! Set(obj, j, v)`, which is a
+ * no-op on an index the comparator invalidated — a comparator that detaches
+ * the buffer makes `sort` return normally (`sort-tonumber.js`).
+ */
+function ensureTaDynSortHelper(ctx: CodegenContext): number | undefined {
+  const helperName = "__ta_dyn_sort";
+  const existing = ctx.funcMap.get(helperName);
+  if (existing !== undefined) return existing;
+  const ext: ValType = { kind: "externref" };
+  const i32: ValType = { kind: "i32" };
+  const f64: ValType = { kind: "f64" };
+  if (ensureLateImport(ctx, "__extern_is_undefined", [ext], [i32]) === undefined) return undefined;
+  const kit = beginTaDynProducer(ctx, helperName, ["comparefn", "unused1", "unused2"], false);
+  if (kit === undefined) return undefined;
+  const { fctx, dv } = kit;
+  const applyClosureIdx = ctx.funcMap.get("__apply_closure")!;
+  const objVecNewIdx = ctx.funcMap.get("__objvec_new")!;
+  const objVecPushIdx = ctx.funcMap.get("__objvec_push")!;
+  const hasCmp = allocLocal(fctx, "hasCmp", i32);
+  const x = allocLocal(fctx, "x", f64);
+  const y = allocLocal(fctx, "y", f64);
+  const args = allocLocal(fctx, "args", ext);
+  const j = allocLocal(fctx, "j", i32);
+  const n = allocLocal(fctx, "n", i32);
+
+  // step 1: comparefn is not undefined and not callable → TypeError.
+  const throwArm: Instr[] = [];
+  {
+    const saved = fctx.body;
+    fctx.savedBodies.push(saved);
+    fctx.body = throwArm;
+    emitThrowTypeError(ctx, fctx, "TypeError: %TypedArray%.prototype.sort: comparefn is not a function");
+    fctx.body = saved;
+    fctx.savedBodies.pop();
+  }
+  fctx.body.push(
+    { op: "local.get", index: 4 },
+    { op: "i32.const", value: 1 },
+    { op: "i32.ge_s" },
+    {
+      op: "if",
+      blockType: { kind: "val", type: i32 },
+      then: [
+        { op: "local.get", index: 1 },
+        { op: "call", funcIdx: ctx.funcMap.get("__extern_is_undefined")! },
+        { op: "i32.eqz" },
+      ],
+      else: [{ op: "i32.const", value: 0 }],
+    },
+    { op: "local.tee", index: hasCmp },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: 1 },
+        { op: "call", funcIdx: ctx.funcMap.get("__typeof_function")! },
+        { op: "i32.eqz" },
+        { op: "if", blockType: { kind: "empty" }, then: throwArm },
+      ],
+    },
+  );
+  // step 3: ValidateTypedArray; step 7: read every element once.
+  emitTaDynViewValidate(ctx, fctx, dv);
+  const f64VecIdx = emitTaDynViewToVec(ctx, fctx, dv);
+  const f64ArrIdx = getArrTypeIdxFromVec(ctx, f64VecIdx);
+  const vec = allocLocal(fctx, "vec", { kind: "ref", typeIdx: f64VecIdx });
+  const data = allocLocal(fctx, "data", { kind: "ref_null", typeIdx: f64ArrIdx });
+  fctx.body.push(
+    { op: "local.tee", index: vec },
+    { op: "struct.get", typeIdx: f64VecIdx, fieldIdx: 0 },
+    { op: "local.set", index: n },
+    { op: "local.get", index: vec },
+    { op: "struct.get", typeIdx: f64VecIdx, fieldIdx: 1 },
+    { op: "local.set", index: data },
+  );
+  const signBit = (local: number): Instr[] => [
+    { op: "local.get", index: local },
+    { op: "i64.reinterpret_f64" },
+    { op: "i64.const", value: 0n },
+    { op: "i64.lt_s" },
+  ];
+  // §23.2.4.7 with no comparator, as `cmp(x, y) > 0`.
+  const defaultGt: Instr[] = [
+    { op: "local.get", index: x },
+    { op: "local.get", index: x },
+    { op: "f64.ne" },
+    {
+      op: "if",
+      blockType: { kind: "val", type: i32 },
+      // x is NaN: > 0 unless y is NaN too.
+      then: [{ op: "local.get", index: y }, { op: "local.get", index: y }, { op: "f64.eq" }],
+      else: [
+        { op: "local.get", index: x },
+        { op: "local.get", index: y },
+        { op: "f64.gt" },
+        // x == y == 0 with x = +0 and y = -0
+        { op: "local.get", index: x },
+        { op: "local.get", index: y },
+        { op: "f64.eq" },
+        ...signBit(y),
+        { op: "i32.and" },
+        ...signBit(x),
+        { op: "i32.eqz" },
+        { op: "i32.and" },
+        { op: "i32.or" },
+      ],
+    },
+  ];
+  // ToNumber through the coercion engine (ToPrimitive hint "number", then the
+  // unbox) — the comparator's object result must run its `@@toPrimitive`.
+  const toNumber: Instr[] = [];
+  {
+    const saved = fctx.body;
+    fctx.savedBodies.push(saved);
+    fctx.body = toNumber;
+    coerceType(ctx, fctx, ext, f64);
+    fctx.body = saved;
+    fctx.savedBodies.pop();
+  }
+  // ToNumber(Call(comparefn, undefined, «x, y»)) > 0 — NaN compares false.
+  const comparatorGt: Instr[] = [
+    { op: "call", funcIdx: objVecNewIdx },
+    { op: "local.tee", index: args },
+    { op: "local.get", index: x },
+    { op: "call", funcIdx: kit.boxNum },
+    { op: "call", funcIdx: objVecPushIdx },
+    { op: "local.get", index: args },
+    { op: "local.get", index: y },
+    { op: "call", funcIdx: kit.boxNum },
+    { op: "call", funcIdx: objVecPushIdx },
+    { op: "local.get", index: 1 },
+    ...(undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" as const }]),
+    { op: "local.get", index: args },
+    { op: "call", funcIdx: applyClosureIdx },
+    ...toNumber,
+    { op: "f64.const", value: 0 },
+    { op: "f64.gt" },
+  ];
+  emitStableMergeSort(fctx, {
+    arrTypeIdx: f64ArrIdx,
+    getOp: "array.get",
+    dataLocal: data,
+    lenLocal: n,
+    buildCompareGtZero: (pushLeft, pushRight) => [
+      ...pushLeft,
+      { op: "local.set", index: x },
+      ...pushRight,
+      { op: "local.set", index: y },
+      { op: "local.get", index: hasCmp },
+      {
+        op: "if",
+        blockType: { kind: "val", type: i32 },
+        then: comparatorGt.map((i) => ({ ...i })),
+        else: defaultGt.map((i) => ({ ...i })),
+      },
+    ],
+  });
+  // step 8: `! Set(obj, j, sortedList[j], true)` — silently skipped on an
+  // index the comparator made invalid.
+  fctx.body.push(
+    ...taDynCountedLoop(j, n, [
+      { op: "local.get", index: 0 },
+      { op: "local.get", index: j },
+      { op: "f64.convert_i32_s" },
+      { op: "local.get", index: data },
+      { op: "ref.as_non_null" },
+      { op: "local.get", index: j },
+      { op: "array.get", typeIdx: f64ArrIdx },
+      { op: "call", funcIdx: kit.boxNum },
+      { op: "call", funcIdx: kit.setElem },
+      { op: "drop" },
+    ]),
+  );
+  return finishTaDynProducer(ctx, kit, 0);
 }
 
 /**

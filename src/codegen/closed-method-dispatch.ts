@@ -93,7 +93,7 @@ import { standaloneDispatchArityPads } from "./zero-arg-method-pad.js"; // (#669
  */
 const VEC_SEARCH_METHODS = new Set(["indexOf", "lastIndexOf", "includes"]);
 /** (#6769 S4) `__ta_dyn_<m>` producers the dispatcher routes a dyn-view receiver to. */
-const TA_DYN_PRODUCER_METHODS = new Set(["map", "filter", "slice"]);
+const TA_DYN_PRODUCER_METHODS = new Set(["map", "filter", "slice", "sort"]);
 
 /**
  * (#5194 r3-2, #6769 S4) The native `__ta_dyn_<m>` helper the dispatcher's
@@ -1550,6 +1550,7 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
           { op: "local.get", index: anyLocalIdx },
           { op: "ref.test", typeIdx: ctx.vecBaseTypeIdx },
           ...arraySubclassOwnMethodShadowTest(ctx, methodName), // (#6683)
+          ...taDynProducerHofExclusion(ctx, methodName, anyLocalIdx), // (#6769 S6) a dyn view sorts as a TypedArray
           {
             op: "if",
             blockType: { kind: "val", type: { kind: "externref" } },

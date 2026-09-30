@@ -401,6 +401,7 @@ export function beginTaDynProducer(
   ctx: CodegenContext,
   helperName: string,
   paramNames: readonly [string, string, string],
+  validate = true,
 ): TaDynProducerKit | undefined {
   if (!noJsHost(ctx)) return undefined;
   const dynIdx = getOrRegisterTaDynViewType(ctx);
@@ -426,7 +427,7 @@ export function beginTaDynProducer(
   const es = allocLocal(fctx, "es", i32);
   const len = allocLocal(fctx, "len", i32);
   pushTaDynMethodPreamble(ctx, fctx, dynIdx, dv, kind, es, len);
-  emitTaDynViewValidate(ctx, fctx, dv);
+  if (validate) emitTaDynViewValidate(ctx, fctx, dv);
   const externSet = ctx.funcMap.get("__extern_set");
   return { fctx, dynIdx, funcIdx, dv, kind, es, len, getElem: elem.getElem, setElem: elem.setElem, boxNum, externSet };
 }
