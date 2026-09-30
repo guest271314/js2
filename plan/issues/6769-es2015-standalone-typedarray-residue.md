@@ -1,7 +1,8 @@
 ---
 id: 6769
 title: "ES2015 standalone: TypedArray residue (38 rows) — live-receiver dyn HOFs, species carriers, TA sort compare, instanceof $__ta_ctor, intrinsic-prototype receivers, ctor-arg protocols"
-status: ready
+status: done
+completed: 2026-09-30
 sprint: current
 created: 2026-09-30
 updated: 2026-09-30
