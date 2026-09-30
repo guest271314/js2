@@ -71,3 +71,24 @@ delta does not change their native/IR dependencies and own source hashes match.
 Normal signed commit hooks will run the changed-root cohort, including the
 retained ES2015 proxy regression. Parent6346 remains pending as last verified;
 this checkpoint is prepared and must remain held until dependency delivery.
+
+
+Publication update: definition PR6346 “feat(ir): authenticate native String
+definition compatibility” delivered as231a0078b17520e989ea10b5224473bc8d66f21f.
+Exact head6db2eb58 is an ancestor of that real merge, which is an ancestor of
+fresh main d4e15d90. Thirteen scoped file blobs match head/merge/main; the
+combined compiler inventory preserves all1716 parent rows among1717 rows.
+Protected merge Test262 run36694978911 passed102 actual conformance shards
+and its final regression gate; CI36694978994, differential36694978936 and
+CLA36694978916 passed. Only the definition slice claim was completed and its
+upstream effect verified. Full issue3518 remains open.
+
+Signed checkpoint63157f85 retains all normal hooks. Its changed-root runs
+passed473 definition,112 key-list and10 retained proxy regression assertions,
+zero skips/failures. Main d4e15d90 was reverified immediately before merging;
+this subsequent delta delivers the exact parent already tested and refreshes
+conformance artifacts/baseline without changing new native key-list sources.
+The key-list claim remains held until real main delivery. Publish one ready
+fork PR and use exact-head protected admission after normal final hooks.
+The prior prepared/pending-parent records above are chronological evidence,
+not current delivery state. Preserve original failures and every pending root.
