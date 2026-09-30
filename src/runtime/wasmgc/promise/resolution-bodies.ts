@@ -2,7 +2,6 @@
 import type { FuncHandle, TypeHandle, Instr, LocalDef } from "../../../wasm/model/instructions.js";
 import { buildTargetTaggedTry } from "../../../wasm/physical/exception-control.js";
 import { PROMISE_STATE_FULFILLED, PROMISE_STATE_REJECTED } from "./settlement-bodies.js";
-import { BFN_STATE_FIELD_IDX } from "../values/closure-layouts.js";
 
 /**
  * (#5197 r3 Step 4) §27.2.1.3 [[AlreadyResolved]], recorded per settle FUNCTION
@@ -16,6 +15,12 @@ import { BFN_STATE_FIELD_IDX } from "../values/closure-layouts.js";
  * rejects the pending promise (it did before as well).
  */
 export const SETTLE_FN_CALLED_BIT = 0x100;
+/**
+ * The `bfnstate` slot of the settle-cap layout `buildPromiseSettleClosureValue`
+ * asserts (func, arity, bag, bfnstate, bfnid, cap_promise — `capPromiseFieldIdx`
+ * 5). Spelled here rather than imported so this runtime body adds no module edge.
+ */
+const SETTLE_CAP_STATE_FIELD_IDX = 3;
 
 /** `[] → [i32]`: 1 iff neither settle function of a pair has been called. */
 export function buildSettlePairUnresolvedInstrs(
@@ -27,7 +32,7 @@ export function buildSettlePairUnresolvedInstrs(
     ...fn,
     { op: "any.convert_extern" },
     { op: "ref.cast", typeIdx: capTypeIdx },
-    { op: "struct.get", typeIdx: capTypeIdx, fieldIdx: BFN_STATE_FIELD_IDX },
+    { op: "struct.get", typeIdx: capTypeIdx, fieldIdx: SETTLE_CAP_STATE_FIELD_IDX },
   ];
   return [
     ...calledBit(resolveFn),
@@ -482,16 +487,16 @@ export function buildPromiseSettleClosureBody(
   return [
     // (#5197 r3) [[AlreadyResolved]]: a second call of this function is a no-op.
     ...self,
-    { op: "struct.get", typeIdx: capTypeIdx, fieldIdx: BFN_STATE_FIELD_IDX },
+    { op: "struct.get", typeIdx: capTypeIdx, fieldIdx: SETTLE_CAP_STATE_FIELD_IDX },
     { op: "i32.const", value: SETTLE_FN_CALLED_BIT },
     { op: "i32.and" },
     { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" }] },
     ...self,
     ...self,
-    { op: "struct.get", typeIdx: capTypeIdx, fieldIdx: BFN_STATE_FIELD_IDX },
+    { op: "struct.get", typeIdx: capTypeIdx, fieldIdx: SETTLE_CAP_STATE_FIELD_IDX },
     { op: "i32.const", value: SETTLE_FN_CALLED_BIT },
     { op: "i32.or" },
-    { op: "struct.set", typeIdx: capTypeIdx, fieldIdx: BFN_STATE_FIELD_IDX },
+    { op: "struct.set", typeIdx: capTypeIdx, fieldIdx: SETTLE_CAP_STATE_FIELD_IDX },
     { op: "local.get", index: 0 }, // self: (ref $wrapperRoot)
     { op: "ref.cast", typeIdx: capTypeIdx }, // downcast to the cap subtype (non-null)
     { op: "struct.get", typeIdx: capTypeIdx, fieldIdx: capPromiseFieldIdx }, // captured (ref $Promise)
