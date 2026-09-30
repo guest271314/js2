@@ -65,3 +65,29 @@ checks and one ready fork PR still remain. Keep the slice claim held until verif
 main delivery. No implementation publication or new main merge is claimed yet. All earlier failing draft instruments and test
 rows stay under .tmp/native-builtin-functions. Do not mistake any passing
 component cohort or an armed PR for public parity or main delivery.
+
+Integration update: signed implementation520a52bd024e85abe37191a7d58835302dbd1189
+passed normal hooks385/385 (36kernel+349boundary), without bypass. Fresh remote
+main was verified stable before/after fetch at
+ee6828f1ef2f6dd7dc26c1eabe699ed8e8a12e50. The merge preserves all incoming
+main files, including delivered Object bodies/regressions and unrelated artifacts.
+Only compiler inventory conflicted. All1725mainrows/order, signed activation
+history and allowed edges are preserved; six owned leaves yield1731rows.
+Backend floor43 and native-runtime93 include both main and new entries.
+Boundary unsigned additions follow main before the six new leaves. All12worker
+implementation/test files remain byte-identical.
+
+The initial issue-join checker refused a mid-file Object-plan insertion; this was
+a composition-instrument limitation, not discarded source. Complete incoming
+issue bytes plus the root-owned suffix and updated date were retained. Original
+receipt and resolver note remain under .tmp/native-builtin-functions/publication.
+Final integrated strict boundary/typecheck/seven gates and normal signed merge
+hooks remain pending at this recorded pre-commit observation.
+
+Final integrated pre-commit checks passed: source TS7, strict boundary349/349
+without skips/failures/suite errors, and all seven existing preservation gates.
+7359inputs stayed unchanged. Native implementation/test content remains identical
+to strict36/36; the incoming Object body files match their delivered test snapshot.
+Normal signed merge hooks, fork publication, ready PR and protected admission
+are the remaining delivery steps. Keep claim active until main proof, and never
+push a branch after it is armed/queued without resolving admission first.

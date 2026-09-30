@@ -370,12 +370,15 @@
         "src/runtime/wasmgc/values/primitive-wrapper-layouts.ts",
         "src/runtime/wasmgc/values/primitive-wrapper-bodies.ts",
         "src/runtime/wasmgc/values/to-object-body.ts",
+        "src/runtime/wasmgc/values/object-prototype-method-bodies.ts",
+        "src/runtime/wasmgc/values/object-prototype-accessor-bodies.ts",
+        "src/runtime/wasmgc/values/object-constructor-body.ts",
         "src/runtime/wasmgc/values/builtin-function-layouts.ts",
         "src/runtime/wasmgc/values/builtin-function-bodies.ts",
         "src/runtime/wasmgc/values/builtin-function-property-bodies.ts",
         "src/runtime/wasmgc/values/builtin-function-prototype-bodies.ts"
       ],
-      "minModules": 90
+      "minModules": 93
     },
     {
       "id": "standalone-platform",
@@ -1753,7 +1756,11 @@
     }
   ],
   "files": [
-    { "path": "src/backend/wasmgc/resources/native-string-own-keys.ts", "state": "clean", "layer": "backend-wasmgc" },
+    {
+      "path": "src/backend/wasmgc/resources/native-string-own-keys.ts",
+      "state": "clean",
+      "layer": "backend-wasmgc"
+    },
     {
       "path": "src/runtime/wasmgc/values/string-create-body.ts",
       "state": "clean",
@@ -1854,8 +1861,16 @@
       "state": "clean",
       "layer": "backend-wasmgc"
     },
-    { "path": "src/runtime/wasmgc/values/string-index-key-body.ts", "state": "clean", "layer": "native-runtime" },
-    { "path": "src/runtime/wasmgc/values/string-own-keys-body.ts", "state": "clean", "layer": "native-runtime" },
+    {
+      "path": "src/runtime/wasmgc/values/string-index-key-body.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/string-own-keys-body.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
     {
       "path": "src/wasm/model/instruction-walk.ts",
       "state": "clean",
@@ -14261,6 +14276,21 @@
     },
     {
       "path": "src/runtime/wasmgc/values/prototype-singleton-bodies.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/object-prototype-method-bodies.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/object-prototype-accessor-bodies.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/object-constructor-body.ts",
       "state": "clean",
       "layer": "native-runtime"
     },
