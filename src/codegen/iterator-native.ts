@@ -247,6 +247,29 @@ function iterFamilyOperand(family: number, familyLocal?: number): Instr {
   return familyLocal === undefined ? { op: "i32.const", value: family } : { op: "local.get", index: familyLocal };
 }
 
+/**
+ * (#6773 S1) FRESH instrs minting a §7.4.2 GetIteratorDirect USER record for
+ * the iterator object held in externref local `iterLocal` —
+ * `$__IterRec{USER, vec: null, idx: 0, userIter, family: UNKNOWN}`, left on
+ * the stack as an externref. The iterator-helper opener (`__iter_hof_open`)
+ * uses it for a closed class instance with a compiled `next`: a helper's
+ * source is the receiver ITSELF (`this.next` is read, `@@iterator` is never
+ * called), which the GetIterator ladder cannot express — and the ladder's OBJ
+ * arm mis-claims such an instance once the object runtime is bootstrapped.
+ */
+export function userIterRecordDirectInstrs(ctx: CodegenContext, iterLocal: number): Instr[] {
+  const { iterRecTypeIdx, vecTypeIdx } = iterRuntimeTypes(ctx);
+  return [
+    { op: "i32.const", value: ITER_KIND_USER },
+    { op: "ref.null", typeIdx: vecTypeIdx },
+    { op: "i32.const", value: 0 },
+    { op: "local.get", index: iterLocal },
+    iterFamilyOperand(ITER_FAMILY_UNKNOWN),
+    { op: "struct.new", typeIdx: iterRecTypeIdx },
+    { op: "extern.convert_any" },
+  ];
+}
+
 /** `$Promise` field layout (async-scheduler.ts): state(0) i32 — 1=FULFILLED —
  *  and value(1) externref. */
 const PROMISE_FIELD_STATE = 0;

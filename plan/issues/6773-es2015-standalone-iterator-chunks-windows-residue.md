@@ -1,7 +1,8 @@
 ---
 id: 6773
 title: "ES2015 standalone: Iterator.prototype.{chunks,windows,join} residue (21 rows) — class-instance source admission, §7.4.4 result check, helper `.return()` forwarding, %IteratorHelperPrototype% identity, `new <undefined>` IsConstructor, `join` as a value"
-status: ready
+status: in-progress
+assignee: ttraenkler/opus-6773
 sprint: current
 created: 2026-09-30
 updated: 2026-09-30
