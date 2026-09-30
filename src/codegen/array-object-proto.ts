@@ -4316,10 +4316,44 @@ function emitIteratorRootPrototypeInit(
   objLocal: number,
   boxSymbolIdx: number | undefined,
 ): number | undefined {
+  const setProtoIdx = ctx.funcMap.get("__object_setPrototypeOf");
+  if (setProtoIdx === undefined) return undefined;
+  const root = iteratorRootPrototypeEnsureInstrs(ctx, boxSymbolIdx, () =>
+    allocLocal(fctx, `__iter_root_proto_${fctx.locals.length}`, { kind: "externref" }),
+  );
+  if (root === undefined) return undefined;
+  initBody.push(
+    ...root.instrs,
+    { op: "local.get", index: objLocal },
+    { op: "global.get", index: root.globalIdx },
+    { op: "call", funcIdx: setProtoIdx },
+    { op: "drop" },
+  );
+  return root.globalIdx;
+}
+
+/**
+ * (#6484 S1; #6773 S4 exports it) FRESH instrs that initialise the ONE
+ * `%IteratorPrototype%` root singleton (`__native_iterator_prototype`) when it
+ * is still null — `$Object` + own `[Symbol.iterator]` closure — plus its
+ * global index. Every consumer (the family prototypes above, the
+ * `%IteratorHelperPrototype%` in iter-lazy-native.ts) runs this same guarded
+ * init, so whichever runs first mints the root and all link to it.
+ * `rootLocal` allocates the externref scratch local the init needs.
+ */
+export function iteratorRootPrototypeEnsureInstrs(
+  ctx: CodegenContext,
+  boxSymbolIdx: number | undefined,
+  rootLocal: () => number,
+): { globalIdx: number; instrs: Instr[] } | undefined {
   const newObjectIdx = ctx.funcMap.get("__new_plain_object");
   const defineValueIdx = ctx.funcMap.get("__defineProperty_value");
-  const setProtoIdx = ctx.funcMap.get("__object_setPrototypeOf");
-  if (newObjectIdx === undefined || defineValueIdx === undefined || setProtoIdx === undefined) return undefined;
+  if (
+    newObjectIdx === undefined ||
+    defineValueIdx === undefined ||
+    ctx.funcMap.get("__object_setPrototypeOf") === undefined
+  )
+    return undefined;
   if (boxSymbolIdx === undefined) return undefined;
 
   const globalName = "__native_iterator_prototype";
@@ -4335,10 +4369,10 @@ function emitIteratorRootPrototypeInit(
     ctx.builtinObjectGlobals.set(globalName, globalIdx);
   }
 
-  const rootLocal = allocLocal(fctx, `__iter_root_proto_${fctx.locals.length}`, { kind: "externref" });
+  const rootSlot = rootLocal();
   const rootInit: Instr[] = [
     { op: "call", funcIdx: newObjectIdx },
-    { op: "local.set", index: rootLocal },
+    { op: "local.set", index: rootSlot },
   ];
   const brand = ensureIteratorNativeProtoGlue(ctx);
   const closure =
@@ -4347,7 +4381,7 @@ function emitIteratorRootPrototypeInit(
       : ensureStandaloneNativeMethodClosure(ctx, brand, ITERATOR_PROTO_SYMBOL_ITERATOR, "method");
   if (closure) {
     rootInit.push(
-      { op: "local.get", index: rootLocal },
+      { op: "local.get", index: rootSlot },
       { op: "i32.const", value: 1 }, // Symbol.iterator
       { op: "call", funcIdx: boxSymbolIdx },
       ...pushBuiltinFnSingletonValueInstrs(ctx, closure),
@@ -4357,18 +4391,15 @@ function emitIteratorRootPrototypeInit(
       { op: "drop" },
     );
   }
-  rootInit.push({ op: "local.get", index: rootLocal }, { op: "global.set", index: globalIdx });
-
-  initBody.push(
-    { op: "global.get", index: globalIdx },
-    { op: "ref.is_null" },
-    { op: "if", blockType: { kind: "empty" }, then: rootInit, else: [] },
-    { op: "local.get", index: objLocal },
-    { op: "global.get", index: globalIdx },
-    { op: "call", funcIdx: setProtoIdx },
-    { op: "drop" },
-  );
-  return globalIdx;
+  rootInit.push({ op: "local.get", index: rootSlot }, { op: "global.set", index: globalIdx });
+  return {
+    globalIdx,
+    instrs: [
+      { op: "global.get", index: globalIdx },
+      { op: "ref.is_null" },
+      { op: "if", blockType: { kind: "empty" }, then: rootInit, else: [] },
+    ],
+  };
 }
 
 export function emitArrayIteratorPrototypeSingleton(ctx: CodegenContext, fctx: FunctionContext): ValType | null {
