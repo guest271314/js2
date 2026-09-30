@@ -16253,3 +16253,9 @@ conflict preserves both complete append sequences against exact721d12bf base.
 All six performance code/test hashes remain exact; every incoming non-issue
 file matches freshly fetched main. Main integration validation and publication
 are recorded in the performance handoff; full IR parity remains open.
+
+Performance integration7e2fa0d596e1fdccaa241b0ea3ef0144727e125e passes TS7,
+normal merge hooks137/137 and independent strict137/137, no skipped/worker
+errors. The six owned hashes and every incoming non-issue file remain exact;
+only the eight planned paths differ from mainf32ffc4d. Publish this independent
+prerequisite through the fork/protected queue before downstream refreshes.

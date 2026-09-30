@@ -67,3 +67,13 @@ conflict preserves both complete append sequences against exact721d12bf base.
 All six performance code/test hashes remain exact; every incoming non-issue
 file matches freshly fetched main. Main integration validation and publication
 are recorded in the performance handoff; full IR parity remains open.
+
+Integration checkpoint7e2fa0d596e1fdccaa241b0ea3ef0144727e125e is signed,
+clean and has parents7fb3a544573cd12495c2cfb65ea485259c425f72 and freshly
+verified mainf32ffc4d919d9653743c53a313f44da9c1957082. TS7 passes. Normal
+merge hooks pass137/137 (50authentication +22ownership +65source admission);
+a separate strict run at that exact tree also passes137/137 with zero skipped
+or worker errors. All six owned hashes remain exact. Only eight planned paths
+differ from current main. Performance publication/queue/main verification are
+next; PR6358/6359 server checks require the delivered prerequisite. Their armed
+branches stay untouched. No full IR completion or legacy retirement is claimed.
