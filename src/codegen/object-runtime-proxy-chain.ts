@@ -493,13 +493,19 @@ export function fillProtoLinkArms(
   if (getDispatch === undefined || externHas === undefined || objFind === undefined) {
     throw new Error("#6766: Proxy dispatch helpers missing in the link regime");
   }
+  // A trap receives ToPropertyKey(P) — `0 in heir` asks the `has` trap for "0".
+  const toKey = fm("__to_property_key");
+  const key = (local: number): Instr[] => [
+    { op: "local.get", index: local },
+    ...(toKey === undefined ? [] : ([{ op: "call", funcIdx: toKey }] satisfies Instr[])),
+  ];
 
   // [[Get]]: §10.1.8.1 step 3.c `parent.[[Get]](P, Receiver)`.
   const getRecv = localIndexOf(ctx, "__extern_get", "explicitReceiver", 2);
   spliceRequired(ctx, "__extern_get", objectTypeIdx, 2, () =>
     ifLink(objectTypeIdx, 2, [
       ...proxyOf(objectTypeIdx, 2),
-      { op: "local.get", index: 1 },
+      ...key(1),
       { op: "local.get", index: getRecv },
       { op: "call", funcIdx: getDispatch },
       { op: "return" },
@@ -510,7 +516,7 @@ export function fillProtoLinkArms(
   spliceRequired(ctx, "__extern_has", objectTypeIdx, 2, () =>
     ifLink(objectTypeIdx, 2, [
       ...proxyOf(objectTypeIdx, 2),
-      { op: "local.get", index: 1 },
+      ...key(1),
       { op: "call", funcIdx: externHas },
       { op: "return" },
     ]),
@@ -529,7 +535,7 @@ export function fillProtoLinkArms(
     const spliced = spliceIntoWalkLoops(decide.body, objectTypeIdx, 9, () =>
       ifLink(objectTypeIdx, 9, [
         ...proxyOf(objectTypeIdx, 9),
-        { op: "local.get", index: 2 },
+        ...key(2),
         { op: "local.get", index: 3 },
         { op: "local.get", index: 0 },
         { op: "call", funcIdx: setWithReceiver },
@@ -544,7 +550,7 @@ export function fillProtoLinkArms(
     );
     if (spliced === 0) throw new Error("#6766: no prototype walk loop in __extern_set_decide");
   }
-  fillSetWalk(ctx, objectTypeIdx, setWithReceiver, objFind);
+  fillSetWalk(ctx, objectTypeIdx, setWithReceiver, objFind, key);
 
   // §20.1.3.3 Object.prototype.isPrototypeOf: a link hop continues through the
   // Proxy's own [[GetPrototypeOf]] (its trap), comparing the PROXY identity.
@@ -631,6 +637,7 @@ function fillSetWalk(
   objectTypeIdx: number,
   setWithReceiver: number | undefined,
   objFind: number,
+  key: (local: number) => Instr[],
 ): void {
   // Without the receiver-threaded [[Set]] (`__reflect_set_receiver` was not
   // reservable) the placeholder's "no link" answer stands.
@@ -662,7 +669,7 @@ function fillSetWalk(
             { op: "br_if", depth: 1 },
             ...ifLink(objectTypeIdx, CUR, [
               ...proxyOf(objectTypeIdx, CUR),
-              { op: "local.get", index: 1 },
+              ...key(1),
               { op: "local.get", index: 2 },
               { op: "local.get", index: 0 },
               { op: "call", funcIdx: setWithReceiver },

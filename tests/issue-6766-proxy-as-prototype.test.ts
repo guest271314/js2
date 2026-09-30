@@ -88,7 +88,7 @@ describe("#6766 — a Proxy in the prototype chain", () => {
     ).toBe(24);
   });
 
-  it("RED on base: `in` over an heir reaches the has trap; a trap-absent write lands on the HEIR", async () => {
+  it("RED on base (14): `in` over an heir reaches the has trap; a trap-absent write lands on the HEIR", async () => {
     expect(
       await run(`
       var seen = 0;
@@ -102,6 +102,43 @@ describe("#6766 — a Proxy in the prototype chain", () => {
       var c = (Object.prototype.hasOwnProperty.call(q, "z") ? 4 : 0) + (Object.prototype.hasOwnProperty.call(target, "z") ? 0 : 8);
       __r = a + b + c + seen * 100;`),
     ).toBe(215);
+  });
+});
+
+describe("#6766 — keys, revocation, refusal", () => {
+  it("RED on base (26): traps see ToPropertyKey keys; a revoked proxy in the chain throws on the hop", async () => {
+    expect(
+      await run(`
+      var h = Object.create(new Proxy({}, { get: function (t, k, r) { return k; }, has: function (t, k) { return k === "0"; } }));
+      var a = (h[0] === "0") ? 1 : 0;
+      var h2 = Object.create(new Proxy({ x: 6 }, {}));
+      var b = (h2["x"] === 6) ? 2 : 0;
+      var c = (0 in h) ? 4 : 0;
+      var d = ("zz" in h) ? 0 : 8;
+      var k = "x";
+      var e = (h2[k] === 6) ? 16 : 0;
+      var revoked = Proxy.revocable({}, {});
+      var h3 = Object.create(revoked.proxy);
+      revoked.revoke();
+      var f = 0;
+      try { h3.foo; } catch (err) { f = (err instanceof TypeError) ? 32 : 64; }
+      __r = a + b + c + d + e + f;`),
+    ).toBe(63);
+  });
+
+  it("RED on base (1111): a refusing set trap throws in strict code and answers false to Reflect.set", async () => {
+    expect(
+      await run(`
+      var h = Object.create(new Proxy({}, { set: function () { return false; } }));
+      var r = 0;
+      try { h.x = 1; r = 1; } catch (e) { r = (e instanceof TypeError) ? 2 : 3; }
+      var ok = Reflect.set(h, "y", 1) ? 10 : 20;
+      var t = {};
+      var h2 = Object.create(new Proxy(t, {}));
+      var ok2 = Reflect.set(h2, "z", 5) ? 100 : 200;
+      var own = Object.prototype.hasOwnProperty.call(h2, "z") && !Object.prototype.hasOwnProperty.call(t, "z") ? 1000 : 2000;
+      __r = r + ok + ok2 + own;`),
+    ).toBe(1122);
   });
 });
 
