@@ -497,6 +497,28 @@ export function promiseResolvePassThroughInstrs(
   ];
 }
 
+/**
+ * (#5197 r3 Step 3) Can this module observe `Get(array, "then")` on an Array it
+ * resolves a promise with — i.e. may it install `Array.prototype.then`? The
+ * pre-scan's named-member set sees an assignment; any Object/Array-prototype
+ * define sets `protoIndexDirty`. Standalone only; every other module keeps the
+ * direct fulfil of a combinator aggregate and a vec-free thenable ladder.
+ */
+export function arrayThenObservable(ctx: CodegenContext): boolean {
+  return ctx.standalone === true && (ctx.protoIndexDirty || ctx.protoNamedWrittenMembers.has("then"));
+}
+
+/**
+ * §27.2.4.1.1 step 6.d.iii.2 settles the `all` / `allSettled` aggregate through
+ * `resultCapability.[[Resolve]]` — a Resolve, so `Get(valuesArray, "then")` runs
+ * (and a poisoned getter rejects). Under {@link arrayThenObservable} that is
+ * `__promise_resolve_value`; otherwise the direct fulfil it always was.
+ */
+export function aggregateSettleFuncIdx(ctx: CodegenContext, fulfillFuncIdx: number): number {
+  const resolveValue = ctx.funcMap.get("__promise_resolve_value");
+  return arrayThenObservable(ctx) && resolveValue !== undefined ? resolveValue : fulfillFuncIdx;
+}
+
 /** Reserve `__promise_species_of_class` (placeholder: "not a class" = null); filled at finalize. */
 function reserveSpeciesOfClass(ctx: CodegenContext): void {
   if (ctx.funcMap.get(SPECIES_OF_CLASS) !== undefined) return;
