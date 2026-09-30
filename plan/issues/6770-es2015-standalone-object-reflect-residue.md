@@ -1,7 +1,8 @@
 ---
 id: 6770
 title: "ES2015 standalone built-ins/Object + built-ins/Reflect residue — 49 rows: closed-struct literals under reflective builtins, own-key order, @@toStringTag on builtin prototypes, Proxy [[OwnPropertyKeys]] surfaces, lazy trap lookup"
-status: ready
+status: in-progress
+assignee: ttraenkler/opus-6770
 sprint: current
 created: 2026-09-30
 updated: 2026-09-30
@@ -18,32 +19,46 @@ related: [6651, 6766, 6767, 5316, 5268, 5148, 5116, 4777, 4599, 3371, 4010, 1906
 loc-budget-allow:
   # 2026-09-30 (#6770 plan, Fable lane). Eight mechanisms across the object
   # runtime; wiring only in the existing files listed, every helper longer
-  # than ~40 lines goes into one of the three NEW leaves (registered in
+  # than ~40 lines goes into a NEW leaf (registered in
   # scripts/compiler-boundaries.json). Growth per step is named in the plan.
-  - src/codegen/object-literal-reflective-escape.ts   # NEW leaf (S2): literal-binding escape predicate
-  - src/codegen/proxy-trap-read.ts                    # NEW leaf (S8): lazy GetMethod(handler, trap) + CreateListFromArrayLike
-  - src/codegen/object-proto-to-locale-string.ts      # NEW leaf (S5): §20.1.3.5 Invoke(O,"toString") on a primitive this
+  # 2026-09-30 (#6770 impl, Opus): the plan's list carried trailing `# …`
+  # comments on each item, which `parseFrontmatterList` does not strip — so no
+  # item matched and the list granted nothing. Rewritten one path per line;
+  # the per-step attribution lives in the implementation record below.
+  # S1: string-source arm call (enumeration), result-binding hub (variables),
+  # string-index decline for an Object.assign result binding (property-access).
+  - src/codegen/object-runtime-enumeration.ts
+  - src/codegen/statements/variables.ts
+  - src/codegen/property-access.ts
+  - src/codegen/object-literal-reflective-escape.ts
+  - src/codegen/proxy-trap-read.ts
+  - src/codegen/object-proto-to-locale-string.ts
   - scripts/compiler-boundaries.json
-  - src/codegen/object-runtime-enumeration.ts         # S1 (assign primitive sources), S3 (closure entries/values bag arm)
-  - src/codegen/expressions/call-builtin-static.ts    # S1 (assign fold), S7 (gOPN/gOPS string/symbol filters)
-  - src/codegen/expressions/calls.ts                  # S1 (compileObjectAssignArg)
-  - src/codegen/literals.ts                           # S2 (one predicate call at the open/closed decision)
-  - src/codegen/object-runtime-descriptors.ts         # S3 (String-wrapper `length`, RegExp `lastIndex`, closed-struct order), S7 (gOPS proxy guard, defineProperties proxy bag)
-  - src/codegen/object-runtime.ts                     # S3 (`__obj_index_of_key` upper bound)
-  - src/codegen/carrier-bag-visibility.ts             # S3 (intrinsic keys first)
-  - src/codegen/expressions/call-namespace-static.ts  # S4 (Reflect.setPrototypeOf status, defineProperty boolean, namespace members)
-  - src/codegen/object-proto-name-in.ts               # S5 (`__proto__` own-ness)
-  - src/codegen/object-proto-has-own-property.ts      # S5
-  - src/codegen/expressions/object-get-prototype-of.ts # S5 (literal fold escape guard)
-  - src/codegen/object-proto-symbol-tag.ts            # S6 (classifier-before-tag order)
-  - src/codegen/object-proto-tostring-carriers.ts     # S6
-  - src/codegen/object-proto-tostring.ts              # S6 (brand → builtinTag demotion, gated)
-  - src/codegen/native-proto.ts                       # S6 (symbolTag glue for WeakMap/WeakSet/Promise/Symbol/Generator)
-  - src/codegen/object-runtime-proxy.ts               # S7 (trap-absent forward incl. symbols, keys enumerable filter), S8 (13 trap-read sites)
-  - src/codegen/object-runtime-proxy-invariants.ts    # S7 (symbol keys in the ownKeys reconciliation)
-  - src/codegen/object-integrity-proxy.ts             # S7 (key list), S8 (trap read)
-  - src/codegen/object-runtime-prototype.ts           # S7 (`__isPrototypeOf` first hop via `__getPrototypeOf`)
-  - src/stdlib/object-runtime.ts                      # S7 (self-hosted gOPDs: symbol keys, skip undefined)
+  - src/codegen/expressions/call-builtin-static.ts
+  - src/codegen/expressions/calls.ts
+  - src/codegen/literals.ts
+  - src/codegen/object-runtime-descriptors.ts
+  - src/codegen/object-runtime.ts
+  - src/codegen/carrier-bag-visibility.ts
+  - src/codegen/expressions/call-namespace-static.ts
+  - src/codegen/object-proto-name-in.ts
+  - src/codegen/object-proto-has-own-property.ts
+  - src/codegen/expressions/object-get-prototype-of.ts
+  - src/codegen/object-proto-symbol-tag.ts
+  - src/codegen/object-proto-tostring-carriers.ts
+  - src/codegen/object-proto-tostring.ts
+  - src/codegen/native-proto.ts
+  - src/codegen/object-runtime-proxy.ts
+  - src/codegen/object-runtime-proxy-invariants.ts
+  - src/codegen/object-integrity-proxy.ts
+  - src/codegen/object-runtime-prototype.ts
+  - src/stdlib/object-runtime.ts
+func-budget-allow:
+  # 2026-09-30 (#6770 S1, Opus): +10 in the enumeration-helper builder (the
+  # string-source arm call, built in the new leaf), +1 in compileElementAccess
+  # (the string-index decline for an Object.assign result binding).
+  - src/codegen/object-runtime-enumeration.ts::buildObjectEnumerationHelpers
+  - src/codegen/property-access.ts::compileElementAccess
 ---
 
 ## Problem

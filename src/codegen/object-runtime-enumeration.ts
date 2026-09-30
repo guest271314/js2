@@ -36,6 +36,7 @@ import { protoIndexForInPushInstrs, protoIndexHasIdxInstrs } from "./proto-index
 import { stringExoticPushKeysPrologue } from "./string-exotic-own-props.js"; // (#4491) §10.4.3 own index keys
 import { definedFuncAt } from "./func-space.js";
 import { orProxyArrayLikeTest, proxyArrayLikeTypeIdx } from "./proxy-array-like.js"; // (#6651 H6)
+import { stringExoticAssignSourceInstrs } from "./object-assign-primitive-operands.js"; // (#6770 S1)
 
 /**
  * Everything the enumeration/array-like/object-static block reads from the
@@ -1265,8 +1266,18 @@ export function buildObjectEnumerationHelpers(ctx: CodegenContext, s: ObjectEnum
               { op: "struct.get", typeIdx: objVecTypeIdx, fieldIdx: 1 },
               { op: "local.get", index: 5 },
               { op: "array.get", typeIdx: objVecArrTypeIdx },
-              { op: "local.tee", index: 12 },
+              { op: "local.set", index: 12 },
+              // (#6770 S1) ToObject(String source): its §10.4.3 index keys.
+              ...stringExoticAssignSourceInstrs(ctx, {
+                target: 0,
+                source: 12,
+                keys: 13,
+                count: 14,
+                index: 15,
+                key: 16,
+              }),
               // srcAny = any.convert_extern(srcExt)
+              { op: "local.get", index: 12 },
               { op: "any.convert_extern" },
               { op: "local.tee", index: 6 },
               // if !$Object → skip this source
