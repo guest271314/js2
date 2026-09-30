@@ -2536,3 +2536,211 @@ table with the probe's answer) rather than an open-ended dig.
   https://claude.ai/code/session_01FEGi3DmyPRPD5dx4kWU8hs`, `Model: Claude
   Opus 5.5 High`. Never `--no-verify`.
 - No `git stash`; A/B by file copy from `.tmp/5197r3/base-src`.
+
+### 2026-09-30 — r3 implementation (Opus)
+
+Branch `issue-5197-r3-promise` (on the plan branch, `origin/main` merged twice:
+`a2546f6fc5`, then `ee6828f1ef`). Before-state measured by this lane on
+`a2546f6fc5` (`.tmp/5197r3/rows-base.log`, eval rows re-run after the QuickJS
+provider build): **0/19**. The plan's before-table and all 23 probe answers
+reproduced exactly. Every row verdict below comes from
+`scripts/run-test262-paths.mts --isolate --standalone` under the shared lock;
+the table is the final re-run on the merged code (`b77cb0b09d`).
+
+#### The 19 rows
+
+| row | step | base | branch |
+| --- | --- | --- | --- |
+| `prototype/then/ctor-null.js` | 1 | fail | **pass** |
+| `prototype/then/ctor-poisoned.js` | 1 | fail | **pass** |
+| `prototype/then/ctor-throws.js` | 1 | fail | **pass** |
+| `prototype/then/ctor-access-count.js` | 1 | fail | **pass** |
+| `prototype/then/ctor-custom.js` | 1 | fail | **pass** |
+| `prototype/then/deferred-is-resolved-value.js` | 1 | fail | **pass** |
+| `prototype/then/capability-executor-called-twice.js` | 1d | CE | **pass** |
+| `prototype/then/capability-executor-not-callable.js` | 1d | CE | **pass** |
+| `resolve/arg-uniq-ctor.js` | 1e | fail | **pass** |
+| `prototype/then/S25.4.5.3_A5.1_T1.js` | 2 | fail | **pass** |
+| `all/resolve-thenable.js` | 3 | fail | **pass** |
+| `all/resolve-poisoned-then.js` | 3 | fail | **pass** |
+| `exception-after-resolve-in-executor.js` | 4 | fail | **pass** |
+| `exception-after-resolve-in-thenable-job.js` | 4 | fail | **pass** |
+| `executor-function-prototype.js` | 5 | fail | **pass** |
+| `all/capability-resolve-throws-no-close.js` | 5 | fail | **pass** |
+| `all/iter-arg-is-string-resolve.js` | 7 | fail | **pass** |
+| `all/resolve-element-function-prototype.js` | 5 | fail | fail — residual R1 |
+| `prototype/catch/this-value-obj-coercible.js` | 6 | fail | fail — residual R2 (step reverted) |
+
+**17/19**: 12 of the 13 firm rows (R1 is a firm Step 5 row) and 5 of the 6
+conditional ones (Step 6's row is R2). Bonus, ES2020, not in the target
+list: `allSettled/resolve-thenable.js`, `allSettled/resolve-poisoned-then.js`.
+
+#### What each step does (and where it deviates from the plan)
+
+1. **SpeciesConstructor + NewPromiseCapability in `then`** — new leaf
+   `src/codegen/promise-species-then.ts` (registered in
+   `scripts/compiler-boundaries.json`). Gate `promiseSpeciesObservable`
+   (standalone, not wasi; `arraySpeciesDirty` or a Promise-rooted class). The
+   ladder reads `constructor` with `__extern_get` (an absent own value reads the
+   `%Promise%` identity slot; a null slot means nothing reified `%Promise%`, so
+   default), TypeErrors a non-Object `C`, reads `@@species` (undefined on a
+   Promise-rooted class object falls back to the finalize-filled
+   `__promise_species_of_class` identity ladder), checks IsConstructor and
+   constructs the capability through `__native_construct_1`. A
+   `super(executor)` carrier settled by the native pair is used directly as the
+   derived promise; any other capability promise is fed by a forward reaction
+   through the dynamic then wrappers. 1e (`Promise.resolve(p)` constructor
+   check), 1f (`P.resolve(x)` on a subclass → `emitClassReceiverSettle`) as
+   planned. 1d needed three owners the plan did not name: the ctor fctx of an
+   anonymous Promise-rooted class now carries `enclosingClassName` (the
+   `<C>_new` prefix heuristic answers undefined for `__anonClass_N`, so a
+   nested `return super(executor)` lowered to NOTHING and the instance was
+   null); `promiseSubclassNameOfType` lets the receiver classifier see an
+   anonymous subclass type; `isAsyncCallExpression` exempts a native-lane
+   subclass `then` from the async-call rejection wrap (it turned a throwing
+   species constructor into a rejected promise). `tests/issue-6651-d4-promise-subclass.test.ts`
+   pinned `11117`; node answers `11017` (the species construct makes
+   `log.count` 2) — updated to node.
+2. **FIFO reactions** — deviation: instead of a mutable `$PromiseCallback.next`,
+   `buildPromiseSettleBody` rebuilds a list of ≥2 nodes in reverse with fresh
+   nodes. No type change, so neither the codegen nor the backend twin
+   declaration moves.
+3. **`Get(array, "then")`** — deviation: the plan assumed the aggregate was
+   settled through Resolve; it was a direct `__promise_fulfill`. Under
+   `arrayThenObservable` (a named `then` write or any Object/Array-prototype
+   define) the all/allSettled aggregate is settled via `__promise_resolve_value`
+   and the thenable ladder gains one `__extern_get` arm per vec type.
+4. **[[AlreadyResolved]]** — deviation: no per-pair cell (it needs a layout
+   change in `$__promise_settle_cap` AND its backend twin). Each settle function
+   records its call in a `bfnstate` bit (`0x100`; bits 0/1 are the delete bits
+   and every reader masks them); its own second call is a no-op, and the
+   executor / thenable-job catch rejects only when neither function of the pair
+   ran. Residual R5.
+5. **Function `C`** — the plan's regime diagnosis held for `resolve.call`: D1's
+   closure ABI declines when `C` is an externref value, so
+   `emitClassReceiverSettle` now also admits an ordinary function
+   (`isOrdinaryFunctionCtorArg`, D1's predicate lifted and shared) and
+   constructs through the driver. D3's drive admits a function `C` over a
+   NON-literal iterable and runs before D1 for that case.
+6. **`catch` on a primitive** — implemented (`__extern_get(recv,"then")` GetV +
+   `__apply_closure`), measured, **reverted**: boolean/number/string pass, the
+   Symbol sub-case does not (R2).
+7. **`Promise.all(<iterable>)` typing** — option (i) via the existing
+   `forceExternrefCallbackParams` hook: a handler on a syntactic
+   `Promise.{all,allSettled,any}(<not an array literal>)` compiles its vec
+   params as externref.
+
+#### Probes (branch, node)
+
+p1 111/111 · p2 110/110 · p3 12/12 · p4 123/123 · p5 1/1 · p6 1/1 ·
+p7 111/111 · p8 RT/111 (step 6 reverted) · p9 1001/1001 · p10 1/1 ·
+p11 11111/11111 · p12 11/11 · p13 111/111 · p14 1/1 · p15 1234/1234 ·
+p16 11/11 · p17 1/1 · p18 11/11 · p19 414/111 (R3) · p20 1/1 · p21 1/1 ·
+p22 10111/11111 (R4) · p23 1111/1111.
+
+`tests/issue-5197-r3-promise.test.ts` (the dispatch brief's name; Step 8
+called it `issue-5197-promise-r3-species.test.ts`): 18 pins (node answers; p22 pinned
+without its `X[@@species]` bit as `p22b`; p8 not pinned, Step 6 reverted) + 3
+guards (p7, p16, p20). Base tree
+(`git archive a2546f6fc5 src`): **18 pins red, 3 guards green**. Branch: 21/21.
+
+#### Controls
+
+- Step-scoped runner controls (every currently-passing row of each family
+  re-run): 40-row `Promise/{,all,allSettled}/resolve-*` family and the 47-row
+  `catch/*` + `{all,race,allSettled,any}/iter-arg-is-*` family — 0
+  currently-passing rows lost (every non-pass is a row not passing on base).
+- Unit files green: `issue-6651-d3/-d4/-d5/-d7`, `issue-2623-promise-subclass-identity`,
+  `issue-5197-es2015-promise-r2`, `issue-5197-promise-generic-capability`,
+  `issue-5197-promise-generic-catch`, `issue-5197-own-then-indirection`,
+  `issue-5197-promise-observable-combinator-r3-2`, `issue-4682`, `issue-4727`,
+  `issue-4746`, `issue-2867-gap4`, `issue-3125`, `issue-3125-widen`,
+  `promise-expando-standalone`, `issue-2671-promise-executor`,
+  `issue-28-promise-executor-invocation`, `issue-2959`,
+  `issue-6651-promise-custom-combinator`, `issue-6651-promise-combinator-drive`,
+  `deno-safe-promise-combinators`. `promise-combinators.test.ts` "resolved
+  values" (host lane) times out identically on the full base `src` — pre-existing.
+- Byte identity: after step 1, 40-row sample (20 async-function + 20
+  then/all rows without `constructor`/`species`/`extends Promise`),
+  standalone AND gc: **80/80 identical**. Final code against `origin/main`
+  `ee6828f1ef` (`bytecmp3.mts`): **gc 40/40 identical**; standalone 18/40
+  identical, 22 differ by design. After steps 2-5 a function-level WAT diff (inliner local
+  names normalized) of a plain async module and of an ES5 row
+  (`Function/prototype/S15.3.4_A1.js` — the assembled harness carries the
+  Promise substrate) is confined to `__promise_fulfill`, `__promise_reject`,
+  `__promise_resolve_cl`, `__promise_reject_cl`, `__promise_thenable_job`,
+  `__promise_{has_callable,lookup}_then` and the executor catch in
+  `__module_init` — none reachable from a module that never touches a promise.
+- Full control, final code (measurement-tree snapshot of `b77cb0b09d`'s
+  `src`): 1,189 rows passing on the 2026-09-29 standalone baseline — every
+  passing `built-ins/Promise/**`, `built-ins/Function/prototype/**`,
+  `built-ins/Object/getPrototypeOf/**`, `language/{expressions,statements}/
+  async-{function,arrow-function}/**` row, 197 of the 789 passing
+  `async-generator` rows, and the 4 `class … extends Promise` rows. By
+  edition: ES5 226, ES2015 415, ES2017 132, ES2018 222, later 80, unclassified
+  114. Result: **1,188 pass, 1 fail, ES5 226/226**. The one failure,
+  `language/expressions/async-generator/early-errors-expression-yield-star-after-newline.js`
+  (a parse-phase negative test that compiles), fails identically on
+  `origin/main` `ee6828f1ef` (in-process and `--isolate`) — pre-existing on
+  main, not this branch. Deviation: the three 400-row chunks ran in-process
+  (`run-test262-paths.mts` without `--isolate`), after the in-process and
+  `--isolate` verdicts were checked equal on the 71-row `rows-c1` set; an
+  isolated control run was started first and killed as too slow for this
+  shared 4-core box.
+
+#### Residuals (each with its mechanism)
+
+| # | row / probe | mechanism |
+| --- | --- | --- |
+| R1 | `all/resolve-element-function-prototype.js` | In the assembled module the resolve-element function never reaches `thenable.then`: probe row `Promise5197/diag-elem.js` answers `undefined:null|function:fp|function:fp|fp` (element fn undefined — the row's «null» is `Object.getPrototypeOf(undefined)` answering null instead of throwing, a second divergence; the capability executor from `Promise.all.call` and `Promise.resolve.call` both inherit `Function.prototype`). D1 IS emitted there (`__promise_custom_comb_*` present), the plain-compile twin p16 answers 11, and the `-name.js` twin of the row (identical up to its last line) passes. `moduleReadsBareFunctionValue` is false for this module (its runtime-eval sites are the harness `eval` kinds only), so the plan's "runtime-eval regime" gate does not identify it. Not reduced further. |
+| R2 | `prototype/catch/this-value-obj-coercible.js` | Step 6's arm passes boolean/number/string (`Promise5197/diag-catch2.js`: `b1n1s1yT`). `Symbol.prototype.then = f` is not observable from a symbol value at all (probe x14: dynamic get, static `s.then` and `catch.call(s)` all miss; node 1111) — `__extern_get` has no `%Symbol.prototype%` arm. Step reverted per the lane rule; the arm can re-land unchanged once that read exists. |
+| R3 | p19 | A direct CALL `id(true).then()` on a boxed primitive throws even though `typeof id(true).then` answers `"function"`; no row depends on it. |
+| R4 | p22 bit 1000 | `X[Symbol.species]` on a Promise-rooted class object answers undefined (no link to `%Promise%`'s accessor); the `then` ladder uses `__promise_species_of_class` instead, so no row observes it. |
+| R5 | step 4 | The resolve/reject pair shares no record: `resolve(thenable); reject(r)` from the SAME pair still rejects the pending promise (unchanged from base). |
+| R6 | shim `bisect-a-value-erased.js` | `var r = Promise.resolve; r.call(NotPromise)` (value-erased) still never constructs `NotPromise`. |
+
+#### Acceptance criteria that do NOT hold
+
+- **Firm rows: 12/13, not 13/13.** `all/resolve-element-function-prototype.js`
+  (Step 5) fails — R1.
+- **Probe answers:** p22 answers `10111`, not `11111` (R4); p8 is not `111`
+  (Step 6 reverted, R2).
+- **Step 5 shim rows: 3/5** (final code, `--isolate`): `call-count-fp`,
+  `bisect-b-reject`, `gpo-executor` pass; `bisect-a-value-erased` (R6) and
+  `bisect-e-all-literal` (`thenable.then` receives `undefined` — R1's
+  mechanism) fail.
+- **Control method:** in-process 400-row chunks, not `--isolate` ≤24-row
+  chunks (see Controls). The async-generator sample (197 of 789) matches the
+  plan's 1-in-4.
+- **Step 4** is per-function, not per-pair (R5).
+
+Holding: 0 attributable pass→non-pass across the 1,189-row control, 0 ES5
+flips, gc byte-identical on the 40-row sample, all gates green, growth
+grants only in this file's frontmatter.
+
+#### Tool refusals
+
+The worktree-isolation guard refused a number of shell commands as too complex
+to verify (heredocs, pipelines around `git`, commands with computed
+arguments). Each was re-issued as plain separate commands, or as a small script
+under `.tmp/5197r3/` doing file edits/measurements only; no refused `git`
+operation was performed another way. The permission system refused nothing
+else.
+
+#### Gates
+
+On the merged tree `b77cb0b09d` (`origin/main` = `ee6828f1ef`), every gate run
+bare with its exit status read directly: `check-loc-budget`, `check-func-budget`
+(both also with `LOC_GATE_BASE=origin/main`), `check-coercion-sites`,
+`check:oracle-ratchet` (`getTypeAtLocation +0, ctx.checker +0`),
+`check:dead-exports`, `check-compiler-boundaries --mode inventory --base
+origin/main` (inventory valid), `typecheck`, `lint`, `check:ir-fallbacks`,
+`prettier --check` on the 20 touched `.ts` files — all exit 0. The 8
+`equivalence-gate.mjs` shards, run locally as CI runs them: 0 new failures
+(22 known failures, all in the baseline). The pre-commit hook passed on every
+commit. The first merge commit's hook failed on
+`tests/issue-3518-semantic-provider-boundary.test.ts` (canonical closure edge
+count 613, expected 612): step 4 had imported `BFN_STATE_FIELD_IDX` from
+`closure-layouts` into `resolution-bodies.ts`; the index is now a local
+constant (the layout `buildPromiseSettleClosureValue` already asserts), which
+keeps main's edge count.

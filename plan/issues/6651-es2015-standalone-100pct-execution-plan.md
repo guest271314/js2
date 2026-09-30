@@ -19904,6 +19904,18 @@ Steps 1-7 in that order; 13 firm rows, 6 conditional on one named probe
 each. D3/D4/D5/D7 made B1 reachable (the 09-03 "G9 deferred" entries are
 superseded); nothing is judged unreachable by construction.
 
+**Implementation (2026-09-30, Opus lane, branch `issue-5197-r3-promise`):
+0 → 17/19** — 12 of the 13 firm rows and 5 of the 6 conditional ones. Two
+remain: `all/resolve-element-function-prototype.js` (firm, Step 5: in the
+assembled module the resolve-element function never reaches `thenable.then`;
+mechanism not reduced below that) and `prototype/catch/this-value-obj-coercible.js`
+(Step 6 measured and reverted — its Symbol sub-case needs a
+`%Symbol.prototype%` read from a symbol value). Control: 1,188/1,189
+currently-passing rows (ES5 226/226); the one failure is pre-existing on
+`origin/main`. Record, deviations and residual mechanisms:
+`plan/issues/5197-es2015-standalone-promise-r2.md` §
+"2026-09-30 — r3 implementation (Opus)".
+
 ## 2026-09-30 — #6767: class definition reflective residue (pointer)
 
 `language/statements/class/definition/**` (19 standalone rows, 18 non-pass on
