@@ -93,6 +93,7 @@ import {
 import { hostRegExpMatchResultNeedsExternref, stripInferenceWrapper } from "../regexp-host-match.js";
 import { taStaticFromOfReflectiveCallNeedsExternref } from "../ta-static-from-of-spec.js";
 import { objectAssignResultNeedsExternref } from "../object-assign-primitive-operands.js";
+import { integrityLiteralResultNeedsExternref } from "../object-literal-reflective-escape.js";
 import { inferStandaloneRegExpMatchResultType } from "../regexp-standalone.js";
 
 /**
@@ -168,6 +169,7 @@ export function transferredArrayLikeResultNeedsExternref(
   if (hostRegExpMatchResultNeedsExternref(ctx, initializer)) return true;
   if (taStaticFromOfReflectiveCallNeedsExternref(ctx, initializer)) return true; // (#6651 E5)
   if (objectAssignResultNeedsExternref(ctx, initializer)) return true; // (#6770 S1)
+  if (integrityLiteralResultNeedsExternref(ctx.standalone, initializer)) return true; // (#6770 S2)
   if (!(ctx.standalone || ctx.wasi) || !initializer || !ts.isCallExpression(initializer)) return false;
   const callee = initializer.expression;
   if (!ts.isPropertyAccessExpression(callee) || ts.isPrivateIdentifier(callee.name)) return false;

@@ -98,3 +98,64 @@ if (sv(Object.keys({ a: 1, b: 2 }).join(), "a,b")) __r |= 4;\n${END}`;
     T,
   );
 });
+
+describe("#6770 S2 — a literal written through a reflective builtin is an open $Object", () => {
+  it(
+    "Object.assign / Reflect.set / Reflect.deleteProperty on a literal-bound var (RED on base)",
+    async () => {
+      const src = `var __r = 0;\n${SV}
+var target = { a: 1 }; var result = Object.assign(target, { a: 2 }, { a: "c" }); if (sv(result.a, "c")) __r |= 1;
+var o1 = { p: 43 }; var res = Reflect.set(o1, "p", 42); if (sv(res, true)) __r |= 2; if (sv(o1.p, 42)) __r |= 4;
+var o2 = { p: 43 }; var receiver = { p: 44 }; var res = Reflect.set(o2, "p", 42, receiver);
+if (sv(res, true)) __r |= 8; if (sv(o2.p, 43)) __r |= 16; if (sv(receiver.p, 42)) __r |= 32;
+var o3 = { prop: 42 }; Reflect.deleteProperty(o3, "prop"); if (sv(o3.hasOwnProperty("prop"), false)) __r |= 64;\n${END}`;
+      expect(await probe(src)).toBe(127);
+    },
+    T,
+  );
+
+  it(
+    "inline literals under freeze / preventExtensions keep integrity and accessors (RED on base)",
+    async () => {
+      const src = `var __r = 0;\n${SV}
+var target2 = Object.freeze({ foo: 1 });
+try { Object.assign(target2, { foo: 1 }); } catch (e) { if (e instanceof TypeError) __r |= 1; }
+if (sv(target2.foo, 1)) __r |= 2;
+if (sv(Object.isFrozen(target2), true)) __r |= 4;
+var value1 = 1;
+var target1 = Object.preventExtensions({ set foo(val) { value1 = val; } });
+Object.assign(target1, { foo: 2 }); if (sv(value1, 2)) __r |= 8;
+var f3 = Object.freeze({ foo: 1 }); Reflect.set(f3, "foo", 2); if (sv(f3.foo, 1)) __r |= 16;\n${END}`;
+      expect(await probe(src)).toBe(31);
+    },
+    T,
+  );
+
+  it(
+    "Object.entries keeps a symbol VALUE's identity on both carriers (RED on base)",
+    async () => {
+      const src = `var __r = 0;\n${SV}
+var symValue = Symbol("value"); var enumSym = Symbol("enum");
+var obj3 = { key: symValue, n: 1 }; if (sv(Object.entries(obj3)[0][1], symValue)) __r |= 1;
+var obj4 = { key: symValue };
+Object.defineProperty(obj4, enumSym, { enumerable: false, value: 1 });
+var e4 = Object.entries(obj4); if (sv(e4[0][1], symValue)) __r |= 2; if (sv(e4.length, 1)) __r |= 4;\n${END}`;
+      expect(await probe(src)).toBe(7);
+    },
+    T,
+  );
+
+  it(
+    "guard — a plain literal only READ reflectively, or frozen by name, keeps working",
+    async () => {
+      const src = `var __r = 0;\n${SV}
+var o = { a: 1, b: 2 }; if (sv(Object.keys(o).join(), "a,b")) __r |= 1;
+if (sv(Object.getOwnPropertyDescriptor(o, "a").value, 1)) __r |= 2;
+if (sv(Reflect.get(o, "b"), 2)) __r |= 4;
+var f = { x: 1 }; Object.freeze(f); if (sv(Object.isFrozen(f), true)) __r |= 8;
+if (sv(Object.prototype.toString.call([]), "[object Array]")) __r |= 16;\n${END}`;
+      expect(await probe(src)).toBe(31);
+    },
+    T,
+  );
+});

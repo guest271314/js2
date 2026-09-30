@@ -4814,6 +4814,8 @@ export function compileObjectKeysOrValues(
         if (fieldKind === "f64") {
           const boxIdx = ctx.funcMap.get("__box_number");
           if (boxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: boxIdx });
+        } else if (entry.field.type.kind === "i32" && entry.field.type.symbol === true) {
+          coerceType(ctx, fctx, entry.field.type, { kind: "externref" }); // (#6770 S2) keep the symbol's identity
         } else if (fieldKind === "i32") {
           fctx.body.push({ op: "f64.convert_i32_s" });
           const boxIdx = ctx.funcMap.get("__box_number");

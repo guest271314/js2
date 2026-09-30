@@ -30,6 +30,19 @@ loc-budget-allow:
   - src/codegen/object-runtime-enumeration.ts
   - src/codegen/statements/variables.ts
   - src/codegen/property-access.ts
+  # S2: one marker call + one consumer-guard carve-out in the #2992 S6 mopSet
+  # arm (object-shape-widening), the shared `$Symbol`-carrier unbox for tuple
+  # fields (type-coercion), the symbol-branded field box in the struct
+  # `Object.entries` arm (object-ops).
+  - src/codegen/declarations/object-shape-widening.ts
+  - src/codegen/type-coercion.ts
+  - src/codegen/object-ops.ts
+  # S3: the RegExp `lastIndex` reflection hook (regexp-lastindex-carrier), the
+  # intrinsic-live push in the function own-names arm (function-instance-props),
+  # the new leaf object-own-key-order.ts.
+  - src/codegen/regexp-lastindex-carrier.ts
+  - src/codegen/function-instance-props.ts
+  - src/codegen/object-own-key-order.ts
   - src/codegen/object-literal-reflective-escape.ts
   - src/codegen/proxy-trap-read.ts
   - src/codegen/object-proto-to-locale-string.ts
@@ -59,6 +72,20 @@ func-budget-allow:
   # (the string-index decline for an Object.assign result binding).
   - src/codegen/object-runtime-enumeration.ts::buildObjectEnumerationHelpers
   - src/codegen/property-access.ts::compileElementAccess
+  # 2026-09-30 (#6770 S2, Opus): +2..+3 lines each — the inline-literal route
+  # in the freeze/seal/preventExtensions arm, the shared symbol-carrier unbox,
+  # the marker call + guard carve-out, the symbol-branded entries box.
+  - src/codegen/expressions/call-builtin-static.ts::compileBuiltinStaticCall
+  - src/codegen/type-coercion.ts::buildVecFromExternref
+  - src/codegen/declarations/object-shape-widening.ts::collectGrowableObjectLiterals
+  - "src/codegen/declarations/object-shape-widening.ts::scanStatements#2"
+  - src/codegen/object-ops.ts::compileObjectKeysOrValues
+  # 2026-09-30 (#6770 S3, Opus): the i64 order-index registration in the
+  # ordered walk (ensureObjectRuntime +4), the non-`$Object` entries/values arm
+  # calls + their two scratch locals each (buildObjectEnumerationHelpers), the
+  # String-wrapper `length` placement call in the gOPN walk (+1).
+  - src/codegen/object-runtime.ts::ensureObjectRuntime
+  - src/codegen/object-runtime-descriptors.ts::buildObjectDescriptorHelpers
 ---
 
 ## Problem

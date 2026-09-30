@@ -119,6 +119,7 @@ import {
   ensureObjectRuntime,
 } from "../object-runtime.js";
 import { isArrayCarrierValType, retainArrayIsArrayExternrefCandidate } from "../array-carrier-brand.js"; // (#4556)
+import { integrityCallLiteralArg } from "../object-literal-reflective-escape.js"; // (#6770 S2)
 import {
   BUILTIN_CTOR_NAMES,
   emitArrayIsArrayExternrefPredicate,
@@ -1931,7 +1932,10 @@ export function compileBuiltinStaticCall(
     }
 
     // Compile the argument — returns the object itself (freeze/seal return their arg)
-    let argType = compileExpression(ctx, fctx, expr.arguments[0]!);
+    // (#6770 S2) An inline literal is built as the identity-bearing `$Object`.
+    const inlineLiteral = ctx.standalone ? integrityCallLiteralArg(expr) : undefined;
+    if (inlineLiteral) compileObjectAssignArg(ctx, fctx, inlineLiteral);
+    let argType = inlineLiteral ? ({ kind: "externref" } as ValType) : compileExpression(ctx, fctx, expr.arguments[0]!);
     if (!argType) return null;
 
     // #1472 Phase B Blocker A Half 2 — object-receiver normalization.
