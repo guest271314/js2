@@ -1377,3 +1377,22 @@ two `-this` rows, mechanism above). p10 ≥ 63 holds (63). Zero rows lost on
 the super + object controls; host and wasi bytes identical; gates green;
 `src/ir/select.ts` untouched. The class control is recorded separately below.
 
+
+### Class control (merged tree `758905cb`, same source as `c60b0a30ad`)
+
+Every ES2015 row under `language/statements/class/` and
+`language/expressions/class/` that passes on the standalone baseline (2,203),
+run IN-PROCESS (`run-test262-paths.mts --standalone`, no `--isolate`: 2,203
+isolated rows is ~3 h of runner lock on a box shared with two other lanes):
+**2,201 pass, 2 fail** —
+`class/definition/methods-gen-yield-star-after-newline.js` and
+`methods-gen-yield-weak-binding.js`, both "This statement should not be
+evaluated." Both are NEGATIVE parse tests (`yield 3 + yield 4`), the same
+family as the two object rows above that fail identically on `origin/main`
+through the runner. Attribution measured at the parse phase instead of a
+second locked run: `.tmp/5350/negparse.mts` compiles each row's source with the
+base tree and with the lane — identical on all three rows checked (the two
+class rows and `object/method-definition/yield-weak-binding.js`): both trees
+report "Expression expected." as a non-fatal diagnostic and return
+`success=true`, which is why the body runs. Not this change. **Zero class rows
+lost.** The in-process peak was ~6.3 GB RSS.
