@@ -85,6 +85,9 @@ func-budget-allow:
   - src/codegen/declarations.ts::collectDeclarations
   - src/codegen/expressions/call-builtin-static.ts::compileBuiltinStaticCall
   - src/codegen/object-runtime.ts::ensureObjectRuntime
+  # 2026-09-30 (#6774 S11, Opus): the member-target default split + one call to
+  # the new emitMemberTargetDefault helper.
+  - src/codegen/expressions/assignment.ts::compileDestructuringAssignment
 ---
 
 ## Problem
