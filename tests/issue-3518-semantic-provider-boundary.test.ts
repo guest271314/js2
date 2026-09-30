@@ -945,6 +945,7 @@ describe("semantic verification and provider ownership boundary", () => {
           "src/backend/wasmgc/resources/native-primitive-wrapper-layouts.ts",
           "src/backend/wasmgc/resources/native-primitive-wrapper-storage.ts",
         );
+      if (id === "native-runtime") additions.push("src/runtime/wasmgc/values/to-object-body.ts");
       const signedEntries = additions.length ? layer.entries.slice(0, -additions.length) : layer.entries;
       if (additions.length) expect(layer.entries.slice(-additions.length)).toEqual(additions);
       const receipt = signedLayerComposition[id as keyof typeof signedLayerComposition];
