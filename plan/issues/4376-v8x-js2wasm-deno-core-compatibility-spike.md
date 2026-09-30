@@ -23,6 +23,7 @@ loc-budget-allow:
   - total
   # Destructured module exports use existing snapshot/live-binding routes.
   - src/codegen/module-namespace-value.ts
+  - src/codegen/expressions/call-namespace-static.ts
   # 2026-08-28: PR #5148 checkpoint (Deno runtime integration — linked
   # shared-realm/callable boundaries, runtime-eval + exception transport,
   # Promise/reflection/buffer-view/finalizer behavior). Broad, measured
@@ -81,6 +82,8 @@ loc-budget-allow:
   - src/codegen/expressions/late-imports.ts
   - src/codegen/async-scheduler.ts
 func-budget-allow:
+  # Runtime operand validation reuses the shared Reflect object classifier.
+  - src/codegen/expressions/call-namespace-static.ts::compileNamespaceStaticCall
   - src/codegen/expressions/calls-closures.ts::compileCallablePropertyCall
   - src/codegen/statements/variables.ts::compileVariableStatement
   - src/codegen/statements/nested-declarations.ts::compileNestedFunctionDeclarationInScope
@@ -557,6 +560,28 @@ without the composed patch (10,007,948 bytes), the patch reduces the artifact
 by 3,006 bytes; the larger artifact size predates it.
 
 ## Handover
+
+### 2026-09-30: resume native adapter after compiler namespace fix
+
+- Restored the published v8x branch at `83f5554c398f94a77ac32e110104c45460969695`
+  in `/private/tmp/v8x-deno-resume-20260930.o0sxeO/repo`.
+- First native adapter build stopped in vendor setup while downloading Chromium
+  ICU test data. The adapter test does not embed that file; js2wasm setup now
+  skips it, while manual `rusty_v8` setup retains upstream test support.
+- Next verification is the native adapter suite and compiled module namespace
+  publication. This checkpoint does not establish complete Deno integration.
+- Native adapter baseline: 23/23 executed tests passed, 2 artifact-dependent
+  tests ignored. Fresh compiled context fixture stopped on an invalid dynamic
+  `Reflect.setPrototypeOf` prototype that should throw. A compiler regression
+  reproducer rejected 0/9 invalid operands before adding runtime validation.
+- Runtime validation now rejects 9/9 invalid operands. Focused namespace,
+  prototype refusal, proxy, and Symbol tests: 44/44 passed; TS7 typecheck passed.
+  The context fixture advances past prototype/identity/buffer checks but still
+  fails later in numeric coercion with a Wasm exception, before writing a usable
+  artifact. Do not claim the native compiled bridge suite passed.
+- Runtime-compile native suite: 26 passed, 2 failed because their required raw
+  Deno/runtime-eval artifacts are absent, 21 ignored. Compiler-free suite:
+  23 passed, 2 ignored. Manual `setup_vendor.sh js2wasm` also succeeds.
 
 2026-09-30 namespace validation complete: 22/23 focused tests pass with explicit exnref worker support. The sole failure in `issue-3188-module-namespace-tostringtag.test.ts`'s standalone TypeScript runtime-namespace callable projection reports `dynamic array length fill requires a pre-reserved Hole global`; pristine detached control `10ec2abc3a4` reproduces the identical failure (7/8 in that file). Three new destructured-export regressions were 0/3 on baseline and 3/3 on candidate. Exact two-store Deno bootstrap passes with namespace score 3 and no recorded blocker. TS7 and diff whitespace checks pass. New source only extends declaration admission; it reuses the existing snapshot and mutable getter machinery. Restored v8x checkout is clean at published `83f5554` with rusty_v8 pinned `dd1b4e9c743b7a11dbeb99d4d0dc55979218b905`; native rebuild and broader op/module/promise integration remain ahead. Original uncommitted ABI comment and Acorn artifact are preserved outside this fix.
 
