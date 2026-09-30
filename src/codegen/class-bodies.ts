@@ -4555,10 +4555,14 @@ export function compileSuperCall(
     for (let i = 0; i < Math.min(flatArgs.length, paramTypes.length); i++) {
       compileExpression(ctx, fctx, flatArgs[i]!, paramTypes[i]);
     }
-    for (let i = paramTypes.length; i < flatArgs.length; i++) {
-      const argResult = compileExpression(ctx, fctx, flatArgs[i]!);
-      if (argResult !== null) {
-        fctx.body.push({ op: "drop" });
+    // (#6772 S1a) A parent that reads `arguments` sees the extras through
+    // `__extras_argv`, exactly as the `new` site publishes them.
+    if (flatArgs.length > paramTypes.length && ctx.funcUsesArguments.has(parentInitName)) {
+      emitSetExtrasArgv(ctx, fctx, flatArgs, paramTypes.length);
+    } else {
+      for (let i = paramTypes.length; i < flatArgs.length; i++) {
+        const argResult = compileExpression(ctx, fctx, flatArgs[i]!);
+        if (argResult !== null) fctx.body.push({ op: "drop" });
       }
     }
     for (let i = flatArgs.length; i < paramTypes.length; i++) {

@@ -1,7 +1,8 @@
 ---
 id: 6772
 title: "ES2015 standalone class residue: this-before-super() ordering, return-override, class-ctor [[Call]] via call/apply, super() extras, computed-key side effects, `new`-named methods, static `constructor` accessors, comma heritage, RegExp `lastIndex` gOPD, heritage `prototype` getter, static/instance accessor slots"
-status: ready
+status: in-progress
+assignee: ttraenkler/opus-6772
 sprint: current
 created: 2026-09-30
 updated: 2026-09-30
