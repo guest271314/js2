@@ -1,7 +1,8 @@
 ---
 id: 6771
 title: "ES2015 standalone: built-ins/Array residue (34 rows) — Proxy receivers + species/RangeError/copyWithin (H6 re-apply), array-like exotic operands, Array(n) holes, @@unscopables, Boolean.prototype.toString override, ArraySetLength order, flat species, fnctor prototype.constructor"
-status: ready
+status: in-progress
+assignee: ttraenkler/opus-6771
 sprint: current
 created: 2026-09-30
 updated: 2026-09-30
@@ -63,6 +64,15 @@ loc-budget-allow:
   - src/codegen/array-set-length-coercion.ts
   - src/codegen/proxy-trap-getmethod.ts
   - scripts/compiler-boundaries.json
+  # 2026-09-30 (#6771 implementation, Opus): wiring lines only — S1's Proxy-trap
+  # return widening is one wrapper call in `computeClosureWrapperSig`
+  # (closures.ts, +6 formatted); S2's finalize fill is one call per pipeline
+  # plus its import (index.ts, +3). Bodies live in the new leaves
+  # proxy-trap-closure-return.ts / array-like-exotic-arms.ts / array-length-holes.ts.
+  - src/codegen/closures.ts
+  - src/codegen/index.ts
+  - src/codegen/proxy-trap-closure-return.ts
+  - src/codegen/array-length-holes.ts
 func-budget-allow:
   # 2026-09-30 (#6771 plan): each gains one arm / one guard / one route.
   - src/codegen/array-methods.ts::setupArrayLoop
@@ -85,6 +95,20 @@ func-budget-allow:
   - src/codegen/ta-dyn-mop.ts::fillTaDynViewMopArms
   - src/codegen/vec-overlay.ts::fillVecOverlayHelpers
   - src/codegen/expressions/assignment.ts::compilePropertyAssignment
+  # 2026-09-30 (#6771 implementation, Opus): one call each — the S2 fill in both
+  # finalize pipelines, and S3's hole-aware static `k in arr` branch.
+  - src/codegen/index.ts::generateModule
+  - src/codegen/index.ts::generateMultiModule
+  - src/codegen/binary-ops-in.ts::compileInOperator
+coercion-sites-allow:
+  # 2026-09-30 (#6771 implementation, Opus): ToString(k) of an integral array
+  # index — the canonical key spelling every array-like arm uses (the `$Object`
+  # arms of `__extern_get_idx`/`__extern_has_idx` already call
+  # `number_toString` for exactly this). S1 re-applies the #6651 H6 copyWithin
+  # body (reviewed there, grant stranded by the revert); S2's closure / builtin
+  # carrier arms delegate by the same key.
+  - src/codegen/array-copywithin-native.ts
+  - src/codegen/array-like-exotic-arms.ts
 ---
 
 ## Problem
