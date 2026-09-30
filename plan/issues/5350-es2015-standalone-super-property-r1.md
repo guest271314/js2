@@ -36,6 +36,17 @@ loc-budget-allow:
   # 2026-09-06 (r3): +1 line — the nested-`super(...)` arm's flag store. The
   # mechanism lives in new-super.ts; only the one-line call site is here.
   - src/codegen/expressions/calls.ts
+  # 2026-09-30 (r2, super WRITES): call sites only — the lowering lives in the
+  # new leaf `expressions/super-property-write.ts`. assignment.ts +6 (import +
+  # one two-line arm each in the dot and element assignment paths);
+  # call-receiver-method.ts +3 (import + the `C.prototype.m()` receiver publish,
+  # mechanism in `expressions/super-receiver-publish.ts`); object-ops.ts +3
+  # (import + the `hasOwnProperty` fold's decline for a key a `super` write can
+  # add, predicate in `super-write-grown-keys.ts`). new-super.ts (granted above)
+  # grows by the shared [[HomeObject]]/receiver emitter factories the write reuses.
+  - src/codegen/expressions/assignment.ts
+  - src/codegen/expressions/call-receiver-method.ts
+  - src/codegen/object-ops.ts
 # 2026-09-06 (r3 review round): the S1 runtime this-initialised flag adds two
 # call sites outside the two modules already granted above — one line each,
 # storing 1 into `__super_done` right after a `super(...)` lowering returns.
@@ -51,6 +62,13 @@ func-budget-allow:
   - src/codegen/dynamic-proto.ts
   - src/codegen/class-bodies.ts::compileClassBodiesInner
   - src/codegen/expressions/calls.ts::compileCallExpression
+  # 2026-09-30 (r2): the same four call sites as the loc grant above, +2..+3
+  # lines each in functions already far over the threshold; every mechanism is
+  # in a new leaf module.
+  - src/codegen/expressions/assignment.ts::compilePropertyAssignment
+  - src/codegen/expressions/assignment.ts::compileElementAssignment
+  - src/codegen/expressions/call-receiver-method.ts::compileReceiverMethodCall
+  - src/codegen/object-ops.ts::compilePropertyIntrospection
 ---
 
 ## Problem
