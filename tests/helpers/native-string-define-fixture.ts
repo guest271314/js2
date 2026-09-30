@@ -32,8 +32,8 @@ import {
 import { fillNativeStringCreateResources } from "../../src/backend/wasmgc/resources/native-string-create.js";
 import {
   stringCreateFixture,
-  fillStringCreateDependencies,
-  stringCreateRuntime,
+  fillStringCreateDependencyPhases,
+  stringCreateRuntimePhases,
   type StringCreateFixture,
   type StringCreateRuntime,
 } from "./native-string-create-fixture.js";
@@ -119,20 +119,35 @@ export function stringDefineFixture(utf8 = false, shifted = false, selected = tr
   return reserveDefinition(stringCreateFixture(utf8, shifted, 2, false, stringDefineSource()), selected);
 }
 export type StringDefineFixture = ReturnType<typeof stringDefineFixture>;
-function fillDefinition(f: StringDefineFixture) {
+function* fillDefinitionPhases(f: StringDefineFixture): Generator<string, void> {
   fillNativeBooleanResources(f.tx, f.booleans);
+  yield "native booleans";
   fillNativeBigIntResources(f.tx, f.bigints);
+  yield "native bigints";
   fillNativeObjectSameValueResources(f.tx, f.sameValue);
+  yield "native SameValue";
   fillNativeErrorResources(f.tx, f.errors);
+  yield "native errors";
   fillNativeObjectDescriptorResources(f.tx, f.descriptors, f.exception);
+  yield "String definition bodies";
 }
-export function completeStringDefineFixture(f = stringDefineFixture()) {
+export function* completeStringDefineFixturePhases(f = stringDefineFixture()) {
+  yield "reserved definition fixture";
   f.tx.freezeReservations();
-  fillStringCreateDependencies(f);
+  yield "frozen reservations";
+  yield* fillStringCreateDependencyPhases(f);
   fillNativeStringCreateResources(f.tx, f.create);
-  fillDefinition(f);
+  yield "completed String constructor";
+  yield* fillDefinitionPhases(f);
   return f;
 }
+export function completeStringDefineFixture(f = stringDefineFixture()) {
+  const phases = completeStringDefineFixturePhases(f);
+  let step = phases.next();
+  while (!step.done) step = phases.next();
+  return step.value;
+}
+
 export interface StringDefineRuntime extends StringCreateRuntime {
   defineData(object: object, key: object, value: unknown, mask: number): void;
   defineAccessor(object: object, key: object, getter: unknown, setter: unknown, mask: number): void;
@@ -148,9 +163,9 @@ export interface StringDefineRuntime extends StringCreateRuntime {
   sameValue(a: unknown, b: unknown): number;
   exception: WebAssembly.Tag;
 }
-export function stringDefineRuntime(utf8 = false, shifted = false) {
+export function* stringDefineRuntimePhases(utf8 = false, shifted = false) {
   let fixture: StringDefineFixture | undefined;
-  const result = stringCreateRuntime(utf8, shifted, 2, stringDefineSource(), (base) => {
+  const result = yield* stringCreateRuntimePhases(utf8, shifted, 2, stringDefineSource(), (base) => {
     const f = reserveDefinition(base);
     fixture = f;
     const tx = f.tx,
@@ -176,8 +191,8 @@ export function stringDefineRuntime(utf8 = false, shifted = false) {
       params: [{ kind: "ref", typeIdx: f.closures.root.typeIndex }],
       results: [f64],
     });
-    return () => {
-      fillDefinition(f);
+    return function* () {
+      yield* fillDefinitionPhases(f);
       requireCompletedNativeStringDefinitions(tx, f.descriptors, f.descriptorDependencies);
       const fill = (name: string, body: Instr[]) => tx.fillFunction(observers[name]!, { locals: [], body });
       const object = (index: number): Instr[] => [
@@ -228,4 +243,11 @@ export function stringDefineRuntime(utf8 = false, shifted = false) {
   });
   if (!fixture) throw Error("missing issued definition fixture");
   return { ...result, f: fixture, runtime: result.runtime as StringDefineRuntime };
+}
+
+export function stringDefineRuntime(...args: Parameters<typeof stringDefineRuntimePhases>) {
+  const phases = stringDefineRuntimePhases(...args);
+  let step = phases.next();
+  while (!step.done) step = phases.next();
+  return step.value;
 }

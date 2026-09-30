@@ -24,7 +24,7 @@ import {
 import { fillNativeStringOwnDescriptorResources } from "../../src/backend/wasmgc/resources/native-string-exotic-own-descriptors.js";
 import { requireNativeStringLiteral } from "../../src/backend/wasmgc/resources/native-string-literals.js";
 import { planNativeStringLiteral } from "../../src/runtime/wasmgc/values/string-literal-bodies.js";
-import { stringExoticFixture, fillStringExoticDependencies, EXOTIC_TEXTS } from "./native-string-exotic-fixture.js";
+import { stringExoticFixture, fillStringExoticDependencyPhases, EXOTIC_TEXTS } from "./native-string-exotic-fixture.js";
 
 const ext: ValType = { kind: "externref" },
   i32: ValType = { kind: "i32" },
@@ -80,12 +80,21 @@ export function stringCreateFixture(
   };
 }
 export type StringCreateFixture = ReturnType<typeof stringCreateFixture>;
-export function fillStringCreateDependencies(f: StringCreateFixture): void {
-  fillStringExoticDependencies(f);
+export function* fillStringCreateDependencyPhases(f: StringCreateFixture): Generator<string, void> {
+  yield* fillStringExoticDependencyPhases(f);
   fillNativeStringOwnDescriptorResources(f.tx, f.pack);
+  yield "String own descriptors";
   fillNativeStringNumberResources(f.tx, f.scanner);
+  yield "String number scanner";
   fillNativeValueResources(f.tx, f.values, f.valueDependencies);
+  yield "native values";
 }
+export function fillStringCreateDependencies(f: StringCreateFixture): void {
+  for (const _phase of fillStringCreateDependencyPhases(f)) {
+    /* Preserve synchronous callers. */
+  }
+}
+
 export function completeStringCreateFixture(f = stringCreateFixture()) {
   f.tx.freezeReservations();
   fillStringCreateDependencies(f);
@@ -122,12 +131,12 @@ export interface StringCreateRuntime {
   header(length: number): object;
   put(object: object, key: object, value: number): void;
 }
-export function stringCreateRuntime(
+export function* stringCreateRuntimePhases(
   utf8 = false,
   shifted = false,
   capacity = 2,
   source?: Parameters<typeof stringCreateFixture>[4],
-  extension?: (fixture: StringCreateFixture) => () => void,
+  extension?: (fixture: StringCreateFixture) => () => void | Generator<string, void>,
 ) {
   const f = stringCreateFixture(utf8, shifted, capacity, false, source),
     { tx } = f;
@@ -183,11 +192,15 @@ export function stringCreateRuntime(
     params: [{ kind: "ref", typeIdx: objectType }, ext],
     results: [i32, { kind: "ref_null", typeIdx: entryType }],
   });
+  yield "reserved native runtime";
   tx.freezeReservations();
-  fillStringCreateDependencies(f);
+  yield "frozen reservations";
+  yield* fillStringCreateDependencyPhases(f);
   fillNativeStringCreateResources(tx, f.create);
   requireCompletedNativeStringCreate(tx, f.create, f.createDependencies);
-  fillExtension?.();
+  yield "completed String constructor";
+  const extensionPhases = fillExtension?.();
+  if (extensionPhases) yield* extensionPhases;
   const literal = (text: string): Instr[] => {
     const binding = requireNativeStringLiteral(tx, f.strings, text, "wtf16");
     return binding.kind === "global"
@@ -374,9 +387,18 @@ export function stringCreateRuntime(
     { op: "struct.set", typeIdx: objectType, fieldIdx: 5 },
   ]);
   Object.entries(observers).forEach(([name, fn]) => tx.defineExport("observer:export:" + name, name, fn));
+  yield "filled boundary observers";
   tx.seal();
+  yield "sealed native module";
   const bytes = emitBinary(f.module),
     module = new WebAssembly.Module(new Uint8Array(bytes));
   if (WebAssembly.Module.imports(module).length) throw Error("native fixture contains host semantic imports");
   return { runtime: new WebAssembly.Instance(module, {}).exports as unknown as StringCreateRuntime, bytes, f };
+}
+
+export function stringCreateRuntime(...args: Parameters<typeof stringCreateRuntimePhases>) {
+  const phases = stringCreateRuntimePhases(...args);
+  let step = phases.next();
+  while (!step.done) step = phases.next();
+  return step.value;
 }

@@ -3,8 +3,9 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { EXOTIC_TEXTS } from "./helpers/native-string-exotic-fixture.js";
 import {
   stringDefineFixture,
-  completeStringDefineFixture,
-  stringDefineRuntime,
+  completeStringDefineFixturePhases,
+  stringDefineRuntimePhases,
+  type StringDefineFixture,
   type StringDefineRuntime,
 } from "./helpers/native-string-define-fixture.js";
 import {
@@ -15,6 +16,27 @@ import {
   requireCompletedNativeStringDefinitions,
   nativeObjectDescriptorReservationInventory,
 } from "../src/backend/wasmgc/resources/native-object-descriptors.js";
+
+/** Fresh real lifecycle per group; each measured phase retains the repository35s limit. */
+function phasedFixture<T>(factory: () => Generator<string, T>, count: number, ready: (result: T) => void) {
+  let phases: Generator<string, T>;
+  beforeAll(() => {
+    phases = factory();
+  });
+  for (let index = 0; index < count; index++)
+    beforeAll(async () => {
+      const step = phases.next();
+      expect(step.done, "fixture phase " + index).toBe(false);
+      expect(typeof step.value).toBe("string");
+      console.info("native fixture phase", index, step.value);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }, 35000);
+  beforeAll(() => {
+    const step = phases.next();
+    expect(step.done, "all fixture phases completed").toBe(true);
+    ready(step.value as T);
+  }, 35000);
+}
 
 afterEach(() => new Promise<void>((resolve) => setImmediate(resolve)));
 const key = (e: StringDefineRuntime, text: string) => {
@@ -69,10 +91,13 @@ for (const utf8 of [false, true])
   for (const shifted of [false, true]) {
     describe(`genuine native String definition utf8=${utf8} shifted=${shifted}`, () => {
       let e: StringDefineRuntime;
-      beforeAll(async () => {
-        e = stringDefineRuntime(utf8, shifted).runtime;
-        await new Promise<void>((resolve) => setImmediate(resolve));
-      }, 35000);
+      phasedFixture(
+        () => stringDefineRuntimePhases(utf8, shifted),
+        20,
+        (result) => {
+          e = result.runtime;
+        },
+      );
       it.each(cases)("matches all virtual descriptor fields %j", (row) => {
         const payload = e.text(1),
           o = e.make(null, payload),
@@ -195,23 +220,47 @@ for (const utf8 of [false, true])
     });
   }
 describe("authenticated String definition selection", () => {
-  it("grants String completion only after the genuine selected bodies", () => {
-    const f = stringDefineFixture();
-    expect(
-      nativeObjectDescriptorReservationInventory(f.tx, f.descriptors, f.descriptorDependencies).ownDescriptorMode,
-    ).toBe("string-exotic");
-    expect(() => requireCompletedNativeStringDefinitions(f.tx, f.descriptors, f.descriptorDependencies)).toThrow(
-      "missing canonical fill",
+  describe("selected owner lifecycle", () => {
+    let f: StringDefineFixture;
+    phasedFixture(
+      function* () {
+        f = stringDefineFixture();
+        expect(
+          nativeObjectDescriptorReservationInventory(f.tx, f.descriptors, f.descriptorDependencies).ownDescriptorMode,
+        ).toBe("string-exotic");
+        expect(() => requireCompletedNativeStringDefinitions(f.tx, f.descriptors, f.descriptorDependencies)).toThrow(
+          "missing canonical fill",
+        );
+        return yield* completeStringDefineFixturePhases(f);
+      },
+      18,
+      (result) => {
+        f = result;
+      },
     );
-    completeStringDefineFixture(f);
-    expect(requireCompletedNativeStringDefinitions(f.tx, f.descriptors, f.descriptorDependencies)).toBe(f.descriptors);
+    it("grants String completion only after the genuine selected bodies", () => {
+      expect(requireCompletedNativeStringDefinitions(f.tx, f.descriptors, f.descriptorDependencies)).toBe(
+        f.descriptors,
+      );
+    });
   });
-  it("cannot infer String completion from a genuinely completed ordinary owner", () => {
-    const f = completeStringDefineFixture(stringDefineFixture(false, false, false));
-    expect(requireCompletedNativeObjectDescriptors(f.tx, f.descriptors, f.descriptorDependencies)).toBe(f.descriptors);
-    expect(() => requireCompletedNativeStringDefinitions(f.tx, f.descriptors, f.descriptorDependencies)).toThrow(
-      "no issued String",
+  describe("ordinary owner lifecycle", () => {
+    let f: StringDefineFixture;
+    phasedFixture(
+      () => completeStringDefineFixturePhases(stringDefineFixture(false, false, false)),
+      18,
+      (result) => {
+        f = result;
+      },
     );
+    it("cannot infer String completion from a genuinely completed ordinary owner", () => {
+      expect(requireCompletedNativeObjectDescriptors(f.tx, f.descriptors, f.descriptorDependencies)).toBe(
+        f.descriptors,
+      );
+      expect(() => requireCompletedNativeStringDefinitions(f.tx, f.descriptors, f.descriptorDependencies)).toThrow(
+        "no issued String",
+      );
+    });
   });
   it.each(["copiedPack", "copiedDependencies", "unknown", "getter"] as const)(
     "refuses %s selection before reserving",
@@ -256,20 +305,29 @@ describe("authenticated String definition selection", () => {
     ).toThrow("foreign");
     expect(f.module).toStrictEqual(before);
   });
-  it("rejects nested substitution, late selection and post-fill body mutation", () => {
-    const a = stringDefineFixture();
-    Object.assign(a.descriptorDependencies.stringOwn!, { pack: { ...a.pack } });
-    expect(() => requireNativeObjectDescriptorReservations(a.tx, a.descriptors, a.descriptorDependencies)).toThrow();
-    const b = stringDefineFixture(false, false, false);
-    Object.assign(b.descriptorDependencies, { stringOwn: { pack: b.pack, dependencies: b.dependencies } });
-    expect(() => requireNativeObjectDescriptorReservations(b.tx, b.descriptors, b.descriptorDependencies)).toThrow(
-      "changed issued selection",
+  describe("post-fill integrity", () => {
+    let c: StringDefineFixture;
+    phasedFixture(
+      () => completeStringDefineFixturePhases(),
+      18,
+      (result) => {
+        c = result;
+      },
     );
-    const c = completeStringDefineFixture();
-    c.descriptors.defineData.object.body.push({ op: "nop" });
-    expect(() => requireCompletedNativeStringDefinitions(c.tx, c.descriptors, c.descriptorDependencies)).toThrow(
-      "altered completed",
-    );
+    it("rejects nested substitution, late selection and post-fill body mutation", () => {
+      const a = stringDefineFixture();
+      Object.assign(a.descriptorDependencies.stringOwn!, { pack: { ...a.pack } });
+      expect(() => requireNativeObjectDescriptorReservations(a.tx, a.descriptors, a.descriptorDependencies)).toThrow();
+      const b = stringDefineFixture(false, false, false);
+      Object.assign(b.descriptorDependencies, { stringOwn: { pack: b.pack, dependencies: b.dependencies } });
+      expect(() => requireNativeObjectDescriptorReservations(b.tx, b.descriptors, b.descriptorDependencies)).toThrow(
+        "changed issued selection",
+      );
+      c.descriptors.defineData.object.body.push({ op: "nop" });
+      expect(() => requireCompletedNativeStringDefinitions(c.tx, c.descriptors, c.descriptorDependencies)).toThrow(
+        "altered completed",
+      );
+    });
   });
   it("refuses replacing a selected field with a getter without invoking it", () => {
     const f = stringDefineFixture();

@@ -202,17 +202,30 @@ export function stringExoticFixture(
   };
 }
 export type StringExoticFixture = ReturnType<typeof stringExoticFixture>;
-export function fillStringExoticDependencies(f: StringExoticFixture): void {
+export function* fillStringExoticDependencyPhases(f: StringExoticFixture): Generator<string, void> {
   if (f.prefix) f.tx.fillFunction(f.prefix, { locals: [], body: [] });
   if (f.prefixGlobal) f.tx.fillGlobal(f.prefixGlobal, [{ op: "i32.const", value: 123 }]);
   fillNativeStringLiteralResources(f.tx, f.strings);
+  yield "fillNativeStringLiteralResources";
   fillNativeStringFlattenResources(f.tx, f.flatten);
+  yield "fillNativeStringFlattenResources";
   fillNativeStringEqualityResources(f.tx, f.equality);
+  yield "fillNativeStringEqualityResources";
   fillNativeSymbolCarrierResources(f.tx, f.symbols);
+  yield "fillNativeSymbolCarrierResources";
   fillNativeObjectLookupResources(f.tx, f.lookup);
+  yield "fillNativeObjectLookupResources";
   fillNativeObjectStorageResources(f.tx, f.storage);
+  yield "fillNativeObjectStorageResources";
   fillNativePrimitiveWrapperStorageResources(f.tx, f.wrappers);
+  yield "fillNativePrimitiveWrapperStorageResources";
 }
+export function fillStringExoticDependencies(f: StringExoticFixture): void {
+  for (const _phase of fillStringExoticDependencyPhases(f)) {
+    /* Run identical synchronous phases. */
+  }
+}
+
 export function completeStringExoticFixture(f = stringExoticFixture()) {
   f.tx.freezeReservations();
   fillStringExoticDependencies(f);

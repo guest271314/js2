@@ -89,3 +89,35 @@ not sign because the configured SSH agent socket was omitted from the command.
 No commit object was written; staged work retained and the socket is restored.
 Only verified upstream main merges count as delivery. Hold this dependent PR
 until constructor PR6345 is actually merged and its ancestry/content verified.
+
+
+Definition delivery repair (2026-09-30): constructor PR6345 is verified on
+main as5b2210af; its nine checkpoint blobs match mainfe8fecd4. Refresh held,
+unqueued PR6346 against that exact main. Preserve quality job109795406561:
+8/473 passed,1 failed,464 skipped plus one worker error; four complete-runtime
+hooks and one authentication test exceeded35s. Split fresh native fixture
+reservation/fill/emit setup into individually bounded35s phases, following
+the existing native Object Get test pattern. Retain each real owner check,
+all473 tests, original failures, and unchanged production semantics. Require
+strict zero-skip validation and normal signed hooks before existing-PR push.
+
+
+Refreshed definition evidence:962/962 strict assertions pass across five files,
+zero skips/failures, strict Vitest exit0, all6975 source/test pins unchanged.
+The receipt wrapper subsequently asserted against a field absent from Vitest3;
+preserve its failure and reconcile all962 actual assertion records and five
+passed suite records directly, without rerunning or changing tests. Twenty
+real runtime setup phases were measured on the WTF16/unshifted fixture; slowest
+7.430s locally. Every phase keeps35s; other layouts are measured by the full
+cohort, not extrapolated from that profile. Seven preservation quality gates
+pass; inventory valid, architecture incomplete, retirement not certified.
+Fresh process repeats168 modules/163src, zero TS/frontend; real forbidden
+import exits2, blocks one resolution, emits zero bytes. Both UTF8/WTF16 rows
+and byte lengths match the prior census exactly (not a byte-identity claim).
+Constructor delivery independently verified: merge5b2210af,102 successful
+conformance shard jobs, successful regression/CI/differential gates.
+Fresh audit:16 open PRs/827 file rows, only owned6346 overlaps these test files.
+Normal full signed commit/push hooks and exact-head protected admission remain
+required; do not call the definition slice delivered or complete its claim
+until its real main ancestry and content are verified. Downstream key-list
+work and the public Number4/9 root remain preserved; legacy stays operational.
