@@ -36,6 +36,15 @@ loc-budget-allow:
   - src/codegen/literals.ts
   - src/codegen/any-boxing-helpers.ts
   - src/codegen/native-proto.ts
+  # 2026-09-30 (#6769 implementation): three more files the steps touch, each
+  # by a routing arm or a guard — the dispatcher's dyn-view producer arm (S4),
+  # the `__getPrototypeOf` ArrayBuffer-carrier arm's call site (S10), and the
+  # `any`-receiver `join` decline for the `%TypedArray%.prototype` receiver (S7).
+  # Restated here so the grants do not depend on another issue file (#6651's
+  # broad grant covers the first today).
+  - src/codegen/closed-method-dispatch.ts
+  - src/codegen/ta-dyn-mop.ts
+  - src/codegen/expressions/calls-closures.ts
 func-budget-allow:
   # 2026-09-30 (#6769 plan): the call-site two-arm gains a helper-call branch
   # per producer method; the species-create validator gains a second carrier

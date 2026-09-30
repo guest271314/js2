@@ -386,6 +386,8 @@ export interface TaDynProducerKit {
   getElem: number;
   setElem: number;
   boxNum: number;
+  /** (#6769 S5) generic store for a statically-carried species result. */
+  externSet: number | undefined;
 }
 
 /**
@@ -425,7 +427,8 @@ export function beginTaDynProducer(
   const len = allocLocal(fctx, "len", i32);
   pushTaDynMethodPreamble(ctx, fctx, dynIdx, dv, kind, es, len);
   emitTaDynViewValidate(ctx, fctx, dv);
-  return { fctx, dynIdx, funcIdx, dv, kind, es, len, getElem: elem.getElem, setElem: elem.setElem, boxNum };
+  const externSet = ctx.funcMap.get("__extern_set");
+  return { fctx, dynIdx, funcIdx, dv, kind, es, len, getElem: elem.getElem, setElem: elem.setElem, boxNum, externSet };
 }
 
 /** Close a producer: return `resultLocal` and publish the function. */
@@ -472,20 +475,44 @@ export function taDynCountedLoop(counter: number, limit: number, body: Instr[]):
   ];
 }
 
-/** `! Set(A, n, value, true)` on a TypedArraySpeciesCreate result held in `resultLocal`. */
+/**
+ * `! Set(A, n, value, true)` on a TypedArraySpeciesCreate result held in
+ * `resultLocal`: the dyn-view element setter, or (#6769 S5) the generic
+ * `__extern_set` for a statically-carried result. `value` is emitted once per
+ * arm (only one runs), so it must be re-emittable.
+ */
 export function taDynResultStoreInstrs(
   kit: TaDynProducerKit,
   resultLocal: number,
   indexLocal: number,
   value: Instr[],
 ): Instr[] {
-  return [
+  const dynStore: Instr[] = [
     { op: "local.get", index: resultLocal },
     { op: "local.get", index: indexLocal },
     { op: "f64.convert_i32_s" },
     ...value,
     { op: "call", funcIdx: kit.setElem },
     { op: "drop" },
+  ];
+  if (kit.externSet === undefined) return dynStore;
+  return [
+    { op: "local.get", index: resultLocal },
+    { op: "any.convert_extern" },
+    { op: "ref.test", typeIdx: kit.dynIdx },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: dynStore,
+      else: [
+        { op: "local.get", index: resultLocal },
+        { op: "local.get", index: indexLocal },
+        { op: "f64.convert_i32_s" },
+        { op: "call", funcIdx: kit.boxNum },
+        ...value.map((i) => ({ ...i })),
+        { op: "call", funcIdx: kit.externSet },
+      ],
+    },
   ];
 }
 
