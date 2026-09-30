@@ -177,6 +177,7 @@ export function stringExoticFixture(utf8 = false, shifted = false, mutablePlan =
     lookupDependencies,
     lookup,
     storage,
+    storageDependencies,
     layouts,
     layoutPlan,
     layoutDependencies,
