@@ -230,6 +230,15 @@ is kept for the binary-size win, which also shows up downstream as test262
   timeout→timeout 4. Zero pass→fail and zero fail→pass.
 - `node scripts/equivalence-gate.mjs`: 22 failing = the 22 known baseline
   failures, **no new regressions**.
+- Root vitest suite, standalone-compiling files, sweep on vs
+  `JS2WASM_FUNC_SWEEP=0`: all 232 files that inspect WAT or function structure,
+  plus a 101-file stride sample of the rest. Seven WAT-shape tests inspected
+  the emitted body of a function that is dead in their test program — never
+  called, or inlined away. Those opt out of the sweep, with a comment:
+  1888, 3522, 3685 (one case), 3765, 4121,
+  native-number-string-integer-fastpath, npm-compat-perf-native-add-fastpath.
+  All other results matched base, including the files that time out or OOM in
+  this container in both modes (4376, 4588, 6662, …).
 - `tests/issue-6768-reachability-sweep.test.ts`: roots and edges (exports,
   elements, global inits, stable handles, shared arrays, late-pass helper
   roots, declared-ref-only and exported-flag-only functions stubbed), fresh
