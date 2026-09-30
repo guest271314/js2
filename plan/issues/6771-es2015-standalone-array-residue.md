@@ -82,6 +82,16 @@ loc-budget-allow:
   # array-ctor-this.ts).
   - src/codegen/property-access-dispatch.ts
   - src/codegen/expressions/call-builtin-static.ts
+  # S8/S9: one element-coerce call + one pre-flush registration in
+  # `buildVecFromExternref` (type-coercion.ts, granted above) and one finalize
+  # call per pipeline (index.ts, granted above); bodies in the new leaf
+  # vec-elem-fidelity.ts. S10a/S10b: ArraySetLength's second conversion —
+  # `__vec_dp_value`'s length body (vec-overlay.ts, granted above), the dynamic
+  # `__extern_set` vec-length arm (vec-length-set.ts, three hook lines + import),
+  # the static assignment + non-writable fold (assignment.ts, granted above);
+  # bodies in array-set-length-coercion.ts.
+  - src/codegen/vec-elem-fidelity.ts
+  - src/codegen/vec-length-set.ts
 func-budget-allow:
   # 2026-09-30 (#6771 plan): each gains one arm / one guard / one route.
   - src/codegen/array-methods.ts::setupArrayLoop
@@ -113,6 +123,10 @@ func-budget-allow:
   - src/codegen/property-access-dispatch.ts::tryConstructorPrototypeIdentity
   - src/codegen/expressions/call-builtin-static.ts::compileBuiltinStaticCall
   - src/codegen/native-construct.ts::fillNativeConstructDrivers
+  # S10a (2026-09-30): the vec-length arm gains three hook splices (first
+  # conversion, step-5 agreement, step-12 refusal); the bodies are
+  # `arraySetLengthDynamicParts` in array-set-length-coercion.ts.
+  - src/codegen/vec-length-set.ts::fillVecLengthDynamicArms
 coercion-sites-allow:
   # 2026-09-30 (#6771 implementation, Opus): ToString(k) of an integral array
   # index — the canonical key spelling every array-like arm uses (the `$Object`

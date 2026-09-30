@@ -441,6 +441,7 @@ import { fillSparseHoleHasIdxArms } from "./vec-externref-hole-presence.js"; // 
 import { finalizeFunctionPoisonPillCalls } from "./function-poison-pill.js";
 import { fillDataViewConstructProtoArm, fillTaDynViewMopArms } from "./ta-dyn-mop.js"; // (#3177/#3371) native view prototype arms
 import { fillArrayLikeExoticArms } from "./array-like-exotic-arms.js"; // (#6771 S2)
+import { fillVecElemGetIdxArms } from "./vec-elem-fidelity.js"; // (#6771 S8/S9)
 import { fillTaStaticViewMopArms } from "./ta-static-view-mop.js"; // (#6651 E7) static view in a generic slot
 import { fillTaDynViewOwnKeyArms } from "./ta-dyn-own-keys.js"; // (#6651 E2) §10.4.5.6 own-key surface
 import { fillObjVecReflectionHelpers } from "./objvec-array-proto.js"; // (#3666) RegExp indices Array reflection
@@ -6664,6 +6665,7 @@ export function generateModule(
     // `.length` fix, so `(arr as any)[i]` through the externref boundary reads
     // the element instead of null/0. Standalone only (no-op otherwise).
     fillExternGetIdxVecArms(ctx);
+    fillVecElemGetIdxArms(ctx); // (#6771 S8/S9) stored-`undefined` f64 and boolean vec elements
 
     // (#3190) Write-side sibling of the fill above: splice `$__vec_base` STORE
     // arms into `__extern_set` so `(arr as any)[i] = v` on an any-typed array
@@ -11352,6 +11354,7 @@ export function generateMultiModule(multiAst: MultiTypedAST, options?: CodegenOp
     // fill, the backing vec contains the right values but every indexed read
     // silently returns the undefined sentinel.
     profilePhase("fill-extern-get-idx-vec-arms", () => fillExternGetIdxVecArms(ctx));
+    profilePhase("fill-vec-elem-get-idx-arms", () => fillVecElemGetIdxArms(ctx)); // (#6771 S8/S9)
 
     // (#3190/#3169) Complete the write-side vec arm and the closed-struct
     // array-like reader trio over the graph-wide carrier/type tables.
