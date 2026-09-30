@@ -36,6 +36,10 @@ loc-budget-allow:
   - src/codegen/string-ops.ts
   - src/codegen/expressions/identifiers.ts
   - src/codegen/object-runtime.ts
+  # 2026-09-30 (#6774 impl, Opus): S2's own-"__proto__" read arm lives in
+  # tryOpenObjectDynamicGet (+10); S4 adds two FunctionContext fields (+4).
+  - src/codegen/property-access.ts
+  - src/codegen/context/types.ts
   # NEW leaves (register each in scripts/compiler-boundaries.json, see Lane protocol)
   - src/codegen/new-target-value.ts
   - src/codegen/eval-param-scope-hoist.ts
@@ -56,6 +60,12 @@ func-budget-allow:
   - src/codegen/closures.ts::compileArrowAsClosure
   - src/codegen/expressions/assignment.ts::compileArrayDestructuringAssignment
   - src/codegen/binary-ops.ts::compileBinaryExpression
+  # 2026-09-30 (#6774 S4 impl, Opus): one-line `new.target` hooks; the logic
+  # lives in the new leaf src/codegen/new-target-value.ts.
+  - src/codegen/closures/arrow-phases.ts::planClosureCaptures
+  - src/codegen/expressions/calls.ts::compileIIFE
+  - src/codegen/expressions.ts::compileExpressionInner
+  - src/codegen/expressions/new-super.ts::compileNewFunctionDeclaration
 ---
 
 ## Problem
