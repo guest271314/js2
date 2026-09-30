@@ -62,6 +62,7 @@ import { buildTaCtorInheritedFromOfGetArm } from "./ta-static-from-of-body.js";
 import { fillHofTaDynViewPresenceBypass } from "./hof-native.js"; // (#6651 E6)
 import { fillOrdinarySetTypedArrayArm } from "./object-runtime-ordinary-set.js"; // (#6651 E6)
 import { taDynViewOwnLengthArm } from "./array-like-exotic-arms.js"; // (#6771 S2c)
+import { fillArrayBufferGetPrototypeOfArm } from "./expressions/object-get-prototype-of.js"; // (#6769 S10)
 
 /** Fresh synthetic FunctionContext for a native helper (the #2872 pattern). */
 function makeFctx(name: string, params: { name: string; type: ValType }[], returnType: ValType): FunctionContext {
@@ -367,6 +368,7 @@ export function fillTaDynViewMopArms(ctx: CodegenContext): void {
     return;
   }
   fillHofTaDynViewPresenceBypass(ctx); // (#6651 E6) §23.2.3 HOFs: no HasProperty
+  fillArrayBufferGetPrototypeOfArm(ctx); // (#6769 S10) a buffer's [[Prototype]]
   const helpers = ensureTaDynMopElemHelpers(ctx);
   if (!helpers) return;
   const anyStrTypeIdx = ctx.anyStrTypeIdx;
