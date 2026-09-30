@@ -3,6 +3,7 @@
  * Call expression compilation: direct calls, optional calls, closure calls,
  * property method calls, IIFEs, and conditional callees.
  */
+import { referencesOwnNewTarget } from "../new-target-value.js"; // (#6774 S4)
 import { ts, forEachChild } from "../../ts-api.js";
 import { widenJsDefaultGuessSlot, widenJsDefaultGuessSymbolSlot } from "../js-default-param-type-guess.js";
 import { profilePhase } from "../../compile-profile.js";
@@ -10451,6 +10452,8 @@ function compileIIFE(ctx: CodegenContext, fctx: FunctionContext, expr: ts.CallEx
     return undefined;
   }
   const funcExpr = callee as ts.FunctionExpression | ts.ArrowFunction;
+  // (#6774 S4) A lexical `new.target` needs the closure path's snapshot capture.
+  if (ctx.standalone && ts.isArrowFunction(funcExpr) && referencesOwnNewTarget(funcExpr)) return undefined;
 
   // Determine parameter types from the function's declared parameters
   const paramTypes: ValType[] = [];

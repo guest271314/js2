@@ -1,4 +1,5 @@
 import { initializeNativeGeneratorFunctionValue } from "./generators-factory-prototype.js";
+import { snapshotArrowNewTarget } from "./new-target-value.js";
 import { widenJsDefaultGuessSlot } from "./js-default-param-type-guess.js";
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
@@ -3706,6 +3707,7 @@ export function compileArrowAsClosure(
     compileExpression(ctx, fctx, thisNode, { kind: "externref" });
     fctx.body.push({ op: "local.set", index: thisLocal });
   }
+  snapshotArrowNewTarget(ctx, fctx, arrow); // (#6774 S4) lexical `new.target`
   const { captures, selfBindingName } = planClosureCaptures(ctx, fctx, arrow, body, additionalCaptureNames);
   // Object-literal method closures need a stable [[HomeObject]] for `super`.
   // Capture the freshly allocated object itself, rather than using
