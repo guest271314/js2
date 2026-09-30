@@ -491,3 +491,150 @@ follow the harness's `var TypedArray = Object.getPrototypeOf(Int8Array)` /
   https://claude.ai/code/session_01FEGi3DmyPRPD5dx4kWU8hs`, `Model: Claude
   Opus 5.5 High`. Never `--no-verify`.
 - No `git stash`; A/B by file copy from `.tmp/6769/base-src`.
+
+### 2026-09-30 — #6769 implementation (Opus)
+
+Branch `issue-6769-typedarray-residue` (plan branch + `origin/main` merged
+twice, last at `ee6828f1ef`). One commit per step — S1 `26309df647`, S2
+`65c6a74cf8`, S3 `097e4769a2`, S4 `7d3a8cee25`, S5 `39c491cf19`, S6
+`05529ce6d6`, S7 `2b3b5d2dcb`, S8 `2e51e20c8a`, S9 `92629d34f6`, S10
+`930d651b06`, then S7c `fc5cae6bcf` — each measured before it was committed.
+The final 38-row + control run is on the merge `db07a0ec5c` (a `git archive`
+snapshot, so the worktree could keep moving while it ran); S7c was taken while
+that run was in flight and is measured by its own targeted control below. The
+branch has NOT been re-merged since:
+`origin/main` `ad10f2e860` is 8 commits ahead (incl. #5350 r2's
+`new-super.ts` / `call-receiver-method.ts` edits) and `git merge-tree` reports
+a clean merge.
+
+#### Rows (38, standalone, `--isolate`, QuickJS provider built)
+
+| | pass | fail |
+| --- | ---: | ---: |
+| base (`d4e15d90` plan measurement; re-run here on the fork point `a2546f6fc5`: `.tmp/6769/rows-base.log`) | 0 | 38 |
+| branch — merged tree `db07a0ec5c` (`.tmp/6769/final-chunk-00.log`) | 26 | 12 |
+| branch + S7c `fc5cae6bcf` (the one changed row measured in `.tmp/6769/s7c-ctl-branch.log`) | **27** | **11** |
+
+Gained (27), by step:
+
+| step | rows |
+| --- | --- |
+| S1 | `filter/result-empty-callbackfn-returns-false` |
+| S2 | `subarray/byteoffset-with-detached-buffer` |
+| S3 | `map/return-new-typedarray-from-empty-length`, `subarray/result-is-new-instance-from-same-ctor`, `ctors/object-arg/iterator-is-null-as-array-like` |
+| S4 | `map/callbackfn-arguments-{with,without}-thisarg`, `filter/callbackfn-arguments-{with,without}-thisarg`, `map/callbackfn-set-value-during-interaction`, `filter/callbackfn-set-value-during-iteration`, `slice/speciesctor-return-same-buffer-with-offset` |
+| S5 | `{subarray,slice}/speciesctor-get-species-custom-ctor-returns-another-instance` |
+| S6 | `sort/{sorted-values,sortcompare-with-no-tostring,sort-tonumber}` |
+| S7 | `{length,byteLength}/invoked-as-accessor`, `join/invoked-as-method`, `TypedArray/invoked`; S7c `Symbol.toStringTag/invoked-as-func` |
+| S8 | `ctors/object-arg/length-excessive-throws`, `ctors/typedarray-arg/other-ctor-returns-new-typedarray` |
+| S9 | `toLocaleString/detached-buffer` |
+| S10 | `ctors/typedarray-arg/same-ctor-buffer-ctor-species-{undefined,null}` |
+
+Residuals (11 — all eleven the plan put out of reach) — first failing
+assertion, mechanism:
+
+| row | first failing assertion | mechanism |
+| --- | --- | --- |
+| `internals/Set/key-is-valid-index-reflect-set` | `receiver[0] should be created (receiver: empty object)` — SameValue(`[object Object]`, `[object Object]`) false | a `{ valueOf(){…} }` literal loses identity across an externref round trip (p4d still 142) — #2773/#3037. |
+| `internals/Set/key-is-in-bounds-receiver-is-not-typed-array` | L36 `assert.sameValue(receiver[0], value, …)` — same false SameValue | same identity loss. |
+| `internals/Set/key-is-valid-index-prototype-chain-set` | `receiver[0] should be updated (receiver: empty object)` | TA in `[[Prototype]]` position + array/String exotic receivers — #6766 F. |
+| `internals/Set/key-is-canonical-invalid-index-prototype-chain-set` | L45 `receiver[1] should not be created` | same (#6766 F). |
+| `internals/Set/key-is-out-of-bounds-receiver-is-proto` | L40 `valueOf is called exactly once` — reads 0 | `Object.create(<TA>)`: the prototype walkers have no TA arm (plan). |
+| `ctors/length-arg/toindex-length` | L45 `-0 length` — reads `[object Object]` | union-element read of a nested literal (#5185); p6e bit 1 still off. |
+| `ctors/object-arg/iterated-array-with-modified-array-iterator` | L44 `ta.length` — 1, expected 4 | a patched `%ArrayIteratorPrototype%.next` is not consulted (#6484); p7 still 0. |
+| `ctors/object-arg/iterated-array-changed-by-tonumber` | L39 → `TypeError: Object.prototype.toString is not yet implemented in --target standalone` | the element's `valueOf` is not found by `__to_primitive` (function-membered literal), so ToPrimitive falls to `Object.prototype.toString`; the drain-before-coerce half is also missing (plan). |
+| `from/iterated-array-changed-by-tonumber` | `SameValue(0, 2)` near L34 | drain-before-coerce: the copy loop reads the live array (plan). |
+| `ctors/no-species` | `SameValue(undefined, [object ArrayBuffer])` — `new Int8Array(<view over a GrossBuffer>).buffer` | `class extends ArrayBuffer` + `super(...arguments)` (#3240). |
+| `from/from-typedarray-into-itself-mapper-detaches-result` | `RuntimeError: illegal cast in __module_init_chunk_0()` (source L24) | custom-`this` `%TypedArray%.from.call` returning an existing view (#6651 E5). |
+
+#### Probes (`.tmp/6769/probes-base.log` → `.tmp/6769/probes-branch.log`)
+
+| probe | base | branch | node | note |
+| --- | ---: | ---: | ---: | --- |
+| p1 | 16 | 127 | 127 | S4 |
+| p2 | 394 | 501 | 501 | S4/S5 |
+| p2b | 385 | 2047 | 2047 | S2 |
+| p2d | 192 | 2015 | 2047 | S2; bit 32 (a dynamic read of an `[Symbol.iterator]` literal member) stays off — `@@iterator` keeps its closed-struct layout (it has static consumers); needs a symbol-key arm in the closed-struct `__extern_get` dispatch, not taken |
+| p3 | 5744 | 8191 | 8191 | S3 (+ S4 for bit 2048, map on a non-identifier receiver) |
+| p4c / p4d | 108 / 142 | 108 / 142 | 509 / 255 | out of scope (literal identity) |
+| p5c | 699061 | 1397589 | 1397581 | S7; bits 8/16 stay off: the probe reads the getter off a descriptor binding that is ASSIGNED after a bare `var desc;`, which the S7c predicate does not follow (it takes an initialiser — the test262 rows' spelling) |
+| s7c | 1198666 | 674121 | 674121 | S7c (added with the step; the pre-S7c branch also answers 1198666): direct and one-binding-removed accessor calls, built-in and user getters, a missing getter still a TypeError |
+| p6a | trap | 21 | 21 | S8 |
+| p6b | 281248 | 1370849 | 1632989 | S8 bits 1/64/128 on; the rest are the out-of-scope residuals |
+| p6e | 8 | 1448 | 2017 | S10 bits 32/128/256/1024 on; bit 1 = toindex residual, 64/512 below |
+| p6f | 7242 | 15611 | 16383 | S10 bits 1/16/32/128/8192 on; `.constructor === ArrayBuffer` (4/512) and a dyn buffer's `instanceof ArrayBuffer` (256) stay off |
+| p7 | 0 | 0 | 15 | out of scope (#6484) |
+| p8 | 96 | 127 | 127 | S6 |
+| p9 | trap | 3 | 3 | S1 |
+
+#### Pins — `tests/issue-6769-typedarray-residue.test.ts`
+
+Ten probe pins (p1, p2, p2d, p3, p5c, p6a, p6f, p8, p9, s7c; node answers;
+p2d and p5c masked to exclude exactly the residual bits named above, p6f
+masked to the five S10 bits) and three guards. **Base sources**
+(`.tmp/6769/btree`, `git archive` of the fork point): 10 failed / 3 passed.
+**Branch**: 13 passed.
+The plan's guard `new Int8Array([3,1,2]).sort()` is replaced by a static
+`Float64Array` comparator sort: the default-comparator sort of a STATIC
+`Int8Array` throws on BOTH trees (side finding below), so it cannot guard.
+
+#### Control
+
+**0 pass → non-pass.** Every row of the control passing on the
+2026-09-29 22:47 standalone baseline still passes on the merged tree
+`db07a0ec5c`:
+
+| set | rows | how measured | pass |
+| --- | ---: | --- | ---: |
+| `.tmp/6769/control.txt` — TypedArray 1,044 + TypedArrayConstructors 589 + ArrayBuffer 162 + DataView 464 | 2,259 | see below | 2,259 |
+| the per-step control rows outside it — S2's `[Symbol.` slice of `built-ins/Symbol/**` + `built-ins/Array/**`, the S3/S4/S5 slices, 157 Atomics/SharedArrayBuffer rows | 348 | see below | 348 |
+
+How: the first 962 of the 2,607 rows ran with `--isolate` under the lock
+(`final-chunk-00.log` rows 39–400, `final-sub-00…05.log`), 962/962 pass. The
+background run was then stopped by the task-runner's 2-hour limit, so the
+remaining 1,645 rows were screened IN-PROCESS, under the lock, in bounded
+slices that record one verdict per row (`.tmp/6769/rest-inproc.tsv`):
+1,645/1,645 pass. The in-process lane shares one realm, so a poisoning row
+can only turn later rows into false NON-passes — none appeared, so no
+`--isolate` confirmation was needed; the residual risk of that lane is a
+false PASS, which is not ruled out.
+
+S7c (`fc5cae6bcf`) was taken after this run started. Its only effect is at a
+direct call of a binding initialised from
+`Object|Reflect.getOwnPropertyDescriptor(…).get|set` (directly or through one
+descriptor binding) — a static test that decides whether the arm is emitted
+at all. The 23 test262 files with such a call were run with `--isolate` on
+both trees (`s7c-ctl-base.log` / `s7c-ctl-branch.log`, one row re-run after a
+provider rebuild): 15 → 17 pass (+ `Symbol.toStringTag/invoked-as-func` and
+its BigInt twin), 0 lost. Every other file compiles through an unchanged path.
+
+#### Side findings (not fixed here)
+
+- A statically-carried `new Int8Array([3, 1, 2]).sort()` (default
+  comparator) throws a Wasm exception on the base AND the branch — at module
+  scope and inside a function. The dyn-view sort (S6) does not touch the
+  static carrier path.
+- `new %TypedArray%(buffer, badOffset)` now throws TypeError only after the
+  buffer-form ToIndex coercions of offset/length have run (the construct is
+  emitted before the intrinsic check on that one path); the spec throws before
+  them. No row observes it.
+- A static TypedArray carrier registered only AFTER a species-create site was
+  emitted is not recognised as a species result there (S5 enumerates carriers
+  at emit time).
+
+#### Gates
+
+loc, func, coercion-sites, oracle-ratchet, dead-exports, loc/func with
+`LOC_GATE_BASE=ad10f2e860` (`origin/main` at record time),
+`check-compiler-boundaries --mode inventory --base ad10f2e860` (valid),
+typecheck — all green on the final tree (re-run after S7c). Grants added in this file's
+frontmatter: loc (`closed-method-dispatch.ts`, `ta-dyn-mop.ts`,
+`expressions/calls-closures.ts`); func
+(`closed-method-dispatch.ts::fillClosedMethodDispatch` +2, and — restated
+from #6651's broad grant so they cannot strand —
+`call-receiver-method.ts::compileReceiverMethodCall` +10,
+`new-super.ts::compileNewExpression` +3, `ta-dyn-mop.ts::fillTaDynViewMopArms`
++1); coercion-sites (`ta-hof-map-filter.ts`, the `filter` producer's
+`__is_truthy`). S7c needed no grant (`call-identifier.ts` changes one
+argument; `unmatched-closure-host-call.ts` stays under the file threshold).
+No new source file; `src/ir/select.ts` untouched.

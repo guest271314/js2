@@ -19919,6 +19919,29 @@ custom-`this` `%TypedArray%.from.call` residual. The leads "ToIndex(-0)" and
 "detached-buffer checks missing" were refuted or narrowed by the probes
 (`new TA(-0).length === 0` already; only `toLocaleString` lacks the guard).
 
+### 2026-09-30 — #6769 TypedArray residue: implementation (Opus lane)
+
+Measured on `issue-6769-typedarray-residue` with `origin/main` merged:
+**0 → 27 of the 38 rows** (`--isolate`, standalone) — every row the plan put
+in reach. Eleven steps landed, one commit each: `__any_unbox_bool(null)`;
+`[Symbol.species]` literal members on the open-`$Object` path; `instanceof`
+for a `$__ta_ctor` RHS; native live-receiver `map`/`filter`/`slice` producers
+for dyn views; species results that are static carriers; a TypedArray `sort`
+(SortCompare, comparator ToNumber, detach-safe write-back); the `%TypedArray%`
+/ `%TypedArray%.prototype` receivers; the constructor RangeError cap and
+static-vec / array-like source arms; the `toLocaleString` detached guard; the
+ArrayBuffer carrier's `[[Prototype]]`; and (S7c) a direct call of a binding
+initialised from `getOwnPropertyDescriptor(…).get`, which now reaches the
+accessor through `__apply_closure` instead of the typed ladder's TypeError
+(also fixes the BigInt `Symbol.toStringTag/invoked-as-func` twin). The eleven
+out-of-reach rows keep the mechanisms the plan named. Controls: 0 pass →
+non-pass over 2,607 currently-passing TypedArray / ArrayBuffer / DataView /
+per-step rows (962 with `--isolate`, the rest screened in-process after the
+background run hit its time limit), and 0 lost in S7c's 23-file targeted
+control.
+Record, probes, pins and side findings:
+`plan/issues/6769-es2015-standalone-typedarray-residue.md`.
+
 ## 2026-09-30 — #6767: class definition reflective residue (pointer)
 
 `language/statements/class/definition/**` (19 standalone rows, 18 non-pass on
