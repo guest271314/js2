@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-09-30T02:44:35.066Z",
-  "baseline_generated_at": "2026-09-30T02:44:35.067Z",
-  "baseline_sha": "e63424fafa58710dfa1bf6d34276dc3c0b409e3f",
+  "timestamp": "2026-09-30T03:13:29.824Z",
+  "baseline_generated_at": "2026-09-30T03:13:29.824Z",
+  "baseline_sha": "6eb34ce5186e9c0626b3305f262cfc077cb54596",
   "oracle_version": 14,
   "mode": {
     "target": "standalone",
@@ -1707,7 +1707,7 @@
           "type_error:TypeError: Proxy trap result violates a Proxy invariant",
           "host_import_leak:standalone target emitted host imports: env::__get_builtin (##)",
           "assertion_fail:Test262Error: Expected true but got false",
-          "assertion_fail:Test262Error: Expected SameValue(«[object Object]», «undefined») to be true"
+          "assertion_fail:Test262Error: handler object is the trap context Expected SameValue(«undefined», «[object Object]») to be true"
         ]
       },
       {
