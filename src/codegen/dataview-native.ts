@@ -67,6 +67,7 @@ import { ensureReflectIsConstructor } from "./reflect-construct-native.js"; // (
 import { reserveNativeConstructDriver } from "./native-construct.js"; // (#4449) custom species constructors
 import { ensureSymbolCarrier } from "./symbol-native.js"; // (#4449) Symbol.species key
 import { ensureNativeArrayFromIterN } from "./iterator-native.js"; // (#5138 A1) iterable ctor arg
+import { orNativeGeneratorCarrierInstrs } from "./generators-native-protocol.js"; // (#6651 A13) generator-object ctor arg
 import { reserveBuiltinConstructorIdentityGlobal } from "./builtin-static-globals.js"; // (#5349 r4) %ArrayBuffer% identity
 
 /** DataView accessor descriptor parsed from a method name like "getUint32". */
@@ -6217,6 +6218,8 @@ function emitTaDynCtorConstructInline(
           { op: "local.get", index: a0CandidateLocal },
           { op: "ref.test", typeIdx: objTypeIdx },
           ...isCallable,
+          // (#6651 A13) …and so is a native generator object (a state struct, no `$Object`).
+          ...(iterablePrelude ? orNativeGeneratorCarrierInstrs(ctx, a0CandidateLocal) : []),
           { op: "if", blockType: { kind: "empty" }, then: objArm, else: chain },
         ]);
       }

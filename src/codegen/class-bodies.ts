@@ -34,7 +34,11 @@ import { recordFnMetaMemberDeclaration } from "./function-instance-meta-methods.
 import { resolveClassHeritageAlias } from "./class-expression-identity.js";
 import { installAstFreeClassConstructorNewWrapper } from "./class-constructor-wrapper.js";
 import { commitClassStructLayout } from "./class-layout-registration.js";
-import { mintDefinedFunc, pushProgramAbiClassCallable } from "./program-abi-class-callable-planning.js";
+import {
+  mintDefinedFunc,
+  pushProgramAbiClassCallable,
+  retypeProgramAbiClassCallable,
+} from "./program-abi-class-callable-planning.js";
 import { setProgramAbiInheritedClassCallableAlias } from "./program-abi-class-callable-planning.js";
 import { absoluteFuncIndex } from "../emit/resolve-layout.js"; // (#1916 S3b) resolve handles for order-stable declaredFuncRefs sort
 import { definedFuncAt } from "./func-space.js";
@@ -66,6 +70,7 @@ import { compileSpreadCallArgsWithArguments } from "./expressions/spread-argumen
 import { findTdzViolatingParamRef, paramDefaultsReferenceArguments } from "./param-tdz.js";
 import { pushDefaultValue } from "./type-coercion.js";
 import { bodyNeedsArgumentsObject, needsImplicitArgumentsObject } from "./helpers/body-uses-arguments.js";
+import { classHeritageIsIntrinsicSymbol } from "./class-heritage-check.js"; // (#6651 C5)
 import {
   compileNativeGeneratorFunction,
   isNativeGeneratorCandidate,
@@ -1618,6 +1623,15 @@ export function collectClassDeclaration(
       ctx.funcUsesArguments.add(initName);
       ctx.funcUsesArguments.add(ctorName);
     }
+    // (#6651 C5) …and so does an IMPLICIT derived constructor whose parent's
+    // `_init` reads them: §15.7.14's `constructor(...args) { super(...args) }`
+    // hands every argument of `new B(…)` to the parent, and `B_init` forwards
+    // `__argc`/`__extras_argv` untouched. Parents register before children.
+    const implicitParent = ctor ? undefined : ctx.classParentMap.get(className);
+    if (implicitParent !== undefined && ctx.funcUsesArguments.has(`${implicitParent}_init`)) {
+      ctx.funcUsesArguments.add(initName);
+      ctx.funcUsesArguments.add(ctorName);
+    }
   }
 
   // Register method functions (own methods defined on this class).
@@ -2255,24 +2269,19 @@ export function collectDeclaredFuncRefs(ctx: CodegenContext, opts?: { additive?:
       if (instr.op === "ref.func") {
         refs.add((instr as { op: "ref.func"; funcIdx: number }).funcIdx);
       }
-      // Recurse into nested instruction arrays (if/then/else, block/body, loop, try/catch)
-      if ("body" in instr && Array.isArray((instr as any).body)) {
-        scanInstrs((instr as any).body);
-      }
-      if ("then" in instr && Array.isArray((instr as any).then)) {
-        scanInstrs((instr as any).then);
-      }
-      if ("else" in instr && Array.isArray((instr as any).else)) {
-        scanInstrs((instr as any).else);
-      }
-      if ("catches" in instr && Array.isArray((instr as any).catches)) {
-        for (const c of (instr as any).catches) {
+      // Recurse into nested instruction arrays (if/then/else, block/body, loop,
+      // try/catch). A plain property read is exactly the former `"k" in instr`
+      // guard here, without a second megamorphic lookup per field (#6759).
+      const n = instr as { body?: unknown; then?: unknown; else?: unknown; catches?: unknown; catchAll?: unknown };
+      if (Array.isArray(n.body)) scanInstrs(n.body);
+      if (Array.isArray(n.then)) scanInstrs(n.then);
+      if (Array.isArray(n.else)) scanInstrs(n.else);
+      if (Array.isArray(n.catches)) {
+        for (const c of n.catches) {
           if (Array.isArray(c.body)) scanInstrs(c.body);
         }
       }
-      if ("catchAll" in instr && Array.isArray((instr as any).catchAll)) {
-        scanInstrs((instr as any).catchAll);
-      }
+      if (Array.isArray(n.catchAll)) scanInstrs(n.catchAll);
     }
   }
   for (const func of ctx.mod.functions) {
@@ -2700,6 +2709,7 @@ function compileClassBodiesInner(
         params.map((p) => p.type),
         0,
         /* unmapped */ true,
+        ctor.parameters,
       );
     }
 
@@ -2910,6 +2920,10 @@ function compileClassBodiesInner(
         fctx.body.push({ op: "local.get", index: selfLocal });
         fctx.body.push({ op: "call", funcIdx: implicitParentInitIdx });
         fctx.body.push({ op: "drop" });
+      } else if (classHeritageIsIntrinsicSymbol(ctx, className)) {
+        // (#6651 C5) The implicit `super(...args)` constructs `%Symbol%` with a
+        // NewTarget — §20.4.1.1 step 1 throws. See the predicate.
+        emitThrowTypeError(ctx, fctx, "Symbol is not a constructor");
       } else if (ctx.classParentMap.get(className) !== undefined) {
         // Legacy fallback (parent has no `_init` — should not happen for
         // user struct classes): keep prior behavior of replaying ancestor
@@ -3324,10 +3338,7 @@ function compileClassBodiesInner(
       {
         const resolvedParams = params.map((p) => p.type);
         const resolvedResults: ValType[] = fctx.returnType ? [fctx.returnType] : [];
-        const updatedTypeIdx = addFuncType(ctx, resolvedParams, resolvedResults, `${fullName}_type`);
-        if (updatedTypeIdx !== func.typeIdx) {
-          func.typeIdx = updatedTypeIdx;
-        }
+        retypeProgramAbiClassCallable(ctx, func, addFuncType(ctx, resolvedParams, resolvedResults, `${fullName}_type`));
       }
 
       for (let i = 0; i < params.length; i++) {
@@ -3352,6 +3363,7 @@ function compileClassBodiesInner(
           params.slice(isStatic ? 0 : 1).map((p) => p.type),
           isStatic ? 0 : 1,
           true,
+          member.parameters,
         );
       }
 
@@ -3483,7 +3495,7 @@ function compileClassBodiesInner(
         const methodParamTypes = params.slice(isStatic ? 0 : 1).map((p) => p.type);
         const paramOffset = isStatic ? 0 : 1; // skip 'this' param for instance methods
         // Class bodies are always strict code → unmapped arguments (#779e).
-        emitArgumentsObject(ctx, fctx, methodParamTypes, paramOffset, true);
+        emitArgumentsObject(ctx, fctx, methodParamTypes, paramOffset, true, member.parameters);
       }
 
       if (isGeneratorMethod && member.body && nativeGenInfo) {
@@ -3726,9 +3738,7 @@ function compileClassBodiesInner(
         const resolvedParams = params.map((p) => p.type);
         const resolvedResults: ValType[] = fctx.returnType ? [fctx.returnType] : [];
         const updatedTypeIdx = addFuncType(ctx, resolvedParams, resolvedResults, `${getterName}_type`);
-        if (updatedTypeIdx !== func.typeIdx) {
-          func.typeIdx = updatedTypeIdx;
-        }
+        retypeProgramAbiClassCallable(ctx, func, updatedTypeIdx);
       }
 
       for (let i = 0; i < params.length; i++) {
@@ -3843,9 +3853,7 @@ function compileClassBodiesInner(
         const resolvedParams = params.map((p) => p.type);
         const resolvedResults: ValType[] = [];
         const updatedTypeIdx = addFuncType(ctx, resolvedParams, resolvedResults, `${setterName}_type`);
-        if (updatedTypeIdx !== func.typeIdx) {
-          func.typeIdx = updatedTypeIdx;
-        }
+        retypeProgramAbiClassCallable(ctx, func, updatedTypeIdx);
       }
 
       for (let i = 0; i < params.length; i++) {
@@ -4034,6 +4042,7 @@ function emitPromiseSubclassOnHostCtor(
       params.map((param) => param.type),
       0,
       /* unmapped */ true,
+      ctor.parameters,
     );
   }
 
@@ -4491,6 +4500,10 @@ export function compileSuperCall(
     // §13.3.7.1 ArgumentListEvaluation.
     for (const arg of args) {
       evaluateArgumentForSideEffects(ctx, fctx, arg);
+    }
+    // (#6651 C5) …then Construct(%Symbol%, args, NewTarget) throws (§20.4.1.1).
+    if (classHeritageIsIntrinsicSymbol(ctx, childClassName)) {
+      emitThrowTypeError(ctx, fctx, "Symbol is not a constructor");
     }
     return;
   }

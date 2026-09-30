@@ -16,8 +16,9 @@
 // SCOPE, deliberately narrow. This module answers the IsConstructor half only,
 // and only for a heritage the compiler can prove NOT to be a constructor by
 // reading the source. The §15.7.14 step 5.g.ii "Get(superclass, 'prototype')
-// is neither Object nor Null" half is NOT implemented here — see the residual
-// note in `plan/issues/5195-es2015-standalone-class-r2.md`.
+// is neither Object nor Null" half is implemented only for the intrinsic
+// `Proxy` (#6651 C5, `heritagePrototypeIsProvablyInvalid`) — see the residual
+// note in `plan/issues/5195-es2015-standalone-class-r2.md` for the rest.
 //
 // COMPILE-TIME PROOF ONLY (r3 review F1, 2026-09-04). The first cut also
 // admitted any heritage the compiler could not trace — a parameter, a
@@ -279,6 +280,19 @@ function heritageIsProvablyNotConstructor(ctx: CodegenContext, expr: ts.Expressi
 }
 
 /**
+ * (#6651 C5) §15.7.14 step 5.g.ii — the half the header scopes out, for the one
+ * heritage whose answer is known from the source: the intrinsic `%Proxy%`. It is
+ * a constructor, but it has NO `prototype` property (§28.2.2 lists only
+ * `revocable`), so `Get(superclass, "prototype")` is undefined — neither an
+ * Object nor null — and `class P extends Proxy {}` throws a TypeError at
+ * definition time. A module-local `Proxy` binding is not the intrinsic and is
+ * declined, like every other heritage this module cannot prove.
+ */
+function heritagePrototypeIsProvablyInvalid(ctx: CodegenContext, expr: ts.Expression): boolean {
+  return ts.isIdentifier(expr) && expr.text === "Proxy" && identifierIsAmbientGlobal(ctx, expr);
+}
+
+/**
  * The heritage expression of `decl` that is PROVABLY not a constructor and so
  * must throw at class-definition time, or `undefined` when the compiler cannot
  * prove it — in which case the class keeps exactly the code the base tree
@@ -295,12 +309,17 @@ export function heritageExpressionNeedingRuntimeCheck(
   ctx: CodegenContext,
   decl: ts.ClassDeclaration | ts.ClassExpression,
 ): ts.Expression | undefined {
-  if (!ctx.standalone) return undefined;
   if (decl.heritageClauses === undefined) return undefined;
   for (const clause of decl.heritageClauses) {
     if (clause.token !== ts.SyntaxKind.ExtendsKeyword || clause.types.length === 0) continue;
     const expr = unwrapHeritage(clause.types[0]!.expression);
     if (expr.kind === ts.SyntaxKind.NullKeyword) return undefined;
+    // (#6651 C5) The `%Proxy%` prototype arm is target-independent: the host
+    // lane resolves an identifier heritage statically too and never read
+    // `Proxy.prototype` either. The IsConstructor arms stay standalone-only —
+    // the host registers every other runtime heritage through its own bridge.
+    if (heritagePrototypeIsProvablyInvalid(ctx, expr)) return expr;
+    if (!ctx.standalone) return undefined;
     return heritageIsProvablyNotConstructor(ctx, expr) ? expr : undefined;
   }
   return undefined;
@@ -339,11 +358,38 @@ export function emitStandaloneHeritageCheck(
       return { commit: false, value: undefined };
     }
     fctx.body.push({ op: "drop" });
+    const message = heritagePrototypeIsProvablyInvalid(ctx, expr)
+      ? "Class extends value does not have valid prototype property undefined"
+      : "Class extends value is not a constructor or null";
+    // Host lane: the ordinary `__new_TypeError` import, so the thrown value is
+    // the realm's own TypeError. Standalone: the in-module constructor.
     fctx.body.push(
-      ...buildThrowJsErrorInstrs(ctx, "TypeError", "Class extends value is not a constructor or null", {
-        forceInModuleCtor: true,
-      }),
+      ...buildThrowJsErrorInstrs(ctx, "TypeError", message, { forceInModuleCtor: ctx.standalone === true }),
     );
     return { commit: true, value: undefined };
   });
+}
+
+/**
+ * (#6651 C5) Is `className`'s heritage the intrinsic `%Symbol%`?
+ *
+ * `class S extends Symbol {}` is a LEGAL class definition — `Symbol` is a
+ * constructor and `Symbol.prototype` is an object — but every construction
+ * throws: `super()` performs `Construct(%Symbol%, args, NewTarget)`, and
+ * §20.4.1.1 step 1 throws a TypeError whenever NewTarget is not undefined. So
+ * the answer is known from the source and is the same on every target.
+ *
+ * Neither lane modelled it: `Symbol` is not a host-constructible builtin parent,
+ * so the class compiled as a root struct wearing a heritage clause, and both
+ * the implicit derived constructor and an explicit `super()` completed
+ * normally. A module-local `Symbol` binding is not the intrinsic and is
+ * declined.
+ */
+export function classHeritageIsIntrinsicSymbol(ctx: CodegenContext, className: string): boolean {
+  const decl = ctx.classDeclarationMap.get(className);
+  const clause = decl?.heritageClauses?.find((c) => c.token === ts.SyntaxKind.ExtendsKeyword);
+  const heritage = clause?.types[0]?.expression;
+  if (heritage === undefined) return false;
+  const expr = unwrapHeritage(heritage);
+  return ts.isIdentifier(expr) && expr.text === "Symbol" && identifierIsAmbientGlobal(ctx, expr);
 }

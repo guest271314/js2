@@ -184,6 +184,7 @@ import { sourceFunctionHandleForDeclaration } from "./program-abi-source-callabl
 import { stripHostBridgeExports } from "./host-bridge-exports.js";
 import { publishStandaloneLinkBoundaryExports } from "./standalone-link-boundary.js"; // (#5383 S2d)
 import { finalizeStandaloneLinkReversePeer } from "./standalone-link-reverse-peer.js"; // (#5383 S17)
+import { importStandaloneLinkErrorCtorCells } from "./standalone-link-error-ctor-cells.js"; // (#6723 D4)
 import { fillLinkBoundaryToStringTagTerminal } from "./link-boundary-tostring.js"; // (#5406)
 import { eliminateDeadLayoutAndPlanProgramAbi } from "./program-abi-finalization.js";
 import { emitDataStructHostBridgeManifest } from "./data-struct-host-bridge.js";
@@ -449,7 +450,7 @@ import {
 import { fillArrayToPrimitive } from "./array-to-primitive.js";
 import { fillNumberToLocaleString, fillTaToLocaleString } from "./to-locale-string-element.js"; // (#6651 TA1)
 import { fillVecOwnToPrimitive } from "./vec-own-to-primitive.js"; // (#6651 E3)
-import { fillClassToPrimitive } from "./class-to-primitive.js";
+import { brandedI32ResultBoxIdx, fillClassToPrimitive } from "./class-to-primitive.js";
 import {
   captureToPrimitiveDispatchFrame,
   ensureToPrimitiveDispatchBoxing,
@@ -466,6 +467,7 @@ import {
 import { emitInlineMathFunctions } from "./math-helpers.js";
 import { ensureFuncClosureSingleton, finalizeMethodTrampolines, getFuncRefWrapperRootTypeIdx } from "./closures.js";
 import { peepholeOptimize } from "./peephole.js";
+import { instrArraySharing } from "./call-arg-producers.js";
 import { repairCrossHierarchyOperands } from "./cross-hierarchy-operands.js"; // (#4157 park 6)
 import { validateFinalStructHierarchies } from "./struct-hierarchy-layout.js";
 import { installAllocCensus } from "./alloc-census.js"; // (#3921) per-type allocation census
@@ -5239,6 +5241,7 @@ export function generateModule(
     : undefined;
   const ctx = createCodegenContext(mod, ast.checker, options, programAbiSession, irPlanningIdentityContext);
   ctx.callableSourceFiles = [ast.sourceFile];
+  importStandaloneLinkErrorCtorCells(ctx); // (#6723 D4) before any defined global
   ctx.irBodyRouteAuditSession?.registerGenerator("single", "generateModule");
   const standaloneCalendar = planSingleSourceStandaloneCalendar(ctx, ast.checker, ast.sourceFile, inventoryOptions);
   ctx.runtimeEvalBoundaryPlan = buildIrRuntimeEvalBoundaryPlan([ast.sourceFile], ctx.oracle);
@@ -7050,10 +7053,12 @@ export function generateModule(
     profilePhase("finalize/dead-layout", () => eliminateDeadLayoutAndPlanProgramAbi(ctx)); // #1899 authoritative remap, then #3520 retained ABI
 
     // Repair struct.get/struct.set type mismatches (externref → struct ref conversion)
-    profilePhase("finalize/repair-struct-types", () => repairStructTypeMismatches(mod, ctx.errors));
+    // (#6759) Both repairs only touch leaf instructions: one sharing analysis serves both.
+    const leafRepairSharing = instrArraySharing(mod);
+    profilePhase("finalize/repair-struct-types", () => repairStructTypeMismatches(mod, ctx.errors, leafRepairSharing));
 
     // Peephole optimization: remove redundant ref.as_non_null after ref.cast, etc.
-    profilePhase("finalize/peephole", () => peepholeOptimize(mod));
+    profilePhase("finalize/peephole", () => peepholeOptimize(mod, leafRepairSharing));
 
     // (#3921) Allocation census — no-op unless JS2WASM_ALLOC_CENSUS=1. Placed
     // here because dead-type elimination has already remapped every `typeIdx`,
@@ -7083,16 +7088,23 @@ export function generateModule(
 
     // (#4157 park 6) Cross-hierarchy operand repair — must run BEFORE the two
     // position-guessing repairs inside stackBalance. See its own header.
-    profilePhase("finalize/cross-hierarchy-operands", () => repairCrossHierarchyOperands(mod, ctx.errors));
+    // (#6759) These three repairs add no multi-parent or cross-function array (leaf
+    // edits, dead-code removal, fresh `else` arms), so one analysis serves them all.
+    const repairSharing = instrArraySharing(mod);
+    profilePhase("finalize/cross-hierarchy-operands", () =>
+      repairCrossHierarchyOperands(mod, ctx.errors, repairSharing),
+    );
     // Stack-balancing fixup: ensure all branches in if/try/block have matching stack states
     reportModuleScale("before-stack-balance", mod);
-    profilePhase("finalize/stack-balance", () => stackBalance(mod, ctx.errors));
+    profilePhase("finalize/stack-balance", () => stackBalance(mod, ctx.errors, repairSharing));
     // #1918 — drain fixup telemetry: per-compile debug log + optional strict mode.
     drainStackBalanceTelemetry(ctx, ast.sourceFile.fileName);
 
     // Late fixup: repair extern.convert_any applied to non-anyref values.
     // Must run after all other passes since they can introduce invalid coercions.
-    profilePhase("finalize/extern-convert-any", () => fixupExternConvertAny(ctx));
+    profilePhase("finalize/extern-convert-any", () =>
+      fixupExternConvertAny(ctx, repairSharing.shared.size === 0 ? repairSharing : undefined),
+    );
     // (#5270 step 1.3) Last: trampoline `call` → `return_call` against final
     // types. Nothing after this retypes a function or edits a body.
     promoteTrampolineTailCalls(ctx);
@@ -9454,6 +9466,8 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
       if (resultType === null || resultType === undefined) {
         // A completed void method returns undefined, never a dispatch miss.
         instrs.push(...canonicalUndefinedExternInstrs(ctx));
+      } else if (brandedI32ResultBoxIdx(ctx, resultType) !== undefined) {
+        instrs.push({ op: "call", funcIdx: brandedI32ResultBoxIdx(ctx, resultType)! }); // (#6651 H1) not a number
       } else if (resultType.kind === "f64" || resultType.kind === "i32" || resultType.kind === "i64") {
         const boxIdx = ctx.funcMap.get("__box_number");
         if (boxIdx === undefined) throw new Error("ToPrimitive method result requires __box_number");
@@ -10546,6 +10560,7 @@ export function generateMultiModule(multiAst: MultiTypedAST, options?: CodegenOp
     : undefined;
   const ctx = createCodegenContext(mod, multiAst.checker, options, programAbiSession, irPlanningIdentityContext);
   ctx.callableSourceFiles = multiAst.sourceFiles;
+  importStandaloneLinkErrorCtorCells(ctx); // (#6723 D4) before any defined global
   const irAuthority = makeIrPlanningAuthority(multiAst.checker, irPlanningIdentityContext, options?.experimentalIR);
   const multiPreparedProgram = initializeMultiPreparedProgram(ctx, multiAst, options, explicitlyDisabledEnv);
   const standaloneCalendar = planMultiCalendar(ctx, multiAst.checker, multiAst.sourceFiles, multiAst.entryFile);
@@ -11730,10 +11745,12 @@ export function generateMultiModule(multiAst: MultiTypedAST, options?: CodegenOp
     profilePhase("eliminate-dead-layout", () => eliminateDeadLayoutAndPlanProgramAbi(ctx)); // #1899 authoritative remap, then #3520 retained ABI
 
     // Repair struct.get/struct.set type mismatches (externref → struct ref conversion)
-    profilePhase("repair-struct-type-mismatches", () => repairStructTypeMismatches(mod, ctx.errors));
+    // (#6759) Both repairs only touch leaf instructions: one sharing analysis serves both.
+    const leafRepairSharing = instrArraySharing(mod);
+    profilePhase("repair-struct-type-mismatches", () => repairStructTypeMismatches(mod, ctx.errors, leafRepairSharing));
 
     // Peephole optimization: remove redundant ref.as_non_null after ref.cast, etc.
-    profilePhase("peephole-optimize", () => peepholeOptimize(mod));
+    profilePhase("peephole-optimize", () => peepholeOptimize(mod, leafRepairSharing));
 
     // (#3921) Allocation census — no-op unless JS2WASM_ALLOC_CENSUS=1. Placed
     // here because dead-type elimination has already remapped every `typeIdx`,
@@ -11761,10 +11778,13 @@ export function generateMultiModule(multiAst: MultiTypedAST, options?: CodegenOp
 
     // (#4157 park 6) Cross-hierarchy operand repair — must run BEFORE the two
     // position-guessing repairs inside stackBalance. See its own header.
-    profilePhase("repair-cross-hierarchy-operands", () => repairCrossHierarchyOperands(mod, ctx.errors));
+    // (#6759) These three repairs add no multi-parent or cross-function array (leaf
+    // edits, dead-code removal, fresh `else` arms), so one analysis serves them all.
+    const repairSharing = instrArraySharing(mod);
+    profilePhase("repair-cross-hierarchy-operands", () => repairCrossHierarchyOperands(mod, ctx.errors, repairSharing));
     // Stack-balancing fixup: ensure all branches in if/try/block have matching stack states
     reportModuleScale("before-stack-balance", mod);
-    profilePhase("stack-balance", () => stackBalance(mod, ctx.errors));
+    profilePhase("stack-balance", () => stackBalance(mod, ctx.errors, repairSharing));
     // #1918 — drain fixup telemetry: per-compile debug log + optional strict mode.
     profilePhase("drain-stack-balance-telemetry", () => drainStackBalanceTelemetry(ctx, multiAst.entryFile.fileName));
 
@@ -11776,7 +11796,9 @@ export function generateMultiModule(multiAst: MultiTypedAST, options?: CodegenOp
     // extern.convert_any ops, the second of which fails validation
     // ("found extern.convert_any of type externref" — externref is NOT a
     // subtype of anyref). Mirror the single-module pipeline at line 1053.
-    profilePhase("fixup-extern-convert-any", () => fixupExternConvertAny(ctx));
+    profilePhase("fixup-extern-convert-any", () =>
+      fixupExternConvertAny(ctx, repairSharing.shared.size === 0 ? repairSharing : undefined),
+    );
   } catch (e) {
     const failure = classifyIrFailure(e, "build");
     for (const sourceFile of multiAst.sourceFiles) {

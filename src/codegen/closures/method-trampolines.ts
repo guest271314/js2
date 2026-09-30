@@ -25,6 +25,7 @@ import { emitWasiErrorConstructor } from "../registry/error-types.js";
 import { allocTempLocal } from "../context/locals.js";
 import { ensureExnTag } from "../index.js";
 import { coercionInstrs } from "../type-coercion.js";
+import { classGeneratorMethodReadsReceiver, methodValueWrapperResults } from "../method-receiver-this.js"; // (#6651 A11)
 import { ensureCurrentThisGlobal } from "../statements/nested-declarations.js";
 import {
   ensureLateImport as ensureLateImportShared,
@@ -135,6 +136,8 @@ function buildNullThisTypeErrorThrow(ctx: CodegenContext): Instr[] | null {
 function methodBodyReadsThis(ctx: CodegenContext, methodFuncIdx: number): boolean {
   const fn = definedFuncAt(ctx, methodFuncIdx);
   if (!fn || !Array.isArray(fn.body)) return true;
+  const generatorBody = classGeneratorMethodReadsReceiver(ctx, fn.name); // (#6651 A11)
+  if (generatorBody !== undefined) return generatorBody;
   const walk = (instrs: Instr[]): boolean => {
     for (const instr of instrs) {
       if (instr.op === "local.get" && (instr as { index?: number }).index === 0) return true;
@@ -531,7 +534,8 @@ export function emitObjectMethodAsClosure(
     typeIdx: allocTypeIdx !== undefined && metaSlot ? allocTypeIdx : allocationStructTypeIdx,
   });
 
-  return { kind: "ref", typeIdx: structTypeIdx };
+  // (#6651 A8) A generator METHOD's value carries its own `prototype` (§15.5.4).
+  return initializeNativeGeneratorFunctionValue(ctx, fctx, memberDecl, { kind: "ref", typeIdx: structTypeIdx });
 }
 
 /**
@@ -977,7 +981,7 @@ export function ensureMethodClosureSingleton(
   const sig = getFuncSignature(ctx, methodFuncIdx);
   if (!sig || sig.params.length === 0) return null;
   const userParams = sig.params.slice(1);
-  const results = sig.results;
+  const { results, resultBridge } = methodValueWrapperResults(ctx, sig.results); // (#6651 A11)
 
   const wrapperTypes = getOrCreateFuncRefWrapperTypes(ctx, userParams, results);
   if (!wrapperTypes) return null;
@@ -1017,6 +1021,7 @@ export function ensureMethodClosureSingleton(
       trampolineBody.push({ op: "local.get", index: i + 1 });
     }
     trampolineBody.push({ op: "call", funcIdx: methodFuncIdx });
+    if (resultBridge) trampolineBody.push({ op: "extern.convert_any" }); // (#6651 A11)
     trampolineFuncIdx = mintDefinedFunc(ctx);
     pushDefinedFunc(ctx, trampolineFuncIdx, {
       name: trampolineName,

@@ -2,6 +2,7 @@ import type { FieldDef, Instr, ValType } from "../../ir/types.js";
 import { widenJsDefaultGuessSlot } from "../js-default-param-type-guess.js";
 import { materializeFnctorTwinCaptures } from "../fnctor-twin-captures.js";
 import { resolveStaticSpreadArgs } from "../static-spread-arity.js"; // (#6460)
+import { isDynamicGeneratorFunctionBinding, tryEmitDynamicGeneratorFunction } from "../generator-function-dynamic.js"; // (#6651 A9)
 import { emitLayoutSelectingStructNew, maybeEmitLayoutHint } from "../fnctor-layout-emit.js"; // (#3927) per-type layouts
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
@@ -101,13 +102,17 @@ import { armConstructIsConstructorGuard } from "../construct-is-constructor-guar
 import { linkCompatibleDeclaredStructAncestor } from "../struct-hierarchy-layout.js";
 import { emitBoundConstructOnNull } from "../construct-bound.js"; // (#4196) §10.4.1.2
 import { emitRuntimeEvalConstructOnNull } from "../runtime-eval-construct.js"; // (#4438) §10.2.2
+import * as bcv from "../builtin-ctor-value-invoke.js"; // (#6713) RegExp / Error-family carriers as values
 import {
   emitBuiltinCollectionConstructOnNull,
   reserveBuiltinCollectionDynConstruct,
 } from "../builtin-collection-dyn-construct.js"; // (#6720)
 import { resolveDefaultExpressionImportGlobal } from "../default-expression-import-global.js";
+import { isValueSelectingNewCallee, isValueSelectingNewSite } from "./new-value-selecting-callee.js"; // (#6738)
 import { emitNativeNumberFormat } from "../number-format-native.js";
 import { compileStandaloneRegExpConstructor, isGlobalRegExpConstructorExpression } from "../regexp-standalone.js";
+import { boundClassConstructArgs } from "../bound-class-construct-args.js"; // (#6651 C5)
+import { compileNewSiteBuiltinSubclass, newSiteBuiltinParent } from "../builtin-subclass-new-site.js"; // (#6651 C5)
 import { singleReturnExpressionOfCall, tracesToProxyConstructorValue } from "../proxy-value-provenance.js"; // (#5196 R3-0); (#6651 F4)
 import { emitStandaloneTest262Error, emitWasiErrorConstructor, isWasiErrorName } from "../registry/error-types.js";
 import { VOID_RESULT, type InnerResult } from "../shared.js";
@@ -171,6 +176,7 @@ import { ensureGetUndefined, ensureLateImport, flushLateImportShifts } from "./l
 import { holeToUndefinedInstrs } from "../array-holes.js";
 import { ensureCurrentThisGlobal } from "../statements/nested-declarations.js";
 import { SUPER_HOME_OBJECT_CAPTURE_NAME } from "../closures.js";
+import { emitClosedLiteralSuperBase } from "../object-literal-super-base.js"; // (#6651 A13)
 import { NEW_GLOBAL_FALLTHROUGH, tryCompileBuiltinGlobalNew } from "./new-builtin-globals.js"; // (#3281 slice 1) built-in global ctor dispatch
 import { tryCompileBuiltinPrototypeConstructorNew } from "./builtin-prototype-constructor.js";
 import {
@@ -795,7 +801,8 @@ function resolvesToDynamicAnyCtorValue(ctx: CodegenContext, calleeExpr: ts.Expre
     );
   }
   if (!ts.isIdentifier(calleeExpr)) return false;
-  if (ctx.classSet.has(calleeExpr.text) || ctx.externClasses.has(calleeExpr.text)) return false;
+  const externClassName = ctx.externClasses.has(calleeExpr.text) && !bcv.shadowsExternClassName(ctx, calleeExpr);
+  if (ctx.classSet.has(calleeExpr.text) || externClassName) return false;
   if (ctx.funcConstructorMap?.has(calleeExpr.text)) return false;
   // (#1930) Destructured-alias form for the symbol lookup (out of ratchet scope);
   // the type-flags check routes through the oracle (`typeFactOf`) rather than a
@@ -1181,7 +1188,7 @@ function compileStandaloneObjectLiteralSuperMethodCall(
   if (expr.arguments.length > 0 && (objVecNewIdx === undefined || objVecPushIdx === undefined)) return undefined;
   const currentThisIdx = ensureCurrentThisGlobal(ctx);
 
-  const methodValueType = compileStandaloneObjectLiteralSuperPropertyRead(ctx, fctx, key, "externref");
+  const methodValueType = compileStandaloneObjectLiteralSuperPropertyRead(ctx, fctx, key, "externref", expr);
   if (methodValueType === undefined) return undefined;
   const methodLocal = allocLocal(fctx, `__super_call_m_${fctx.locals.length}`, externref);
   fctx.body.push({ op: "local.set", index: methodLocal });
@@ -1245,7 +1252,7 @@ function compileStandaloneObjectLiteralSuperMethodCall(
       }
     }
     fctx.body.push({ op: "local.get", index: methodLocal });
-    fctx.body.push({ op: "global.get", index: currentThisIdx });
+    fctx.body.push(objectLiteralSuperReceiver(fctx, currentThisIdx));
     fctx.body.push({ op: "local.get", index: argsLocal });
     fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__apply_closure") ?? applyIdx });
   } else {
@@ -1257,7 +1264,7 @@ function compileStandaloneObjectLiteralSuperMethodCall(
       then: [{ op: "ref.null.extern" }],
       else: [
         { op: "local.get", index: methodLocal },
-        { op: "global.get", index: currentThisIdx },
+        objectLiteralSuperReceiver(fctx, currentThisIdx),
         { op: "local.get", index: argsLocal },
         { op: "call", funcIdx: applyIdx },
       ],
@@ -1497,7 +1504,7 @@ function compileStandaloneSuperPropertyRead(
   fctx: FunctionContext,
   key: SuperReadKey,
   accessType: ts.Type | "externref",
-  emitHomeObject: () => boolean,
+  emitHomeObject: () => boolean | "base",
   emitReceiver: () => void,
 ): ValType | undefined {
   if (!ctx.standalone) return undefined;
@@ -1510,8 +1517,10 @@ function compileStandaloneSuperPropertyRead(
   const reflectGetReceiverIdx = ctx.funcMap.get("__reflect_get_receiver");
   if (getPrototypeOfIdx === undefined || reflectGetReceiverIdx === undefined) return undefined;
 
-  if (!emitHomeObject()) return undefined;
-  fctx.body.push({ op: "call", funcIdx: getPrototypeOfIdx });
+  const home = emitHomeObject();
+  if (home === false) return undefined;
+  // (#6651 A13) "base": the step pushed GetSuperBase()'s answer itself.
+  if (home === true) fctx.body.push({ op: "call", funcIdx: getPrototypeOfIdx });
   if (key.kind === "name") {
     // (#5153 C.1) §12.3.5.3 step 5: RequireObjectCoercible(GetSuperBase()).
     // With the home object's [[Prototype]] set to null the read must throw a
@@ -1536,7 +1545,7 @@ function compileStandaloneSuperPropertyRead(
   // The property receiver is the call-time `this`, not [[HomeObject]]. This
   // distinction is observable through an inherited accessor.
   emitReceiver();
-  fctx.body.push({ op: "call", funcIdx: reflectGetReceiverIdx });
+  fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__reflect_get_receiver") ?? reflectGetReceiverIdx });
 
   // (#5350 step 5) `"externref"` keeps the raw value — the method-call arm
   // invokes it and coerces the CALL's result, not the property's.
@@ -1900,6 +1909,7 @@ function compileStandaloneObjectLiteralSuperPropertyRead(
   fctx: FunctionContext,
   key: SuperReadKey,
   accessType: ts.Type | "externref",
+  anchor: ts.Node,
 ): ValType | undefined {
   if (!ctx.standalone) return undefined;
   const currentThisIdx = ensureCurrentThisGlobal(ctx);
@@ -1913,14 +1923,27 @@ function compileStandaloneObjectLiteralSuperPropertyRead(
       // [[HomeObject]]. Falling back to __current_this would make a borrowed
       // method resolve `super` against the call-time receiver.
       const homeObjectLocal = fctx.localMap.get(SUPER_HOME_OBJECT_CAPTURE_NAME);
-      if (homeObjectLocal === undefined) return false;
+      // (#6651 A13) No capture: a closed-struct literal's method, whose super base is static.
+      if (homeObjectLocal === undefined) return emitClosedLiteralSuperBase(ctx, fctx, anchor) && "base";
       fctx.body.push({ op: "local.get", index: homeObjectLocal });
       return true;
     },
-    () => {
-      fctx.body.push({ op: "global.get", index: currentThisIdx });
-    },
+    () => fctx.body.push(objectLiteralSuperReceiver(fctx, currentThisIdx)),
   );
+}
+
+/**
+ * (#6651 A10) The §12.3.5.3 `actualThis` of an object-literal method's `super`
+ * reference. A native generator method's body runs in its RESUME function,
+ * long after the call that bound `this` returned; its receiver is the one the
+ * factory snapshotted into the frame (`capturesDynamicThis`), rehydrated as the
+ * resume function's `this` local. Everywhere else it is `__current_this`.
+ */
+function objectLiteralSuperReceiver(fctx: FunctionContext, currentThisIdx: number): Instr {
+  const resumeThis = fctx.localMap.has("__gen_self") ? fctx.localMap.get("this") : undefined;
+  return resumeThis !== undefined
+    ? { op: "local.get", index: resumeThis }
+    : { op: "global.get", index: currentThisIdx };
 }
 
 /**
@@ -2061,6 +2084,7 @@ export function compileSuperPropertyAccess(
       fctx,
       { kind: "name", name: propName },
       accessType,
+      expr,
     );
     if (runtimeReadType !== undefined) return runtimeReadType;
 
@@ -2258,7 +2282,7 @@ export function compileSuperElementAccess(
       const dynClassName = resolveEnclosingClassName(fctx);
       const dynRead =
         dynClassName === undefined
-          ? compileStandaloneObjectLiteralSuperPropertyRead(ctx, fctx, dynamicKey, accessType)
+          ? compileStandaloneObjectLiteralSuperPropertyRead(ctx, fctx, dynamicKey, accessType, expr)
           : compileStandaloneClassSuperPropertyRead(
               ctx,
               fctx,
@@ -2303,6 +2327,7 @@ export function compileSuperElementAccess(
       fctx,
       { kind: "name", name: propName },
       accessType,
+      expr,
     );
     if (runtimeReadType !== undefined) return runtimeReadType;
 
@@ -3990,11 +4015,13 @@ function tryCompileNativeConstructFromValue(
   // NULL. `resolvesToDynamicAnyCtorValue` is the same admission the host lane
   // uses, and it declines an UNDECLARED base (#4728) — so the host-global
   // `new Temporal.X(…)` lane is untouched.
-  const dynamicMemberCtorValue =
+  // (#6738) …and a callee that SELECTS a ctor value at run time, `new (a || B)()`.
+  const dynamicCtorValue =
     noJsHost(ctx) &&
-    (ts.isPropertyAccessExpression(calleeExpr) || ts.isElementAccessExpression(calleeExpr)) &&
-    resolvesToDynamicAnyCtorValue(ctx, calleeExpr);
-  if (!ts.isIdentifier(calleeExpr) && !runtimeEvalCallableResult && !dynamicMemberCtorValue) return undefined;
+    (((ts.isPropertyAccessExpression(calleeExpr) || ts.isElementAccessExpression(calleeExpr)) &&
+      resolvesToDynamicAnyCtorValue(ctx, calleeExpr)) ||
+      isValueSelectingNewCallee(calleeExpr));
+  if (!ts.isIdentifier(calleeExpr) && !runtimeEvalCallableResult && !dynamicCtorValue) return undefined;
   // A compiled fnctor for this binding means the typed-struct path owns it.
   if (ts.isIdentifier(calleeExpr) && ctx.funcConstructorMap.has(calleeExpr.text)) return undefined;
   const runtimeFunctionAlias =
@@ -4010,7 +4037,7 @@ function tryCompileNativeConstructFromValue(
     !runtimeEvalCallableResult &&
     !proxyValue &&
     !proxyCtorValue &&
-    !dynamicMemberCtorValue &&
+    !dynamicCtorValue &&
     !resolvesToConstructableFunctionValue(ctx, calleeExpr) &&
     !resolvesToLateAssignedConstructSignatureValue(ctx, calleeExpr) &&
     !(noJsHost(ctx) && isDefaultExpressionImport(ctx, calleeExpr)) // (#6720) the snapshot cell's VALUE
@@ -5127,6 +5154,7 @@ function emitDynamicNewFallback(
     fctx.body = base;
     emitBuiltinFnNotAConstructorGuard(ctx, fctx, descLocal);
     emitTaDynCtorConstructFromLocals(ctx, fctx, descLocal, argLocals);
+    bcv.emitBuiltinCtorValueConstructOnNull(ctx, fctx, calleeExpr, descLocal, argLocals);
     emitBuiltinCollectionConstructOnNull(ctx, fctx, descLocal, argLocals); // (#6720)
     fctx.body = savedBase;
     noMatchBase = base;
@@ -6557,6 +6585,8 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     const unavailable = standaloneUnavailableGlobalReference(ctx, fctx, expr.expression);
     if (unavailable !== undefined) return emitStandaloneUnavailableGlobalThrow(ctx, fctx, unavailable);
   }
+  const ctorAlias = bcv.tryCompileBuiltinCtorAliasInvoke(ctx, fctx, expr); // typed `var R = globalThis.RegExp`
+  if (ctorAlias !== undefined) return ctorAlias;
   // (#3927 per-type layouts) Publish the allocation-label hint when this `new`
   // is a recorded label site of a split family. BEFORE the arguments compile —
   // a labelled allocation nested in them consumes and resets the hint, so the
@@ -6578,6 +6608,10 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     emitSymbolOperandCoercionThrow(ctx, fctx, expr.arguments![0]!, "number")
   ) {
     return { kind: "externref" };
+  }
+  {
+    const r = tryEmitDynamicGeneratorFunction(ctx, fctx, expr); // (#6651 A9) `new %GeneratorFunction%(…)`
+    if (r !== undefined) return r;
   }
 
   // (#1528b) Unwrap parens AND `as`/`!`/type-assertion wrappers so the static
@@ -6632,7 +6666,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       const init = ctx.oracle.variableInitializerOf(id);
       if (init === undefined) return false;
       if (ts.isFunctionExpression(init) && init.asteriskToken !== undefined) return true;
-      return objectLiteralMethodWithoutConstruct(init);
+      return objectLiteralMethodWithoutConstruct(init) || isDynamicGeneratorFunctionBinding(ctx, id); // (#6651 A9)
     };
     const namedGenerator =
       ts.isIdentifier(gen) &&
@@ -7568,7 +7602,8 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     // admission itself, so this only opens the door.
     (noJsHost(ctx) &&
       (ts.isPropertyAccessExpression(expr.expression) || ts.isElementAccessExpression(expr.expression)) &&
-      resolvesToDynamicAnyCtorValue(ctx, expr.expression))
+      resolvesToDynamicAnyCtorValue(ctx, expr.expression)) ||
+    isValueSelectingNewSite(ctx, expr.expression, className) // (#6738)
   ) {
     const nativeCtor = tryCompileNativeConstructFromValue(ctx, fctx, expr.expression, expr.arguments ?? []);
     if (nativeCtor) return nativeCtor;
@@ -8048,6 +8083,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
           // [[Construct]]. Each retry declines for the other's carrier shape,
           // so the chain has no ordering hazard.
           emitRuntimeEvalConstructOnNull(ctx, fctx, expr, taDescLocal, taArgLocals);
+          bcv.emitBuiltinCtorValueConstructOnNull(ctx, fctx, dynCallee, taDescLocal, taArgLocals);
           emitBuiltinCollectionConstructOnNull(ctx, fctx, taDescLocal, taArgLocals); // (#6720) Map/Set carrier value
           return { kind: "externref" };
         }
@@ -8145,6 +8181,21 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     return { kind: "externref" };
   }
 
+  // (#6651 C5) `new D(…)` for a member-less `class D extends Date|RegExp|DataView {}`
+  // IS `new <Parent>(…)`, standalone — see builtin-subclass-new-site.ts.
+  const newSiteParent = newSiteBuiltinParent(ctx, className);
+  if (newSiteParent !== undefined) {
+    const built = compileNewSiteBuiltinSubclass(ctx, fctx, className, () => {
+      if (newSiteParent === "RegExp") return compileStandaloneRegExpConstructor(ctx, fctx, expr.arguments ?? [], expr);
+      const r =
+        newSiteParent === "DataView"
+          ? tryCompileIndexedBuiltinNew(ctx, fctx, expr, newSiteParent)
+          : tryCompileBuiltinGlobalNew(ctx, fctx, expr, newSiteParent);
+      return r === NEW_INDEXED_FALLTHROUGH || r === NEW_GLOBAL_FALLTHROUGH ? undefined : r;
+    });
+    if (built !== undefined) return built;
+  }
+
   // Handle local class constructors
   if (ctx.classSet.has(className)) {
     const ctorName = `${className}_new`;
@@ -8156,7 +8207,8 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
 
     // Compile constructor arguments with type hints
     const paramTypes = getFuncParamTypes(ctx, funcIdx);
-    const args = expr.arguments ?? [];
+    // (#6651 C5) `new (C.bind(o, 1))(8)` → `C_new(1, 8)`: bound args first.
+    const args = boundClassConstructArgs(ctx, expr, className) ?? expr.arguments ?? [];
     const forceCollectionArrayVec =
       ctx.classBuiltinParentMap.get(className) === "Map" || ctx.classBuiltinParentMap.get(className) === "Set";
     const ctorRestInfo = ctx.funcRestParams.get(ctorName);
@@ -8220,8 +8272,17 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       for (let i = 0; i < args.length && i < positionalParamCount; i++) {
         compileCtorArgument(ctx, fctx, args[i]!, paramTypes?.[i], forceCollectionArrayVec && i === 0);
       }
-      for (let i = positionalParamCount; i < args.length; i++) {
-        evaluateCtorExtraArgument(ctx, fctx, args[i]!);
+      if (args.length > positionalParamCount && ctx.funcUsesArguments.has(ctorName)) {
+        // (#6651 C5) A constructor that reads `arguments` sees the surplus
+        // arguments through `__extras_argv`, exactly as a function call's
+        // (call-identifier.ts) — they used to be evaluated and dropped, so
+        // `class A { constructor() { args = arguments } }; new A(0, 1)` saw
+        // an empty arguments object on both lanes.
+        emitSetExtrasArgv(ctx, fctx, [...args], positionalParamCount);
+      } else {
+        for (let i = positionalParamCount; i < args.length; i++) {
+          evaluateCtorExtraArgument(ctx, fctx, args[i]!);
+        }
       }
       // Pad missing constructor arguments with defaults (arity mismatch)
       if (paramTypes) {

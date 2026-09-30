@@ -1328,6 +1328,23 @@ export function tryEmitCompiledModuleNamespaceObject(
   return exports ? emitNamespaceObject(ctx, fctx, declaration, exports, true) : undefined;
 }
 
+/**
+ * The namespace object of one compiled ES module source file, keyed by its
+ * module symbol so every `import()` of the module (and a nested `export * as`)
+ * shares one object identity. `undefined` when the export list cannot be
+ * materialized honestly (the caller must not fabricate a substitute).
+ */
+export function tryEmitModuleNamespaceObjectForSource(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  sourceFile: ts.SourceFile,
+): ValType | undefined {
+  const moduleSymbol = (sourceFile as unknown as { symbol?: ts.Symbol }).symbol;
+  if (moduleSymbol === undefined || moduleSourceFile(moduleSymbol) !== sourceFile) return undefined;
+  const exports = moduleSymbolNamespaceExports(ctx, moduleSymbol, new Set());
+  return exports ? emitNamespaceObject(ctx, fctx, moduleSymbol, exports, true) : undefined;
+}
+
 function namespaceMemberAccessForIdentifier(
   identifier: ts.Identifier,
 ): ts.PropertyAccessExpression | ts.ElementAccessExpression | undefined {

@@ -141,10 +141,16 @@ function writingOccurrences(sourceFile: ts.SourceFile): Map<string, ts.Identifie
 /**
  * Is `id`'s binding declared exactly once and never assigned after its
  * initializer? `false` on any doubt — an unresolvable binding, more than one
- * declaration, or an occurrence the checker cannot place.
+ * declaration, or an occurrence the checker cannot place. `ignoreDeclaration`
+ * lets a caller discount declarations it has proven are not bindings.
  */
-export function bindingIsSingleAssignment(ctx: CodegenContext, id: ts.Identifier): boolean {
-  const decls = ctx.oracle.declarationsOf(id);
+export function bindingIsSingleAssignment(
+  ctx: CodegenContext,
+  id: ts.Identifier,
+  ignoreDeclaration?: (declaration: ts.Declaration) => boolean,
+): boolean {
+  const all = ctx.oracle.declarationsOf(id);
+  const decls = ignoreDeclaration ? all.filter((d) => !ignoreDeclaration(d)) : all;
   if (decls.length !== 1) return false;
   const decl = decls[0];
   if (decl === undefined) return false;
@@ -261,4 +267,25 @@ function isInsideFunction(node: ts.Node): boolean {
     if (ts.isSourceFile(parent)) return false;
   }
   return false;
+}
+
+/**
+ * (#6651 A9) {@link bindingIsSingleAssignment} for a SOURCE binding whose name
+ * may also name an ambient lib declaration. A script-level
+ * `var GeneratorFunction = …` merges with lib's `interface GeneratorFunction`,
+ * so the checker reports two declarations and the plain predicate declines.
+ * Only declarations outside `.d.ts` files are counted: an ambient interface
+ * declares a type, never a value, and cannot be written.
+ */
+export function sourceBindingIsSingleAssignment(ctx: CodegenContext, id: ts.Identifier): boolean {
+  const decls = ctx.oracle.declarationsOf(id).filter((d) => !d.getSourceFile().isDeclarationFile);
+  if (decls.length !== 1 || !ts.isVariableDeclaration(decls[0]!)) return false;
+  const decl = decls[0];
+  const writes = writingOccurrences(id.getSourceFile()).get(id.text);
+  if (writes === undefined) return true;
+  for (const write of writes) {
+    const target = ctx.oracle.valueDeclarationOf(write);
+    if (target === undefined || target === decl) return false;
+  }
+  return true;
 }

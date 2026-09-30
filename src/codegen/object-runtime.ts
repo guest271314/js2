@@ -294,6 +294,7 @@ import {
   captureReversePeerReadBinding,
   reverseMethodCallArmInstrs,
 } from "./standalone-link-reverse-peer.js"; // (#5383 S17 / #6600) the REVERSE hop
+import { stringWrapperLengthArm } from "./string-wrapper-dynamic-length.js"; // (#6651 C5)
 import { captureWrapperPrimitiveKey } from "./to-primitive-wrapper-slot.js"; // (#4492 wave-5) __to_primitive's [[PrimitiveValue]] arms
 import { buildToPrimitiveBody } from "../runtime/wasmgc/values/to-primitive-bodies.js";
 import type {
@@ -7454,6 +7455,8 @@ interface ExternGetIdxBodyParams {
   numberToStringIdx: number;
   /** funcIdx of `__extern_get` (only used when objArrayLikeArms). */
   externGetIdx: number;
+  /** (#6651 H6) `$Proxy` type: its indexed read is the same `Get(O, ToString(i))`. */
+  proxyTypeIdx?: number;
   /** Pre-built per-`__vec_<k>` dispatch arms (empty at registration time). */
   vecArms: Instr[];
   /** (#2106 S1) Factory for the miss ("index absent") result instrs. A FACTORY
@@ -7483,6 +7486,13 @@ export function buildExternGetIdxBody(p: ExternGetIdxBodyParams): Instr[] {
     ? [
         { op: "local.get", index: 2 },
         { op: "ref.test", typeIdx: objectTypeIdx },
+        ...(p.proxyTypeIdx === undefined
+          ? []
+          : ([
+              { op: "local.get", index: 2 },
+              { op: "ref.test", typeIdx: p.proxyTypeIdx },
+              { op: "i32.or" },
+            ] satisfies Instr[])),
         {
           op: "if",
           blockType: { kind: "empty" },
@@ -9698,6 +9708,7 @@ export function unshiftExternGetStringExoticArm(ctx: CodegenContext): void {
           op: "if",
           blockType: { kind: "empty" },
           then: [
+            ...stringWrapperLengthArm(ctx, 1, stringData), // (#6651 C5) `length`
             // n = ToNumber(key), then require Number::toString(n) to equal the
             // original key. This rejects 01, 1.0, NaN, and other non-canonical
             // numeric strings before the String-exotic arm runs.

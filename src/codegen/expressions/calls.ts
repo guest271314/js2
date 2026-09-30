@@ -27,6 +27,7 @@ import { tryStandaloneHostFreeCall } from "./standalone-dynamic-code.js"; // (#6
 import { compileArrayMethodCall, compileArrayPrototypeCall, resolveArrayInfo } from "../array-methods.js";
 import { emitGlobalThisGopdFold } from "../dyn-read.js"; // (#2984)
 import { tryEmitNullishReceiverCall } from "../nullish-receiver-coercible.js"; // (#4484 B) §7.3.2 on a syntactic null/undefined receiver
+import { tryEmitDynamicGeneratorFunction } from "../generator-function-dynamic.js"; // (#6651 A9)
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "../func-space.js"; // (#1916 S3b) stable-regime minting
 import { sourceFunctionHandleForDeclaration } from "../program-abi-source-callable-planning.js";
 import { withRuntimeModuleCallableBindings } from "../runtime-module-callable-metadata.js";
@@ -46,6 +47,7 @@ import { observeHostDynamicMethodCallArity } from "../dynamic-method-call-arity.
 import { NATIVE_HOF_METHODS } from "../hof-native.js";
 import { ensureTaMapFilterHelper } from "../ta-hof-map-filter.js";
 import { LAZY_ITER_METHODS } from "../iter-lazy-native.js"; // (#2903 R3b) flatMap closure-path exemption
+import { prepareBuiltinCtorValueInvoke } from "../builtin-ctor-value-invoke.js"; // (#6713)
 import {
   ensureBoundaryCallableKind,
   ensureObjVecBuilders,
@@ -293,6 +295,7 @@ import {
 } from "../property-access.js";
 import { emitToNumber, emitToString } from "../coercion-engine.js";
 import type { InnerResult } from "../shared.js";
+import { compileStandaloneDynamicImport } from "./standalone-dynamic-import.js";
 import {
   brandExternMethodResult,
   coerceType,
@@ -4759,6 +4762,7 @@ export function tryEmitInlineDynamicCall(
   if (wantIsCallableGuard) {
     ensureBoundaryCallableKind(ctx); // (#6686) admitted JS functions are callable
     ensureLateImport(ctx, "__is_callable", [{ kind: "externref" }], [{ kind: "i32" }]);
+    prepareBuiltinCtorValueInvoke(ctx, fctx, expr.expression); // (#6713) RegExp/Error carrier [[Call]]
   }
   if (allCandidates.length === 0 && !wantProxyArm && !wantBoundArm && !wantTaCtorArm && !wantApplyFallback) return null;
 
@@ -6848,22 +6852,6 @@ function tryIteratorStaticsIntrinsicCall(
   return VOID_RESULT;
 }
 
-/**
- * #3509 — A standalone dynamic import in an ordinary lifted closure can be lowered
- * to a call-site trap instead of rejecting the whole module. This is the
- * deferred case: creating the function does not need a loader, and execution
- * remains honest because reaching import() throws before a Promise or module
- * namespace can be manufactured.
- *
- * Async functions stay on #3494's explicit unsupported path. Their throw must
- * become a rejected Promise rather than escape synchronously, which requires
- * the async/module-evaluation substrate that this bounded fix deliberately
- * does not approximate.
- */
-function canDeferStandaloneDynamicImport(fctx: FunctionContext): boolean {
-  return fctx.deferredDynamicImportTrap === true;
-}
-
 /** Private, opt-in proxy brand probe used by the Deno app bridge. Ordinary
  * source never sees this name; the JavaScript fallback returns false, while a
  * standalone build can test the concrete `$Proxy` RTT without invoking any
@@ -7576,7 +7564,8 @@ function compileCallExpression(
     if (r !== undefined) return r;
   }
   {
-    const r = tryRuntimeEvalInterpretedBoundaryIntrinsic(ctx, fctx, expr);
+    const r =
+      tryRuntimeEvalInterpretedBoundaryIntrinsic(ctx, fctx, expr) ?? tryEmitDynamicGeneratorFunction(ctx, fctx, expr); // (#6651 A9)
     if (r !== undefined) return r;
   }
 
@@ -7919,42 +7908,10 @@ function compileCallExpression(
 
   // Dynamic import() — delegate to __dynamic_import host import.
   // Takes a specifier (externref string) and returns an externref (Promise).
-  // #3494 — standalone has no host loader, while compileMulti does not yet
-  // represent deferred module records or module namespace objects. Never emit
-  // env.__dynamic_import or manufacture an always-fulfilled placeholder.
-  //
-  // #3509 — an ordinary function body is deferred: compiling/creating it does
-  // not require a loader. Preserve that property with a host-free, catchable
-  // runtime throw if execution reaches import(). Eager/top-level and async
-  // cases retain #3494's fatal diagnostic until their Promise/module semantics
-  // can be implemented honestly.
+  // #3494 — standalone has no host loader: resolve an evaluated module of the
+  // compiled graph to its namespace, reject everything else with a TypeError.
   if (expr.expression.kind === ts.SyntaxKind.ImportKeyword) {
-    if (ctx.standalone) {
-      if (canDeferStandaloneDynamicImport(fctx)) {
-        reportError(
-          ctx,
-          expr,
-          "Warning: standalone dynamic import has no module loader and will throw if this function is invoked (#3509; module evaluation #3494)",
-          "warning",
-        );
-        // Preserve argument side effects and nesting order before the loader
-        // failure. A nested import emits its own terminal throw here; Wasm's
-        // stack-polymorphic unreachable tail keeps the enclosing expression
-        // valid without inventing a result.
-        for (const argument of expr.arguments) {
-          const argumentType = compileExpression(ctx, fctx, argument);
-          if (argumentType !== null) fctx.body.push({ op: "drop" });
-        }
-        emitThrowTypeError(ctx, fctx, "Standalone dynamic import requires a module loader (#3494)");
-        return { kind: "externref" };
-      }
-      reportError(
-        ctx,
-        expr,
-        "Standalone dynamic import is unsupported until compileMulti provides internal module records and namespace objects",
-      );
-      return null;
-    }
+    if (ctx.standalone) return compileStandaloneDynamicImport(ctx, fctx, expr);
     // Ensure __dynamic_import is registered
     let dynIdx = ctx.funcMap.get("__dynamic_import");
     if (dynIdx === undefined) {
