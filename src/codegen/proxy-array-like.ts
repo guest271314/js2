@@ -27,6 +27,7 @@ import type { Instr } from "../ir/types.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { allocLocal } from "./context/locals.js";
 import { buildThrowJsErrorInstrs } from "./js-errors.js";
+import { arrayCtorThisCallSeen } from "./array-ctor-this.js"; // (#6771 S7)
 
 /** The `$Proxy` type index when the array-like arms should admit proxies. */
 export function proxyArrayLikeTypeIdx(ctx: CodegenContext): number | undefined {
@@ -152,5 +153,6 @@ export function arrayLikeLengthLimitGuard(ctx: CodegenContext, fctx: FunctionCon
  * `%Array.prototype%` singleton for a genuine array.
  */
 export function arrayTypedValueMayNotBeArray(ctx: CodegenContext): boolean {
-  return ctx.standalone && (ctx.arraySpeciesDirty || ctx.proxyDirty === true);
+  // (#6771 S7) …and a constructor-`this` `Array.from`/`Array.of` (array-ctor-this.ts).
+  return ctx.standalone && (ctx.arraySpeciesDirty || ctx.proxyDirty === true || arrayCtorThisCallSeen(ctx));
 }

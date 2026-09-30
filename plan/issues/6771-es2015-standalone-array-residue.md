@@ -77,6 +77,11 @@ loc-budget-allow:
   # TypeScript types as a primitive wrapper (one guard + its import; the
   # predicate lives in bool-to-locale-string.ts).
   - src/codegen/typeof-delete.ts
+  # S7: one guarded-read call in the `.constructor` namespace fold, one
+  # runtime-predicate condition in the `Array.isArray` fold (bodies in
+  # array-ctor-this.ts).
+  - src/codegen/property-access-dispatch.ts
+  - src/codegen/expressions/call-builtin-static.ts
 func-budget-allow:
   # 2026-09-30 (#6771 plan): each gains one arm / one guard / one route.
   - src/codegen/array-methods.ts::setupArrayLoop
@@ -105,6 +110,9 @@ func-budget-allow:
   - src/codegen/index.ts::generateMultiModule
   - src/codegen/binary-ops-in.ts::compileInOperator
   - src/codegen/typeof-delete.ts::compileTypeofExpression
+  - src/codegen/property-access-dispatch.ts::tryConstructorPrototypeIdentity
+  - src/codegen/expressions/call-builtin-static.ts::compileBuiltinStaticCall
+  - src/codegen/native-construct.ts::fillNativeConstructDrivers
 coercion-sites-allow:
   # 2026-09-30 (#6771 implementation, Opus): ToString(k) of an integral array
   # index — the canonical key spelling every array-like arm uses (the `$Object`

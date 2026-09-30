@@ -49,6 +49,7 @@ import { planHoleyArrayCarrier } from "./holey-array-plan.js"; // (#4222) isolat
 import { recordDescriptorArrayReceiver } from "./declarations/descriptor-array-carrier.js"; // (#4670)
 import { armExhaustiveForNonCallableMemberLiteral } from "./class-to-primitive.js"; // (#6771 S2d)
 import { isArrayLengthConstructor } from "./array-length-holes.js"; // (#6771 S3)
+import { noteArrayCtorThisCall } from "./array-ctor-this.js"; // (#6771 S7)
 
 /**
  * Cheap AST pre-scan: set `ctx.usesArrayHoles` when the program contains any
@@ -68,6 +69,7 @@ export function scanForArrayHoles(ctx: CodegenContext, root: ts.Node): void {
     // (#6771 S2d) Not a flag of this pass, so it must not be cut off by the
     // all-flags-set early-out below: that early-out also waits for it.
     const exhaustiveArmed = armExhaustiveForNonCallableMemberLiteral(ctx, node);
+    noteArrayCtorThisCall(ctx, node); // (#6771 S7)
     if (
       exhaustiveArmed &&
       ctx.usesArrayHoles &&
