@@ -49,6 +49,11 @@ import {
   emitSuperInitializedFlagStore,
   ensureSuperInitializedFlagLocal,
 } from "./derived-ctor-this-guard.js"; // (#5350 r3 / #6772 S1b) runtime this-initialised flag
+import {
+  emitCtorFallthroughOverride,
+  emitSaveParentOverride,
+  markCtorReturnOverrideClass,
+} from "./ctor-return-override.js"; // (#6772 S2)
 import { popBody, pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, deduplicateLocals } from "./context/locals.js";
@@ -1231,6 +1236,7 @@ export function collectClassDeclaration(
     }
   }
   if (parentStructTypeIdx !== undefined) (ctx.mod.types[parentStructTypeIdx] as StructTypeDef).superTypeIdx ??= -1;
+  markCtorReturnOverrideClass(ctx, className, decl); // (#6772 S2) before any binding of it is typed
   // Pre-register the struct type index BEFORE resolving field types.
   // This allows self-referencing fields (e.g. `next: ListNode | null` in class ListNode)
   // to resolve to `ref null $structTypeIdx` instead of falling back to externref.
@@ -2928,6 +2934,7 @@ function compileClassBodiesInner(
         fctx.body.push({ op: "local.get", index: selfLocal });
         fctx.body.push({ op: "call", funcIdx: implicitParentInitIdx });
         fctx.body.push({ op: "drop" });
+        emitSaveParentOverride(ctx, fctx, className); // (#6772 S2)
       } else if (classHeritageIsIntrinsicSymbol(ctx, className)) {
         // (#6651 C5) The implicit `super(...args)` constructs `%Symbol%` with a
         // NewTarget — §20.4.1.1 step 1 throws. See the predicate.
@@ -3068,6 +3075,7 @@ function compileClassBodiesInner(
         ) {
           compileSuperCall(ctx, fctx, className, selfLocal, stmt.expression, fields);
           emitSuperCallBindThis(ctx, fctx); // (#5350 r3 / #6772 S1b) BindThisValue
+          emitSaveParentOverride(ctx, fctx, className); // (#6772 S2)
           if (isDerivedClass) {
             emitOwnInstanceFieldInitializers();
           }
@@ -3170,6 +3178,7 @@ function compileClassBodiesInner(
     }
 
     // Return the struct instance
+    emitCtorFallthroughOverride(ctx, fctx, className); // (#6772 S2)
     fctx.body.push({ op: "local.get", index: selfLocal });
 
     cacheStringLiterals(ctx, fctx);

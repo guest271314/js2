@@ -505,6 +505,7 @@ import {
 } from "./new-builtin-globals.js";
 import { compileSuperElementMethodCall, compileSuperMethodCall } from "./new-super.js";
 import { constructorFrameClassName, emitSuperCallBindThis } from "../derived-ctor-this-guard.js"; // (#6772 S1b)
+import { emitSaveParentOverride } from "../ctor-return-override.js"; // (#6772 S2)
 import { compileIdentifierCall } from "./call-identifier.js";
 import { compileBuiltinStaticCall, tryCompileFromCharCodeFamilyReflective } from "./call-builtin-static.js";
 import { compileNamespaceStaticCall } from "./call-namespace-static.js";
@@ -8101,6 +8102,7 @@ function compileCallExpression(
     if (enclosingClass !== undefined && thisLocal !== undefined) {
       compileSuperCall(ctx, fctx, enclosingClass, thisLocal, expr, []);
       emitSuperCallBindThis(ctx, fctx); // (#5350 r3 / #6772 S1b) BindThisValue
+      emitSaveParentOverride(ctx, fctx, enclosingClass); // (#6772 S2)
       return VOID_RESULT;
     }
   }

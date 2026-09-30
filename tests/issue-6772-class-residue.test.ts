@@ -172,3 +172,296 @@ describe("#6772 S1b — derived-constructor GetThisBinding / BindThisValue", () 
     expect((instance.exports as { probe: () => number }).probe()).toBe(2);
   });
 });
+
+describe("#6772 S2 \u2014 constructor return-override channel", () => {
+  it("RED on base (8): foreign-object override \u2014 base / inherited / derived / extends-null (node 63)", async () => {
+    expect(
+      await runProbe(`
+        class Base { constructor(a,b){ var o = new Object(); o.prp = a + b; return o; } }
+        var b = new Base(1,2);
+        var r = (b.prp === 3) ? 1 : 0;
+        var obj = {};
+        class Base3 { constructor(){ return obj; } }
+        class Sub3 extends Base3 {}
+        var s3 = new Sub3();
+        r += (s3 === obj) ? 2 : 0;
+        class B2 { constructor(){ this.prop = 1; } }
+        class D2 extends B2 { constructor(){ super(); return {}; } }
+        var o2 = new D2();
+        r += (typeof o2.prop === 'undefined') ? 4 : 0;
+        r += (o2 instanceof D2) ? 0 : 8;
+        var obj2;
+        class Foo extends null { constructor(){ return obj2 = {}; } }
+        var f = new Foo();
+        r += (f === obj2) ? 16 : 0;
+        r += (Object.getPrototypeOf(f) === Object.prototype) ? 32 : 0;
+        __r = r;
+      `),
+    ).toBe(63);
+  });
+
+  it("RED on base (4608): this-access-restriction-2 distilled \u2014 override, derived `this`, second super() (node 8191)", async () => {
+    expect(
+      await runProbe(`
+        var r = 0;
+        class Base {
+          constructor(a, b) {
+            var o = new Object();
+            o.prp = a + b;
+            return o;
+          }
+        }
+        class Subclass extends Base {
+          constructor(a, b) {
+            var exn;
+            try { this.prp1 = 3; } catch (e) { exn = e; }
+            r += (exn instanceof ReferenceError) ? 1 : 0;
+            super(a, b);
+            r += (this.prp === a + b) ? 2 : 0;
+            r += (this.prp1 === undefined) ? 4 : 0;
+            r += (this.hasOwnProperty("prp1") === false) ? 8 : 0;
+            return this;
+          }
+        }
+        var b = new Base(1, 2);
+        r += (b.prp === 3) ? 16 : 0;
+        var s = new Subclass(2, -1);
+        r += (s.prp === 1) ? 32 : 0;
+        r += (s.prp1 === undefined) ? 64 : 0;
+        r += (s.hasOwnProperty("prp1") === false) ? 128 : 0;
+        class Subclass2 extends Base {
+          constructor(x) {
+            super(1, 2);
+            if (x < 0) return;
+            var called = false;
+            function tmp() { called = true; return 3; }
+            var exn = null;
+            try { super(tmp(), 4); } catch (e) { exn = e; }
+            r += (exn instanceof ReferenceError) ? 256 : 0;
+            r += (called === true) ? 512 : 0;
+          }
+        }
+        var s2 = new Subclass2(1);
+        r += (s2.prp === 3) ? 1024 : 0;
+        var s3 = new Subclass2(-1);
+        r += (s3.prp === 3) ? 2048 : 0;
+        class BadSubclass extends Base { constructor() {} }
+        try { new BadSubclass(); } catch (e) { r += (e instanceof ReferenceError) ? 4096 : 0; }
+        __r = r;
+      `),
+    ).toBe(8191);
+  });
+
+  it("RED on base (4): `typeof` / reads of a declared field off the override object (node 7)", async () => {
+    expect(
+      await runProbe(`
+        class B2 { constructor(){ this.prop = 1; } }
+        class D2 extends B2 { constructor(){ super(); return {}; } }
+        var o2 = new D2();
+        var r = 0;
+        r += (typeof o2.prop === 'undefined') ? 1 : 0;
+        var t = typeof o2.prop;
+        r += (t === 'undefined') ? 2 : 0;
+        r += (o2.prop === undefined) ? 4 : 0;
+        __r = r;
+      `),
+    ).toBe(7);
+  });
+
+  it("RED on base (10): `return {}` is a plain object, not the class's own struct (node 7)", async () => {
+    expect(
+      await runProbe(`
+        class Base { constructor(){ return {}; } }
+        var r = 0;
+        var b = new Base();
+        r += (b instanceof Base) ? 0 : 1;
+        r += (typeof b === "object") ? 2 : 0;
+        var p = Object.getPrototypeOf(b);
+        r += (p === Object.prototype) ? 4 : 0;
+        r += (p === Base.prototype) ? 8 : 0;
+        r += (p === null) ? 16 : 0;
+        r += (p === undefined) ? 32 : 0;
+        __r = r;
+      `),
+    ).toBe(7);
+  });
+
+  it("RED on base (7): getPrototypeOf / instanceof through a marked parent (node 31)", async () => {
+    expect(
+      await runProbe(`
+        var flag = false;
+        class Base { constructor(){ this.x = 1; if (flag) return {}; } m() { return 1; } }
+        class Sub extends Base { constructor(){ super(); } }
+        var r = 0;
+        var b = new Base();
+        r += (Object.getPrototypeOf(b) === Base.prototype) ? 1 : 0;
+        var s = new Sub();
+        r += (Object.getPrototypeOf(s) === Sub.prototype) ? 2 : 0;
+        r += (s instanceof Base && s instanceof Sub) ? 4 : 0;
+        flag = true;
+        var s2 = new Sub();
+        r += (Object.getPrototypeOf(s2) === Object.prototype) ? 8 : 0;
+        r += (s2 instanceof Sub) ? 0 : 16;
+        __r = r;
+      `),
+    ).toBe(31);
+  });
+
+  it("RED on base (63): a non-overriding instance keeps fields, methods, accessor, instanceof (node 255)", async () => {
+    expect(
+      await runProbe(`
+        var flag = false;
+        var other = { prp: 99 };
+        class Base {
+          constructor(a) { this.x = a; this.y = a + 1; if (flag) return other; }
+          m() { return this.x * 10; }
+          get g() { return this.y; }
+          static s() { return 5; }
+        }
+        var r = 0;
+        var b = new Base(3);
+        r += (b.x === 3) ? 1 : 0;
+        r += (b.m() === 30) ? 2 : 0;
+        r += (b instanceof Base) ? 4 : 0;
+        r += (b.g === 4) ? 8 : 0;
+        b.x = 7;
+        r += (b.m() === 70) ? 16 : 0;
+        r += (Base.s() === 5) ? 32 : 0;
+        flag = true;
+        var c = new Base(1);
+        r += (c === other && c.prp === 99) ? 64 : 0;
+        r += (c instanceof Base) ? 0 : 128;
+        __r = r;
+      `),
+    ).toBe(255);
+  });
+
+  it("RED on base (63): writes / compound / update / setter / private on a marked class (node 255)", async () => {
+    expect(
+      await runProbe(`
+        var sink = null;
+        class Base {
+          #p = 5;
+          constructor(a, o) { this.x = a; this._v = 0; if (o) return o; }
+          get v() { return this._v; }
+          set v(n) { this._v = n * 2; }
+          peek() { return this.#p; }
+          static has(o) { return #p in o; }
+        }
+        var r = 0;
+        var b = new Base(3);
+        b.x = 10;
+        r += (b.x === 10) ? 1 : 0;
+        b.x += 5;
+        r += (b.x === 15) ? 2 : 0;
+        b.x++;
+        r += (b.x === 16) ? 4 : 0;
+        b.v = 4;
+        r += (b.v === 8 && b._v === 8) ? 8 : 0;
+        r += (b.peek() === 5) ? 16 : 0;
+        r += (Base.has(b)) ? 32 : 0;
+        var o = {};
+        var c = new Base(1, o);
+        c.x = 9;
+        r += (o.x === 9) ? 64 : 0;
+        r += (Base.has(c)) ? 0 : 128;
+        __r = r;
+      `),
+    ).toBe(255);
+  });
+
+  it("guard (base 63): a derived class of a marked base that does not override at runtime", async () => {
+    expect(
+      await runProbe(`
+        var flag = false;
+        class Base { constructor(v){ this.v = v; if (flag) return { v: -1, getV: function () { return -1; } }; } getV() { return this.v; } }
+        class Sub extends Base {
+          constructor(v){
+            super(v);
+            this.w = this.v * 2;
+            this.z = this.getV() + 1;
+            var f = () => this.w;
+            this.q = f();
+          }
+          sum() { return this.v + this.w; }
+        }
+        var r = 0;
+        var s = new Sub(3);
+        r += (s.v === 3) ? 1 : 0;
+        r += (s.w === 6) ? 2 : 0;
+        r += (s.z === 4) ? 4 : 0;
+        r += (s.q === 6) ? 8 : 0;
+        r += (s.sum() === 9) ? 16 : 0;
+        r += (s instanceof Sub && s instanceof Base) ? 32 : 0;
+        __r = r;
+      `),
+    ).toBe(63);
+  });
+
+  it("guard (base 31): getPrototypeOf of a marked class OBJECT and its prototype keeps the class folds", async () => {
+    expect(
+      await runProbe(`
+        var flag = false;
+        class Base { constructor(){ this.x = 1; if (flag) return {}; } }
+        class Sub extends Base { constructor(){ super(); } }
+        var C = class { constructor(){ if (flag) return {}; } };
+        var r = 0;
+        r += (Object.getPrototypeOf(Base) === Function.prototype) ? 1 : 0;
+        r += (Object.getPrototypeOf(Base.prototype) === Object.prototype) ? 2 : 0;
+        r += (Object.getPrototypeOf(Sub.prototype) === Base.prototype) ? 4 : 0;
+        r += (Object.getPrototypeOf(C) === Function.prototype) ? 8 : 0;
+        r += (Object.getPrototypeOf(C.prototype) === Object.prototype) ? 16 : 0;
+        __r = r;
+      `),
+    ).toBe(31);
+  });
+
+  it("RESIDUAL (base 0, node 31): a class METHOD read / call on the foreign override object resolves against the class", async () => {
+    // Data members of a marked-class binding read dynamically; declared methods
+    // keep the struct dispatch, so `c.m()` / `typeof d.m` miss the override
+    // object's own shape (bits 2 and 16).
+    expect(
+      await runProbe(`
+        var other = { x: 42, m: function () { return 7; } };
+        var empty = {};
+        class Base {
+          constructor(a, o) { this.x = a; return o; }
+          m() { return 1; }
+        }
+        var r = 0;
+        var c = new Base(3, other);
+        r += (c.x === 42) ? 1 : 0;
+        r += (c.m() === 7) ? 2 : 0;
+        var d = new Base(3, empty);
+        r += (typeof d.x === "undefined") ? 4 : 0;
+        r += (d.x === undefined) ? 8 : 0;
+        r += (typeof d.m === "undefined") ? 16 : 0;
+        __r = r;
+      `),
+    ).toBe(13);
+  });
+
+  it("RESIDUAL (base 2, node 15): `this.m()` in a derived frame after an overriding super() hits the nominal receiver guard", async () => {
+    // `this.v` reads the override object (bit 1); `this.w = 5` writes the
+    // discarded struct (bit 2 only observes that it does not throw); the
+    // declared-method call throws TypeError (10000) instead of calling the
+    // override object's own `getV`.
+    expect(
+      await runProbe(`
+        var flag = true;
+        var r = 0;
+        class Base { constructor(v){ this.v = v; if (flag) return { v: -1, getV: function () { return -1; } }; } getV() { return this.v; } }
+        class Sub extends Base {
+          constructor(v){
+            super(v);
+            try { r += (this.v === -1) ? 1 : 0; } catch (e) { r += 100; }
+            try { this.w = 5; r += 2; } catch (e) { r += 1000; }
+            try { r += (this.getV() === -1) ? 4 : 0; } catch (e) { r += 10000; }
+          }
+        }
+        try { var t = new Sub(3); r += (t.v === -1) ? 8 : 0; } catch (e) { r += 100000; }
+        __r = r;
+      `),
+    ).toBe(10011);
+  });
+});

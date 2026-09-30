@@ -372,7 +372,7 @@ export function guardThisReceiver(ctx: CodegenContext, fctx: FunctionContext, re
  * confirm it names a class first.
  */
 export function constructorFrameClassName(ctx: CodegenContext, fctx: FunctionContext): string | undefined {
-  if (!fctx.enclosingClassName) {
+  if (ctx.standalone && !fctx.enclosingClassName) {
     for (const suffix of ["_init", "_new"]) {
       if (!fctx.name.endsWith(suffix)) continue;
       const name = fctx.name.slice(0, -suffix.length);

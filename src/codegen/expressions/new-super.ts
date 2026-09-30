@@ -161,6 +161,7 @@ import {
 import { standaloneClassProtoObjectApplies } from "../class-proto-object.js"; // (#5350 step 1) class [[HomeObject]] gate
 import { emitStandaloneHeritageCheck } from "../class-heritage-check.js"; // (#5195 r3-5)
 import { emitSuperUninitializedThisCheck, emitUninitializedThisGuard } from "../derived-ctor-this-guard.js"; // (#6772 S1b)
+import { emitNewSiteOverrideSelect } from "../ctor-return-override.js"; // (#6772 S2)
 import { compileTemporalNewExpression } from "../temporal-native.js";
 import {
   emitSuperUninitializedThisGuard,
@@ -6900,7 +6901,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
           return ctorResult;
         }
         const structTypeIdx = ctx.structMap.get(syntheticName)!;
-        return { kind: "ref", typeIdx: structTypeIdx };
+        return emitNewSiteOverrideSelect(ctx, fctx, syntheticName) ?? { kind: "ref", typeIdx: structTypeIdx }; // (#6772 S2)
       }
     }
   }
@@ -8143,7 +8144,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       releaseTempLocal(fctx, resultLocal);
       releaseTempLocal(fctx, ntPrevLocal);
     }
-    return { kind: "ref", typeIdx: structTypeIdx };
+    return emitNewSiteOverrideSelect(ctx, fctx, className) ?? { kind: "ref", typeIdx: structTypeIdx }; // (#6772 S2)
   }
 
   const externInfo = ctx.externClasses.get(className);

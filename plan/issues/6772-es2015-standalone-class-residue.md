@@ -42,6 +42,12 @@ loc-budget-allow:
   - src/codegen/context/types.ts
   - src/codegen/context/create-context.ts
   - src/ir/planning-identity.ts
+  # 2026-09-30 (#6772 S2, Opus implementation): a binding of a return-override
+  # class may hold the FOREIGN override object, so the two sites that fold a
+  # member read on the checker's class type (struct-name resolution / open
+  # dynamic read, and `typeof`) take one-line hooks into the S2 leaf.
+  - src/codegen/property-access.ts
+  - src/codegen/typeof-delete.ts
   # NEW leaves (register each in scripts/compiler-boundaries.json, see Lane protocol)
   - src/codegen/derived-ctor-this-guard.ts
   - src/codegen/ctor-return-override.ts
@@ -63,6 +69,10 @@ func-budget-allow:
   - src/codegen/expressions/call-builtin-static.ts::compileBuiltinStaticCall
   - src/codegen/property-access-dispatch.ts::emitClassStaticMemberRead
   - src/codegen/property-access-dispatch.ts::finalizeStructAndDynamicMemberGet
+  # 2026-09-30 (#6772 S2, Opus implementation): one unsound-fold guard line
+  # each, the same shape as the #4204 / #4428 guards beside them.
+  - src/codegen/typeof-delete.ts::compileTypeofComparison
+  - src/codegen/typeof-delete.ts::compileTypeofExpression
 ---
 
 ## Problem
@@ -780,3 +790,33 @@ red by construction of this slice.
   the body; never `--no-verify`; no `git stash` (A/B by file copy from
   `.tmp/6772/base-src`). Push early; do NOT open a PR — the lead verifies
   the pushed head and opens it.
+
+### 2026-09-30 — #6772 implementation (Opus)
+
+Running record, one entry per step (the commit body carries the full
+measurement). Base for "base" values: `origin/main` @ `e303c5c794` unless an
+entry names another; probes `.tmp/6772/*.js` (standalone, `imports: []`),
+node oracle `.tmp/6772/oracle.mjs`; rows `--isolate --standalone` under the
+shared lock.
+
+| step | commit | probes base -> branch (node) | rows flipped |
+| --- | --- | --- | --- |
+| S1a | `23c6b10634` | p5e 0 -> 2121 (2121); p5d 21 guard | `arguments/access.js` |
+| S1b | `db43fed38d` | p1 0 -> 3 (3), p2 0 -> 63 (63), p3 14 -> 15 (15), nested 133 -> 3333, g1 880 -> 1023 | `definition/this-access-restriction.js`, `definition/this-check-ordering.js` |
+| S2 | (this step) | p4 8 -> 63, t2 4608 -> 8191, g6 4 -> 7, g11 10 -> 7, g8 7 -> 31, g2 63 -> 255, g5 63 -> 255; guards g13 63, g16 31, p15 15 | `subclass/class-definition-null-proto-contains-return-override.js`, `subclass/derived-class-return-override-with-object.js`, `subclass/default-constructor-2.js`, `definition/this-access-restriction-2.js` |
+
+S2 design note (deviates from the plan's "set only on an object return"):
+`$__ctor_override` is a RETURN REGISTER written on EVERY exit of a marked
+`_init`, so a stale value from an unrelated construction can never be read;
+it is consumed only right after a call into a marked `_init`. A derived frame
+whose parent is marked keeps the parent's answer in a frame local saved AFTER
+BindThisValue (a second, throwing `super()` cannot replace it), and its
+`this` / data-member reads use that object. `this-access-restriction-2.js`
+passes at S2 already: a marked class's `.call` reaches the dynamic [[Call]]
+TypeError (probe g17: base 200 -> 3, node 3); S3 covers unmarked classes.
+S2 residuals (pinned `RESIDUAL`): declared-METHOD reads/calls on a foreign
+override object resolve against the class (g3 13, node 31); in a derived
+frame after an overriding `super()`, `this.m()` throws from the nominal
+receiver guard and `this.x = v` writes the discarded struct (g12b 10011,
+node 15); dynamic construct sites (`Reflect.construct`, class values) do not
+read the register; a child collected before its parent is not retro-marked.

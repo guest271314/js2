@@ -24,6 +24,7 @@ import { sourceShadowsGlobalName } from "../source-function-members.js"; // (#51
 import { allocLocal } from "../context/locals.js"; // (#6609)
 import { popBody, pushBody } from "../context/bodies.js"; // (#6630 fallback)
 import { isStandaloneBaseClassOrPrototype } from "../class-proto-object.js"; // (#6767 step 2)
+import { tryEmitOverrideBindingGetPrototypeOf } from "../ctor-return-override.js"; // (#6772 S2)
 
 const NATIVE_COLLECTION_NAMES = new Set(["Map", "Set", "WeakMap", "WeakSet"]);
 
@@ -336,6 +337,8 @@ export function tryCompileEs5GetPrototypeOfEarly(
   // READ, not folded — see `tryEmitDynamicProtoRuntimeRead`.
   const dynamicProtoRead = tryEmitDynamicProtoRuntimeRead(ctx, fctx, arg0);
   if (dynamicProtoRead) return dynamicProtoRead;
+  const overrideProto = tryEmitOverrideBindingGetPrototypeOf(ctx, fctx, arg0); // (#6772 S2)
+  if (overrideProto) return overrideProto;
 
   // (#6767 step 2) A standalone BASE class and its prototype read their real
   // [[Prototype]] instead of the class folds below — see the helper.
