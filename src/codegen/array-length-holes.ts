@@ -113,3 +113,20 @@ export function vecStaticIndexPresenceInstrs(
     },
   ];
 }
+
+/**
+ * Does an `indexOf` / `lastIndexOf` scan over an externref vec read a `$Hole`
+ * as `undefined`? §23.1.3.17/20 test HasProperty first, so a hole is SKIPPED —
+ * which the #2001 S1 map (`$Hole → undefined`) contradicts on purpose, for the
+ * test262 shape that pairs a hole with an index INHERITED from
+ * `Array.prototype` / `Object.prototype` (the flat vec cannot see it; the map
+ * answers `undefined`, which is what that inherited getter-less accessor
+ * yields). Standalone keeps the map only where such a write exists
+ * (`protoIndexDirty`); elsewhere nothing can be inherited, the hole is absent,
+ * and the raw marker never strict-equals a search value — so
+ * `new Array(3).indexOf(undefined)` stays `-1` now that the length form stores
+ * holes (S3) instead of `null`. The host lane keeps its bytes.
+ */
+export function holeSearchReadsUndefined(ctx: CodegenContext): boolean {
+  return !ctx.standalone || ctx.protoIndexDirty;
+}

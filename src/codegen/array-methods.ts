@@ -13,6 +13,7 @@ import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, getLocalType } from "./context/locals.js";
 import { probeCompiledType } from "./context/speculative.js";
 import { emitHoleToUndefined, holeTestInstrs, holeToUndefinedInstrs, joinEmptyElementTest } from "./array-holes.js";
+import { holeSearchReadsUndefined } from "./array-length-holes.js"; // (#6771 S3) indexOf skips a hole
 import { emitF64HoleToUndef, f64HolesActive, f64HoleTestInstrs, f64HoleToUndefFor } from "./vec-f64-hole-presence.js"; // (#4491 T11)
 import { overlayRouteActive } from "./typed-lane-overlay-route.js"; // (#4491 T11)
 import {
@@ -3759,7 +3760,7 @@ function compileArrayIndexOf(
   // `__get_undefined` so the detached `holeToUndefinedInstrs` flush can't shift
   // the captured `__host_eq` funcIdx.
   let holeMap: Instr[] = [];
-  if (ctx.usesArrayHoles && elemType.kind === "externref") {
+  if (ctx.usesArrayHoles && elemType.kind === "externref" && holeSearchReadsUndefined(ctx)) {
     ensureGetUndefined(ctx);
     flushLateImportShifts(ctx, fctx);
     holeMap = holeToUndefinedInstrs(ctx, fctx);
@@ -10390,7 +10391,7 @@ function compileArrayLastIndexOf(
   // but test262's sparse-hole lastIndexOf tests rely on prototype-inherited
   // indices we can't model, so keep the S1 `$Hole → undefined` map (net-0).
   let liofHoleMap: Instr[] = [];
-  if (ctx.usesArrayHoles && elemType.kind === "externref") {
+  if (ctx.usesArrayHoles && elemType.kind === "externref" && holeSearchReadsUndefined(ctx)) {
     ensureGetUndefined(ctx);
     flushLateImportShifts(ctx, fctx);
     liofHoleMap = holeToUndefinedInstrs(ctx, fctx);
