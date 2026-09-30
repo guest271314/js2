@@ -19884,3 +19884,37 @@ bare-identifier callees). Control (643 passing Proxy/Reflect/Object and
 Proxy-mentioning rows): 0 pass → non-pass attributable to the branch. Record,
 walker audit and residual mechanisms:
 `plan/issues/6766-es2015-standalone-proxy-as-prototype-link.md`.
+
+### 2026-09-30 — #6769 TypedArray residue: plan (Fable lane)
+
+The 38 remaining ES2015 standalone rows under `built-ins/TypedArray/**` and
+`built-ins/TypedArrayConstructors/**` (realm rows excluded) were measured on
+`d4e15d90f9` (38 fail) and bucketed with 13 harness-shaped probes into ten
+mechanisms; the plan in
+`plan/issues/6769-es2015-standalone-typedarray-residue.md` takes seven of them
+in ten steps ordered by yield: the `__any_unbox_bool(null)` trap, a
+function-valued `[Symbol.species]` literal member invisible to the dynamic MOP
+(the literal stays on the struct path with an `@@N` field), `instanceof` for a
+`$__ta_ctor` RHS, native live-receiver `map`/`filter`/`slice` for dyn views
+(today the call-site two-arm rebinds the identifier to an f64 copy, so the
+callback's third argument and `Reflect.set(sample, …)` see the copy), species
+results that are STATIC carriers, a TypedArray `sort` compare with comparator
+ToNumber, the `%TypedArray%`/`%TypedArray%.prototype` receivers, a RangeError
+cap and static-vec source arm in the dyn constructor, the `toLocaleString`
+detached guard, and the ArrayBuffer carrier's `[[Prototype]]`. Expected yield
+27 of 38.
+
+Eleven rows are recorded as out of reach with their mechanism named: two
+`internals/Set` rows fail on VALUE IDENTITY (`{ valueOf(){} }` literals are
+re-boxed on every externref round trip — #2773/#3037, not the receiver walk);
+three need a TypedArray in `[[Prototype]]` position (+ array/String exotic
+receivers and a Proxy `defineProperty` trap — #6766's F cluster);
+`toindex-length` reads the wrong union lane of a nested literal (#5185's
+family); the modified-array-iterator row needs the native iterator ladder to
+honour a patched `%ArrayIteratorPrototype%.next` (#6484's lane); the two
+`iterated-array-changed-by-tonumber` rows need drain-before-coerce AND the
+same literal-identity fix; `no-species` needs `class extends ArrayBuffer`
+(#3240); `from-typedarray-into-itself-mapper-detaches-result` is E5's
+custom-`this` `%TypedArray%.from.call` residual. The leads "ToIndex(-0)" and
+"detached-buffer checks missing" were refuted or narrowed by the probes
+(`new TA(-0).length === 0` already; only `toLocaleString` lacks the guard).
