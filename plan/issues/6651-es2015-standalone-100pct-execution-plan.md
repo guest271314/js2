@@ -19884,3 +19884,22 @@ bare-identifier callees). Control (643 passing Proxy/Reflect/Object and
 Proxy-mentioning rows): 0 pass → non-pass attributable to the branch. Record,
 walker audit and residual mechanisms:
 `plan/issues/6766-es2015-standalone-proxy-as-prototype-link.md`.
+
+### 2026-09-30 — #5197 r3: the 19 residual ES2015 standalone `built-ins/Promise/**` rows (plan, Fable lane)
+
+Plan written to `plan/issues/5197-es2015-standalone-promise-r2.md` §
+"Implementation Plan — r3 (2026-09-30)". Measured on `origin/main` @
+`d4e15d90f9`: all 19 non-pass; 23 probes (`.tmp/5197r3/`) pin the
+mechanisms. Buckets: **B1** `then` never performs §27.2.5.4 steps 3-4
+(`SpeciesConstructor` + `NewPromiseCapability(C)`) and a Promise-rooted class
+object has no inherited `@@species`, `P.resolve(x)` bypasses `P`, the
+anonymous `new class extends Promise{…}(fn)` site is an invalid binary — 9
+rows; **B2** LIFO reactions — 1; **B3** `Resolve(p, <$Vec>)` skips
+`Get(array,"then")` — 2; **B4** no `[[AlreadyResolved]]` — 2; **B5** a
+function `C` in `Promise.<m>.call(C, …)` is bypassed once the module reads
+`Function.prototype` (runtime-eval regime; the D1 arm's executor is absent
+from the WAT) and D1 drains a dynamic iterable — 3; **B6** `catch` on a
+primitive receiver — 1; **B7** `Promise.all(<string>)` result typing — 1.
+Steps 1-7 in that order; 13 firm rows, 6 conditional on one named probe
+each. D3/D4/D5/D7 made B1 reachable (the 09-03 "G9 deferred" entries are
+superseded); nothing is judged unreachable by construction.
