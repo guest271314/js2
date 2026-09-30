@@ -574,7 +574,7 @@
     {
       "name": "Objects",
       "testCategories": ["language/expressions/object", "built-ins/Object"],
-      "passCount": 4407,
+      "passCount": 4408,
       "totalCount": 4581,
       "editionSpread": [
         {
@@ -584,7 +584,7 @@
         },
         {
           "edition": "ES2015",
-          "pass": 702,
+          "pass": 703,
           "total": 752
         },
         {
@@ -1061,7 +1061,7 @@
         "language/expressions/new",
         "language/expressions/new.target"
       ],
-      "passCount": 402,
+      "passCount": 408,
       "totalCount": 461
     },
     {
@@ -1080,7 +1080,7 @@
     {
       "name": "Symbol",
       "testCategories": ["built-ins/Symbol"],
-      "passCount": 1822,
+      "passCount": 1834,
       "totalCount": 1955
     },
     {
@@ -1092,7 +1092,7 @@
         "built-ins/DataView",
         "built-ins/Uint8Array"
       ],
-      "passCount": 1062,
+      "passCount": 1089,
       "totalCount": 1106
     },
     {
@@ -1151,7 +1151,7 @@
     {
       "name": "Proxy / Reflect",
       "testCategories": ["built-ins/Proxy", "built-ins/Reflect"],
-      "passCount": 908,
+      "passCount": 910,
       "totalCount": 1072
     },
     {
@@ -1240,7 +1240,7 @@
     {
       "name": "BigInt",
       "testCategories": ["built-ins/BigInt"],
-      "passCount": 632,
+      "passCount": 643,
       "totalCount": 1048
     },
     {

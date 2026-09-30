@@ -19885,6 +19885,94 @@ Proxy-mentioning rows): 0 pass → non-pass attributable to the branch. Record,
 walker audit and residual mechanisms:
 `plan/issues/6766-es2015-standalone-proxy-as-prototype-link.md`.
 
+### 2026-09-30 — #6769 TypedArray residue: plan (Fable lane)
+
+The 38 remaining ES2015 standalone rows under `built-ins/TypedArray/**` and
+`built-ins/TypedArrayConstructors/**` (realm rows excluded) were measured on
+`d4e15d90f9` (38 fail) and bucketed with 13 harness-shaped probes into ten
+mechanisms; the plan in
+`plan/issues/6769-es2015-standalone-typedarray-residue.md` takes seven of them
+in ten steps ordered by yield: the `__any_unbox_bool(null)` trap, a
+function-valued `[Symbol.species]` literal member invisible to the dynamic MOP
+(the literal stays on the struct path with an `@@N` field), `instanceof` for a
+`$__ta_ctor` RHS, native live-receiver `map`/`filter`/`slice` for dyn views
+(today the call-site two-arm rebinds the identifier to an f64 copy, so the
+callback's third argument and `Reflect.set(sample, …)` see the copy), species
+results that are STATIC carriers, a TypedArray `sort` compare with comparator
+ToNumber, the `%TypedArray%`/`%TypedArray%.prototype` receivers, a RangeError
+cap and static-vec source arm in the dyn constructor, the `toLocaleString`
+detached guard, and the ArrayBuffer carrier's `[[Prototype]]`. Expected yield
+27 of 38.
+
+Eleven rows are recorded as out of reach with their mechanism named: two
+`internals/Set` rows fail on VALUE IDENTITY (`{ valueOf(){} }` literals are
+re-boxed on every externref round trip — #2773/#3037, not the receiver walk);
+three need a TypedArray in `[[Prototype]]` position (+ array/String exotic
+receivers and a Proxy `defineProperty` trap — #6766's F cluster);
+`toindex-length` reads the wrong union lane of a nested literal (#5185's
+family); the modified-array-iterator row needs the native iterator ladder to
+honour a patched `%ArrayIteratorPrototype%.next` (#6484's lane); the two
+`iterated-array-changed-by-tonumber` rows need drain-before-coerce AND the
+same literal-identity fix; `no-species` needs `class extends ArrayBuffer`
+(#3240); `from-typedarray-into-itself-mapper-detaches-result` is E5's
+custom-`this` `%TypedArray%.from.call` residual. The leads "ToIndex(-0)" and
+"detached-buffer checks missing" were refuted or narrowed by the probes
+(`new TA(-0).length === 0` already; only `toLocaleString` lacks the guard).
+
+### 2026-09-30 — #6769 TypedArray residue: implementation (Opus lane)
+
+Measured on `issue-6769-typedarray-residue` with `origin/main` merged:
+**0 → 27 of the 38 rows** (`--isolate`, standalone) — every row the plan put
+in reach. Eleven steps landed, one commit each: `__any_unbox_bool(null)`;
+`[Symbol.species]` literal members on the open-`$Object` path; `instanceof`
+for a `$__ta_ctor` RHS; native live-receiver `map`/`filter`/`slice` producers
+for dyn views; species results that are static carriers; a TypedArray `sort`
+(SortCompare, comparator ToNumber, detach-safe write-back); the `%TypedArray%`
+/ `%TypedArray%.prototype` receivers; the constructor RangeError cap and
+static-vec / array-like source arms; the `toLocaleString` detached guard; the
+ArrayBuffer carrier's `[[Prototype]]`; and (S7c) a direct call of a binding
+initialised from `getOwnPropertyDescriptor(…).get`, which now reaches the
+accessor through `__apply_closure` instead of the typed ladder's TypeError
+(also fixes the BigInt `Symbol.toStringTag/invoked-as-func` twin). The eleven
+out-of-reach rows keep the mechanisms the plan named. Controls: 0 pass →
+non-pass over 2,607 currently-passing TypedArray / ArrayBuffer / DataView /
+per-step rows (962 with `--isolate`, the rest screened in-process after the
+background run hit its time limit), and 0 lost in S7c's 23-file targeted
+control.
+Record, probes, pins and side findings:
+`plan/issues/6769-es2015-standalone-typedarray-residue.md`.
+
+### 2026-09-30 — #5197 r3: the 19 residual ES2015 standalone `built-ins/Promise/**` rows (plan, Fable lane)
+
+Plan written to `plan/issues/5197-es2015-standalone-promise-r2.md` §
+"Implementation Plan — r3 (2026-09-30)". Measured on `origin/main` @
+`d4e15d90f9`: all 19 non-pass; 23 probes (`.tmp/5197r3/`) pin the
+mechanisms. Buckets: **B1** `then` never performs §27.2.5.4 steps 3-4
+(`SpeciesConstructor` + `NewPromiseCapability(C)`) and a Promise-rooted class
+object has no inherited `@@species`, `P.resolve(x)` bypasses `P`, the
+anonymous `new class extends Promise{…}(fn)` site is an invalid binary — 9
+rows; **B2** LIFO reactions — 1; **B3** `Resolve(p, <$Vec>)` skips
+`Get(array,"then")` — 2; **B4** no `[[AlreadyResolved]]` — 2; **B5** a
+function `C` in `Promise.<m>.call(C, …)` is bypassed once the module reads
+`Function.prototype` (runtime-eval regime; the D1 arm's executor is absent
+from the WAT) and D1 drains a dynamic iterable — 3; **B6** `catch` on a
+primitive receiver — 1; **B7** `Promise.all(<string>)` result typing — 1.
+Steps 1-7 in that order; 13 firm rows, 6 conditional on one named probe
+each. D3/D4/D5/D7 made B1 reachable (the 09-03 "G9 deferred" entries are
+superseded); nothing is judged unreachable by construction.
+
+**Implementation (2026-09-30, Opus lane, branch `issue-5197-r3-promise`):
+0 → 17/19** — 12 of the 13 firm rows and 5 of the 6 conditional ones. Two
+remain: `all/resolve-element-function-prototype.js` (firm, Step 5: in the
+assembled module the resolve-element function never reaches `thenable.then`;
+mechanism not reduced below that) and `prototype/catch/this-value-obj-coercible.js`
+(Step 6 measured and reverted — its Symbol sub-case needs a
+`%Symbol.prototype%` read from a symbol value). Control: 1,188/1,189
+currently-passing rows (ES5 226/226); the one failure is pre-existing on
+`origin/main`. Record, deviations and residual mechanisms:
+`plan/issues/5197-es2015-standalone-promise-r2.md` §
+"2026-09-30 — r3 implementation (Opus)".
+
 ## 2026-09-30 — #6767: class definition reflective residue (pointer)
 
 `language/statements/class/definition/**` (19 standalone rows, 18 non-pass on
@@ -19901,3 +19989,21 @@ that reach beyond the cluster: call-site parameter inference no longer narrows
 a parameter to `$C` from a `C.prototype` argument, and `C[k]()` on a class
 identifier no longer pushes a stray receiver (an invalid module when used as a
 call argument).
+
+## 2026-09-30 — #5350 r2 (super property WRITES) — pointer
+
+`super.x = v` / `super[k] = v` now lower onto `__reflect_set_receiver` in
+standalone (branch `issue-5350-r2-super-property-write`; full record under
+"2026-09-30 r2 implementation (Opus)" in
+`plan/issues/5350-es2015-standalone-super-property-r1.md`). Cluster C gains 4
+rows (`super/prop-{dot,expr}-obj-ref-non-strict.js`,
+`super/prop-{dot,expr}-cls-ref-strict.js`); p10 37 → 63 (node 127). Two
+findings for this plan's other lanes: (1) the receiver walk now refuses to
+create a key on a NON-EXTENSIBLE receiver, so `Reflect.set`'s 4-argument form
+answers `false` there (it answered `true`); (2) the remaining `super/*-cls-ref-this.js`
+pair is blocked by a class-member `this` that cannot hold a non-instance
+receiver (`P.prototype.getThis() === P.prototype` traps "illegal cast" on main,
+no `super` involved), and `super/call-proto-not-ctor.js` by class objects having
+no runtime [[Prototype]] (`Object.setPrototypeOf(C, f)` is a silent no-op;
+`super()` is inlined from the compile-time parent) — both representation
+questions, neither built.
