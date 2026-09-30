@@ -56,3 +56,14 @@ One heavy process, explicit4GBforks, no ignored errors/timeouts/hooks/protection
 bypasses. Preserve dirty root, Number56files, prepared realm12files and corpus
 objects/worktrees. No passive GitHub watcher available; no polling workaround.
 Full IR parity/conformance precedes any legacy retirement.
+
+
+Fresh-main integration record — 2026-09-30: signed implementation commit
+7fb3a544573cd12495c2cfb65ea485259c425f72 passed normal hooks, including72/72,
+and retained7336 pins. Main was freshly read and fetched as
+f32ffc4d919d9653743c53a313f44da9c1957082, including delivered frontend PR6361
+and its subsequent conformance baseline refresh. The sole issue-plan append
+conflict preserves both complete append sequences against exact721d12bf base.
+All six performance code/test hashes remain exact; every incoming non-issue
+file matches freshly fetched main. Main integration validation and publication
+are recorded in the performance handoff; full IR parity remains open.
