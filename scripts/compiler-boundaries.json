@@ -220,9 +220,10 @@
         "src/runtime/contracts/index.ts",
         "src/runtime/contracts/timer-capability.ts",
         "src/runtime/contracts/builtin-brands.ts",
-        "src/runtime/contracts/collection-kind.ts"
+        "src/runtime/contracts/collection-kind.ts",
+        "src/runtime/contracts/js-value-tags.ts"
       ],
-      "minModules": 7
+      "minModules": 8
     },
     {
       "id": "backend-wasmgc",
@@ -13408,6 +13409,11 @@
     },
     {
       "path": "src/runtime/contracts/collection-kind.ts",
+      "state": "clean",
+      "layer": "runtime-contracts"
+    },
+    {
+      "path": "src/runtime/contracts/js-value-tags.ts",
       "state": "clean",
       "layer": "runtime-contracts"
     },

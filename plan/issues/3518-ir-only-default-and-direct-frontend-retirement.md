@@ -15687,6 +15687,68 @@ Only its fixture hook now uses the repository's existing35s test budget and
 yields after construction, like the definition fixture. Keep all90 semantic
 checks, production providers, normal hooks and protected gates unchanged.
 
+### Canonical JavaScript value-tag contract delivery — 2026-09-30
+
+Fresh upstream main d4e15d90 and all16 open PRs/all825 file rows verified before
+edits: no tag source/test/seam overlap. Existing claim3518:js-tag-abi-contract-
+20260930 remains with ttraenkler/codex-js-tag-abi-contract-20260930, now tracking
+isolated branchcodex/3518-js-tag-contract-20260930. Preserve all56 pending files
+in the original public Number worktree unchanged, including its22 ABI/primitive
+proof controls and unchanged nine public acceptance/oracle cases.
+
+Deliver the canonical enum and carrier function verbatim in import-free runtime
+contracts/js-value-tags.ts, with the former ir/js-tag API forwarding the same
+objects. Canonical NumberF64/Boolean aliases come from that same enum. Change
+only the existing seam's canonical-leaf exemption; no consumer allowance or
+baseline increases. Append one runtime-contract inventory entry and increment
+its real module floor once, retaining every historical activation and other row.
+
+The independent nine ABI compatibility assertions cover eight numeric/carrier
+partitions and identity of old/new API/domain/aliases. They do not replace the
+original22 Number-specific controls: thirteen primitive-box classifier controls
+still live with that unlanded Number implementation and remain required. Run
+existing tag-domain, non-JavaScript domain, actual dynamic lowering and semantic
+boundary cohorts, source TS7, actual frontend-free leaf resolution/refusal,
+all preservation gates and full normal signed hooks. Publish ready through the
+fork and protected exact-head queue; only actual main delivery counts.
+
+This is a prerequisite component of the original ABI repair, not a completed
+Number provider or full claim. Keep that claim active until its original proof
+integration is delivered. Remaining Number physical gaps and canonical Object
+realm/provider closure must be implemented; keep legacy operational until all
+IR behavior is tested and equal. Do not retire code or certify architecture.
+
+
+ABI first delivery cohort:415/416 passed, one inventory-tail assertion failed,
+zero unexecuted cases or worker errors; all6979 source/test pins unchanged.
+All67 ABI/domain/actual-lowering cases pass. The preserved boundary failure
+rejects the real extra tag contract because its explicit unsigned additions
+still list only builtin-brands/collection-kind. Append the genuine new leaf,
+add it to the actual copied-source fixture, and require135 current modules
+(previous134 plus the import-free leaf), preserving106 historical owners, all
+signed entry digests,612 edges and consumer allowances. Do not change or reseed
+any signed activation history. Focus the two affected positive checks before
+rerunning the complete349 boundary plus67 ABI/domain/lowering cohort.
+
+
+
+ABI relocation validation:416/416 strict assertions, zero skips/failures/worker
+errors, all6979 source/test pins unchanged. Includes349 boundary cases, nine
+ABI compatibility controls,16 tag-domain,26 non-JavaScript domain and16 actual
+dynamic lowering cases. The focused inventory repair passed2/2 positive checks;
+its347 other cases were deliberately filtered, followed by the full416 pass.
+Original415/416 failure is preserved. Current copied-source fixture measures
+135 modules and612 edges; historical106 population and all signed hashes remain.
+Alias mutation8 pass/one expected failure detects the wrong NumberF64 tag; exact
+restoration verified. Fresh leaf census loads three modules/two source modules,
+zero TS/frontend; real from-ast and TypeScript import controls each exit2 and
+block one resolution. This is ABI leaf evidence, not public prepared-IR replay.
+Source TS7 and all seven preservation gates pass; inventory valid, architecture
+incomplete. Independent clean corpusb363f29d/56970 files verified. Shared metadata
+changes sit beside existing contract/plan rows, preserving peer append regions.
+All56 Number pending-file hashes remain unchanged. Full original ABI/Number
+claim, public provider/realm closure and full migration remain incomplete.
+
 ### Native String DefineOwnProperty join — 2026-09-30
 
 Claim3518:string-define-own-20260930 is held by
