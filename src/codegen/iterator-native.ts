@@ -3036,6 +3036,7 @@ export function fillNativeIteratorLateArms(ctx: CodegenContext): void {
       undefined,
       argumentDeps,
       iteratorNextFn.locals,
+      deps ? userResultObjectCheck(ctx, nextMethodStructTypeIdxs(ctx)) : [], // (#6773 S2)
     );
   }
 
@@ -3348,7 +3349,7 @@ export function fillIteratorMethodPresent(ctx: CodegenContext): void {
  * `__array_from_iter_n` drainability guard admits them. Same struct filter as
  * `emitIteratorMethodExport` (index.ts). Sorted for deterministic emission.
  */
-function collectUserIterableStructTypeIdxs(ctx: CodegenContext): number[] {
+function collectUserIterableStructTypeIdxs(ctx: CodegenContext, withNext?: number[]): number[] {
   const out: number[] = [];
   for (const [structName] of ctx.structFields) {
     if (
@@ -3363,9 +3364,48 @@ function collectUserIterableStructTypeIdxs(ctx: CodegenContext): number[] {
     if (ctx.funcMap.has(`${structName}_@@iterator`) || ctx.funcMap.has(`${structName}_next`)) {
       out.push(typeIdx);
     }
+    if (ctx.funcMap.has(`${structName}_next`)) withNext?.push(typeIdx); // (#6773 S2)
   }
   out.sort((a, b) => a - b);
+  withNext?.sort((a, b) => a - b);
   return out;
+}
+
+/** (#6773 S2) The closed struct types carrying a compiled `next` method. */
+function nextMethodStructTypeIdxs(ctx: CodegenContext): number[] {
+  const withNext: number[] = [];
+  collectUserIterableStructTypeIdxs(ctx, withNext);
+  return withNext;
+}
+
+/**
+ * (#6773 S2) FRESH instrs for §7.4.4 IteratorNext step 3 on the USER step's
+ * `res` (local 6): a result that is not an Object throws TypeError instead of
+ * degrading to `done`. Guarded to records whose iterator is a closed struct
+ * with a COMPILED `next` method (`nextTypeIdxs`): `__call_next` answers null
+ * both for a `next()` that RETURNED null and for a struct with no method arm
+ * (a closure-valued `next` field, which only the strict provider drives), and
+ * only the former is a proven §7.4.4 result. Empty (no check) in host mode or
+ * when the TypeError deps are missing.
+ */
+function userResultObjectCheck(ctx: CodegenContext, nextTypeIdxs: number[]): Instr[] {
+  const throwIfNotObject = nextTypeIdxs.length > 0 ? notAnObjectThrowInstrs(ctx, 6) : undefined;
+  if (throwIfNotObject === undefined) return [];
+  const { iterRecTypeIdx } = iterRuntimeTypes(ctx);
+  const cond: Instr[] = [];
+  nextTypeIdxs.forEach((typeIdx, i) => {
+    cond.push(
+      { op: "local.get", index: 1 },
+      { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 3 },
+      { op: "any.convert_extern" },
+      { op: "ref.test", typeIdx },
+    );
+    if (i > 0) cond.push({ op: "i32.or" });
+  });
+  return [
+    ...cond,
+    { op: "if", blockType: { kind: "empty" }, then: [{ op: "local.get", index: 6 }, ...throwIfNotObject], else: [] },
+  ];
 }
 
 /**
@@ -4881,6 +4921,7 @@ function buildIteratorNextBody(
   strictMethods?: StrictMethodDispatchDeps,
   argsDeps?: ArgumentsIteratorDeps,
   locals?: { name: string; type: ValType }[], // (#6651 A9) the target function's, for `readDecoder`
+  userResultCheck: Instr[] = [], // (#6773 S2) `userResultObjectCheck`, spliced after `res = __call_next(…)`
 ): Instr[] {
   const { iterRecTypeIdx, vecTypeIdx, arrTypeIdx } = types;
   const decode = readDecoder(objDeps ?? {}, locals, 1);
@@ -5910,6 +5951,7 @@ function buildIteratorNextBody(
     { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 3 },
     { op: "call", funcIdx: deps.callNextIdx },
     { op: "local.set", index: 6 },
+    ...userResultCheck,
     ...((objDeps
       ? [
           ...objCarrierTest(objDeps, () => [{ op: "local.get", index: 6 }, { op: "any.convert_extern" }]),
