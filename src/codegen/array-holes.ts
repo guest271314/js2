@@ -1187,11 +1187,20 @@ function isProtoMemberValueUse(node: ts.Node): boolean {
     return true;
   }
   // Object-of-a-member-access ⇒ the syntactic path handles it; not a value use.
+  // (#6771 S5) Except `[Symbol.unscopables]`: that member exists only as a
+  // companion entry (`symbolDataProps`), which only the seeder installs.
   if (
     (ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) &&
     unwrapExpr(parent.expression) === unwrapExpr(node)
   ) {
-    return false;
+    const key = ts.isElementAccessExpression(parent) ? unwrapExpr(parent.argumentExpression) : undefined;
+    return (
+      key !== undefined &&
+      ts.isPropertyAccessExpression(key) &&
+      key.name.text === "unscopables" &&
+      ts.isIdentifier(key.expression) &&
+      key.expression.text === "Symbol"
+    );
   }
   // `Object.defineProperty(X.prototype, …)` / `defineProperties` /
   // `Reflect.defineProperty` — the proto is a WRITE TARGET here, not a value

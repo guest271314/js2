@@ -157,6 +157,7 @@ import {
 // `Invoke(this, "then", …)`, so its non-Promise receiver arm reuses the same
 // vararg `then` dispatcher the thenable-assimilation job already uses.
 import { reserveClosedMethodDispatchVararg } from "./closed-method-dispatch.js";
+import { ARRAY_PROTO_SYMBOL_DATA_PROPS } from "./array-unscopables.js"; // (#6771 S5)
 // (#6651 E4) Real §23.2.2.1/§23.2.2.2 bodies for the `%TypedArray%` statics.
 import {
   emitTaStaticFromOfBody,
@@ -2841,7 +2842,10 @@ export function ensureArrayNativeProtoGlue(ctx: CodegenContext): number | undefi
   const brand = getBuiltinBrand(ctx, "Array");
   if (brand === undefined) return undefined;
   if (!getNativeProtoBuiltinGlue(ctx, brand)) {
-    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "Array", ARRAY_PROTO_METHODS));
+    registerNativeProtoBuiltin(ctx, {
+      ...makeGlue(ctx, brand, "Array", ARRAY_PROTO_METHODS),
+      symbolDataProps: ARRAY_PROTO_SYMBOL_DATA_PROPS, // (#6771 S5) @@unscopables
+    });
   }
   return brand;
 }
