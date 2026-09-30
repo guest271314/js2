@@ -3,6 +3,7 @@ import { buildOrdinaryObjectLookupDefinition } from "../../src/runtime/wasmgc/va
 import type { Instr, ValType } from "../../src/wasm/model/instructions.js";
 import { emitBinary } from "../../src/emit/binary.js";
 import { readFileSync } from "node:fs";
+import type { PreparedIrProgram } from "../../src/ir/program/prepared-contracts.js";
 import { decodePreparedIrProgram } from "../../src/ir/program-codec.js";
 import { assertPreparedIrProgram } from "../../src/ir/program-validation.js";
 import { deriveNativeValueResourcePlan } from "../../src/ir/program/native-value-resources.js";
@@ -31,11 +32,19 @@ const ext: ValType = { kind: "externref" },
 const get = (index: number): Instr => ({ op: "local.get", index });
 export const CREATE_TEXTS = ["", "a", "😀", "é😀\ud800\0", "0123456789"] as const;
 /** Canonical complete program data passes codec revalidation and the full validator; not frontend driver output. */
-export function stringCreateFixture(utf8 = false, shifted = false, capacity = 2, mutablePlan = false) {
-  const f = stringExoticFixture(utf8, shifted);
-  const program = decodePreparedIrProgram(
-    readFileSync(new URL("../fixtures/issue-3518-string-create-program.codec.txt", import.meta.url), "utf8"),
-  );
+export function stringCreateFixture(
+  utf8 = false,
+  shifted = false,
+  capacity = 2,
+  mutablePlan = false,
+  source?: { readonly program: PreparedIrProgram; readonly additionalLiterals: readonly string[] },
+) {
+  const f = stringExoticFixture(utf8, shifted, false, source?.additionalLiterals);
+  const program =
+    source?.program ??
+    decodePreparedIrProgram(
+      readFileSync(new URL("../fixtures/issue-3518-string-create-program.codec.txt", import.meta.url), "utf8"),
+    );
   assertPreparedIrProgram(program);
   const valuePlan = deriveNativeValueResourcePlan(program, program.runtime[0]!, "native-string");
   const scanner = reserveNativeStringNumberResources(f.tx, valuePlan, f.flatten);
@@ -113,9 +122,16 @@ export interface StringCreateRuntime {
   header(length: number): object;
   put(object: object, key: object, value: number): void;
 }
-export function stringCreateRuntime(utf8 = false, shifted = false, capacity = 2) {
-  const f = stringCreateFixture(utf8, shifted, capacity),
+export function stringCreateRuntime(
+  utf8 = false,
+  shifted = false,
+  capacity = 2,
+  source?: Parameters<typeof stringCreateFixture>[4],
+  extension?: (fixture: StringCreateFixture) => () => void,
+) {
+  const f = stringCreateFixture(utf8, shifted, capacity, false, source),
     { tx } = f;
+  const fillExtension = extension?.(f);
   const objectType = f.objects.object.typeIndex,
     entryType = f.objects.propEntry.typeIndex;
   const object = (index: number): Instr[] => [
@@ -171,6 +187,7 @@ export function stringCreateRuntime(utf8 = false, shifted = false, capacity = 2)
   fillStringCreateDependencies(f);
   fillNativeStringCreateResources(tx, f.create);
   requireCompletedNativeStringCreate(tx, f.create, f.createDependencies);
+  fillExtension?.();
   const literal = (text: string): Instr[] => {
     const binding = requireNativeStringLiteral(tx, f.strings, text, "wtf16");
     return binding.kind === "global"

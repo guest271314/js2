@@ -96,7 +96,12 @@ export const EXOTIC_TEXTS = [
 ];
 
 /** Real layouts/strings/lookup; no source/frontend preparation or host semantic imports. */
-export function stringExoticFixture(utf8 = false, shifted = false, mutablePlan = false) {
+export function stringExoticFixture(
+  utf8 = false,
+  shifted = false,
+  mutablePlan = false,
+  additionalLiterals: readonly string[] = [],
+) {
   const module = createEmptyModule(),
     tx = new PhysicalModuleReservations(module);
   const prefix = shifted ? tx.reserveFunction("prefix:function", "prefix", { params: [], results: [] }) : undefined;
@@ -107,7 +112,10 @@ export function stringExoticFixture(utf8 = false, shifted = false, mutablePlan =
   const strings = reserveNativeStringLiteralResources(tx, {
     key: "strings",
     utf8Storage: utf8,
-    literals: [...EXOTIC_TEXTS.map((value) => ({ value })), { value: "ppé😀\ud800\0qq", encoding: "wtf16" as const }],
+    literals: [
+      ...[...new Set([...EXOTIC_TEXTS, ...additionalLiterals])].map((value) => ({ value })),
+      { value: "ppé😀\ud800\0qq", encoding: "wtf16" as const },
+    ],
   });
   const flatten = reserveNativeStringFlattenResources(tx, "flatten", strings);
   const equality = reserveNativeStringEqualityResources(tx, "equality", flatten, true);
