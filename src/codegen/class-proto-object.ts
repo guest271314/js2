@@ -204,6 +204,24 @@ export function isStandaloneClassProtoObjectExpression(ctx: CodegenContext, expr
 }
 
 /**
+ * (#6767 step 2) True when `expression` is a standalone BASE class (no
+ * `extends`) spelled by name, or its `.prototype` — the two
+ * `Object.getPrototypeOf` operands `expressions/object-get-prototype-of.ts`
+ * routes to the runtime instead of the class folds in `call-builtin-static.ts`
+ * (which predate this module's `$Object` and answered `null` / `C.prototype`).
+ */
+export function isStandaloneBaseClassOrPrototype(ctx: CodegenContext, expression: ts.Expression): boolean {
+  if (!ctx.standalone) return false;
+  let bare = expression;
+  while (ts.isParenthesizedExpression(bare)) bare = bare.expression;
+  const classExpr = ts.isPropertyAccessExpression(bare) && bare.name.text === "prototype" ? bare.expression : bare;
+  const className = classIdentityFromExpression(ctx, classExpr);
+  if (className === undefined || !standaloneClassProtoObjectApplies(ctx, className)) return false;
+  const decl = ctx.classDeclarationMap.get(className);
+  return decl !== undefined && !decl.heritageClauses?.some((c) => c.token === ts.SyntaxKind.ExtendsKeyword);
+}
+
+/**
  * Emit the lazy-initialized `$Object` prototype singleton for `className`,
  * leaving its externref on the stack. Returns `false` without emitting anything
  * if the object runtime cannot supply the helpers, in which case the caller
