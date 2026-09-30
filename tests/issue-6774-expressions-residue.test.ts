@@ -109,6 +109,18 @@ obj = { ['__proto__']: null }; if (obj.__proto__ === null) bits |= 16;`,
     expected: 3,
     body: `var t = null; (function (p) { t = p; })\`a\`; try { t.x = 1; } catch (e) { if (e instanceof TypeError) bits |= 1; } if (Object.isFrozen(t) && Object.isFrozen(t.raw)) bits |= 2;`,
   },
+  {
+    name: "loose_eq_string_left_toprimitive_symbol",
+    step: "S19",
+    expected: 3,
+    body: `var y = {}; var rv = "str"; y[Symbol.toPrimitive] = function () { return rv; }; if ("str" == y) bits |= 1; rv = Symbol.toPrimitive; if (Symbol.toPrimitive == y) bits |= 2;`,
+  },
+  {
+    name: "object_pattern_member_target_with_initializer",
+    step: "S11",
+    expected: 3,
+    body: `var holder = {}; var vals = { x: 23 }; ({ x: holder.y = 42 } = vals); if (holder.y === 23) bits |= 1; var got; ({ x: { set y(v) { got = v; } }.y = 42 } = vals); if (got === 23) bits |= 2;`,
+  },
 ];
 
 describe("#6774 ES2015 standalone expressions residue", () => {
