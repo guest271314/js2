@@ -24,6 +24,7 @@ loc-budget-allow:
   # Destructured module exports use existing snapshot/live-binding routes.
   - src/codegen/module-namespace-value.ts
   - src/codegen/expressions/call-namespace-static.ts
+  - src/checker/usage-inference.ts
   # 2026-08-28: PR #5148 checkpoint (Deno runtime integration — linked
   # shared-realm/callable boundaries, runtime-eval + exception transport,
   # Promise/reflection/buffer-view/finalizer behavior). Broad, measured
@@ -560,6 +561,31 @@ without the composed patch (10,007,948 bytes), the patch reduces the artifact
 by 3,006 bytes; the larger artifact size predates it.
 
 ## Handover
+
+### 2026-09-30: coercion exception ordering
+
+- The context bridge fails specifically on `throwingCoercion` during ToNumber.
+  Direct `valueOf()` and direct throw controls pass; unary `+value` fails.
+- Emitted WAT shows the `any` local promoted to `f64`, calling ToNumber in
+  the initializer before entering its `try_table`. This moves the observable
+  `valueOf()` call and exception outside the source catch.
+- Restrict the usage-only numeric-local route to writes with inert primitive
+  conversion. Grounded-number definition proofs remain eligible. Pending
+  regression and full bridge verification; full Deno integration remains open.
+- Verified 97/97 focused numeric-local, coercion, usage-inference and prototype
+  tests. Three envelope controls now pass; the original unary-plus case failed
+  on the parent while direct calls and direct throws passed. An additional
+  regression proves conversion is not invoked on an untaken read after an
+  object assignment. Two old representation assertions required eager
+  conversion of unknown writes and were corrected to require boxed carriers;
+  their semantic checks remain unchanged.
+- Full context fixture now passes numeric coercion and exception identity. Its
+  next stop is empty-string canonical handle reuse after buffer decoding (not
+  signed zero: extra checks prove signed-zero stability throughout handle
+  growth). The fixture still stops before artifact publication.
+- Exact two-store Deno bootstrap and destructured namespaces remain passing
+  (4/4 tests). Typecheck also passes. Native namespace export publication is
+  still the next integration step once the full context bridge is verified.
 
 ### 2026-09-30: resume native adapter after compiler namespace fix
 
