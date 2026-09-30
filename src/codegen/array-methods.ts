@@ -10757,7 +10757,11 @@ function compileArrayFlat(
     // (#3363) Native depth-1 homogeneous nested-array flatten first; falls
     // through to the loud refusal below for depth args / non-nested / mixed
     // receivers (the larger recursive/heterogeneous arm stays a #2717 follow-up).
-    const native = tryCompileArrayFlatNativeDepth1(ctx, fctx, propAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
+    // (#6771 S4) A species-observable module takes the generic helper, whose
+    // result goes through ArraySpeciesCreate; the typed depth-1 arm cannot.
+    const native = arraySpeciesActive(ctx)
+      ? undefined
+      : tryCompileArrayFlatNativeDepth1(ctx, fctx, propAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
     if (native) return native;
     // (#2717) Any depth / element kind: the native recursive FlattenIntoArray.
     const generic = compileArrayFlatNativeCall(ctx, fctx, "flat", propAccess.expression, callExpr.arguments);
@@ -10842,7 +10846,11 @@ function compileArrayFlatMap(
   // below (scalar / union / externref returns), per the #2711 fail-loud policy.
   // Host/gc mode is unchanged — it keeps the fast `__array_flatMap` import path.
   if (ctx.standalone || ctx.wasi) {
-    const native = tryCompileFlatMapNative(ctx, fctx, propAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
+    // (#6771 S4) Species-observable: the generic helper + ArraySpeciesCreate
+    // (the typed map+flatten cannot publish onto a species result).
+    const native = arraySpeciesActive(ctx)
+      ? compileArrayFlatNativeCall(ctx, fctx, "flatMap", propAccess.expression, callExpr.arguments)
+      : tryCompileFlatMapNative(ctx, fctx, propAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
     if (native) return native;
     reportError(
       ctx,
