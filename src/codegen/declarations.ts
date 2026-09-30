@@ -8,7 +8,7 @@
 import { isTopLevelClassPrototypeWrite } from "./class-proto-toplevel-write.js";
 import { widenJsDefaultGuessSlot } from "./js-default-param-type-guess.js";
 import { collectScopeLocalDeclNames } from "./scope-local-decl-names.js";
-import { registerResolvedRestParam } from "./resolved-rest-param.js"; // (#1058)
+import { registerResolvedRestParam, restPatternParamVecType } from "./resolved-rest-param.js"; // (#1058)
 import { widenUndefinedDefaultParamSlot } from "./destructuring-params.js";
 import { expressionHasWidenedPropertyType } from "./strict-eq-stale-type.js";
 import { functionReturnsWidenedProperty } from "./declarations/widened-property-return.js";
@@ -1816,7 +1816,10 @@ function registerBodylessFunctionDeclaration(
     params = [];
     for (let i = 0; i < stmt.parameters.length; i++) {
       const param = stmt.parameters[i]!;
-      params.push(lowerParamType(ctx, param, name, i, stmt, sourceFile));
+      params.push(
+        restPatternParamVecType(ctx, param, (t) => getOrRegisterVecType(ctx, "externref", t)) ??
+          lowerParamType(ctx, param, name, i, stmt, sourceFile),
+      );
     }
     if (noJsHost(ctx)) registerResolvedRestParam(ctx, name, stmt, params); // (#6651 A10) rest packs like a plain function
     const nativeGenerator = registerNativeGenerator(ctx, stmt, name, params);
@@ -2940,7 +2943,10 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         params = [];
         for (let i = 0; i < stmt.parameters.length; i++) {
           const param = stmt.parameters[i]!;
-          params.push(lowerParamType(ctx, param, name, i, stmt, sourceFile));
+          params.push(
+            restPatternParamVecType(ctx, param, (t) => getOrRegisterVecType(ctx, "externref", t)) ??
+              lowerParamType(ctx, param, name, i, stmt, sourceFile),
+          );
         }
         if (noJsHost(ctx)) registerResolvedRestParam(ctx, name, stmt, params); // (#6651 A10) rest packs like a plain function
         const nativeGenerator = registerNativeGenerator(ctx, stmt, name, params);
