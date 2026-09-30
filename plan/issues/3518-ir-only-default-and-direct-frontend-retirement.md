@@ -15757,6 +15757,15 @@ ABI branch. Preserve those artifacts; all measured ABI/lowering/boundary sources
 remain identical. Complete normal signed hooks before fork publication; this is
 prepared evidence, not ABI main delivery or full claim completion.
 
+
+Admission refresh: existing ready PR6353 stayed held when fresh main advanced
+todf9e3e54, delivering PR6351's ES2015 class reflection fixes and regression
+tests. Fetch and exact diff inspection preceded a clean merge. Preserve all
+class source, the new396-line descriptor owner, its issue6767 budget grant,
+compiler rows and regression tests. Native tag sources remain unchanged;
+normal hooks must exercise boundary/ABI and inherited class regression cases.
+Do not create a duplicate PR or release hold/admit an obsolete head.
+
 ### Native String DefineOwnProperty join — 2026-09-30
 
 Claim3518:string-define-own-20260930 is held by
