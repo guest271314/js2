@@ -1796,6 +1796,30 @@ export function ensureNativeIterResultObject(ctx: CodegenContext): number | unde
           ],
     exported: false,
   });
+  // (#6773 S3) `__iter_return_result(recv) -> externref` — `helper.return()`
+  // on a lazy Iterator-helper wrapper: IteratorClose through the fully-armed
+  // `__iterator_return` (its `$LazyIterHelper` prepend reaches
+  // `__lazy_iter_close`), then the §27.1.2.1.2 `{value: undefined, done: true}`.
+  const iterReturnIdx = ctx.funcMap.get("__iterator_return");
+  const returnResultIdx = mintDefinedFunc(ctx);
+  ctx.funcMap.set("__iter_return_result", returnResultIdx);
+  pushDefinedFunc(ctx, returnResultIdx, {
+    name: "__iter_return_result",
+    typeIdx: stepTypeIdx,
+    locals: [],
+    body: [
+      ...(iterReturnIdx === undefined
+        ? []
+        : ([
+            { op: "local.get", index: 0 },
+            { op: "call", funcIdx: iterReturnIdx },
+          ] satisfies Instr[])),
+      { op: "i32.const", value: 1 },
+      { op: "ref.null.extern" },
+      { op: "call", funcIdx },
+    ],
+    exported: false,
+  });
   return funcIdx;
 }
 
@@ -3165,6 +3189,7 @@ export function fillNativeIteratorLateArms(ctx: CodegenContext): void {
         sgDeps,
         closeCheck,
         Boolean(strictRuntime && objDeps?.sgetReturnIdx !== undefined && deps?.callReturnIdx === undefined),
+        deps ? ctx.funcMap.get("__call_get_return") : undefined, // (#6773 S3)
       );
     }
   }
@@ -3440,6 +3465,7 @@ function buildIteratorReturnBody(
    */
   closeResultCheck?: () => Instr[],
   closeUserViaProperties = false,
+  callGetReturnIdx?: number, // (#6773 S3) `__call_get_return` — class getter named `return`
 ): Instr[] {
   const { iterRecTypeIdx } = types;
   const validateClose: Instr[] = closeResultCheck ? closeResultCheck() : [{ op: "drop" }];
@@ -3638,11 +3664,39 @@ function buildIteratorReturnBody(
         },
       ]
     : [];
+  // (#6773 S3) GetMethod(userIter, "return") (§7.3.10) consults an ACCESSOR:
+  // a class getter named `return` runs first — its throw propagates — and a
+  // truthy value is called with the iterator as receiver, its result checked
+  // (§7.4.9 step 9). A struct without the getter answers null here and falls
+  // through to the method dispatch. Needs the OBJ deps' closure bridge and
+  // `ret` (3) / `closeres` (4) scratch locals.
+  const getterClose: Instr[] =
+    callGetReturnIdx !== undefined && objDeps
+      ? [
+          { op: "local.get", index: 2 },
+          { op: "call", funcIdx: callGetReturnIdx },
+          { op: "local.tee", index: 3 },
+          { op: "call", funcIdx: objDeps.isTruthyIdx },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: 3 },
+              { op: "local.get", index: 2 },
+              ...emptyArgsVecInstrs(types),
+              { op: "call", funcIdx: objDeps.applyClosureIdx },
+              ...(closeResultCheck ? closeResultCheck() : [{ op: "drop" } satisfies Instr]),
+              { op: "return" },
+            ],
+            else: [],
+          },
+        ]
+      : [];
   // USER close (closed-struct `__call_return` dispatch) — only when the
   // dispatcher exists; otherwise the body simply ends after the OBJ arm
   // (non-OBJ kinds ⇒ NormalCompletion no-op).
   const userClose: Instr[] =
-    callReturnIdx !== undefined
+    callReturnIdx !== undefined || getterClose.length > 0
       ? [
           // Only USER records have a user `return` to dispatch.
           { op: "local.get", index: 1 },
@@ -3658,11 +3712,16 @@ function buildIteratorReturnBody(
           { op: "local.tee", index: 2 },
           { op: "ref.is_null" },
           { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" }], else: [] },
+          ...getterClose,
           // __call_return(userIter) — drop the result ({done} carrier or null when
           // the struct has no `return` method; the dispatcher returns null then).
-          { op: "local.get", index: 2 },
-          { op: "call", funcIdx: callReturnIdx },
-          { op: "drop" },
+          ...(callReturnIdx !== undefined
+            ? ([
+                { op: "local.get", index: 2 },
+                { op: "call", funcIdx: callReturnIdx },
+                { op: "drop" },
+              ] satisfies Instr[])
+            : []),
         ]
       : [];
   return [

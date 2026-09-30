@@ -500,14 +500,24 @@ function ensureLazyStepper(ctx: CodegenContext, deps: LazyDeps): void {
     { op: "ref.cast", typeIdx: helperTypeIdx },
   ];
   const doneReturn: Instr[] = [{ op: "i32.const", value: 1 }, { op: "ref.null.extern" }, { op: "return" }];
-  // (done, val) = __iter_hof_next(src); if done → return (done, null).
+  // (#6773 S3) helper.flags |= 1 read from the FIELD — the helper is
+  // `completed` (§27.1.2.1): its source reported done, or `.return()` ran.
+  const markCompleted: Instr[] = [
+    ...cast(),
+    ...cast(),
+    { op: "struct.get", typeIdx: helperTypeIdx, fieldIdx: F_FLAGS },
+    { op: "i32.const", value: 1 },
+    { op: "i32.or" },
+    { op: "struct.set", typeIdx: helperTypeIdx, fieldIdx: F_FLAGS },
+  ];
+  // (done, val) = __iter_hof_next(src); if done → completed, return (done, null).
   const pullStep: Instr[] = [
     { op: "local.get", index: SRC },
     { op: "call", funcIdx: nextIdx },
     { op: "local.set", index: VAL },
     { op: "local.set", index: DONE },
     { op: "local.get", index: DONE },
-    { op: "if", blockType: { kind: "empty" }, then: doneReturn },
+    { op: "if", blockType: { kind: "empty" }, then: [...markCompleted, ...doneReturn] },
   ];
   // args = [val, box(st)].
   const buildArgs: Instr[] = [
@@ -580,7 +590,7 @@ function ensureLazyStepper(ctx: CodegenContext, deps: LazyDeps): void {
     {
       op: "if",
       blockType: { kind: "empty" },
-      then: [{ op: "local.get", index: SRC }, { op: "call", funcIdx: closeIdx }, ...doneReturn],
+      then: [{ op: "local.get", index: SRC }, { op: "call", funcIdx: closeIdx }, ...markCompleted, ...doneReturn],
     },
     ...pullStep,
     // st -= 1; persist.
@@ -885,6 +895,13 @@ function ensureLazyStepper(ctx: CodegenContext, deps: LazyDeps): void {
     { op: "local.get", index: SRC },
     { op: "ref.is_null" },
     { op: "if", blockType: { kind: "empty" }, then: doneReturn },
+    // (#6773 S3) completed (exhausted or `.return()`ed) ⇒ done, every kind —
+    // the underlying iterator is never stepped again (§27.1.2.1.1).
+    ...cast(),
+    { op: "struct.get", typeIdx: helperTypeIdx, fieldIdx: F_FLAGS },
+    { op: "i32.const", value: 1 },
+    { op: "i32.and" },
+    { op: "if", blockType: { kind: "empty" }, then: doneReturn },
     // kind / st
     ...cast(),
     { op: "struct.get", typeIdx: helperTypeIdx, fieldIdx: F_KIND },
@@ -954,10 +971,28 @@ function ensureLazyStepper(ctx: CodegenContext, deps: LazyDeps): void {
   });
 
   // __lazy_iter_close(helperExt) → IteratorClose(src) when non-null.
-  const closeBody: Instr[] = [
+  // (#6773 S3) §27.1.2.1.2 %IteratorHelperPrototype%.return: a `completed`
+  // helper (source exhausted, or already returned) forwards NOTHING; otherwise
+  // it is marked completed BEFORE the close, so a throwing underlying
+  // `return()` still leaves it completed and a second `.return()` is a no-op.
+  const helper = (): Instr[] => [
     { op: "local.get", index: 0 },
     { op: "any.convert_extern" },
     { op: "ref.cast", typeIdx: helperTypeIdx },
+  ];
+  const closeBody: Instr[] = [
+    ...helper(),
+    { op: "struct.get", typeIdx: helperTypeIdx, fieldIdx: F_FLAGS },
+    { op: "i32.const", value: 1 },
+    { op: "i32.and" },
+    { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" }] },
+    ...helper(),
+    ...helper(),
+    { op: "struct.get", typeIdx: helperTypeIdx, fieldIdx: F_FLAGS },
+    { op: "i32.const", value: 1 },
+    { op: "i32.or" },
+    { op: "struct.set", typeIdx: helperTypeIdx, fieldIdx: F_FLAGS },
+    ...helper(),
     { op: "struct.get", typeIdx: helperTypeIdx, fieldIdx: F_SRC },
     { op: "local.set", index: 1 },
     { op: "local.get", index: 1 },

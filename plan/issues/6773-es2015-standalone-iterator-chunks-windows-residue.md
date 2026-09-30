@@ -43,6 +43,11 @@ func-budget-allow:
   - src/codegen/closed-method-dispatch.ts::fillClosedMethodDispatch
   - src/codegen/object-runtime-prototype.ts::buildObjectPrototypeHelpers
   - src/codegen/index.ts::generateModule
+  # 2026-09-30 (#6773 S3, opus-6773): one line — the standalone
+  # `__call_get_return` accessor dispatcher (`emitMethodDispatch("get_return",
+  # …)`) next to the `__call_return` method one, for the getter-aware USER
+  # IteratorClose; the function sits exactly at its 622 ceiling.
+  - src/codegen/index.ts::emitIteratorMethodExport
 ---
 
 # #6773 — ES2015 standalone: `Iterator.prototype.{chunks,windows,join}` residue (21 rows)

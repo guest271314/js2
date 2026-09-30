@@ -8309,6 +8309,7 @@ function emitIteratorMethodExport(ctx: CodegenContext): void {
     emitMethodDispatch("@@iterator", "__call_@@iterator");
     emitMethodDispatch("next", "__call_next");
     emitMethodDispatch("return", "__call_return"); // (#3100 S5) IteratorClose §7.4.9 USER-arm dispatcher
+    if (ctx.standalone || ctx.wasi) emitMethodDispatch("get_return", "__call_get_return"); // (#6773 S3) GetMethod getter
   }
 
   // (#3123) Host-side class-member resolution surface for fnctor-subclass
