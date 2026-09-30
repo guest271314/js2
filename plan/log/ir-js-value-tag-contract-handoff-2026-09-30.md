@@ -27,3 +27,10 @@ claim, public provider/realm closure and full migration remain incomplete.
 Preserve /private/tmp/js2-ir-public-number-712-20260928 and all56 pending files, including unchanged22 ABI/primitive-classifier controls and nine public oracle/acceptance cases. Thirteen Number-specific controls remain with the unlanded Number implementation. This prerequisite PR does not close that broader original claim. Public historical4/9/seven provider gaps remain measured on its old root; delivered legacy host-key fix must be consumed and remeasured. Complete canonical Object realm, ToObject/prototype factories, full Object constructor/member providers, native Number operations and authenticated physical/consumer joins. Preserve real status2 prototype gaps and original receiver/abrupt behavior; no fake absence certificates or completeness grants.
 
 Before protected admission: fresh main/exact fork head, full normal signed Thomas-author/Codex-coauthor/accurate Model hooks, ready non-draft PR through fork, no duplicates/bypasses. Only verified main ancestry/content and actual protected conformance/check records count as delivery. Keep legacy and every preserved fixture/failure. No polling or scheduler workaround; passive subscription unavailable here. Actual published state belongs in .tmp/tag-contract/publication/published-handoff.md after effect verification.
+
+Publication main refresh: freshc836a50c delivers only six npm compatibility
+artifacts (PR6350); no source/test/compiler dependency changes. It was fetched,
+inspected and immediately reverified before clean merging into this unpushed
+ABI branch. Preserve those artifacts; all measured ABI/lowering/boundary sources
+remain identical. Complete normal signed hooks before fork publication; this is
+prepared evidence, not ABI main delivery or full claim completion.

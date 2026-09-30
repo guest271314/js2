@@ -15749,6 +15749,14 @@ changes sit beside existing contract/plan rows, preserving peer append regions.
 All56 Number pending-file hashes remain unchanged. Full original ABI/Number
 claim, public provider/realm closure and full migration remain incomplete.
 
+
+Publication main refresh: freshc836a50c delivers only six npm compatibility
+artifacts (PR6350); no source/test/compiler dependency changes. It was fetched,
+inspected and immediately reverified before clean merging into this unpushed
+ABI branch. Preserve those artifacts; all measured ABI/lowering/boundary sources
+remain identical. Complete normal signed hooks before fork publication; this is
+prepared evidence, not ABI main delivery or full claim completion.
+
 ### Native String DefineOwnProperty join — 2026-09-30
 
 Claim3518:string-define-own-20260930 is held by
