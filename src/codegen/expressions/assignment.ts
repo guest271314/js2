@@ -71,6 +71,7 @@ import { resolveReceiverStruct } from "../fnctor-escape-gate.js"; // (#2681/#268
 import { presenceSetInstrs, presenceSlotOf } from "../fnctor-presence-bits.js"; // (#3780) packed own-presence flags
 import { tryEmitFnctorTypedFieldSet } from "../fnctor-typed-reads.js"; // (#4155 Phase 2) struct-typed fnctor receiver
 import { tryEmitTypedThisFieldSet } from "../typed-this.js"; // (#3683 S2) typed-`this` field write
+import { guardThisReceiver } from "../derived-ctor-this-guard.js"; // (#6772 S1b)
 import { reserveMemberSetDispatch } from "../member-set-dispatch.js"; // (#2681/#2686 A3) pre-check set dispatcher
 import { boxNullRefAsUndefined } from "../null-ref-undefined-box.js"; // (#1058)
 import { tryEmitTypedF64MemberSet } from "../member-set-f64.js"; // (#4157 A) typed f64 write twin
@@ -4184,6 +4185,7 @@ function compilePropertyAssignment(
   target: ts.PropertyAccessExpression,
   value: ts.Expression,
 ): InnerResult {
+  guardThisReceiver(ctx, fctx, target.expression); // (#6772 S1b)
   // A folded direct-eval body lives in the foreign `<eval>.ts` source file.
   // Its `this.#private` assignment is still lexically inside the surrounding
   // static class method, so let the private-accessor path classify it with the
@@ -5646,6 +5648,7 @@ function compileElementAssignment(
   target: ts.ElementAccessExpression,
   value: ts.Expression,
 ): InnerResult {
+  guardThisReceiver(ctx, fctx, target.expression); // (#6772 S1b)
   const poisonResult = tryCompileStrictFunctionPoisonAssignment(ctx, fctx, target, value);
   if (poisonResult !== undefined) return poisonResult;
 

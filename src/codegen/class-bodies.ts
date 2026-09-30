@@ -43,11 +43,12 @@ import { setProgramAbiInheritedClassCallableAlias } from "./program-abi-class-ca
 import { absoluteFuncIndex } from "../emit/resolve-layout.js"; // (#1916 S3b) resolve handles for order-stable declaredFuncRefs sort
 import { definedFuncAt } from "./func-space.js";
 import { getOrAssignClassNewTargetId } from "./new-target.js"; // (#2023)
+import { emitNativeConstructRuntimeArgv } from "./expressions/new-super.js"; // (#5383 S67) runtime-length `super(...spread)` across the link
 import {
-  emitNativeConstructRuntimeArgv, // (#5383 S67) runtime-length `super(...spread)` across the link
+  emitSuperCallBindThis,
   emitSuperInitializedFlagStore,
   ensureSuperInitializedFlagLocal,
-} from "./expressions/new-super.js"; // (#5350 r3) runtime this-initialised flag
+} from "./derived-ctor-this-guard.js"; // (#5350 r3 / #6772 S1b) runtime this-initialised flag
 import { popBody, pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, deduplicateLocals } from "./context/locals.js";
@@ -3066,7 +3067,7 @@ function compileClassBodiesInner(
           stmt.expression.expression.kind === ts.SyntaxKind.SuperKeyword
         ) {
           compileSuperCall(ctx, fctx, className, selfLocal, stmt.expression, fields);
-          emitSuperInitializedFlagStore(fctx); // (#5350 r3) `this` is initialised from here on
+          emitSuperCallBindThis(ctx, fctx); // (#5350 r3 / #6772 S1b) BindThisValue
           if (isDerivedClass) {
             emitOwnInstanceFieldInitializers();
           }
