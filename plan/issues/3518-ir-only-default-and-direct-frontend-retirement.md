@@ -16095,3 +16095,111 @@ The key-list claim remains held until real main delivery. Publish one ready
 fork PR and use exact-head protected admission after normal final hooks.
 The prior prepared/pending-parent records above are chronological evidence,
 not current delivery state. Preserve original failures and every pending root.
+
+
+## Shared invocation substrate implementation plan — 2026-09-30
+
+Claim `3518:shared-invocation-substrate-20260930` is held on the upstream
+`issue-assignments` branch by
+`ttraenkler/codex-shared-invocation-substrate-20260930`. The isolated branch
+starts at freshly verified main `ee6828f1ef2f6dd7dc26c1eabe699ed8e8a12e50`.
+The actual open-PR file census contains 14 PRs and 810 paths, with no overlap
+on this slice's production paths. Armed PR 6358 and the preserved 56-file
+Number lane are dependencies/context, not editable workspaces for this slice.
+
+The full next responsibility remains genuine public native realm/Number
+integration, including the unchanged nine-row 712 fixture and fresh decoded
+replay. This prerequisite breaks the resource cycle: source closure issuance
+needs builtin requests, builtin requests need the argument-vector owner, and
+source invocation currently allocates that owner after source closure types.
+Neither this prerequisite nor the builtin kernel certifies whole-realm parity.
+
+### Owned implementation and acceptance
+
+1. Add `src/backend/wasmgc/resources/native-invocation-substrate.ts`. It issues
+   the argument-vector declaration/reservations and canonical TypeError owner
+   before any source-closure population is required. Reuse existing canonical
+   vector/error builders and the owning physical ledger; never allocate a
+   second vector for clients sharing this issued substrate.
+2. Extend `native-invocation.ts` with an optional authentic substrate input.
+   Preserve the default path, key ordering, shapes, signatures, source
+   invocation state and abrupt restoration. A borrowed substrate has one fill
+   owner and requires canonical completed prerequisites before invocation fill.
+   Reservation authentication alone never grants completion.
+3. Authenticate exact original requirements/dependency identities, live
+   declarations/layouts and owning ledger. Reject forged, copied, foreign,
+   stale, incomplete and externally filled noncanonical owners. A copied
+   dependencies object does not issue a capability; original producer inputs
+   remain retained and reauthenticated. Preflight the entire owned key set
+   before allocating any resource.
+4. Add semantic tests proving reservation before source closures, shared
+   vector identity, exact existing source calls/getters and state restoration,
+   zero host imports, canonical completion and duplicate-fill refusal. Keep
+   original consumer/getter/vector tests unchanged and run them directly.
+5. Root owns this issue append, compiler inventory/boundary metadata,
+   preservation receipts, integration, commits and publication. Native
+   implementer owns only the new substrate, the narrow invocation edit and
+   its new tests/helper. Independent architect reviews the implementation.
+
+One heavy local process at a time, one 4GB fork, no file parallelism. No hook
+bypasses, gate weakening, fixture replacement or old-path retirement. After
+scoped validation, merge only freshly verified main, preserve incoming work,
+publish a ready PR and use protected queue admission against its exact head.
+Only verified main delivery completes this scoped claim; the full epic stays
+active until all IR behavior is tested equal.
+
+The independent full dependency plan is retained in
+[Public native realm and Number integration](../agent-context/3518-public-native-realm-plan-2026-09-30.md).
+It records complete realm/catalog and mixed dispatch obligations, the actual
+reservation cycle and unchanged public replay acceptance; the current shared
+substrate claim covers only its prerequisite, not whole-realm completion.
+
+### Shared invocation substrate validation and baseline attribution
+
+The native implementer and independent architect completed the scoped review.
+The owner validates plain producer records, rechecks original input identities
+and optional-field presence, preflights its entire declaration census, and
+compares actual vector bodies and locals with canonical recipes. Present
+undefined/null substrate inputs and falsy malformed expected dependency records
+refuse. Default keys, reservation order, aliases and function ownership are
+preserved; borrowed clients never fill the shared resources.
+
+The strict unfiltered six-file cohort measured **524/528 assertions passed,
+four failed, no skipped/todo assertions, plus one collection failure**. New
+substrate 45/45, unchanged invocation consumer 61/61, getter invocation 42/42
+and boundary 349/349 pass. Actual zero-import emitted Wasm covers normal and
+displaced physical indices, vector growth/identity, TypeError payloads, genuine
+captured source calls/apply/getters and exact state restoration for both
+invocation-generated TypeError and a getter-body throw of its captured native
+string. These substrate controls use UTF-16; no additional UTF-8 cross-product
+is claimed beyond the unchanged consumer cohort's own measured coverage.
+Source TS7, scoped lint and all seven preservation gates pass. All 7,338 pinned
+inputs remained unchanged through the final cohort and gates.
+
+The two untouched vector suites were rerun unfiltered on a clean exact
+`ee6828f1` checkout. The native vector suite reproduces 27/31 plus the identical
+four async-gap-message expectation failures. Native argument-vector resources
+collects zero rows with the same historical array-main receipt mismatch for
+`src/codegen/apply-closure-variadic-builtin.ts`. Every status and first error
+matches the candidate, with 7,344 base input hashes unchanged and zero worker
+errors. The uncollected runtime rows remain unmeasured. Do not replace old
+receipt hashes or weaken the expectations.
+
+Original diagnostic evidence is retained: three initial setup refusals each
+ran zero behavior rows/40 skipped (source effects, exported any return and
+ThrowStatement effects); a 37/40 run found an array.new_fixed helper operand
+typo; four targeted failures identified reversed apply operands and missing
+authentic String carrier. Corrected targeted execution and malformed expected
+record controls pass 6/6 (39 intentionally unselected), then the complete new
+suite passes 45/45. No production acceptance, original fixture or gate was
+weakened. Exact diagnostic input bytes and hashes are retained.
+
+All 1,725 original inventory rows and order, signed activation history and
+allowed edges remain. One new backend leaf gives 1,726 rows and backend floor
+41→42. The inventory/dead-export gates certify preservation only; full
+architecture and public native realm remain incomplete. Original 56 pending
+Number files and its source fixture remain untouched. Public Number is still
+5/9 in that separate lane. No legacy retirement is authorized by this leaf.
+
+Publication and exact-content main proof are still required to complete the
+scoped claim; the full migration epic remains active.

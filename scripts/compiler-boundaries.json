@@ -271,9 +271,10 @@
         "src/backend/wasmgc/resources/native-object-get.ts",
         "src/backend/wasmgc/program/native-primitive-boundary-abi.ts",
         "src/backend/wasmgc/resources/native-primitive-wrapper-layouts.ts",
-        "src/backend/wasmgc/resources/native-primitive-wrapper-storage.ts"
+        "src/backend/wasmgc/resources/native-primitive-wrapper-storage.ts",
+        "src/backend/wasmgc/resources/native-invocation-substrate.ts"
       ],
-      "minModules": 41
+      "minModules": 42
     },
     {
       "id": "native-runtime",
@@ -1750,7 +1751,11 @@
     }
   ],
   "files": [
-    { "path": "src/backend/wasmgc/resources/native-string-own-keys.ts", "state": "clean", "layer": "backend-wasmgc" },
+    {
+      "path": "src/backend/wasmgc/resources/native-string-own-keys.ts",
+      "state": "clean",
+      "layer": "backend-wasmgc"
+    },
     {
       "path": "src/runtime/wasmgc/values/string-create-body.ts",
       "state": "clean",
@@ -1851,8 +1856,16 @@
       "state": "clean",
       "layer": "backend-wasmgc"
     },
-    { "path": "src/runtime/wasmgc/values/string-index-key-body.ts", "state": "clean", "layer": "native-runtime" },
-    { "path": "src/runtime/wasmgc/values/string-own-keys-body.ts", "state": "clean", "layer": "native-runtime" },
+    {
+      "path": "src/runtime/wasmgc/values/string-index-key-body.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/string-own-keys-body.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
     {
       "path": "src/wasm/model/instruction-walk.ts",
       "state": "clean",
@@ -14531,6 +14544,11 @@
       "state": "clean",
       "layer": "native-runtime",
       "note": "Pure virtual-first String definition lookup and compatible no-op bodies."
+    },
+    {
+      "path": "src/backend/wasmgc/resources/native-invocation-substrate.ts",
+      "state": "clean",
+      "layer": "backend-wasmgc"
     }
   ]
 }
