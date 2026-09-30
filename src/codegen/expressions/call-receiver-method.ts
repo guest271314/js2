@@ -268,6 +268,7 @@ import { reserveTaToLocaleString, taToLocaleStringApplies } from "../to-locale-s
 import { isHostResolvedBuiltinReceiver } from "../standalone-unavailable-globals.js"; // (#1472)
 import { guardedCastBackup, publishNonInstanceSuperReceiver } from "./super-receiver-publish.js"; // (#5350 r2)
 import { tryEmitPrimitiveToLocaleStringInvoke } from "../object-proto-to-locale-string.js"; // (#6770 S5)
+import { tryEmitTaggedToStringInvoke } from "../object-proto-symbol-tag.js"; // (#6770 S6)
 import {
   BUILTIN_CLASS_NAMES,
   coerceNumberMethodArgToF64,
@@ -3911,6 +3912,8 @@ export function compileReceiverMethodCall(
 
     // For externref values (e.g. RegExp.exec result, host objects), delegate to JS toString
     if (wasm.kind === "externref") {
+      const tagged = tryEmitTaggedToStringInvoke(ctx, fctx, propAccess.expression, expr); // (#6770 S6)
+      if (tagged !== undefined) return tagged;
       const toStrIdx = ensureLateImport(ctx, "__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }]);
       flushLateImportShifts(ctx, fctx);
       if (toStrIdx !== undefined) {

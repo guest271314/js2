@@ -320,3 +320,55 @@ var o = { toString: function () { return "o!"; } }; if (sv(o.toLocaleString(), "
     T,
   );
 });
+
+describe("#6770 S6 — Object.prototype.toString tags (§20.1.3.6 steps 3-15)", () => {
+  it(
+    "the METHOD spelling o.toString() reads @@toStringTag (RED on base)",
+    async () => {
+      const src = `var __r = 0;\n${SV}
+var poisoned = Object.defineProperty({}, Symbol.toStringTag, { get: function () { throw new Error("x"); } });
+try { poisoned.toString(); } catch (e) { __r |= 1; }
+var custom = {}; custom[Symbol.toStringTag] = "c";
+if (sv(custom.toString(), "[object c]")) __r |= 2;
+var plain = {}; if (sv(plain.toString(), "[object Object]")) __r |= 4;
+var own = {}; own.toString = function () { return "own"; }; own[Symbol.toStringTag] = "zz";
+if (sv(own.toString(), "own")) __r |= 8;\n${END}`;
+      expect(await probe(src)).toBe(15);
+    },
+    T,
+  );
+
+  it(
+    "builtinTag (IsArray) is settled before a get trap revokes the proxy (RED on base)",
+    async () => {
+      const src = `var __r = 0;\n${SV}
+var h1 = Proxy.revocable([], { get: function () { h1.revoke(); } });
+try { if (sv(Object.prototype.toString.call(h1.proxy), "[object Array]")) __r |= 1; } catch (e) { __r |= 2; }
+var h2 = Proxy.revocable({}, { get: function () { h2.revoke(); } });
+var outer = new Proxy(h2.proxy, {});
+try { if (sv(Object.prototype.toString.call(outer), "[object Object]")) __r |= 4; } catch (e) { __r |= 8; }
+var h3 = Proxy.revocable([], { get: function () { h3.revoke(); } });
+try { if (h3.proxy.foo === undefined) __r |= 16; } catch (e) { __r |= 32; }\n${END}`;
+      expect(await probe(src)).toBe(21);
+    },
+    T,
+  );
+
+  it(
+    "a deleted WeakSet / WeakMap / Promise prototype tag answers [object Object] (RED on base)",
+    async () => {
+      const src = `var __r = 0;\n${SV}
+var toString = Object.prototype.toString;
+var ws = new WeakSet(), wm = new WeakMap(), p = new Promise(function () {});
+if (sv(toString.call(ws), "[object WeakSet]")) __r |= 1;
+if (sv(toString.call(wm), "[object WeakMap]")) __r |= 2;
+if (sv(toString.call(p), "[object Promise]")) __r |= 4;
+delete WeakSet.prototype[Symbol.toStringTag]; if (sv(toString.call(ws), "[object Object]")) __r |= 8;
+delete WeakMap.prototype[Symbol.toStringTag]; if (sv(toString.call(wm), "[object Object]")) __r |= 16;
+delete Promise.prototype[Symbol.toStringTag]; if (sv(toString.call(p), "[object Object]")) __r |= 32;
+if (sv(toString.call(new Map()), "[object Map]")) __r |= 64;\n${END}`;
+      expect(await probe(src)).toBe(127);
+    },
+    T,
+  );
+});

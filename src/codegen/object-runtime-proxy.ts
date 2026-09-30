@@ -41,6 +41,23 @@ const PROXY_CALL_APPLY = "__proxy_call_apply"; // (#3031 apply slice) apply — 
 const PROXY_CALL_CONSTRUCT = "__proxy_call_construct"; // (#4397) construct — §10.5.13 [[Construct]]
 
 /**
+ * (#6770 S6) The [[ProxyTarget]] a post-trap invariant validator checks.
+ * §10.5.x step 3 reads the target ONCE, before the trap runs; a trap that
+ * revokes its own proxy nulls the field, and re-reading it after the call threw
+ * "Cannot convert undefined or null to object" instead of answering the trap
+ * (`Object/prototype/toString/proxy-revoked-during-get-call.js`). A dispatch
+ * that banked the pre-trap read passes its local; the rest re-read as before.
+ */
+function proxyTargetRead(proxyTypeIdx: number, targetField: number, pLocal: number, targetLocal?: number): Instr[] {
+  if (targetLocal !== undefined) return [{ op: "local.get", index: targetLocal }];
+  return [
+    { op: "local.get", index: pLocal },
+    { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: targetField },
+    { op: "extern.convert_any" },
+  ];
+}
+
+/**
  * (#1100) Standalone Proxy meta-object dispatch runtime — Phase 1.
  *
  * Registers the per-operation dispatch helpers (`__proxy_{get,set,has}_dispatch`),
@@ -337,6 +354,7 @@ export function ensureProxyRuntime(
     // get:  driver(handler, trap, target, key, receiver=param2)
     // has:  driver(handler, trap, target, key)
     // set:  driver(handler, trap, target, key, value=param2, receiver=proxy)
+    const TGT = P + 3; // (#6770 S6) [[ProxyTarget]] as read BEFORE the trap — see proxyTargetRead
     const trapArm: Instr[] = [
       // handler
       { op: "local.get", index: P },
@@ -348,6 +366,7 @@ export function ensureProxyRuntime(
       { op: "local.get", index: P },
       { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
       { op: "extern.convert_any" },
+      { op: "local.tee", index: TGT },
       // key
       { op: "local.get", index: 1 },
     ];
@@ -387,7 +406,7 @@ export function ensureProxyRuntime(
             : trapFieldIdx === TRAP_GOPD
               ? descriptorInvariants.gopd
               : descriptorInvariants.get;
-      trapArm.push(...validateTrapResult(validator, P, RES, 1, isSet ? [2] : []));
+      trapArm.push(...validateTrapResult(validator, P, RES, 1, isSet ? [2] : [], TGT));
     }
 
     const body: Instr[] = [
@@ -569,11 +588,10 @@ export function ensureProxyRuntime(
     resLocal: number,
     keyLocal: number | undefined,
     extras: number[],
+    targetLocal?: number,
   ): Instr[] => [
     { op: "local.set", index: resLocal },
-    { op: "local.get", index: pLocal },
-    { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
-    { op: "extern.convert_any" },
+    ...proxyTargetRead(proxyTypeIdx, F_PTARGET, pLocal, targetLocal),
     ...(keyLocal === undefined ? [] : ([{ op: "local.get", index: keyLocal }] satisfies Instr[])),
     ...extras.map((index): Instr => ({ op: "local.get", index })),
     { op: "local.get", index: resLocal },
@@ -1168,6 +1186,8 @@ export function ensureProxyRuntime(
     // (#5140) scratch for the §10.5 post-trap invariant validators. Index is
     // 2 + arity: 4 on the 2-param proto/ext helpers, 5 on the 3-param ones.
     { name: "res", type: { kind: "externref" } as ValType },
+    // (#6770 S6) the [[ProxyTarget]] read BEFORE the trap call (3 + arity).
+    { name: "tgt", type: { kind: "externref" } as ValType },
   ];
   const ownKeysDispatchLocals = (): { name: string; type: ValType }[] => [
     { name: "p", type: { kind: "ref", typeIdx: proxyTypeIdx } as ValType },

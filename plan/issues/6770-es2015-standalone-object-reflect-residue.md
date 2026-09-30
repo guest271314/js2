@@ -126,6 +126,10 @@ func-budget-allow:
   - src/codegen/expressions/call-receiver-method.ts::compileReceiverMethodCall
   - src/codegen/typeof-delete.ts::compileTypeofExpression
   - src/codegen/typeof-delete.ts::compileTypeofComparison
+  # 2026-09-30 (#6770 S6, Opus): +3 in ensureProxyRuntime — the pre-trap
+  # [[ProxyTarget]] local (declaration, `local.tee`, index constant); the read
+  # helper itself is module-level (`proxyTargetRead`).
+  - src/codegen/object-runtime-proxy.ts::ensureProxyRuntime
 ---
 
 ## Problem
