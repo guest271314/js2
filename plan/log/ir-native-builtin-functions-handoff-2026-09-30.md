@@ -1,0 +1,67 @@
+# Native builtin callable kernel handoff — 2026-09-30
+
+The active goal is complete IR migration. Develop and test the IR path to full
+parity before retiring direct compiler code. Only verified upstream main merges
+count as delivery. Issues live under plan/issues and ownership under upstream
+issue-assignments. Preserve original Number fixtures and failures, dirty root
+worktrees, all peer work and corpus object sources.
+
+This lane owns claim3518:native-builtin-functions-20260930 as
+ttraenkler/codex-native-builtin-functions-20260930, branch
+codex/3518-native-builtin-functions-20260930, worktree
+/private/tmp/js2-ir-native-builtin-functions-20260930. Root is sole integrator and
+publisher; the native implementation agent used Codex GPT-6 Astra Max. The
+architect planned and independently reviewed the implementation. Parent
+integration model subtype/effort are unknown and must not be guessed.
+
+Six new compiler leaves add a synchronous Function.prototype/ThrowTypeError
+kernel, genuine source-first request composition, physical owners, native GC
+layouts and bodies. Existing source-closure and invocation seams forward an
+optional authenticated input. Common/source layouts and legacy execution remain.
+Actual singleton aliases, separate realm identities, true original-name slots,
+actual own descriptors and ordered keys, receiver/argument-vector transport and
+prototype access have emitted Wasm controls. Transport observers are test-only
+and stay outside the intrinsic catalog. Module imports are inspected at zero;
+this is component execution rather than whole prepared-program native replay.
+
+The ordinary Object carrier must be effectively final. Unknown and exotic
+carriers yield explicit gaps before false absence or prototype mutation. A
+whole-realm join requires authenticated heterogeneous String/source/ordinary
+dispatch; relaxing this gate alone would recreate the String-index defect.
+Canonical vector completion means exact reauthenticated locals and instruction
+bodies, not just completed genuine reservation tokens. Keep review regressions
+for external wrong-body fills and authentic StringCreate inheritance.
+
+Capture-layout separation refuses a mutable actual capture before publishing
+the composed source owner. Its fault-injected layout-provider control is not
+an allocation-free guarantee. Ordinary genuine captures remain immutable; the
+existing resource-key collision preflight remains separately allocation-free.
+
+The full native realm, public Number provider closure and migration remain
+incomplete. Original unchanged public Number assertions are5/9: legacy UTF-8
+712 now passes, while original/decoded IR×UTF-16/UTF-8 still refuses seven missing
+physical bindings. ABI22/22 and boundary349/349 plus seven preservation gates
+passed separately. The pending Number worktree is not ready for publication.
+
+Verified upstream delivery: String own keys PR6352 (82b63dab), canonical value
+tags PR6353 (9fb5eccc), Object constructor/prototype bodies PR6355 (f028d534).
+The last has nine scoped blobs identical on main2255e91, exact head ancestral
+to merge/main, all102actualshards+finalregressiongate and CI/CLA/differential
+merge-group checks passed. Only each completed slice claim was closed.
+
+Pre-integration validation: source TS7 passed; corrected kernel36/36, zero
+skips/todo/failures/worker errors; all seven configured preservation gates passed.
+7354 input hashes unchanged through typecheck, kernel and gates. Coordinates are
+normal UTF-16 and displaced actual UTF-8; StringCreate refusal is normal UTF-16.
+Do not claim all four cross-products. Full compatibility cohort:710/722 assertions
+passed,12failed, two additional suites failed collection,11/14files passed.
+Clean exact8245base reproduction of the three failing suites has identical
+assertion statuses and first error texts:39/51+12fail, two collection failures,
+zero skips and7326pins unchanged. These observed failures predate this lane;
+uncollected runtime rows remain unmeasured. Separate follow-up plan is in issue3518.
+
+Normal signed implementation commit, fresh-main integration, final integrated
+checks and one ready fork PR still remain. Keep the slice claim held until verified
+main delivery. No implementation publication or new main merge is claimed yet. All earlier failing draft instruments and test
+rows stay under .tmp/native-builtin-functions. Do not mistake any passing
+component cohort or an armed PR for public parity or main delivery.

@@ -271,9 +271,11 @@
         "src/backend/wasmgc/resources/native-object-get.ts",
         "src/backend/wasmgc/program/native-primitive-boundary-abi.ts",
         "src/backend/wasmgc/resources/native-primitive-wrapper-layouts.ts",
-        "src/backend/wasmgc/resources/native-primitive-wrapper-storage.ts"
+        "src/backend/wasmgc/resources/native-primitive-wrapper-storage.ts",
+        "src/backend/wasmgc/resources/native-builtin-function-requests.ts",
+        "src/backend/wasmgc/resources/native-builtin-functions.ts"
       ],
-      "minModules": 41
+      "minModules": 43
     },
     {
       "id": "native-runtime",
@@ -367,9 +369,13 @@
         "src/runtime/wasmgc/values/prototype-chain-bodies.ts",
         "src/runtime/wasmgc/values/primitive-wrapper-layouts.ts",
         "src/runtime/wasmgc/values/primitive-wrapper-bodies.ts",
-        "src/runtime/wasmgc/values/to-object-body.ts"
+        "src/runtime/wasmgc/values/to-object-body.ts",
+        "src/runtime/wasmgc/values/builtin-function-layouts.ts",
+        "src/runtime/wasmgc/values/builtin-function-bodies.ts",
+        "src/runtime/wasmgc/values/builtin-function-property-bodies.ts",
+        "src/runtime/wasmgc/values/builtin-function-prototype-bodies.ts"
       ],
-      "minModules": 86
+      "minModules": 90
     },
     {
       "id": "standalone-platform",
@@ -14513,6 +14519,36 @@
       "state": "clean",
       "layer": "native-runtime",
       "note": "Pure virtual-first String definition lookup and compatible no-op bodies."
+    },
+    {
+      "path": "src/backend/wasmgc/resources/native-builtin-function-requests.ts",
+      "state": "clean",
+      "layer": "backend-wasmgc"
+    },
+    {
+      "path": "src/backend/wasmgc/resources/native-builtin-functions.ts",
+      "state": "clean",
+      "layer": "backend-wasmgc"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/builtin-function-layouts.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/builtin-function-bodies.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/builtin-function-property-bodies.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/builtin-function-prototype-bodies.ts",
+      "state": "clean",
+      "layer": "native-runtime"
     }
   ]
 }
