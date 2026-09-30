@@ -36,7 +36,11 @@ import {
   customCapabilityTypeError,
   ensureCustomCapabilityRuntime,
 } from "./promise-combinators.js";
-import { reserveConstructDriver, resolveCompiledClassReceiver } from "./promise-class-receiver-drive.js";
+import {
+  isOrdinaryFunctionCtorArg,
+  reserveConstructDriver,
+  resolveCompiledClassReceiver,
+} from "./promise-class-receiver-drive.js";
 import { GLOBAL_NON_CONSTRUCTOR_FUNCTION_NAMES } from "./expressions/non-constructable.js";
 import { isBuiltinConstructorIdentityName } from "./builtin-static-globals.js";
 
@@ -90,7 +94,11 @@ export function emitClassReceiverSettle(
   settle: "resolve" | "reject",
 ): ValType | undefined {
   if (!isStandalonePromiseActive(ctx)) return undefined;
-  if (resolveCompiledClassReceiver(ctx, ctorArg) === undefined || shadowsGlobalValueName(ctorArg)) return undefined;
+  // (#5197 r3 Step 5) …or an ordinary function `C` whose closure ABI D1 could not use (held as an
+  // externref value, e.g. once the module reads `Function.prototype`): Construct(C, «executor»)
+  // through the same driver, whose ordinary tail runs the function with a fresh `this`.
+  const admitted = resolveCompiledClassReceiver(ctx, ctorArg) !== undefined || isOrdinaryFunctionCtorArg(ctx, ctorArg);
+  if (!admitted || shadowsGlobalValueName(ctorArg)) return undefined;
 
   const snap = snapshotSpeculative(ctx, fctx);
   // Registration strictly precedes emission.
