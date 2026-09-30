@@ -21,6 +21,8 @@ loc-budget-allow:
   # lines since this branch's September 8 base. This is already-landed main
   # history, not new Deno implementation growth.
   - total
+  # Destructured module exports use existing snapshot/live-binding routes.
+  - src/codegen/module-namespace-value.ts
   # 2026-08-28: PR #5148 checkpoint (Deno runtime integration — linked
   # shared-realm/callable boundaries, runtime-eval + exception transport,
   # Promise/reflection/buffer-view/finalizer behavior). Broad, measured
@@ -555,6 +557,14 @@ without the composed patch (10,007,948 bytes), the patch reduces the artifact
 by 3,006 bytes; the larger artifact size predates it.
 
 ## Handover
+
+2026-09-30 namespace validation complete: 22/23 focused tests pass with explicit exnref worker support. The sole failure in `issue-3188-module-namespace-tostringtag.test.ts`'s standalone TypeScript runtime-namespace callable projection reports `dynamic array length fill requires a pre-reserved Hole global`; pristine detached control `10ec2abc3a4` reproduces the identical failure (7/8 in that file). Three new destructured-export regressions were 0/3 on baseline and 3/3 on candidate. Exact two-store Deno bootstrap passes with namespace score 3 and no recorded blocker. TS7 and diff whitespace checks pass. New source only extends declaration admission; it reuses the existing snapshot and mutable getter machinery. Restored v8x checkout is clean at published `83f5554` with rusty_v8 pinned `dd1b4e9c743b7a11dbeb99d4d0dc55979218b905`; native rebuild and broader op/module/promise integration remain ahead. Original uncommitted ABI comment and Acorn artifact are preserved outside this fix.
+
+2026-09-30 destructured namespace repair: baseline `10ec2abc3a4` fails all three new standalone regressions with raw Wasm exceptions. Candidate recognizes top-level BindingElement declarations, including nested object/array patterns, and routes const bindings to existing snapshots and let/var to existing live getters. The three regressions pass; the actual two-store Deno bootstrap checkpoint now returns namespace identity score 3 with no blocker, replacing the previous expected exception, and exact hello-world/host effects still pass. First broader run 8/9 passes; the only failure is the test worker's missing `--experimental-wasm-exnref` flag for a generator fixture. Rerun with explicit worker flag pending. TS7 typecheck passes. Full native v8x replay is not re-established yet; restored runtime checkout lacks initialized rusty_v8 submodule. This is compiler namespace progress, not completion of native namespace handles or full Deno integration.
+
+2026-09-30 full bootstrap envelope rerun passes 1/1, including all source hashes, exact imports/exports, two isolated stores, wrapper/module/usage stages, host output and no provider calls. The remaining namespace failure is traced to `mod.js`'s `const {core, internals, primordials} = bootstrap; export {...}`: `module-namespace-value.ts` only accepts Identifier VariableDeclaration exports; the checker represents these bindings as BindingElement declarations, so it declines the whole namespace. Adding a regression for object aliases, array bindings, and nested mutable bindings before extending the existing snapshot/live-getter routes. Namespace success must then replace the bootstrap test's expected-exception checkpoint.
+
+2026-09-30 resumed integration after main merge `10ec2abc3a4`: primordial substrate tests pass 17/17. Full unchanged-core child probe exits successfully and emits 2,697,863 bytes; the enclosing test stops at its stale 6.2–6.75 MB envelope before checking later assertions. Envelope updated to 2.5–2.9 MB, with source hashes, exact imports/exports, two-store stages, host calls and output assertions retained; rerun pending. Published v8x PR 2 remains open at `83f5554`, compiler PR 5784 remains open at `5aa3d8f85743bb`; original temporary checkouts now contain only leftover build directories. Restoring runtime source from its published branch in `/private/tmp/v8x-deno-resume-20260930.o0sxeO/repo`. Module namespace test currently expects a recorded raw Wasm exception, so general namespace support remains an explicit integration gap.
 
 The exact pins, stop point, reproduction steps, rejected shortcuts, and safest
 next slice are recorded in

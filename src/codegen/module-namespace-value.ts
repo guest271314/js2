@@ -223,14 +223,33 @@ function nodeBuiltinReexport(symbol: ts.Symbol): { moduleName: string; propertyN
   return undefined;
 }
 
-/** `export const x = …` at the top level of the exporting module. */
-function immutableTopLevelConstName(ctx: CodegenContext, node: ts.Declaration): string | undefined {
-  if (!ts.isVariableDeclaration(node) || !ts.isIdentifier(node.name)) return undefined;
-  const list = node.parent;
-  if (!ts.isVariableDeclarationList(list) || (list.flags & ts.NodeFlags.Const) === 0) return undefined;
+/** The module-global cell of a simple or destructured top-level binding. */
+function topLevelVariableBinding(
+  ctx: CodegenContext,
+  node: ts.Declaration,
+): { name: string; list: ts.VariableDeclarationList } | undefined {
+  if (!(ts.isVariableDeclaration(node) || ts.isBindingElement(node)) || !ts.isIdentifier(node.name)) {
+    return undefined;
+  }
+  const name = node.name.text;
+  let owner: ts.Node = node;
+  // Nested object/array patterns still belong to one VariableDeclaration.
+  // Do not admit parameters, catch bindings, or function-local variables.
+  while (ts.isBindingElement(owner) || ts.isObjectBindingPattern(owner) || ts.isArrayBindingPattern(owner)) {
+    owner = owner.parent;
+  }
+  if (!ts.isVariableDeclaration(owner)) return undefined;
+  const list = owner.parent;
+  if (!ts.isVariableDeclarationList(list)) return undefined;
   const statement = list.parent;
   if (!ts.isVariableStatement(statement) || statement.parent !== statement.getSourceFile()) return undefined;
-  return ctx.moduleGlobals.has(node.name.text) ? node.name.text : undefined;
+  return ctx.moduleGlobals.has(name) ? { name, list } : undefined;
+}
+
+/** `const` module exports, including destructured bindings. */
+function immutableTopLevelConstName(ctx: CodegenContext, node: ts.Declaration): string | undefined {
+  const binding = topLevelVariableBinding(ctx, node);
+  return binding !== undefined && (binding.list.flags & ts.NodeFlags.Const) !== 0 ? binding.name : undefined;
 }
 
 /**
@@ -243,12 +262,8 @@ function immutableTopLevelConstName(ctx: CodegenContext, node: ts.Declaration): 
  * (const) or must hold a live getter (var/let).
  */
 function mutableTopLevelBindingName(ctx: CodegenContext, node: ts.Declaration): string | undefined {
-  if (!ts.isVariableDeclaration(node) || !ts.isIdentifier(node.name)) return undefined;
-  const list = node.parent;
-  if (!ts.isVariableDeclarationList(list) || (list.flags & ts.NodeFlags.Const) !== 0) return undefined;
-  const statement = list.parent;
-  if (!ts.isVariableStatement(statement) || statement.parent !== statement.getSourceFile()) return undefined;
-  return ctx.moduleGlobals.has(node.name.text) ? node.name.text : undefined;
+  const binding = topLevelVariableBinding(ctx, node);
+  return binding !== undefined && (binding.list.flags & ts.NodeFlags.Const) === 0 ? binding.name : undefined;
 }
 
 /**
