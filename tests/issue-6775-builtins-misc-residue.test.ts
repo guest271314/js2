@@ -47,6 +47,55 @@ const PROBES: { name: string; what: string; expected: number; source: string }[]
     source:
       "var __r = 0;\nvar get = Object.getOwnPropertyDescriptor(Error.prototype, 'stack').get;\nif (typeof get === 'function') __r |= 1;\ntry { new get(); } catch (e) { __r |= 2; if (e instanceof TypeError) __r |= 4; }\nvar f = function () { new get(); };\ntry { f(); } catch (e) { __r |= 8; if (e instanceof TypeError) __r |= 16; }\nexport function readResult() { return __r; }\n",
   },
+  {
+    name: "s4a",
+    what: "S4 \u2014 JSON.parse ToString of a non-string primitive; a JSON boolean is a boolean; a direct `JSON.parse(x) === v` compare",
+    expected: 677202,
+    source:
+      "var __r = 0;\ntry { JSON.parse(); __r |= 1; } catch (e) { if (e instanceof SyntaxError) __r |= 2; else __r |= 4; }\ntry { JSON.parse(undefined); __r |= 8; } catch (e) { if (e instanceof SyntaxError) __r |= 16; else __r |= 32; }\ntry { if (JSON.parse(null) === null) __r |= 64; } catch (e) { __r |= 128; }\ntry { if (JSON.parse(false) === false) __r |= 256; } catch (e) { __r |= 512; }\ntry { if (JSON.parse(true) === true) __r |= 1024; } catch (e) { __r |= 2048; }\ntry { if (JSON.parse(0) === 0) __r |= 4096; } catch (e) { __r |= 8192; }\ntry { if (JSON.parse(3.14) === 3.14) __r |= 16384; } catch (e) { __r |= 32768; }\ntry { JSON.parse(Symbol('desc')); __r |= 65536; } catch (e) { if (e instanceof TypeError) __r |= 131072; else __r |= 262144; }\ntry { if (JSON.parse('1') === 1) __r |= 524288; } catch (e) { __r |= 1048576; }\nexport function readResult() { return __r; }\n",
+  },
+  {
+    name: "s4b",
+    what: "S4 \u2014 a provably non-callable, non-array replacer ('' / 0 / true / Symbol()) is ignored",
+    expected: 1361,
+    source:
+      "var __r = 0;\nvar obj = { key: [1] };\nvar json = '{\"key\":[1]}';\nfunction id(x) { return x; }\ntry { if (JSON.stringify(obj, null) === json) __r |= 1; } catch (e) { __r |= 2; }\ntry { if (JSON.stringify(obj, '') === json) __r |= 16; } catch (e) { __r |= 32; }\ntry { if (JSON.stringify(obj, 0) === json) __r |= 64; } catch (e) { __r |= 128; }\ntry { if (JSON.stringify(obj, true) === json) __r |= 256; } catch (e) { __r |= 512; }\ntry { if (JSON.stringify(obj, Symbol()) === json) __r |= 1024; } catch (e) { __r |= 2048; }\nexport function readResult() { return __r; }\n",
+  },
+  {
+    name: "s4c",
+    what: "S4 \u2014 a Proxy value whose length trap throws is observed inside the try (no struct copy at the binding)",
+    expected: 2,
+    source:
+      "var __r = 0;\nfunction T262() {}\nvar abruptLength = new Proxy([], { get: function (_t, key) { if (key === 'length') throw new T262(); } });\ntry { JSON.stringify(abruptLength); __r |= 1; } catch (e) { if (e instanceof T262) __r |= 2; else __r |= 4; }\nexport function readResult() { return __r; }\n",
+  },
+  {
+    name: "s4d",
+    what: "S4 \u2014 a Proxy replacer is classified before a primitive root is serialised",
+    expected: 18,
+    source:
+      "var __r = 0;\nfunction T262() {}\nvar abruptLength = new Proxy([], { get: function (_t, key) { if (key === 'length') throw new T262(); } });\ntry { JSON.stringify(null, abruptLength); __r |= 1; } catch (e) { if (e instanceof T262) __r |= 2; else __r |= 4; }\nvar abruptToPrimitive = { valueOf: function () { throw new T262(); } };\nvar abruptToLength = new Proxy([], { get: function (_t, key) { if (key === 'length') return abruptToPrimitive; } });\ntry { JSON.stringify([], abruptToLength); __r |= 8; } catch (e) { if (e instanceof T262) __r |= 16; else __r |= 32; }\nexport function readResult() { return __r; }\n",
+  },
+  {
+    name: "s5a",
+    what: "S5 \u2014 Symbol.for applies ToString (ToPrimitive \u2192 user toString, Symbol \u2192 TypeError)",
+    expected: 1321,
+    source:
+      "var __r = 0;\ntry { if (Symbol.for('k') === Symbol.for('k')) __r |= 1; } catch (e) { __r |= 2; }\ntry { var subject = { toString: function () { throw new RangeError('t'); } }; Symbol.for(subject); __r |= 4; } catch (e) { if (e instanceof RangeError) __r |= 8; else __r |= 16; }\ntry { var s2 = { toString: function () { return 'k'; } }; if (Symbol.for(s2) === Symbol.for('k')) __r |= 32; } catch (e) { __r |= 64; }\ntry { Symbol.for(Symbol('s')); __r |= 128; } catch (e) { if (e instanceof TypeError) __r |= 256; else __r |= 512; }\ntry { if (Symbol.keyFor(Symbol.for(1)) === '1') __r |= 1024; } catch (e) { __r |= 2048; }\nexport function readResult() { return __r; }\n",
+  },
+  {
+    name: "s5b",
+    what: "S5 \u2014 sym() / new Object(sym)() throw TypeError; Object(sym) inherits from Symbol.prototype",
+    expected: 873618,
+    source:
+      "var __r = 0;\nvar sym = Symbol('desc');\ntry { sym(); __r |= 1; } catch (e) { if (e instanceof TypeError) __r |= 2; else __r |= 4; }\ntry { new sym(); __r |= 8; } catch (e) { if (e instanceof TypeError) __r |= 16; else __r |= 32; }\nvar symObj = Object(Symbol());\ntry { symObj(); __r |= 64; } catch (e) { if (e instanceof TypeError) __r |= 128; else __r |= 256; }\ntry { new symObj(); __r |= 512; } catch (e) { if (e instanceof TypeError) __r |= 1024; else __r |= 2048; }\ntry { if (Object.getPrototypeOf(Symbol('66')).constructor === Symbol) __r |= 4096; } catch (e) { __r |= 8192; }\ntry { if (Object.getPrototypeOf(Object(Symbol('66'))).constructor === Symbol) __r |= 16384; } catch (e) { __r |= 32768; }\ntry { if (Object.getPrototypeOf(Object(Symbol('66'))) === Symbol.prototype) __r |= 65536; } catch (e) { __r |= 131072; }\ntry { var p = Object.getPrototypeOf(Symbol('66')); if (p === Symbol.prototype) __r |= 262144; if (p.constructor === Symbol) __r |= 524288; } catch (e) { __r |= 1048576; }\nexport function readResult() { return __r; }\n",
+  },
+  {
+    name: "s5c",
+    what: "S5 \u2014 recv[Symbol.toPrimitive]() on a symbol / Symbol wrapper answers the symbol",
+    expected: 2901,
+    source:
+      "var __r = 0;\ntry { if (Object(Symbol.toPrimitive)[Symbol.toPrimitive]() === Symbol.toPrimitive) __r |= 1; } catch (e) { __r |= 2; }\ntry { if (Symbol.toPrimitive[Symbol.toPrimitive]() === Symbol.toPrimitive) __r |= 4; } catch (e) { __r |= 8; }\ntry { var s = Symbol('x'); if (s[Symbol.toPrimitive]() === s) __r |= 16; } catch (e) { __r |= 32; }\ntry { var w = Object(Symbol.iterator); if (w[Symbol.toPrimitive]() === Symbol.iterator) __r |= 64; } catch (e) { __r |= 128; }\ntry { var s3 = Symbol('y'); if (s3.toString() === 'Symbol(y)') __r |= 256; if (s3.valueOf() === s3) __r |= 512; } catch (e) { __r |= 1024; }\ntry { if (Symbol.iterator.description === 'Symbol.iterator') __r |= 2048; } catch (e) { __r |= 4096; }\nexport function readResult() { return __r; }\n",
+  },
 ];
 
 describe("#6775 ES2015 standalone built-ins misc residue", () => {

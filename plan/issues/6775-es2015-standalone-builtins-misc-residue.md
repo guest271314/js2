@@ -39,6 +39,13 @@ loc-budget-allow:
   - src/codegen/wrapper-constructor-carrier.ts
   - src/codegen/generator-yield-linearize.ts
   - src/codegen/json-codec-native.ts
+  # 2026-09-30 (#6775 S5, Opus): +6 — the one-line dispatch into the new
+  # `expressions/to-primitive-method-call.ts` leaf (the arm body lives there).
+  - src/codegen/expressions/calls-closures.ts
+func-budget-allow:
+  # 2026-09-30 (#6775 S4, Opus): +8 — the JSON boolean box picks the real
+  # `$__box_boolean_struct` when the module has it (two-arm literal).
+  - src/codegen/json-codec-native.ts::emitJsonParseText
 ---
 
 ## Problem

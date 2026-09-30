@@ -192,6 +192,10 @@ function consumesExternrefCarrier(parent: ts.CallExpression | ts.NewExpression):
   const member = callee.name.text;
   if (namespace === "Reflect") return true;
   if (namespace === "Proxy") return member === "revocable";
+  // (#6775 S4) The native JSON codec walks a `$Proxy` value/replacer through
+  // its traps; a vec/struct slot copied the Proxy (running `length` and every
+  // index trap) at the binding's initialisation instead.
+  if (namespace === "JSON") return member === "stringify";
   return namespace === "Object" && OBJECT_META_STATICS.has(member);
 }
 

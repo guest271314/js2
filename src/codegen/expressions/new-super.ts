@@ -75,6 +75,7 @@ import {
   ensureObjectRuntime,
   ensureObjVecBuilders,
   reserveApplyClosure,
+  WRAPPER_PRIMITIVE_KEY, // (#6775 S5)
 } from "../object-runtime.js"; // (#1100) standalone Proxy native runtime; (#2928) Function-marker construct
 import { ensureSetHelpers } from "../set-runtime.js";
 import { ensureWeakCollectionHelpers } from "../weak-collections-runtime.js";
@@ -101,7 +102,7 @@ import {
 } from "../standalone-class-construct.js"; // (#5383 S2g, #6615, #6619)
 import { resolvePromiseSubclassName } from "./promise-subclass.js"; // (#5197 r3)
 import { armExternF64ArgTypeGuard, armExternRefArgTypeGuard } from "../extern-arg-marshal.js"; // (#6615 / #5383 S28, #6619 / #5383 S32)
-import { armConstructIsConstructorGuard } from "../construct-is-constructor-guard.js"; // (#6612 / #5383 S25)
+import { armConstructIsConstructorGuard, primitiveWrapperConstructThrow } from "../construct-is-constructor-guard.js"; // (#6612 / #5383 S25)
 import { linkCompatibleDeclaredStructAncestor } from "../struct-hierarchy-layout.js";
 import { emitBoundConstructOnNull } from "../construct-bound.js"; // (#4196) §10.4.1.2
 import { emitRuntimeEvalConstructOnNull } from "../runtime-eval-construct.js"; // (#4438) §10.2.2
@@ -4574,7 +4575,6 @@ function emitTaIntrinsicConstructThrow(ctx: CodegenContext, fctx: FunctionContex
 function emitBuiltinFnNotAConstructorGuard(ctx: CodegenContext, fctx: FunctionContext, descLocal: number): void {
   emitTaIntrinsicConstructThrow(ctx, fctx, descLocal); // (#6769 S7d) `%TypedArray%` has a throwing [[Construct]]
   const isBuiltinIdx = ctx.funcMap.get("__builtinfn_is_builtin");
-  if (isBuiltinIdx === undefined) return;
   const guardBody: Instr[] = [];
   const savedBody = fctx.body;
   fctx.body = guardBody;
@@ -4583,6 +4583,10 @@ function emitBuiltinFnNotAConstructorGuard(ctx: CodegenContext, fctx: FunctionCo
   } finally {
     fctx.body = savedBody;
   }
+  // (#6775 S5) `new Object(Symbol())()` — a primitive wrapper has no [[Construct]].
+  if (ctx.objectRuntimeTypes) addStringConstantGlobal(ctx, WRAPPER_PRIMITIVE_KEY);
+  fctx.body.push(...primitiveWrapperConstructThrow(ctx, descLocal, "anyref", guardBody));
+  if (isBuiltinIdx === undefined) return;
   fctx.body.push(
     { op: "local.get", index: descLocal },
     { op: "extern.convert_any" },

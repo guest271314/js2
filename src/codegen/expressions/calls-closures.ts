@@ -7,6 +7,7 @@
  * - compileCallablePropertyCall — call to a callable struct field
  * - tryExternClassMethodOnAny — resolve method call on any-typed receiver via extern classes
  */
+import { tryEmitDynamicToPrimitiveMethodCall } from "./to-primitive-method-call.js"; // (#6775 S5)
 import { guardedExternRefResultBridge } from "./dispatch-extern-result-bridge.js";
 import { standaloneMissingStringArgRead, standaloneRefToExternBridge } from "./dispatch-extern-arg-bridge.js";
 import { tryEmitFunctionTypedPropertyCall } from "./function-typed-property-call.js";
@@ -2129,6 +2130,11 @@ export function compileCallableElementAccessCall(
   {
     const hostHasInstance = tryEmitHostFunctionHasInstanceCall(ctx, fctx, expr, elemAccess);
     if (hostHasInstance !== undefined) return hostHasInstance;
+  }
+
+  {
+    const toPrimitive = tryEmitDynamicToPrimitiveMethodCall(ctx, fctx, expr, elemAccess);
+    if (toPrimitive !== undefined) return toPrimitive;
   }
 
   // `%Function.prototype%[@@hasInstance]` is a native method closure whose
