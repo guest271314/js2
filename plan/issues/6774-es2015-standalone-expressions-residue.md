@@ -40,6 +40,14 @@ loc-budget-allow:
   # tryOpenObjectDynamicGet (+10); S4 adds two FunctionContext fields (+4).
   - src/codegen/property-access.ts
   - src/codegen/context/types.ts
+  # 2026-09-30 (#6774 impl, Opus): S6 hooks (symbol-arg inference opt-out,
+  # open-literal element call, class gOPS → static sidecar), S7 generator
+  # rest-pattern vec lowering, S19 explicit "default" hint at loose `==`.
+  - src/codegen/expressions/call-builtin-static.ts
+  - src/codegen/expressions/call-tail-dispatch.ts
+  - src/codegen/binary-ops-typed-dispatch.ts
+  - src/codegen/declarations.ts
+  - src/codegen/declarations/param-return-inference.ts
   # NEW leaves (register each in scripts/compiler-boundaries.json, see Lane protocol)
   - src/codegen/new-target-value.ts
   - src/codegen/eval-param-scope-hoist.ts
@@ -66,6 +74,17 @@ func-budget-allow:
   - src/codegen/expressions/calls.ts::compileIIFE
   - src/codegen/expressions.ts::compileExpressionInner
   - src/codegen/expressions/new-super.ts::compileNewFunctionDeclaration
+  # 2026-09-30 (#6774 S5/S6/S7/S19 impl, Opus): one-arm hooks at the existing
+  # dispatch sites (foreign `super.x` → compileSuperPropertyAccess; symbol-arg
+  # inference opt-out; open-literal element call; class gOPS sidecar; generator
+  # rest-pattern vec; explicit "default" loose-eq hint + its native literal).
+  - src/codegen/property-access.ts::compilePropertyAccess
+  - src/codegen/binary-ops-typed-dispatch.ts::compileTypedBinaryDispatch
+  - src/codegen/declarations/param-return-inference.ts::inferParamTypeFromCallSites
+  - src/codegen/expressions/call-tail-dispatch.ts::compileTailDispatch
+  - src/codegen/declarations.ts::collectDeclarations
+  - src/codegen/expressions/call-builtin-static.ts::compileBuiltinStaticCall
+  - src/codegen/object-runtime.ts::ensureObjectRuntime
 ---
 
 ## Problem
