@@ -405,18 +405,24 @@ const PROMISE_PROTO_METHODS = ["catch", "finally", "then"] as const;
 /** (#2861) `Iterator.prototype`'s own helper method names (ES2025 iterator
  * helpers, §27.1.4). `[Symbol.iterator]` is a computed key handled elsewhere. */
 const ITERATOR_PROTO_METHODS = [
+  "chunks", // (#6773 S6) iterator-chunking
   "drop",
   "every",
   "filter",
   "find",
   "flatMap",
   "forEach",
+  "join", // (#6773 S6) Iterator.prototype.join
   "map",
   "reduce",
   "some",
   "take",
   "toArray",
+  "windows", // (#6773 S6) iterator-chunking
 ] as const;
+
+/** (#6773 S6) Members seeded as OWN data properties on the `%IteratorPrototype%` root singleton. */
+const ITERATOR_ROOT_SEEDED_METHODS = ["chunks", "join", "windows"] as const;
 
 /** `Function.prototype`'s own method names (ES2024 §20.2.3). */
 const FUNCTION_PROTO_METHODS = ["apply", "bind", "call", "toString", FUNCTION_PROTO_HAS_INSTANCE_MEMBER] as const;
@@ -4385,6 +4391,24 @@ export function iteratorRootPrototypeEnsureInstrs(
       { op: "i32.const", value: 1 }, // Symbol.iterator
       { op: "call", funcIdx: boxSymbolIdx },
       ...pushBuiltinFnSingletonValueInstrs(ctx, closure),
+      { op: "extern.convert_any" },
+      { op: "f64.const", value: 0x01 | 0x04 }, // writable:true, enumerable:false, configurable:true
+      { op: "call", funcIdx: defineValueIdx },
+      { op: "drop" },
+    );
+  }
+  // (#6773 S6) `chunks` / `join` / `windows` are own methods of the root, like
+  // `[Symbol.iterator]` above: `Iterator.prototype.join` must read as a
+  // (non-constructor) function. The closure's refusal body throws a catchable
+  // TypeError when CALLED; calls on a helper receiver keep the native lazy arm.
+  for (const name of brand === undefined ? [] : ITERATOR_ROOT_SEEDED_METHODS) {
+    const member = ensureStandaloneNativeMethodClosure(ctx, brand!, name, "method", { refusalBodyFallback: true });
+    if (!member) continue;
+    addStringConstantGlobal(ctx, name);
+    rootInit.push(
+      { op: "local.get", index: rootSlot },
+      ...stringConstantExternrefInstrs(ctx, name),
+      ...pushBuiltinFnSingletonValueInstrs(ctx, member),
       { op: "extern.convert_any" },
       { op: "f64.const", value: 0x01 | 0x04 }, // writable:true, enumerable:false, configurable:true
       { op: "call", funcIdx: defineValueIdx },
