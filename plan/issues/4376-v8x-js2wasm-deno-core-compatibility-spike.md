@@ -26,6 +26,7 @@ loc-budget-allow:
   - src/codegen/expressions/call-namespace-static.ts
   - src/checker/usage-inference.ts
   - src/codegen/map-runtime.ts
+  - src/codegen/apply-closure-variadic-builtin.ts
   # 2026-08-28: PR #5148 checkpoint (Deno runtime integration — linked
   # shared-realm/callable boundaries, runtime-eval + exception transport,
   # Promise/reflection/buffer-view/finalizer behavior). Broad, measured
@@ -564,6 +565,27 @@ without the composed patch (10,007,948 bytes), the patch reduces the artifact
 by 3,006 bytes; the larger artifact size predates it.
 
 ## Handover
+
+### 2026-09-30: callback receiver isolation
+
+- Merged latest `loopdive/js2` main (`fd0cf19cb95`) at `347f83b5078`, preserving
+  unrelated dirty files without stashing.
+- The exact bridge probe failed before Rust: `host.call(object, ...)` sent the
+  global object's handle as `this`, not the object's handle. The variadic
+  builtin apply shortcut admitted an ordinary rest callback sharing its
+  Wasm signature and bypassed receiver installation. Restrict that shortcut
+  to the three builtin metadata identities, including their discriminator
+  fields, instead of signature shape alone.
+- The self-contained regression with the original signature-only guard passes
+  1/2 (`call` fails, `apply` is the control). The fixed full bridge passes
+  receiver identity and nested reentry. Compiler regression and controls pass
+  25/25, including the exact Deno bootstrap and destructured namespace cases;
+  TS7 typecheck passes.
+- Native callback verification now passes the receiver assertion and nested
+  callback mutation, then fails later at `exerciseThrow` (returns -2, expected
+  1). Host callback construction rejection is a separate remaining defect,
+  also reproduced by the JavaScript-only bridge probe. The native test is
+  terminal (0/1 overall); do not report it as passing.
 
 ### 2026-09-30: string-handle lookup verification
 
