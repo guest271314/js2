@@ -143,6 +143,7 @@ import { canBuildSpreadArgList, isTupleStructType } from "./spread-arg-list.js";
 import { compileArrayPushSpread } from "./array-push-spread.js"; // (#5361)
 import { taDynDetachedGuardPrologue } from "./ta-dyn-method-call.js"; // (#6651 E6) join/toLocaleString
 import { reserveNumberToLocaleString } from "./to-locale-string-element.js"; // (#6651 TA1) numeric element Invoke
+import { reserveBoolToLocaleString } from "./bool-to-locale-string.js"; // (#6771 S6) boolean element Invoke
 
 // (#3264) Array.prototype-borrow subsystem extracted to array-prototype-borrow.ts;
 // re-export the two public entries so existing importers keep resolving.
@@ -5879,7 +5880,15 @@ function compileArrayJoinNative(
     { op: "local.get", index: iTmp },
     { op: getOp, typeIdx: arrTypeIdx },
   ];
-  if (elemIsBoolean) {
+  const localizedBoolIdx =
+    elemIsBoolean && isLocalizedJoin(propAccess) ? reserveBoolToLocaleString(ctx, fctx, propAccess) : undefined; // (#6771 S6)
+  if (localizedBoolIdx !== undefined) {
+    elemToStr.push(
+      { op: "call", funcIdx: localizedBoolIdx },
+      { op: "any.convert_extern" },
+      { op: "ref.cast", typeIdx: anyStrTypeIdx },
+    );
+  } else if (elemIsBoolean) {
     // #2105: i32 element on the stack → native "true"/"false" string, then
     // cast up to ref $AnyString for the concat loop (NativeString <: AnyString).
     elemToStr.push({

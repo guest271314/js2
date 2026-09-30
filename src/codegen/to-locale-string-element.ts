@@ -116,7 +116,7 @@ export const TA_TO_LOCALE_STRING = "__ta_to_locale_string";
 const ELEMENT_METHOD = "toLocaleString";
 
 /** §7.1.17 ToString, the native every arm of every element tail ends in. */
-const TO_STRING = "__extern_toString";
+export const TO_STRING = "__extern_toString";
 
 /**
  * The gates shared by both reserves.
@@ -220,7 +220,7 @@ export function reserveTaToLocaleString(
  * Both fills ALWAYS write a valid body, so this is a construction placeholder
  * and never a reachable trap.
  */
-function reservePlaceholder(ctx: CodegenContext, name: string, params: ValType[], typeName: string): number {
+export function reservePlaceholder(ctx: CodegenContext, name: string, params: ValType[], typeName: string): number {
   const typeIdx = addFuncType(ctx, params, [{ kind: "externref" }], typeName);
   const funcIdx = mintDefinedFunc(ctx);
   const placeholder: WasmFunction = {
@@ -236,7 +236,7 @@ function reservePlaceholder(ctx: CodegenContext, name: string, params: ValType[]
 }
 
 /** A minimal FunctionContext: these bodies are BUILT, never compiled. */
-function makeHelperFctx(name: string, paramName: string, paramType: ValType): FunctionContext {
+export function makeHelperFctx(name: string, paramName: string, paramType: ValType): FunctionContext {
   return {
     name,
     params: [{ name: paramName, type: paramType }],
@@ -466,7 +466,7 @@ export function fillTaToLocaleString(ctx: CodegenContext): void {
 }
 
 /** The reserved function record, or `undefined` when it is not there to fill. */
-function reservedFunc(ctx: CodegenContext, name: string): WasmFunction | undefined {
+export function reservedFunc(ctx: CodegenContext, name: string): WasmFunction | undefined {
   const funcIdx = ctx.funcMap.get(name);
   if (funcIdx === undefined) return undefined;
   return definedFuncAt(ctx, funcIdx) ?? undefined;

@@ -451,6 +451,7 @@ import {
 } from "./reflect-construct-native.js";
 import { fillArrayToPrimitive } from "./array-to-primitive.js";
 import { fillNumberToLocaleString, fillTaToLocaleString } from "./to-locale-string-element.js"; // (#6651 TA1)
+import { fillBoolToLocaleString } from "./bool-to-locale-string.js"; // (#6771 S6)
 import { fillVecOwnToPrimitive } from "./vec-own-to-primitive.js"; // (#6651 E3)
 import { brandedI32ResultBoxIdx, fillClassToPrimitive } from "./class-to-primitive.js";
 import {
@@ -6877,6 +6878,7 @@ export function generateModule(
     // hit is only known to be a USER value once the native-proto seeder registry
     // is final — see num-to-locale-string.ts.
     fillNumberToLocaleString(ctx);
+    fillBoolToLocaleString(ctx); // (#6771 S6)
     fillTaToLocaleString(ctx);
 
     // #1504: emit __is_closure(externref) -> i32 so the JS-side wrapExports
@@ -11634,6 +11636,7 @@ export function generateMultiModule(multiAst: MultiTypedAST, options?: CodegenOp
     profilePhase("fill-class-to-primitive", () => fillClassToPrimitive(ctx));
     // (#6651 TA1) Same reserve/fill reason as the three above.
     profilePhase("fill-num-to-locale-string", () => fillNumberToLocaleString(ctx));
+    profilePhase("fill-bool-to-locale-string", () => fillBoolToLocaleString(ctx)); // (#6771 S6)
     profilePhase("fill-ta-to-locale-string", () => fillTaToLocaleString(ctx));
 
     // (#3981) Same class of multi-file gap as the two fills immediately above.

@@ -73,6 +73,10 @@ loc-budget-allow:
   - src/codegen/index.ts
   - src/codegen/proxy-trap-closure-return.ts
   - src/codegen/array-length-holes.ts
+  # S6: `typeof this` must not fold to "object" in strict code whose `this`
+  # TypeScript types as a primitive wrapper (one guard + its import; the
+  # predicate lives in bool-to-locale-string.ts).
+  - src/codegen/typeof-delete.ts
 func-budget-allow:
   # 2026-09-30 (#6771 plan): each gains one arm / one guard / one route.
   - src/codegen/array-methods.ts::setupArrayLoop
@@ -100,6 +104,7 @@ func-budget-allow:
   - src/codegen/index.ts::generateModule
   - src/codegen/index.ts::generateMultiModule
   - src/codegen/binary-ops-in.ts::compileInOperator
+  - src/codegen/typeof-delete.ts::compileTypeofExpression
 coercion-sites-allow:
   # 2026-09-30 (#6771 implementation, Opus): ToString(k) of an integral array
   # index — the canonical key spelling every array-like arm uses (the `$Object`
