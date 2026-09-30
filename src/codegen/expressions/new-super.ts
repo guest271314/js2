@@ -4098,7 +4098,8 @@ function tryCompileNativeConstructFromValue(
     noJsHost(ctx) &&
     (((ts.isPropertyAccessExpression(calleeExpr) || ts.isElementAccessExpression(calleeExpr)) &&
       resolvesToDynamicAnyCtorValue(ctx, calleeExpr)) ||
-      isValueSelectingNewCallee(calleeExpr));
+      isValueSelectingNewCallee(calleeExpr) ||
+      ts.isTaggedTemplateExpression(calleeExpr)); // (#6774 S3) `new tag\`x\``: the tag call's result
   if (!ts.isIdentifier(calleeExpr) && !runtimeEvalCallableResult && !dynamicCtorValue) return undefined;
   // A compiled fnctor for this binding means the typed-struct path owns it.
   if (ts.isIdentifier(calleeExpr) && ctx.funcConstructorMap.has(calleeExpr.text)) return undefined;
@@ -7237,7 +7238,15 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     const exprType = ctx.checker.getTypeAtLocation(unwrappedNonId);
     const constructSigs = ctx.checker.getSignaturesOfType(exprType, ts.SignatureKind.Construct);
     const callSigs = ctx.checker.getSignaturesOfType(exprType, ts.SignatureKind.Call);
-    if (unwrappedNonId.kind !== ts.SyntaxKind.ThisKeyword && callSigs.length > 0 && constructSigs.length === 0) {
+    // (#6774 S3) A tag call's RESULT is a runtime value; the construct driver
+    // performs the IsConstructor check (JS function values have [[Construct]]).
+    const tagResult = noJsHost(ctx) && ts.isTaggedTemplateExpression(unwrappedNonId);
+    if (
+      !tagResult &&
+      unwrappedNonId.kind !== ts.SyntaxKind.ThisKeyword &&
+      callSigs.length > 0 &&
+      constructSigs.length === 0
+    ) {
       // #1528: real TypeError instance — spec requires `Construct(F)` to throw
       // `TypeError("F is not a constructor")` when F has no [[Construct]].
       return emitStaticNotAConstructorThrow(ctx, fctx, []);
@@ -7703,7 +7712,8 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     (noJsHost(ctx) &&
       (ts.isPropertyAccessExpression(expr.expression) || ts.isElementAccessExpression(expr.expression)) &&
       resolvesToDynamicAnyCtorValue(ctx, expr.expression)) ||
-    isValueSelectingNewSite(ctx, expr.expression, className) // (#6738)
+    isValueSelectingNewSite(ctx, expr.expression, className) || // (#6738)
+    (noJsHost(ctx) && ts.isTaggedTemplateExpression(expr.expression)) // (#6774 S3)
   ) {
     const nativeCtor = tryCompileNativeConstructFromValue(ctx, fctx, expr.expression, expr.arguments ?? []);
     if (nativeCtor) return nativeCtor;
