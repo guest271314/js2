@@ -323,7 +323,13 @@ second array/string MOP inside the proxy runtime.
 
 ### 2026-09-30 — #6766 implementation (Opus)
 
-Branch `issue-6766-proxy-proto-link`, merged with `origin/main` @ `d0e6abb8`.
+Branch `issue-6766-proxy-proto-link`, merged with `origin/main` @ `d0e6abb8`
+(every table below), then again @ `54a85ebd`: on that tree typecheck, all
+gates, the pin file plus `issue-1898`/`issue-1837` (19/19) and the 21 core +
+measure rows were re-run — identical verdicts (10 pass: core 6, measure 4).
+The 643-row control was measured on the `d0e6abb8` merge only; the
+`d0e6abb8..54a85ebd` delta touches no file this branch changes (the new
+String-exotic descriptor bodies belong to the unwired native-backend layout).
 All runs standalone, `--isolate`, serialized under the shared lock.
 
 **Result.** Core **6/10** (base 0/10), measure **4/11** (base 1/11), probes
