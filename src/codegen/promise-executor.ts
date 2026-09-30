@@ -58,6 +58,7 @@ import {
   buildPromiseSettleClosureInstrs,
   isStandalonePromiseActive,
 } from "./async-scheduler.js";
+import { buildSettlePairUnresolvedInstrs } from "../runtime/wasmgc/promise/resolution-bodies.js"; // (#5197 r3)
 
 /**
  * #2959 — Emit the native standalone `new Promise(executor)` lowering.
@@ -201,10 +202,22 @@ export function emitStandalonePromiseFromExecutor(
         payloadType: { kind: "externref" },
         body: [
           { op: "local.set", index: reasonLocal },
-          { op: "local.get", index: pLocal },
-          { op: "local.get", index: reasonLocal },
-          { op: "call", funcIdx: rejectFuncIdx },
-          { op: "drop" },
+          // (#5197 r3) [[AlreadyResolved]]: a throw after resolve/reject ran is ignored.
+          ...buildSettlePairUnresolvedInstrs(
+            closures.capTypeIdx,
+            [{ op: "local.get", index: rvLocal }],
+            [{ op: "local.get", index: rjLocal }],
+          ),
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: pLocal },
+              { op: "local.get", index: reasonLocal },
+              { op: "call", funcIdx: rejectFuncIdx },
+              { op: "drop" },
+            ],
+          },
         ],
       },
     ]),
@@ -347,10 +360,22 @@ export function emitStandalonePromiseFromExecutorValue(
         payloadType: { kind: "externref" },
         body: [
           { op: "local.set", index: reasonLocal },
-          { op: "local.get", index: pLocal },
-          { op: "local.get", index: reasonLocal },
-          { op: "call", funcIdx: rejectFuncIdx },
-          { op: "drop" },
+          // (#5197 r3) [[AlreadyResolved]]: a throw after resolve/reject ran is ignored.
+          ...buildSettlePairUnresolvedInstrs(
+            closures.capTypeIdx,
+            [{ op: "local.get", index: rvLocal }],
+            [{ op: "local.get", index: rjLocal }],
+          ),
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: pLocal },
+              { op: "local.get", index: reasonLocal },
+              { op: "call", funcIdx: rejectFuncIdx },
+              { op: "drop" },
+            ],
+          },
         ],
       },
     ]),
