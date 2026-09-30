@@ -31,6 +31,19 @@ loc-budget-allow:
   - src/codegen/literals.ts
   - src/codegen/context/types.ts
   - scripts/compiler-boundaries.json
+func-budget-allow:
+  # 2026-09-30 (#6766 implementation): wiring only — the heavy bodies live in
+  # the new leaf object-runtime-proxy-chain.ts. buildObjectPrototypeHelpers
+  # gains the link-native registration + the canonicalize / getPrototypeOf /
+  # SameValue hooks; ensureObjectRuntime gains the `protoLink` field, the
+  # own-write registration gate, the reserved set-walk hooks and the arm fill
+  # call; fillDynamicProtoHelpers gains the one `protoLink` null its sentinel
+  # `struct.new $Object` needs; ensureProxyRuntime gains the 3-argument
+  # [[Set]] dispatch's call into the leaf's receiver-observable forward.
+  - src/codegen/object-runtime-proxy.ts::ensureProxyRuntime
+  - src/codegen/object-runtime-prototype.ts::buildObjectPrototypeHelpers
+  - src/codegen/object-runtime.ts::ensureObjectRuntime
+  - src/codegen/dynamic-proto.ts::fillDynamicProtoHelpers
 ---
 
 ## Problem
