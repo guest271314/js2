@@ -4251,6 +4251,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         boxSymbolIdx,
         applyClosureIdx,
         defaultHint: stringExtern("default"),
+        defaultHintNative: nativeStringLiteralInstrs(ctx, "default"),
         errors: [
           stringExtern(typeErrorMessage),
           stringExtern(typeErrorMessage),

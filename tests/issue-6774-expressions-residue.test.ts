@@ -73,6 +73,42 @@ obj = { ['__proto__']: null }; if (obj.__proto__ === null) bits |= 16;`,
     expected: 7,
     body: `var hits = 0; function F() { if ((_ => new.target)() !== undefined) hits++; this.af = _ => (new.target ? 1 : 2); } F(); var o = new F(); if (hits === 1) bits |= 1; if (o.af() === 1) bits |= 2; var gnt; var g = function () { gnt = new.target; }; new g(); if (sv(gnt, g)) { g(); if (sv(gnt, undefined)) bits |= 4; }`,
   },
+  {
+    name: "c3_obj_eval_dot_elem",
+    step: "S5",
+    expected: 3,
+    body: `var proto = { fromA: "a" }; var o = { fromA: "c", m() { return eval("super.fromA;"); }, n() { return eval('super["fromA"];'); } }; Object.setPrototypeOf(o, proto); if (sv(o.m(), "a")) bits |= 1; if (sv(o.n(), "a")) bits |= 2;`,
+  },
+  {
+    name: "c3_cls_eval",
+    step: "S5",
+    expected: 1,
+    body: `class A {} class B extends A {} class C extends B { method() { return eval("super.fromA;"); } } A.prototype.fromA = "a"; C.prototype.fromA = "c"; if (sv(C.prototype.method(), "a")) bits |= 1;`,
+  },
+  {
+    name: "symbol_through_untyped_param",
+    step: "S6",
+    expected: 7,
+    body: `var s1 = Symbol(), s2 = Symbol(); if (typeof ID(s2) === "symbol") bits |= 1; var o = { a: "A", [s1]: "B", [ID(s2)]: "D" }; if (sv(o[s2], "D")) bits |= 2; if (Object.getOwnPropertySymbols(o).length === 2) bits |= 4;`,
+  },
+  {
+    name: "numeric_key_mix_element_call",
+    step: "S6",
+    expected: 3,
+    body: `var o = { a() { return "A"; }, [1]() { return "B"; }, [ID(2)]() { return "D"; } }; if (sv(o.a(), "A")) bits |= 1; if (sv(o[1](), "B")) bits |= 2;`,
+  },
+  {
+    name: "static_symbol_methods_own_symbols",
+    step: "S6",
+    expected: 3,
+    body: `var s1 = Symbol(), s2 = Symbol(); class C { static a() {} static [s1]() { return 1; } static [ID(s2)]() { return 2; } } var syms = Object.getOwnPropertySymbols(C); if (syms.length === 2 && syms[0] === s1 && syms[1] === s2) bits |= 1; if (C[s2]() === 2) bits |= 2;`,
+  },
+  {
+    name: "template_object_frozen",
+    step: "S13",
+    expected: 3,
+    body: `var t = null; (function (p) { t = p; })\`a\`; try { t.x = 1; } catch (e) { if (e instanceof TypeError) bits |= 1; } if (Object.isFrozen(t) && Object.isFrozen(t.raw)) bits |= 2;`,
+  },
 ];
 
 describe("#6774 ES2015 standalone expressions residue", () => {
