@@ -60,6 +60,14 @@ func-budget-allow:
   # logic itself lives in two new module-level helpers, so the fill grows by
   # exactly that call line.
   - src/codegen/closed-method-dispatch.ts::fillClosedMethodDispatch
+  # 2026-09-30 (#6769 implementation): three growths #6651's broad grant covers
+  # today, restated here so they do not strand if that file leaves the
+  # change-set — the S9 detached guard in the 0-arg `toLocaleString` path
+  # (+10), the S7d `%TypedArray%` construct throw after the buffer-arg dyn
+  # construct (+3), and the S10 ArrayBuffer `[[Prototype]]` arm's call (+1).
+  - src/codegen/expressions/call-receiver-method.ts::compileReceiverMethodCall
+  - src/codegen/expressions/new-super.ts::compileNewExpression
+  - src/codegen/ta-dyn-mop.ts::fillTaDynViewMopArms
 coercion-sites-allow:
   # 2026-09-30 (#6769 S4, implementation): the live-receiver `filter` producer
   # applies §7.1.2 ToBoolean to the predicate result through the existing native

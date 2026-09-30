@@ -10,7 +10,7 @@
 //
 // WHICH PINS HAVE TEETH. Every probe case FAILS on the base sources (the
 // before-state is recorded in the issue file); the three guards at the bottom
-// answer the same on both trees. Two probes carry a MASK: the bits it excludes
+// answer the same on both trees. Three probes carry a MASK: the bits it excludes
 // are recorded residuals with their mechanism named in the issue file, and the
 // mask keeps the pin honest about exactly what this change delivers.
 import { describe, expect, it } from "vitest";
@@ -170,7 +170,7 @@ export function readResult() { return __r; }
   },
   {
     name: "p5c",
-    what: "S7 — %TypedArray% / %TypedArray%.prototype receivers (bits 8/16, the bare @@toStringTag getter call, are a recorded residual)",
+    what: "S7 — %TypedArray% / %TypedArray%.prototype receivers (bits 8/16 — a getter read off a descriptor binding that was ASSIGNED, not initialised — are a recorded residual)",
     expected: 1397581,
     mask: 2097127,
     source: `// p5c — every statement of the invoked-as rows, individually try-wrapped
@@ -290,6 +290,35 @@ body(Float64Array);
 var ok2 = 0;
 [false, "", 0, -0, NaN, undefined, null].forEach(function(val) { var r = [1, 2, 3].filter(function() { return val; }); if (r.length === 0) ok2++; });
 if (ok2 === 7) __r |= 2;
+export function readResult() { return __r; }
+`,
+  },
+  {
+    name: "s7c",
+    what: "S7c — a direct call of a binding holding a descriptor's accessor reaches the accessor (built-in and user getters; a missing getter still throws TypeError)",
+    expected: 674121,
+    mask: null,
+    source: `// s7c — \`var g = Object.getOwnPropertyDescriptor(o, k).get; g()\` (the test262 invoked-as-func idiom)
+var __r = 0;
+var TypedArray = Object.getPrototypeOf(Int8Array);
+var TAP = TypedArray.prototype;
+var tagGetter = Object.getOwnPropertyDescriptor(TAP, Symbol.toStringTag).get;
+try { if (tagGetter() === undefined) __r |= 1; } catch (e) { __r |= 2; }
+var lenGetter = Object.getOwnPropertyDescriptor(TAP, "length").get;
+try { lenGetter(); __r |= 4; } catch (e) { if (e instanceof TypeError) __r |= 8; else __r |= 16; }
+var bufGetter = Object.getOwnPropertyDescriptor(TAP, "buffer").get;
+try { bufGetter(); __r |= 32; } catch (e) { if (e instanceof TypeError) __r |= 64; else __r |= 128; }
+var userGetter = Object.getOwnPropertyDescriptor({ get x() { return 5; } }, "x").get;
+try { if (userGetter() === 5) __r |= 256; } catch (e) { __r |= 512; }
+var noGetter = Object.getOwnPropertyDescriptor({ x: 1 }, "x").get;
+try { noGetter(); __r |= 1024; } catch (e) { if (e instanceof TypeError) __r |= 2048; else __r |= 4096; }
+var abGetter = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength").get;
+try { abGetter(); __r |= 8192; } catch (e) { if (e instanceof TypeError) __r |= 16384; else __r |= 32768; }
+var dvGetter = Object.getOwnPropertyDescriptor(DataView.prototype, "byteOffset").get;
+try { dvGetter(); __r |= 65536; } catch (e) { if (e instanceof TypeError) __r |= 131072; else __r |= 262144; }
+var d2 = Object.getOwnPropertyDescriptor(TAP, Symbol.toStringTag);
+var g2 = d2.get;
+try { if (g2() === undefined) __r |= 524288; } catch (e) { __r |= 1048576; }
 export function readResult() { return __r; }
 `,
   },
