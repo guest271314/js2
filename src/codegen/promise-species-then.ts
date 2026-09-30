@@ -35,6 +35,7 @@
  *   the spec (the native derived promise settles first, then forwards). No row
  *   observes that hop.
  */
+import { ts } from "../ts-api.js";
 import type { Instr, ValType } from "../ir/types.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { allocLocal } from "./context/locals.js";
@@ -517,6 +518,29 @@ export function arrayThenObservable(ctx: CodegenContext): boolean {
 export function aggregateSettleFuncIdx(ctx: CodegenContext, fulfillFuncIdx: number): number {
   const resolveValue = ctx.funcMap.get("__promise_resolve_value");
   return arrayThenObservable(ctx) && resolveValue !== undefined ? resolveValue : fulfillFuncIdx;
+}
+
+/**
+ * (#5197 r3 Step 7) Is `handler` a `.then` / `.catch` callback on a syntactic
+ * `Promise.{all,allSettled,any}(<not an array literal>)`? Such an aggregate is the
+ * combinator's externref `$Vec` — a drained iterable (a string, an `any`) is never
+ * the element-typed vec TS infers for the handler's parameter (`string[]`), so a
+ * typed parameter would `ref.cast`-trap in the reaction wrapper. The caller compiles
+ * the handler with array/vec parameters widened to externref (the existing
+ * `forceExternrefCallbackParams` hook), read through the dynamic vec reader.
+ */
+export function isDrainedCombinatorResultHandler(ctx: CodegenContext, handler: ts.Expression): boolean {
+  if (ctx.standalone !== true) return false;
+  const call = handler.parent;
+  if (!call || !ts.isCallExpression(call) || !ts.isPropertyAccessExpression(call.expression)) return false;
+  const receiver = call.expression.expression;
+  if (!ts.isCallExpression(receiver) || !ts.isPropertyAccessExpression(receiver.expression)) return false;
+  const ns = receiver.expression.expression;
+  const method = receiver.expression.name.text;
+  if (!ts.isIdentifier(ns) || ns.text !== "Promise") return false;
+  if (method !== "all" && method !== "allSettled" && method !== "any") return false;
+  const iterable = receiver.arguments[0];
+  return iterable !== undefined && !ts.isArrayLiteralExpression(iterable);
 }
 
 /** Reserve `__promise_species_of_class` (placeholder: "not a class" = null); filled at finalize. */
