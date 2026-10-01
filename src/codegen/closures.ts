@@ -231,6 +231,7 @@ import {
   ensureFuncClosureSingleton,
   emitCachedFuncClosureAccess,
 } from "./closures/method-trampolines.js";
+import { readEnv } from "../env.js";
 export {
   emitObjectMethodAsClosure,
   finalizeMethodTrampolines,
@@ -3473,7 +3474,7 @@ function reportClosureFrameBreach(
   };
   walk(liftedFctx.body);
   if (worst < 0) return;
-  if (process.env?.JS2WASM_FRAME_OPS) {
+  if (readEnv("JS2WASM_FRAME_OPS")) {
     const flat: string[] = [];
     const dump = (instrs: readonly Instr[], depth: number): void => {
       for (const instr of instrs) {
@@ -3518,7 +3519,7 @@ function reportClosureFrameBreach(
  * Consumed by `scripts/profile-buckets.mjs`.
  */
 function reportClosureNameMap(arrow: ts.ArrowFunction | ts.FunctionExpression, closureName: string): void {
-  if (typeof process === "undefined" || !process.env?.JS2WASM_CLOSURE_NAME_MAP) return;
+  if (typeof process === "undefined" || !readEnv("JS2WASM_CLOSURE_NAME_MAP")) return;
   let label = ts.isFunctionExpression(arrow) && arrow.name ? arrow.name.text : "";
   if (!label) {
     const parent = arrow.parent;
@@ -3780,7 +3781,7 @@ export function compileArrowAsClosure(
   // together with the offending source text. The end-of-codegen checker can only
   // say which function is broken; this says which ARROW produced it, which is
   // the last link needed to reduce a fixture. Inert unless set.
-  if (typeof process !== "undefined" && process.env?.JS2WASM_CHECK_FRAMES) {
+  if (typeof process !== "undefined" && readEnv("JS2WASM_CHECK_FRAMES")) {
     reportClosureFrameBreach(ctx, arrow, closureName, liftedFuncTypeIdx, liftedFctx);
   }
   pushProgramAbiNestedCallable(ctx, arrow, liftedFuncIdx, {
@@ -4794,7 +4795,7 @@ export function compileArrowAsCallback(
         }
       } else {
         // Immutable capture or already-boxed: push directly
-        if (process.env?.JS2WASM_FRAME_OPS) {
+        if (readEnv("JS2WASM_FRAME_OPS")) {
           const liveFrame = fctx.params.length + fctx.locals.length;
           if (cap.localIdx >= liveFrame) {
             process.stderr.write(

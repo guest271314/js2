@@ -173,6 +173,7 @@ function isDeclaredOracleHeterogeneousPrimitiveUnion(ctx: CodegenContext, expr: 
   return declaration !== undefined && isOracleHeterogeneousPrimitiveUnion(ctx.oracle.typeFactOf(declaration));
 }
 import { compileModulo } from "./remainder.js";
+import { readEnv } from "../env.js";
 export { emitModulo } from "./remainder.js";
 
 // ── Binary operations ─────────────────────────────────────────────────
@@ -1549,7 +1550,7 @@ export function compileBinaryExpression(
     isNumberType(leftTsType) &&
     isNumberType(rightTsType) &&
     (isNeverUndefinedNumber(fctx, expr.left) || isNeverUndefinedNumber(fctx, expr.right)) &&
-    process.env.JS2WASM_STATIC_NUMBER_EQ !== "0";
+    readEnv("JS2WASM_STATIC_NUMBER_EQ") !== "0";
 
   // (#1961) In nativeStrings mode a `string | undefined` / `string | null`
   // operand (e.g. `"x".at(i)`, optional chains/params) lowers to a NULLABLE
