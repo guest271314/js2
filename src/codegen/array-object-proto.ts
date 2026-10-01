@@ -146,6 +146,7 @@ import { emitSymbolProtoValueOfBody } from "./symbol-proto-valueof.js";
 import { emitSymbolProtoToStringBody } from "./symbol-proto-tostring.js"; // (#4776)
 import { emitNumberProtoFormatBody } from "./number-proto-format.js";
 import { emitDateProtoToPrimitiveBody } from "./date-proto-to-primitive.js"; // (#5156)
+import { emitDateProtoToJsonBody } from "./date-proto-to-json.js"; // (#6775 S8)
 import { ensureSymbolCarrier, usesNativeSymbolProvider } from "./symbol-native.js";
 import {
   emitStandalonePromiseFinally,
@@ -2679,6 +2680,7 @@ function makeGlue(
       // (#5156, §21.4.4.45) `Date.prototype[Symbol.toPrimitive]` — the one
       // builtin whose ToPrimitive prefers `toString` under the "default" hint.
       (name === "Date" && member === "@@3" ? emitDateProtoToPrimitiveBody(c, fctx) : null) ??
+      (name === "Date" && member === "toJSON" ? emitDateProtoToJsonBody(c, fctx) : null) ?? // (#6775 S8)
       // ES2015 §20.5.3.4 — Error.prototype.toString is inherited by each
       // NativeError prototype, so all of those glues share the same ordered
       // property-read and Symbol-rejecting body.

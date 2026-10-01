@@ -96,6 +96,69 @@ const PROBES: { name: string; what: string; expected: number; source: string }[]
     source:
       "var __r = 0;\ntry { if (Object(Symbol.toPrimitive)[Symbol.toPrimitive]() === Symbol.toPrimitive) __r |= 1; } catch (e) { __r |= 2; }\ntry { if (Symbol.toPrimitive[Symbol.toPrimitive]() === Symbol.toPrimitive) __r |= 4; } catch (e) { __r |= 8; }\ntry { var s = Symbol('x'); if (s[Symbol.toPrimitive]() === s) __r |= 16; } catch (e) { __r |= 32; }\ntry { var w = Object(Symbol.iterator); if (w[Symbol.toPrimitive]() === Symbol.iterator) __r |= 64; } catch (e) { __r |= 128; }\ntry { var s3 = Symbol('y'); if (s3.toString() === 'Symbol(y)') __r |= 256; if (s3.valueOf() === s3) __r |= 512; } catch (e) { __r |= 1024; }\ntry { if (Symbol.iterator.description === 'Symbol.iterator') __r |= 2048; } catch (e) { __r |= 4096; }\nexport function readResult() { return __r; }\n",
   },
+  {
+    name: "s6a",
+    what: "S6 \u2014 ArrayBuffer.prototype.slice.call(x) brand-checks the receiver and slices a real buffer",
+    expected: 511,
+    source:
+      'var __r = 0;\nfunction t(f, bit) { try { f(); } catch (e) { if (e instanceof TypeError) __r |= bit; } }\nt(function () { ArrayBuffer.prototype.slice.call({}); }, 1);\nt(function () { ArrayBuffer.prototype.slice.call([]); }, 2);\nt(function () { ArrayBuffer.prototype.slice.call(undefined); }, 4);\nt(function () { ArrayBuffer.prototype.slice.call(null); }, 8);\nt(function () { ArrayBuffer.prototype.slice.call(true); }, 16);\nt(function () { ArrayBuffer.prototype.slice.call(""); }, 32);\nt(function () { ArrayBuffer.prototype.slice.call(Symbol()); }, 64);\nt(function () { ArrayBuffer.prototype.slice.call(1); }, 128);\nif (ArrayBuffer.prototype.slice.call(new ArrayBuffer(4), 1).byteLength === 3) __r |= 256;\nexport function readResult() { return __r; }\n',
+  },
+  {
+    name: "s6b",
+    what: "S6 \u2014 getPrototypeOf(<ArrayBuffer>) / slice species lanes answer ArrayBuffer.prototype; NT.prototype non-object falls back",
+    expected: 1023,
+    source:
+      "var __r = 0;\nfunction t(bit, f) { try { if (f()) __r |= bit; } catch (e) { __r |= bit * 4096; } }\nt(1, function () { var ab = new ArrayBuffer(8); return Object.getPrototypeOf(ab) === ArrayBuffer.prototype; });\nt(2, function () { var ab = new ArrayBuffer(8); var s = ab.slice(); return Object.getPrototypeOf(s) === ArrayBuffer.prototype; });\nt(4, function () { var ab = new ArrayBuffer(8); return Object.getPrototypeOf(ab.slice(1)) === ArrayBuffer.prototype; });\nt(8, function () { var sc = {}; sc[Symbol.species] = undefined; var a2 = new ArrayBuffer(8); a2.constructor = sc; return Object.getPrototypeOf(a2.slice()) === ArrayBuffer.prototype; });\nt(16, function () { var a3 = new ArrayBuffer(8); a3.constructor = undefined; return Object.getPrototypeOf(a3.slice()) === ArrayBuffer.prototype; });\nfunction nt() {}\nt(32, function () { nt.prototype = undefined; var r1 = Reflect.construct(ArrayBuffer, [1], nt); return Object.getPrototypeOf(r1) === ArrayBuffer.prototype; });\nt(64, function () { nt.prototype = 1; var r1 = Reflect.construct(ArrayBuffer, [1], nt); return Object.getPrototypeOf(r1) === ArrayBuffer.prototype; });\nt(128, function () { var anyv = [new ArrayBuffer(2)][0]; return Object.getPrototypeOf(anyv) === ArrayBuffer.prototype; });\nt(256, function () { return new ArrayBuffer(2).slice() instanceof ArrayBuffer; });\nt(512, function () { return Object.getPrototypeOf(new Uint8Array(2)) === Uint8Array.prototype; });\nexport function readResult() { return __r; }\n",
+  },
+  {
+    name: "s6c",
+    what: "S6 \u2014 Reflect.construct(ArrayBuffer, [huge], NT) reads NT.prototype before allocating",
+    expected: 5,
+    source:
+      'var __r = 0;\nfunction DummyError() {}\nvar newTarget = function() {}.bind(null);\nvar calls = 0;\nObject.defineProperty(newTarget, "prototype", { get: function() { calls++; throw new DummyError(); } });\ntry { Reflect.construct(ArrayBuffer, [7 * 1125899906842624], newTarget); } catch (e) { if (e instanceof DummyError) __r |= 1; if (e instanceof RangeError) __r |= 2; }\nif (calls === 1) __r |= 4;\nexport function readResult() { return __r; }\n',
+  },
+  {
+    name: "s7a",
+    what: "S7 \u2014 dv.constructor walks %DataView.prototype% (not Object); getPrototypeOf(dv) identity",
+    expected: 993,
+    source:
+      'var __r = 0;\nvar dv = new DataView(new ArrayBuffer(8), 0);\nvar c = dv.constructor;\nif (c === DataView) __r |= 1;\nif (c === Object) __r |= 2;\nif (c === ArrayBuffer) __r |= 8;\nif (c === undefined) __r |= 16;\nif (typeof c === "function") __r |= 32;\nif (DataView.prototype.constructor === DataView) __r |= 64;\nif (Object.getPrototypeOf(dv) === DataView.prototype) __r |= 128;\nif (Object.getPrototypeOf(dv).constructor === DataView) __r |= 256;\nif (c === Object.getPrototypeOf(dv).constructor) __r |= 512;\nif (c === Array) __r |= 1024;\nexport function readResult() { return __r; }\n',
+  },
+  {
+    name: "s7b",
+    what: "S7 \u2014 a NewTarget.prototype getter that detaches the buffer makes Reflect.construct(DataView, \u2026) throw TypeError (node's 25 reflects the shim, which does not really detach)",
+    expected: 26,
+    source:
+      'var __r = 0;\nfunction $DETACHBUFFER(buf) { if (buf == null) { return; } buf.__detached__ = true; }\nvar buffer = new ArrayBuffer(8);\nvar called = false;\nvar byteOffset = { valueOf() { called = true; return 0; } };\nvar newTarget = function() {}.bind(null);\nObject.defineProperty(newTarget, "prototype", { get() { $DETACHBUFFER(buffer); return DataView.prototype; } });\ntry { Reflect.construct(DataView, [buffer, byteOffset], newTarget); __r |= 1; } catch (e) { if (e instanceof TypeError) __r |= 2; else __r |= 4; }\nif (called) __r |= 8;\nvar b2 = new ArrayBuffer(8);\nvar nt2 = function() {}.bind(null);\nObject.defineProperty(nt2, "prototype", { get() { return DataView.prototype; } });\ntry { var d2 = Reflect.construct(DataView, [b2, 2], nt2); if (d2.byteLength === 6) __r |= 16; } catch (e) { __r |= 32; }\nexport function readResult() { return __r; }\n',
+  },
+  {
+    name: "s8a",
+    what: "S8 \u2014 Date.prototype.toJSON generic body: ToObject throw, ToPrimitive(number), non-finite \u2192 null, Invoke toISOString",
+    expected: 127,
+    source:
+      "var __r = 0;\nvar toJSON = Date.prototype.toJSON;\nfunction t(bit, f) { try { if (f()) __r |= bit; } catch (e) { __r |= bit * 4096; } }\nt(1, function () { try { toJSON.call(undefined); return false; } catch (e) { return e instanceof TypeError; } });\nt(2, function () { try { toJSON.call(null); return false; } catch (e) { return e instanceof TypeError; } });\nNumber.prototype.toISOString = function () { return 'str'; };\nt(4, function () { return toJSON.call(10) === 'str'; });\nt(8, function () { return toJSON.call(NaN) === null; });\nt(16, function () { return toJSON.call({ valueOf: function () { return Infinity; }, toISOString: function () { return 1; } }) === null; });\nvar result = new Boolean(false);\nvar obj = { toISOString: function () { return result; } };\nvar cc = 0;\nobj[Symbol.toPrimitive] = function (h) { cc++; return 3.14; };\nt(32, function () { return Date.prototype.toJSON.call(obj) === result && cc === 1; });\nt(64, function () { return new Date(0).toJSON() === '1970-01-01T00:00:00.000Z'; });\nexport function readResult() { return __r; }\n",
+  },
+  {
+    name: "s8b",
+    what: "S8 \u2014 toJSON.call(Symbol()) invokes Symbol.prototype.toISOString on the wrapper",
+    expected: 1,
+    source:
+      "var __r = 0;\nvar toJSON = Date.prototype.toJSON;\nSymbol.prototype.toISOString = function () { return 10; };\nvar r;\ntry { r = toJSON.call(Symbol()); if (r === 10) __r |= 1; else if (r === null) __r |= 2; else if (r === undefined) __r |= 4; } catch (e) { __r |= 8; }\nexport function readResult() { return __r; }\n",
+  },
+  {
+    name: "s10",
+    what: "S10 \u2014 new C(msg) for an Error-family ctor held in a value builds a real error with its own message",
+    expected: 63,
+    source:
+      "var __r = 0;\nvar ctors = [EvalError, RangeError, ReferenceError, SyntaxError, TypeError, URIError];\nfor (var i = 0; i < ctors.length; i++) {\n  try {\n    var e = new ctors[i]('m');\n    if (e.message === 'm' && e.hasOwnProperty('message')) __r |= 1 << i;\n  } catch (x) { __r |= 4096 << i; }\n}\nexport function readResult() { return __r; }\n",
+  },
+  {
+    name: "s11",
+    what: "S11 \u2014 '<target> = yield' inside try/finally suspends into a spill; .return() skips the assignment",
+    expected: 15,
+    source:
+      "var __r = 0;\nvar obj = { foo: 'not modified' };\nfunction* g() { try { obj.foo = yield; } finally { return 1; } }\nvar iter = g();\niter.next();\nvar result = iter.return(45).value;\nif (obj.foo === 'not modified') __r |= 1;\nif (result === 1) __r |= 2;\nvar o2 = { a: 0, b: 0 };\nfunction* g2() { o2.a = yield; o2.b = yield 5; }\nvar it2 = g2(); it2.next(); it2.next(3); it2.next(4);\nif (o2.a === 3 && o2.b === 4) __r |= 4;\nvar o3 = { c: 0 };\nfunction* g3() { try { o3.c = yield; } finally { o3.d = 1; } }\nvar it3 = g3(); it3.next(); it3.next(7);\nif (o3.c === 7 && o3.d === 1) __r |= 8;\nexport function readResult() { return __r; }\n",
+  },
 ];
 
 describe("#6775 ES2015 standalone built-ins misc residue", () => {

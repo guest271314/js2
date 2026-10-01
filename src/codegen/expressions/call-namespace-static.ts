@@ -122,6 +122,7 @@ import {
   classifyRuntimeNewTargetSite,
   emitRuntimeNewTargetPrototype,
   prepareRuntimeNewTargetProto,
+  tryEmitArrayBufferNewTargetPreRead,
   tryEmitOrdinaryConstructWithNewTarget,
   tryEmitProxyConstructWithNewTarget,
 } from "./reflect-construct-newtarget.js"; // (#3371 r4)
@@ -2552,6 +2553,14 @@ export function compileNamespaceStaticCall(
           return { kind: "externref" };
         }
 
+        // (#6775 S6) ArrayBuffer reads NewTarget.prototype BEFORE allocating.
+        const abTarget = unwrapReflectConstructExpr(targetArg);
+        const abPreRead =
+          runtimeNewTargetProto &&
+          ts.isIdentifier(abTarget) &&
+          abTarget.text === "ArrayBuffer" &&
+          isGlobalBuiltinIdentifier(ctx, fctx, abTarget) &&
+          tryEmitArrayBufferNewTargetPreRead(ctx, fctx, unwrappedList.elements, ntValueLocal!);
         const newExpr = ts.factory.createNewExpression(targetArg, undefined, [
           ...unwrappedList.elements,
         ] as ts.Expression[]);
@@ -2563,7 +2572,7 @@ export function compileNamespaceStaticCall(
         }
         if (resultType.kind !== "externref") coerceType(ctx, fctx, resultType, externRef);
 
-        if (!distinctNewTarget) return { kind: "externref" };
+        if (!distinctNewTarget || abPreRead) return { kind: "externref" };
 
         if (refuseDistinctNewTarget) {
           // Verbatim the pre-r4 refusal, emitted at the pre-r4 point (after the

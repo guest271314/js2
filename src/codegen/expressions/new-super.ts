@@ -109,6 +109,7 @@ import { emitRuntimeEvalConstructOnNull } from "../runtime-eval-construct.js"; /
 import * as bcv from "../builtin-ctor-value-invoke.js"; // (#6713) RegExp / Error-family carriers as values
 import {
   emitBuiltinCollectionConstructOnNull,
+  tryEmitErrorFamilyValueConstruct,
   reserveBuiltinCollectionDynConstruct,
 } from "../builtin-collection-dyn-construct.js"; // (#6720)
 import { resolveDefaultExpressionImportGlobal } from "../default-expression-import-global.js";
@@ -8706,6 +8707,18 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     if (r !== undefined) return r;
   }
 
+  {
+    const r = tryEmitErrorFamilyValueConstruct(
+      ctx,
+      fctx,
+      className,
+      expr.expression,
+      expr.arguments ?? [],
+      (e) => compileExpression(ctx, fctx, e, { kind: "externref" }),
+      (t) => coerceType(ctx, fctx, t, { kind: "externref" }),
+    ); // (#6775 S10) `var C = nativeErrors[i]; new C(msg)`
+    if (r !== undefined) return r;
+  }
   reportError(ctx, expr, `Unsupported new expression for class: ${className}`);
   return null;
 }

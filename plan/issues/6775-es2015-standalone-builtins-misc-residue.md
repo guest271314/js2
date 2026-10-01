@@ -42,10 +42,33 @@ loc-budget-allow:
   # 2026-09-30 (#6775 S5, Opus): +6 — the one-line dispatch into the new
   # `expressions/to-primitive-method-call.ts` leaf (the arm body lives there).
   - src/codegen/expressions/calls-closures.ts
+  # 2026-10-01 (#6775 S6, Opus): the byte-vec `constructor` arm of
+  # `__extern_get`'s vec block (walks the buffer's [[Prototype]]).
+  - src/codegen/vec-constructor-carrier.ts
+  # 2026-10-01 (#6775 S7, Opus): +2 — one spread of the shared
+  # constructor-walk arm into the DataView-window `__extern_get` arm, + import.
+  - src/codegen/ta-dyn-mop.ts
+  # 2026-10-01 (#6775 S10, Opus): the Error-family arms of the identity
+  # construct helper + the `new C(msg)` value-construct fallback.
+  - src/codegen/builtin-collection-dyn-construct.ts
+  - src/codegen/builtin-static-globals.ts
+  # 2026-10-01 (#6775 S11, Opus): +48 — the `<target> = yield` statement arm
+  # (predicate + arm + spill typing) in the native generator planner.
+  - src/codegen/generators-native.ts
 func-budget-allow:
   # 2026-09-30 (#6775 S4, Opus): +8 — the JSON boolean box picks the real
   # `$__box_boolean_struct` when the module has it (two-arm literal).
   - src/codegen/json-codec-native.ts::emitJsonParseText
+  # 2026-10-01 (#6775 S6, Opus): +8 — the ArrayBuffer-target gate that hoists
+  # `Get(NT, "prototype")` before allocation (the body lives in
+  # reflect-construct-newtarget.ts::tryEmitArrayBufferNewTargetPreRead).
+  - src/codegen/expressions/call-namespace-static.ts::compileNamespaceStaticCall
+  # 2026-10-01 (#6775 S10, Opus): +12 — the Error-family value-construct
+  # fallback ahead of the terminal "Unsupported new expression" refusal.
+  - src/codegen/expressions/new-super.ts::compileNewExpression
+  # 2026-10-01 (#6775 S11, Opus): the `<target> = yield` arm (helper closure,
+  # spill typing) lives inside the planner's closure scope by construction.
+  - src/codegen/generators-native.ts::buildNativeGeneratorPlan
 ---
 
 ## Problem
