@@ -55,6 +55,7 @@ loc-budget-allow:
   - src/codegen/with-call-binding.ts
   - src/codegen/tagged-template-standalone.ts
   - src/codegen/computed-key-members.ts
+  - src/codegen/eval-spread-args.ts
   - scripts/compiler-boundaries.json
 func-budget-allow:
   # 2026-09-30 (#6774 plan): one-to-six-line call sites inside functions already
@@ -88,6 +89,9 @@ func-budget-allow:
   # 2026-09-30 (#6774 S11, Opus): the member-target default split + one call to
   # the new emitMemberTargetDefault helper.
   - src/codegen/expressions/assignment.ts::compileDestructuringAssignment
+  # 2026-10-01 (#6774 S18, Opus): a spread EXTRA argument of a folded eval is
+  # stepped (emitDiscardedSpreadArgument in the new leaf eval-spread-args.ts).
+  - src/codegen/expressions/eval-inline.ts::tryStaticEvalInline
 ---
 
 ## Problem

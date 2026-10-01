@@ -121,6 +121,18 @@ obj = { ['__proto__']: null }; if (obj.__proto__ === null) bits |= 16;`,
     expected: 3,
     body: `var holder = {}; var vals = { x: 23 }; ({ x: holder.y = 42 } = vals); if (holder.y === 23) bits |= 1; var got; ({ x: { set y(v) { got = v; } }.y = 42 } = vals); if (got === 23) bits |= 2;`,
   },
+  {
+    name: "strict_arrow_lexical_this_assigned",
+    step: "S16",
+    expected: 1,
+    body: `var c3 = 1; var h3 = function () { return () => { c3 = this; }; }; h3()(); if (c3 === undefined) bits |= 1;`,
+  },
+  {
+    name: "untyped_iife_tag_host_free",
+    step: "S17",
+    expected: 3,
+    body: `var calls = 0, seen; (function () { return function (site, n) { calls++; seen = n; }; })()\`a\${7}b\`; if (calls === 1) bits |= 1; if (seen === 7) bits |= 2;`,
+  },
 ];
 
 describe("#6774 ES2015 standalone expressions residue", () => {

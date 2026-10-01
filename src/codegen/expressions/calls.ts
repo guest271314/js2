@@ -4,6 +4,7 @@
  * property method calls, IIFEs, and conditional callees.
  */
 import { referencesOwnNewTarget } from "../new-target-value.js"; // (#6774 S4)
+import { tryCompileStandaloneEvalSpread } from "../eval-spread-args.js"; // (#6774 S18)
 import { ts, forEachChild } from "../../ts-api.js";
 import { widenJsDefaultGuessSlot, widenJsDefaultGuessSymbolSlot } from "../js-default-param-type-guess.js";
 import { profilePhase } from "../../compile-profile.js";
@@ -7852,6 +7853,8 @@ function compileCallExpression(
       if (rewritten !== undefined) return rewritten;
       const inlined = tryStaticEvalInline(ctx, fctx, expr, evalKind === "direct");
       if (inlined !== undefined) return inlined;
+      const spreadEval = tryCompileStandaloneEvalSpread(ctx, fctx, expr); // (#6774 S18)
+      if (spreadEval !== undefined) return spreadEval;
       // #2928/#2929 — direct eval adds live caller cells to indirect eval's global environment.
       const runtimeEval =
         evalKind === "direct"
