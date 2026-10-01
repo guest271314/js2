@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-10-01T03:18:08.600Z",
-  "baseline_generated_at": "2026-10-01T03:18:08.601Z",
-  "baseline_sha": "1265c47d6fc41300a380ef7e4abc45fdfcfd2c61",
+  "timestamp": "2026-10-01T10:11:35.023Z",
+  "baseline_generated_at": "2026-10-01T10:11:35.023Z",
+  "baseline_sha": "2030fafc70e46a135aec9c1efa372942d917b62c",
   "oracle_version": 14,
   "mode": {
     "target": "standalone",
@@ -1797,7 +1797,7 @@
           "test/language/statements/async-generator/yield-star-return-missing-value-is-awaited.js",
           "test/language/statements/for-of/head-using-fresh-binding-per-iteration.js",
           "test/language/statements/async-generator/generator-created-after-decl-inst.js",
-          "test/language/expressions/async-generator/yield-star-sync-next.js"
+          "test/language/expressions/class/elements/async-gen-private-method-static/yield-star-async-next.js"
         ],
         "sample_signatures": [
           "host_import_leak:standalone target emitted host imports: env::__create_async_generator, env::__gen_create_buffer, env::__gen_next, env::__gen_result_done, env::__gen_result_value, env::__gen_return, env::__gen_set_return, env::__gen_yield_star (##)",

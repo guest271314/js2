@@ -6,7 +6,7 @@ created: 2026-07-21
 updated: 2026-10-01
 priority: critical
 feasibility: hard
-reasoning_effort: high
+reasoning_effort: medium
 task_type: refactor
 area: ir, codegen, codegen-linear, compiler
 language_feature: compiler-internals
@@ -19053,3 +19053,26 @@ Pre-commit delivery evidence: canonical scoped claim63764-feehmtqm reverified, c
 The first full normal commit hook stopped at two test-only lints and made no commit. Sol6.1 Medium renamed the local `escape` binding and changed the deliberate sparse-array mutation to `Reflect.deleteProperty`, with explicit successful deletion, unchanged length and absent-own-index assertions. The control still creates a hole; assigning `undefined` was rejected as a semantics change. No production source or fixed receipt changed, and the existing39 verifier and63 policy rows remain the required rerun population. Original failure log, exit and exact before/after test hashes are preserved in `plan/log/3518-validation-lowering-b-2026-10-01/lint-repair-2026-10-01/`. Thirteen production pins stay byte-identical to the original Astra freeze; its original test pin remains immutable historical evidence, superseded only for this reviewed lint repair. Root owns actual validation and full-hook retry.
 
 Root rerun after the lint repair:102/102 affected controls pass (39 verifier,63 policy), zero skipped/unhandled errors; targeted TS7 of all nine new preservation paths exits0. Scoped Biome and Prettier pass. Production freeze hashes verified unchanged. Full normal commit hooks remain the next acceptance step.
+
+## 2026-10-01 — PR6378 quality blocker: fresh capture inside one historical proof
+
+Exact prerequisite head0e4638af fails quality job110246367505 in run36824281778: historical-runtime suite630/631; the explicit intermediate-view/overload/denominator positive test times out at the existing35000ms limit. Root local full suite631/631 passes (883772ms total), so this is runner-cost sensitivity, not permission to waive the failure. The single positive repeatedly invokes `readRuntimeContractReceiptSource` through global `read`, re-authenticating the entire27-source composition for each census/view.
+
+Bounded Sol6.1 Medium implementation plan: own only tests/issue-3518-historical-runtime-reconstruction.test.ts and only this existing positive test. Take one fresh `currentHistoricalRead()` at the start, pass it to the original positive and all existing read/view/census operands inside this same proof. That existing helper authenticates the full fixed population and falls back to raw current data for out-of-domain paths; retain it unchanged. Preserve every test row/name, expected hash/count/overload/shape and all630 remaining mutation controls. No module/global/cross-operation cache, retries, fallback, source/helper/receipt or timeout change. Root verifies the exact diff, runs selected before/after controls and full631 cohort, commits with normal hooks and updates existing PR6378 through the fork. No duplicate PR or gate bypass.
+
+Scoped canonical ownership verified: `3518:pr6378-historical-capture-20261001`, owner `ttraenkler/codex-pr6378-historical-capture-20261001`, branch `codex/3518-pr6378-historical-capture-20261001`, write_id `18840-to2baw11`. Sol6.1 Medium owns the one existing positive test only; root owns issue evidence, Git, all actual verification and existing-PR update.
+
+Root exact selected comparison on the unchanged Node25/Vitest single-fork harness: original positive passes1/1 in23419ms; Sol Medium repaired positive passes1/1 in859ms. Both intentionally leave630 unselected rows uncredited. All18 assertion expressions/41 literal values and the53251-byte outside-proof residue remain unchanged; existing35000ms timeout and every helper/receipt/mutation function are unchanged. Scoped Biome/Prettier pass. Full631 acceptance awaits the normal signed commit hook. Exact CI failure, original/current patch and selected runs are preserved in `plan/log/3518-pr6378-quality-capture-2026-10-01/`. User routing is now reflected in epic frontmatter: Sol6.1 default, high for this complex epic; Medium for this bounded repair, Astra for hard specs.
+
+
+## 2026-10-01 — delivered prerequisite and fresh Phase B integration
+
+The user confirms Astra writes implementation plans for hard tasks in plan/issues; Sol6.1 Medium is the default implementer. Raise effort only for a concrete unresolved difficulty. Historical model attribution remains unchanged. Legacy remains operational until all IR coverage, tests and behavioral equality are complete.
+
+Prerequisite PR6378, “refactor(ir): isolate canonical semantic contracts,” delivered exact signed head a5cf2e922e33beea974e42d032152596f05af271 as main merge2030fafc70e46a135aec9c1efa372942d917b62c. Full fresh PR178/178 path blob/mode/type comparisons match; exacthead is second parent. All102 actual queue Test262 shards (82standalone,20host), final regression and differential gates passed. The separate merge-group CI run/issue-tests was cancelled and remains uncredited; post-main benchmark validity and three memory failures are preserved, attribution unproved. Delivery of this prerequisite does not establish complete migration.
+
+Phase B branch codex/3518-validation-lowering-b-resume-20261001 starts at signed clean23ddb71a0ecfa3ef2bede4546e551321e66f34f6. Fresh canonicalmain a8955988411c197304f1897ae592c7bb606ac122 includes2030 and adds only benchmark reports and a LOC baseline update. Root integrated this exact main without committing; the sole conflict was this append-only issue. Both complete historical appendices are preserved. Thirteen production freeze pins are to be reverified; refreshed normal hooks/checks, signed commit and fork publication remain pending. No B/C1 delivery credit. Canonical scoped ownership remains3518:validation-lowering-phase-b-20261001/write63764-feehmtqm.
+
+Root integration preflight: all13 original production pins remain exact after main merge; the only refreshed root test is the already-delivered historical-runtime proof. Normal merge commit hooks use CHANGED_ROOT_TESTS_BASE=exact signed B parent23ddb71a to select that complete631-row cohort, retaining earlier2430/2430 B acceptance and unchanged receipts. No hook bypass or changed detector threshold. Newmain benchmark/baseline changes and issue appendices preserved; signing and publication remain pending.
+
+Independent production continuation: Sol6.1 Medium runtime-definition checkpointV2 now passes configuredfocusedTS7 and38/38 original runtime rows (earlier32/38 sixfailures and logs preserved). The two foreign-defect observation rows remain incomplete replay coverage; this checkpoint does not claim42pending algorithms or2Construct implemented. Newly claimed physical exception-reference support passes18/20 actual engine/assembler rows; two failures expose existing object-link global displacement and WAT signature-index defects. Astra High wrote the linker implementation plan in the separate issue worktree. Additional linker source scope remains withheld pending reconciliation of held3518:object-link-function-indices; no fake/fullacceptance credit.
