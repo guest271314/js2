@@ -119,7 +119,12 @@ code 1`). The real suite is the directory `tests/equivalence/`.
 **Banked floor** (`node scripts/equivalence-gate.mjs --update`, single fork,
 1 GB fork heap, this branch = origin/main @ 4a860ee9 + #6785): 223 files,
 1,740 passing, 22 failing, 3 todo. The 22 failures are exactly the existing
-`knownFailures` (unchanged); `passingFloor: 1740`, `fileCount: 223`.
+`knownFailures` (unchanged); `passingFloor: 1740`, `fileCount: 223`. A
+second full `node scripts/equivalence-gate.mjs` against the banked baseline
+exits 0 (223 files, 1,740 passing). A later merge of main added
+`await-settled-operand-yields.test.ts` (2 tests, both pass). That puts the
+suite at 224 files / 1,742 passing, so the banked numbers are a lower bound,
+and the next `--update` raises them.
 
 **Before → after** (old gate = `origin/main:scripts/equivalence-gate.mjs`, both
 fed the same data through `MERGE_PARTIALS_DIR`):
