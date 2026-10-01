@@ -130,11 +130,7 @@ export {
 // pulls the `async-cps`/`async-frame` chain which imports back into `closures`
 // (a cycle), so it must evaluate after this module's other deps are loaded to
 // avoid perturbing the init order of the coercion-engine/string-ops chain.
-import {
-  planAsyncClosureActivation,
-  emitAsyncClosureBody,
-  reportDeclinedAsyncRejectionHazard,
-} from "./async-activation.js";
+import { planAsyncClosureActivation, emitAsyncClosureBody, reportDeclinedAsyncBody } from "./async-activation.js";
 import { emitAsyncGenerator, isAsyncGenDriveCandidate } from "./async-frame.js"; // (#2865) async-gen fn-expr producer
 import { asyncClosurePromiseWrapEnabled, reserveAsyncClosurePromiseWrapper } from "./async-closure-promise.js"; // (#4648)
 // (#3164) Native generator FUNCTION EXPRESSIONS (standalone/wasi): the lifted
@@ -3666,12 +3662,12 @@ export function compileArrowAsClosure(
       closureReturnType = { kind: "externref" };
       eagerAsyncPromiseWrap = true;
     }
-    // (#3587) Declined async arrow/fn-expr with a genuinely-suspending await
-    // inside a `try`: refuse loudly instead of silently compiling the legacy
-    // pass-through that cannot deliver awaited rejections. Still reported for
+    // (#3587/#6780) Declined async arrow/fn-expr with a suspension inside a `try`
+    // or only settled awaits: refuse loudly instead of silently compiling the
+    // legacy pass-through (lost rejections / inline continuations). Still reported for
     // the #4630 wrap — the wrap settles the COMPLETION value, it does not make
     // the parked pass-through deliver awaited rejections.
-    reportDeclinedAsyncRejectionHazard(ctx, arrow);
+    reportDeclinedAsyncBody(ctx, arrow);
   }
   // (#4648) NOTE — a DECLINED (await-free) async closure does NOT get the
   // Promise wrapper here; only the host-callback bridge does (see
