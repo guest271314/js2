@@ -372,3 +372,118 @@ if (sv(toString.call(new Map()), "[object Map]")) __r |= 64;\n${END}`;
     T,
   );
 });
+
+describe("#6770 S7 — Proxy [[OwnPropertyKeys]] surfaces", () => {
+  it(
+    "every own-key surface of a proxy reads ONE validated list and takes its part (RED on base)",
+    async () => {
+      const src = `var __r = 0;
+var t1 = {}; Object.defineProperty(t1, "prop", { value: 1, writable: true, enumerable: true, configurable: false });
+var p1 = new Proxy(t1, { ownKeys: function () { return []; } });
+try { Object.getOwnPropertySymbols(p1); } catch (e) { if (e instanceof TypeError) __r |= 1; }
+try { Object.getOwnPropertyNames(p1); } catch (e) { if (e instanceof TypeError) __r |= 2; }
+var p2 = new Proxy({}, { ownKeys: function () { return ["a", "a"]; } });
+try { Object.getOwnPropertySymbols(p2); } catch (e) { if (e instanceof TypeError) __r |= 4; }
+var t3 = {}; Object.defineProperty(t3, "prop", { value: 3, writable: true, enumerable: false, configurable: true });
+var p3 = new Proxy(t3, { ownKeys: function () { return ["prop"]; } }); Object.preventExtensions(t3);
+if (Object.keys(p3).length === 0) __r |= 8;
+var t4 = {}; var sym = Symbol(); t4[sym] = 1; t4.foo = 2; t4[0] = 3; var seen = [];
+var p4 = new Proxy(t4, { getOwnPropertyDescriptor: function (_t, key) { seen.push(key); } });
+Object.getOwnPropertyDescriptors(p4);
+if (seen.length === 3 && seen[0] === "0" && seen[1] === "foo" && seen[2] === sym) __r |= 16;
+if (Reflect.ownKeys(p4).length === 3) __r |= 32;
+var p5 = new Proxy({}, { getOwnPropertyDescriptor: function () {}, ownKeys: function () { return ["a"]; } });
+if (!("a" in Object.getOwnPropertyDescriptors(p5))) __r |= 64;
+var t6 = {}; var s6 = Symbol(); Object.defineProperty(t6, s6, { value: 1, configurable: false });
+var p6 = new Proxy(t6, { ownKeys: function () { return []; } });
+try { Object.getOwnPropertyNames(p6); } catch (e) { if (e instanceof TypeError) __r |= 128; }
+var names = Object.getOwnPropertyNames(new Proxy(t4, {}));
+if (names.length === 2 && names[0] === "0" && names[1] === "foo") __r |= 256;
+var syms = Object.getOwnPropertySymbols(new Proxy(t4, {}));
+if (syms.length === 1 && syms[0] === sym) __r |= 512;\n${END}`;
+      expect(await probe(src)).toBe(1023);
+    },
+    T,
+  );
+
+  it(
+    "defineProperties / seal / freeze / isPrototypeOf through a proxy (RED on base)",
+    async () => {
+      const src = `var __r = 0;
+var sym = Symbol(); var t = {}; t[sym] = 1; t.foo = 2; t[0] = 3; var order = [];
+var bag = new Proxy(t, { getOwnPropertyDescriptor: function (_t, key) { order.push(key); } });
+Object.defineProperties({}, bag);
+if (order.length === 3 && order[0] === "0" && order[1] === "foo" && order[2] === sym) __r |= 1;
+var seen = {}; var keys = [];
+var p = new Proxy({ [sym]: 1, get foo() {}, set foo(_v) {} }, {
+  defineProperty: function (tt, key, d) { keys.push(key); seen[key] = d; return Reflect.defineProperty(tt, key, d); },
+});
+Object.seal(p);
+if (keys.length === 2) __r |= 2;
+if (seen[sym] && seen[sym].configurable === false && seen[sym].value === undefined) __r |= 4;
+if (seen.foo && seen.foo.configurable === false && seen.foo.get === undefined) __r |= 8;
+var proxyProto = []; var p6 = new Proxy({}, { getPrototypeOf: function () { return proxyProto; } });
+if (proxyProto.isPrototypeOf(p6)) __r |= 16;
+if (!({}).isPrototypeOf(p6)) __r |= 32;
+if (Object.prototype.isPrototypeOf(p6)) __r |= 64;\n${END}`;
+      expect(await probe(src)).toBe(127);
+    },
+    T,
+  );
+
+  it(
+    "guard — ordinary own-key surfaces keep their answers",
+    async () => {
+      const src = `var __r = 0;
+var s = Symbol(); var o = {}; o.b = 1; o.a = 2; o[1] = 5; o[s] = 3;
+var n = Object.getOwnPropertyNames(o); if (n.length === 3 && n[0] === "1" && n[1] === "b" && n[2] === "a") __r |= 1;
+var y = Object.getOwnPropertySymbols(o); if (y.length === 1 && y[0] === s) __r |= 2;
+var k = Reflect.ownKeys(o); if (k.length === 4 && k[3] === s) __r |= 4;
+if (Object.keys(o).join() === "1,b,a") __r |= 8;\n${END}`;
+      expect(await probe(src)).toBe(15);
+    },
+    T,
+  );
+
+  it(
+    "nested proxies, non-$Object targets, and the Object.keys gopd filter (RED on base)",
+    async () => {
+      // for-in over a proxy is NOT asserted: it misses on base and branch alike.
+      const src = `var __r = 0;
+var sym = Symbol(); var t4 = {}; t4[sym] = 1; t4.foo = 2; t4[0] = 3;
+var k1 = Reflect.ownKeys(new Proxy(new Proxy(t4, {}), {}));
+if (k1.length === 3 && k1[0] === "0" && k1[1] === "foo" && k1[2] === sym) __r |= 1;
+var k2 = Object.keys(new Proxy([1, 2], {})); if (k2.length === 2 && k2[0] === "0" && k2[1] === "1") __r |= 2;
+var k3 = Object.keys(new Proxy(t4, {})); if (k3.length === 2 && k3[0] === "0" && k3[1] === "foo") __r |= 4;
+if (Object.getOwnPropertyNames(new Proxy(new Proxy(t4, {}), {})).length === 2) __r |= 16;
+var g2 = Object.getOwnPropertySymbols(new Proxy(new Proxy(t4, {}), {})); if (g2.length === 1 && g2[0] === sym) __r |= 32;
+var fn = function () {}; fn.a = 1;
+var k4 = Object.keys(new Proxy(fn, {})); if (k4.length === 1 && k4[0] === "a") __r |= 64;
+var k5 = Object.keys(new Proxy(new String("ab"), {})); if (k5.length === 2 && k5[0] === "0") __r |= 128;
+var cnt = 0;
+var p6 = new Proxy({ a: 1, b: 2 }, { getOwnPropertyDescriptor: function (t, k) { cnt++; return Reflect.getOwnPropertyDescriptor(t, k); } });
+if (Object.keys(p6).length === 2 && cnt === 2) __r |= 256;
+var p7 = new Proxy({}, { ownKeys: function () { return ["x", "y"]; }, getOwnPropertyDescriptor: function (t, k) { return k === "x" ? { value: 1, enumerable: true, configurable: true } : undefined; } });
+var k7 = Object.keys(p7); if (k7.length === 1 && k7[0] === "x") __r |= 512;\n${END}`;
+      expect(await probe(src)).toBe(1015);
+    },
+    T,
+  );
+
+  it(
+    "Object.defineProperties with a closed-struct Properties map from a call (RED on base)",
+    async () => {
+      const src = `var __r = 0;
+function mk() { return { b: { value: 2 } }; }
+var o2 = Object.defineProperties({}, mk()); if (o2.b === 2) __r |= 1;
+var o3 = {}; Object.defineProperties(o3, mk()); if (o3.b === 2) __r |= 2;
+var d = Object.getOwnPropertyDescriptor(o3, "b"); if (d && d.value === 2 && d.writable === false && d.enumerable === false) __r |= 4;
+var bag = mk(); var o4 = Object.create(Object.prototype); Object.defineProperties(o4, bag);
+if (Object.getOwnPropertyNames(o4).length === 1) __r |= 8;
+function mk2() { var r = {}; r.b = { value: 2 }; return r; }
+if (Object.getOwnPropertyNames(Object.defineProperties({}, mk2())).length === 1) __r |= 16;\n${END}`;
+      expect(await probe(src)).toBe(31);
+    },
+    T,
+  );
+});

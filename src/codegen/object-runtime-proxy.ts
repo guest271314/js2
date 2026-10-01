@@ -24,6 +24,11 @@ import { ensureExternStrictEqHelper } from "./any-helpers.js";
 import { registerProxyInvariantValidators } from "./object-runtime-proxy-invariants.js"; // (#5316) §10.5 descriptor-model half
 import { reserveStandaloneLinkReversePeer, reverseProxyGetArmInstrs } from "./standalone-link-reverse-peer.js"; // (#6637 S63)
 import { protoLinkReceiverSetForward } from "./object-runtime-proxy-chain.js"; // (#6766)
+import {
+  ensureEnumerableOwnKeysNative,
+  ensureOwnKeysAllNative,
+  installProxyKeyBagGuards,
+} from "./proxy-own-keys-surfaces.js"; // (#6770 S7)
 
 /** (#1100/#1355) Reserved trap-invoke driver names — filled by `fillProxyDispatch`. */
 const PROXY_CALL_GET = "__proxy_call_get";
@@ -895,8 +900,13 @@ export function ensureProxyRuntime(
   const ownKeysTypeofUndefinedIdx = ctx.funcMap.get("__typeof_undefined")!;
   const ownKeysTypeofBigIntIdx = ctx.funcMap.get("__typeof_bigint")!;
   const ownKeysSymbolTypeIdx = ctx.symbolTypeIdx;
-  const buildOwnKeysDispatch = (forwardName: string): Instr[] => {
-    const forwardIdx = ctx.funcMap.get(forwardName)!;
+  // (#6770 S7) Both dispatches forward to the target's FULL key list and the
+  // `Object.keys` one then keeps §20.1.2.17's enumerable string keys, asking
+  // the PROXY's [[GetOwnProperty]] per key (the gopd trap when present).
+  const ownKeysAllIdx = ensureOwnKeysAllNative(ctx);
+  const buildOwnKeysDispatch = (forwardName: string, enumerableOnly = false): Instr[] => {
+    const forwardIdx = ownKeysAllIdx ?? ctx.funcMap.get(forwardName)!;
+    const enumerableIdx = enumerableOnly ? ensureEnumerableOwnKeysNative(ctx) : undefined;
     const isObjectNumIdx = ctx.funcMap.get("__typeof_number")!;
     const isObjectBoolIdx = ctx.funcMap.get("__typeof_boolean")!;
     const isObjectStrIdx = ctx.funcMap.get("__typeof_string")!;
@@ -1079,6 +1089,14 @@ export function ensureProxyRuntime(
         then: forwardArm,
         else: [...trapCallableGuard(3), ...trapArm],
       },
+      ...(enumerableIdx === undefined
+        ? []
+        : ([
+            { op: "local.set", index: 3 },
+            { op: "local.get", index: 0 },
+            { op: "local.get", index: 3 },
+            { op: "call", funcIdx: enumerableIdx },
+          ] satisfies Instr[])),
     ];
   };
 
@@ -1322,7 +1340,7 @@ export function ensureProxyRuntime(
     [externref, externref],
     [externref],
     ownKeysDispatchLocals(),
-    buildOwnKeysDispatch("__object_keys"),
+    buildOwnKeysDispatch("__object_keys", true),
   );
   registerNative(
     "__proxy_ownkeys_names_dispatch",
@@ -2682,6 +2700,7 @@ export function ensureProxyRuntime(
     ];
     objDefineBody.unshift(...guard);
   }
+  installProxyKeyBagGuards(ctx, proxyTypeIdx, findBody); // (#6770 S7) gOPDs / defineProperties bags
 
   void objectTypeIdx;
 }

@@ -90,6 +90,17 @@ loc-budget-allow:
   - src/codegen/native-proto-own-props.ts
   - src/codegen/object-proto-proto-accessor.ts
   - src/codegen/builtin-proto-member-override.ts
+  # S7 (2026-09-30, Opus): the new leaf proxy-own-keys-surfaces.ts (the
+  # full-key-list / filter / enumerable-keys / gOPDs / defineProperties /
+  # isPrototypeOf natives), and the Proxy-target literal route (new-builtin-globals).
+  - src/codegen/proxy-own-keys-surfaces.ts
+  - src/codegen/expressions/new-builtin-globals.ts
+coercion-sites-allow:
+  # 2026-09-30 (#6770 S7, Opus): one by-name lookup of the EXISTING ToBoolean
+  # native (`__is_truthy`) for a proxy descriptor's `enumerable` field in the
+  # EnumerableOwnProperties / ObjectDefineProperties key walks — a call to the
+  # engine's own coercion, not a hand-rolled one.
+  - src/codegen/proxy-own-keys-surfaces.ts
 func-budget-allow:
   # 2026-09-30 (#6770 S1, Opus): +10 in the enumeration-helper builder (the
   # string-source arm call, built in the new leaf), +1 in compileElementAccess

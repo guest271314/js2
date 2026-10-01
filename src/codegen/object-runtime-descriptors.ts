@@ -55,6 +55,7 @@ import { protoIndexOwnViewSubstituteInstrs } from "./proto-index-store.js"; // (
 import { CLOSURE_PROTO_OF } from "./closure-prototype-edge.js";
 import { stringExoticLengthBeforeNamedKeyInstrs } from "./object-own-key-order.js"; // (#6770 S3)
 import { ensureDefineRejectionGlobal } from "./define-rejection-channel.js"; // (#6770 S4)
+import { installClosedStructPropertiesGuard } from "./proxy-own-keys-surfaces.js"; // (#6770 S7)
 
 function closurePrototypeDescriptorArm(
   ctx: CodegenContext,
@@ -1474,6 +1475,7 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
       ],
       body,
     );
+    installClosedStructPropertiesGuard(ctx); // (#6770 S7) a closed-struct `Properties` map
     void L_OBJ;
     void L_RAW_OBJ;
   }

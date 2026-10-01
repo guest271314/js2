@@ -9,6 +9,7 @@
 // callee is not one of these, so the caller in calls.ts continues its dispatch
 // chain. Moved verbatim: the emitted Wasm is byte-identical.
 import { ts } from "../../ts-api.js";
+import { emitProxyAwareOwnKeysCall } from "../proxy-own-keys-surfaces.js"; // (#6770 S7)
 import { isBooleanType, isNumberType, isStringType } from "../../checker/type-mapper.js";
 import { ensureIntegrityPredicate } from "../object-integrity-carrier.js"; // (#4032)
 import { emitToInt32 } from "../binary-ops.js";
@@ -3706,6 +3707,7 @@ export function compileBuiltinStaticCall(
     if (argResult.kind !== "externref") {
       coerceType(ctx, fctx, argResult, { kind: "externref" });
     }
+    if (emitProxyAwareOwnKeysCall(ctx, fctx, expr, false)) return { kind: "externref" }; // (#6770 S7)
     const funcIdx = ensureLateImport(ctx, "__getOwnPropertyNames", [{ kind: "externref" }], [{ kind: "externref" }]);
     flushLateImportShifts(ctx, fctx);
     if (funcIdx !== undefined) {
@@ -3762,7 +3764,9 @@ export function compileBuiltinStaticCall(
       fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: throwNotCoercible });
       fctx.body.push({ op: "local.get", index: gopsLocal });
       releaseTempLocal(fctx, gopsLocal);
-      fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__getOwnPropertySymbols") ?? funcIdx });
+      if (!emitProxyAwareOwnKeysCall(ctx, fctx, expr, true)) {
+        fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__getOwnPropertySymbols") ?? funcIdx });
+      } // (#6770 S7) a $Proxy answers the symbols of its [[OwnPropertyKeys]]
     } else if (funcIdx !== undefined) {
       fctx.body.push({ op: "call", funcIdx });
     } else {
