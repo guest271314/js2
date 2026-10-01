@@ -8,6 +8,11 @@ import { dirname, resolve } from "node:path";
 import { setImmediate } from "node:timers/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import ts from "typescript";
+import {
+  authenticateIrValidationPolicy,
+  beforeIrValidationPolicyActivations,
+  irValidationPolicyActivations,
+} from "./helpers/ir-validation-policy-evolution.js";
 
 const repository = resolve(import.meta.dirname, "..");
 // Fixed specification population, independent of discovered imports and policy.
@@ -806,6 +811,7 @@ const sourceContractActivations = [
 
 // Authenticate the additive prefix before examining the unchanged old history.
 function assertCurrentActivations(history: unknown[]) {
+  history = beforeIrValidationPolicyActivations(history);
   expect(history).toHaveLength(91);
   expect(history.slice(88)).toEqual(sourceContractActivations);
   history = history.slice(0, 88);
@@ -980,6 +986,7 @@ describe("semantic verification and provider ownership boundary", () => {
     ])
       expect(required).toContain(path);
     const p = policy();
+    authenticateIrValidationPolicy(p);
     assertCurrentActivations(p.activationHistory);
     expect(digest(p.allowedEdges)).toBe("efe7e7ed8dee1a009d2bef3ff36dba80df1a805cd3f5b7b472e62ec6dcff64c7");
     for (const [id, entries] of Object.entries(currentLayerGroups)) {
@@ -1073,6 +1080,8 @@ describe("semantic verification and provider ownership boundary", () => {
       if (id === "backend-wasmgc") additions.push("src/backend/wasmgc/resources/native-mixed-object-access.ts");
       const contracts = sourceContractActivations.find((record) => record.layer === id);
       if (contracts) additions.push(...contracts.entries);
+      const validation = irValidationPolicyActivations.find((record) => record.layer === id);
+      if (validation) additions.push(...validation.entries);
       const signedEntries = additions.length ? layer.entries.slice(0, -additions.length) : layer.entries;
       if (additions.length) expect(layer.entries.slice(-additions.length)).toEqual(additions);
       const receipt = signedLayerComposition[id as keyof typeof signedLayerComposition];
