@@ -138,7 +138,7 @@ import {
 } from "./native-dynamic-boundary-tag.js";
 import { prepareStandaloneNativePromiseNumberBoundary } from "./native-promise-number-boundary.js";
 import { prepareAsyncCallableAbi } from "./async-ir-planning.js";
-import { widenAsyncThenableResults } from "./async-thenable-return.js";
+import { widenAsyncDeclarationResults } from "./async-activation.js"; // (#5371 + #6780)
 import {
   ensureNativeStringBoundaryBridge,
   ensureNativeStringExternBridge,
@@ -1876,7 +1876,7 @@ function registerBodylessFunctionDeclaration(
   }
 
   [params, results] = prepareAsyncCallableAbi(ctx, stmt, expandLinearU8ParamTypes(ctx, stmt, params), results);
-  results = widenAsyncThenableResults(ctx, stmt, results);
+  results = widenAsyncDeclarationResults(ctx, stmt, results);
 
   const optionalParams: OptionalParamInfo[] = [];
   for (let i = 0; i < stmt.parameters.length; i++) {
@@ -3020,7 +3020,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
       }
 
       [params, results] = prepareAsyncCallableAbi(ctx, stmt, expandLinearU8ParamTypes(ctx, stmt, params), results);
-      results = widenAsyncThenableResults(ctx, stmt, results);
+      results = widenAsyncDeclarationResults(ctx, stmt, results);
 
       const optionalParams: OptionalParamInfo[] = [];
       for (let i = 0; i < stmt.parameters.length; i++) {

@@ -29,6 +29,7 @@ import {
   asyncGenConsumerNeedsDrive,
 } from "./async-frame.js";
 import { isStandalonePromiseActive } from "./async-scheduler.js";
+import { widenAsyncThenableResults } from "./async-thenable-return.js";
 
 /**
  * Rewrite a compiled function's registered result type. An activated async
@@ -382,6 +383,34 @@ export function maybeActivateAsync(
   fctx.returnType = { kind: "externref" };
   emitAsyncLane(ctx, fctx, decl, decision);
   return true;
+}
+
+/**
+ * Declaration-time wasm result for a top-level function declaration: the
+ * #5371 thenable widening, then (#6780) the Promise carrier for an async
+ * declaration the HOST engine will drive.
+ *
+ * {@link maybeActivateAsync} rewrites a driven declaration's result to
+ * `externref` only when its BODY compiles. A caller compiled earlier — a
+ * forward reference, e.g. `main` declared above its helpers — had already
+ * baked the unwrapped `T`, and the stack repair then unboxed the returned
+ * Promise to NaN (`await helper()` read NaN). #6780 put every
+ * settled-await body on the engine, so this registers the carrier the body
+ * will produce up front, making call sites order-independent. Host lane only
+ * (the wasi/standalone drive lane keys its call sites on `calleeIsDriveLowered`
+ * instead); same decision as the activation itself, so the two cannot drift.
+ */
+export function widenAsyncDeclarationResults(
+  ctx: CodegenContext,
+  decl: ts.FunctionDeclaration,
+  results: ValType[],
+): ValType[] {
+  const widened = widenAsyncThenableResults(ctx, decl, results);
+  if (!ts.isSourceFile(decl.parent) || decl.asteriskToken !== undefined || !isHostDriveLane(ctx)) return widened;
+  if (widened.length === 1 && widened[0]!.kind === "externref") return widened;
+  const isAsync = decl.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) === true;
+  if (decideAsyncActivation(ctx, decl, isAsync, /*allowNonDeclaration*/ false)?.lane !== "host-drive") return widened;
+  return [{ kind: "externref" }];
 }
 
 /**

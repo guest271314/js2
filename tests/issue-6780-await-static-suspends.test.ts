@@ -230,6 +230,30 @@ export async function run(): Promise<string> {
     );
   });
 
+  it("forward references: a caller compiled before its driven callee reads the settled value, not NaN", async () => {
+    // `run` is declared (and compiled) BEFORE `af` / `real`. The callee's
+    // Promise result must be registered at declaration time; before #6780 a
+    // driven callee's result type was rewritten only when its body compiled,
+    // so the earlier caller unboxed the Promise to NaN (real awaits included).
+    await expectSameOrder(
+      `
+export async function run(): Promise<string> {
+  const v = await af(3);
+  log("af+1=" + (v + 1));
+  const r = await real(4);
+  log("real+1=" + (r + 1));
+  const all = await Promise.all([af(1), real(2)]);
+  log("all=" + all.join("/"));
+  return out.join(",");
+}
+async function af(n: number): Promise<number> { await null; return n * 2; }
+async function g(): Promise<number> { return 0; }
+async function real(n: number): Promise<number> { await g(); return n * 2; }
+`,
+      "af+1=7,real+1=9,all=2/4",
+    );
+  });
+
   it("a ZERO-await async function still runs synchronously up to its return", async () => {
     await expectSameOrder(
       `
