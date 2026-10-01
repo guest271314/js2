@@ -69,3 +69,46 @@ code 1`). The real suite is the directory `tests/equivalence/`.
 - `tests/equivalence-gate.test.ts` (new) drives the gate over fixture JSON
   reports for the three cases (assertion failure, file failure, count drop).
 - CLAUDE.md run command works as written.
+
+## Implementation Plan
+
+1. `scripts/equivalence-gate.mjs` — split into pure, exported functions plus a
+   `main()` that runs only when the file is executed (`realpath(argv[1])`
+   guard), so the CLI is unchanged and the test can import the evaluation:
+   - `summarizeReport(report)` — failing/passing ids as before, plus the set
+     of files seen and `fileFailures`: a file vitest marks `failed` with no
+     tests collected (import / syntax / collect error), with a file-level
+     `message`, or with no failing test; and any file with tests still
+     `pending` (the run ended under them). `report.success === false` with no
+     failing test or file becomes an `unexplained` failure.
+   - `evaluateGate(summary, baseline, { partial, diskFiles })` — per-test
+     regressions (unchanged), file failures, and — for a whole-suite report
+     only — `passing.size < passingFloor`, `files.size < fileCount`, any test
+     file on disk absent from the report, and any missing shard partial. A
+     baseline without the two numbers fails closed.
+   - `bankBaseline(summary, previous)` — `--update` raises `passingFloor` /
+     `fileCount` to the run's numbers, never lowers them, and refuses (writes
+     nothing, exit 1) a run below either floor or with a file-level failure.
+     `--update` also refuses a `SHARD` run and an incomplete set of shard
+     partials.
+   - `toPartial` / `fromPartial` / `mergeSummaries` — the shard partial now
+     carries `shard`, `files`, `fileFailures`, `unexplained`.
+2. Sharded CI (`.github/workflows/ci.yml`) — chose **sum the shard reports in
+   the `equivalence-gate` job**, not a committed per-shard split: vitest's
+   `--shard` assigns files by a hash of the path, so every added test file
+   reshuffles the split and a committed per-shard floor would go stale on
+   unrelated PRs. Each `equivalence-shard` cell still gates its own per-test
+   and per-file failures (`SHARD` set ⇒ partial scope, no floor), writes
+   `PARTIAL_OUT`, and uploads it; `equivalence-gate` checks the matrix result,
+   sparse-checks-out the script + baseline + `tests/equivalence/`, downloads
+   the eight partials, and runs the gate in `MERGE_PARTIALS_DIR` mode, which
+   applies the floor and file count to the sum.
+3. `vitest.config.ts` — default fork heap 512 → 1024 MB (what the gate already
+   used), and `maxForks = min(cores − 1, freemem / (1.5 × heap))`; test262
+   runs stay at 1 fork.
+4. `CLAUDE.md` — the run command and Project Structure line now name
+   `node scripts/equivalence-gate.mjs` and the `tests/equivalence/` directory.
+5. `tests/equivalence-gate.test.ts` (new) — fixture reports for every failure
+   class plus the clean control; `tests/issue-4609-…` now marks its one-test
+   synthetic partial as a single shard (`SHARD=1/8`), since the merged scope
+   would otherwise trip the floor before the membership check it pins.
