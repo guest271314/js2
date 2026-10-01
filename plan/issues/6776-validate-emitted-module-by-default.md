@@ -189,10 +189,20 @@ rows fail today as `compile_error` with `invalid Wasm binary (…)`:
   default: `issue-4394 … seeds each top-level function name` (10.7 s). It
   passes when run alone, so it was a load timeout.
 
-**Gates**: check-loc-budget 0, check-func-budget 0, check-coercion-sites 0,
-check:oracle-ratchet 0, check:dead-exports 0, check-verdict-oracle-bump 0,
-check:test-vacuity-shapes 0, typecheck 0, format:check 0, biome lint 0 —
-re-run after the final `origin/main` merge (see PR).
+**Gates.** All exit 0, re-run after merging `origin/main` at 3444df3d.
+- Budgets: check-loc-budget and check-func-budget, at the merge-base and with
+  `LOC_GATE_BASE=origin/main`; check-coercion-sites.
+- `check-compiler-boundaries --mode inventory --base origin/main`.
+- `check:` gates: oracle-ratchet, dead-exports, ir-dialect,
+  ir-kind-neutrality, jstag-seam, ir-layering, codegen-fallbacks,
+  any-box-sites, speculative-rollback, stack-balance, pushraw,
+  host-import-policy, ir-only, ir-adoption, issues, done-status-integrity,
+  issue-spec-coverage, harness-compile-budget, verdict-oracle,
+  test-vacuity-shapes, ir-fallbacks.
+- lint, typecheck, format:check (run by hand: the pre-push copy timed out
+  under load), and the pre-push hook (typecheck, lint, oracle ratchet,
+  coercion sites, numeric-local IR parity, issue integrity).
+- No LOC or function budget allowance was needed.
 
 **Left out on purpose**
 - The `--package-linking merge` bundle and `compileToObject` (`.o` relocatable
