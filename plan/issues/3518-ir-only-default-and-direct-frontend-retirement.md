@@ -3,7 +3,7 @@ id: 3518
 title: "IR-only default and direct front-end retirement"
 status: in-progress
 created: 2026-07-21
-updated: 2026-09-30
+updated: 2026-10-01
 priority: critical
 feasibility: hard
 reasoning_effort: max
@@ -17193,3 +17193,17 @@ graph remains OPEN and strict modeled closure FAIL; retirement/deletion is
 NOT CERTIFIED. Host semantic observer imports are still component instruments.
 Full public provider/Number/45-catalog and backend-equality work remains open.
 Normal signed commit and fork push hooks are required before ready PR publication.
+
+
+## 2026-10-01 source-parameter projection preservation delivery
+
+Claim `3518:source-parameter-projection-preservation-20261001`, owner `ttraenkler/codex-source-parameter-projection-preservation-20261001`, branch `codex/3518-source-parameters-main-20261001`, based on freshly verified upstream main `4c5a334669d3d9ac4db29e850f73d65965ba89f6`. This independent existing-bug repair does not include pending PR6371's realm infrastructure or the frozen new source identity implementation.
+
+Actual physical preparation rebuilds in `vec-layout.ts`, `string-carrier.ts` and `physical-ref-support.ts` discarded affirmative fixed/default parameter facts whenever a carrier/type changed. Preserve the exact original `parameters` record explicitly and compare its identity in the unchanged fast path; absent source facts remain absent. Three production files gain two lines each. Existing assertions and fixtures remain unchanged.
+
+New seven-row controls cover actual vector/string/reference type rewrites, absent facts and stable second pass, plus genuine captured String source preparation/codec with one lifted source unit and one allocation represented in both semantic/projected views. Fresh-main before-edit run measured 4/7: three pure projection rows lost the record, three absence controls and the genuine source/codec row already passed. The genuine transport row is a preservation control, not evidence that the pre-edit driver itself exercised the buggy reconstruction. It verifies no public execution or full source Call parity. Independent static review found no additional same-function reconstruction seam and no defect in the narrow repair.
+
+Validate exact current-root TypeScript, new controls and relevant physical/source requirements preservation; run all normal hooks and protected CI/queue. Only actual verified main merge counts delivery. The new source identity draft remains separately held and preserved pending genuine validation/lowering dependency separation; do not weaken boundary policy or omit guards to publish it. Full catalog, source modes, mixed Get/Call/Construct/newTarget, dynamic Function/eval/with, original public nine-row parity and both-backend equality stay required. Legacy retirement remains unauthorized until full IR equivalence.
+
+
+Current-root validation measured 49/49 across new projections (7), existing physical-reference controls (4), native source requirements (28) and native source callable contracts (10), with no ignored worker errors. TS7 passed. Fresh-main LOC/function, coercion and oracle gates passed; compiler inventory is valid with zero inventory errors and architecture explicitly incomplete. Dead-export preservation passes its 6/6 full and cut witnesses while graph OPEN/strict modeled closure FAIL/retirement NOT CERTIFIED remain unchanged. No architecture or full IR completion is claimed.
