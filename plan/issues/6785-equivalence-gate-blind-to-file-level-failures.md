@@ -1,10 +1,12 @@
 ---
 id: 6785
 title: "ci: `equivalence-gate` (required) reads only `assertionResults` — a file that fails to import, a deleted test file, or a fork OOM has zero assertions and passes as 'no new regressions'"
-status: ready
+status: in-progress
 sprint: Backlog
+assignee: "ttraenkler/claude-dev-6785"
+branch: "claude/issue-6785-equivalence-gate-floor"
 created: 2026-09-30
-updated: 2026-09-30
+updated: 2026-10-01
 priority: high
 horizon: s
 feasibility: easy
