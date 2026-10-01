@@ -171,13 +171,16 @@ createFreshCompiler();
 // still override by passing its own `hostBridge`.
 const HARNESS_HOST_BRIDGE = { hostBridge: "always" };
 
+// #6776: the worker validates itself with source-mapped reporting; the library default would turn the negative-test arm's compile failure into an incidental pass (see #2920).
+const WORKER_SELF_VALIDATES = { validate: false };
+
 function compileSingleSource(source, options) {
-  const opts = { ...HARNESS_HOST_BRIDGE, ...options };
+  const opts = { ...HARNESS_HOST_BRIDGE, ...WORKER_SELF_VALIDATES, ...options };
   return incrementalCompiler ? incrementalCompiler.compile(source, opts) : compile(source, opts);
 }
 
 function compileMultipleSources(files, entryFile, options) {
-  const opts = { ...HARNESS_HOST_BRIDGE, ...options };
+  const opts = { ...HARNESS_HOST_BRIDGE, ...WORKER_SELF_VALIDATES, ...options };
   return incrementalCompiler?.compileMulti
     ? incrementalCompiler.compileMulti(files, entryFile, opts)
     : compileMulti(files, entryFile, opts);
@@ -1609,6 +1612,7 @@ async function doCompile(
       temporalSource = linkedHarnessHonestSource(linkedHarness, source);
     }
     return compilerBundle.compileWithTemporalGlobal(temporalSource, temporal, {
+      ...WORKER_SELF_VALIDATES,
       allowJs: true,
       fileName: "test.js",
       sourceMap: true,
@@ -1636,6 +1640,7 @@ async function doCompile(
     // the caller is told, and the row is stamped `linked-harness-fallback`.
     const bodyOptions = {
       ...HARNESS_HOST_BRIDGE, // (#6723 D4) same bridge as the provider and the honest lane
+      ...WORKER_SELF_VALIDATES,
       allowJs: true,
       fileName: "test.js",
       sourceMap: true,
@@ -2033,6 +2038,8 @@ async function buildInvalidBinaryError(source, sourceMapUrl, result, target) {
 
   try {
     const watResult = await compile(source, {
+      // The bytes are known invalid here; this re-compile only wants the WAT.
+      ...WORKER_SELF_VALIDATES,
       fileName: "test.ts",
       sourceMap: true,
       sourceMapUrl: sourceMapUrl || "test.wasm.map",

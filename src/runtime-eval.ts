@@ -376,6 +376,11 @@ export function createEvalShim(options: EvalShimOptions = {}): (src: any, isDire
           // the `catch` below swallows — silently degrading a correct answer to
           // `undefined`. Always take the proven legacy-then-overlay pipeline.
           disableIrFirst: true,
+          // (#6776) The shim builds the Module itself below and maps an engine
+          // rejection to SyntaxError. Validating in the compile would decode
+          // twice and send a rejected expression form to the statement-form
+          // retry, which answers `undefined` instead of throwing.
+          validate: false,
         }),
       );
     } catch {
@@ -392,8 +397,9 @@ export function createEvalShim(options: EvalShimOptions = {}): (src: any, isDire
             fileName: filename,
             allowJs: true,
             skipSemanticDiagnostics: true,
-            // (#2973) Same opt-out as the expression-form wrapper above.
+            // (#2973, #6776) Same opt-outs as the expression-form wrapper above.
             disableIrFirst: true,
+            validate: false,
           }),
         );
       } catch (e: any) {
@@ -761,6 +767,8 @@ export function createNewFunctionShim(options: EvalShimOptions = {}): (params: a
             // (#2973) Same rationale as the eval shim — take the proven legacy
             // pipeline, not the IR-first measurement path.
             disableIrFirst: true,
+            // (#6776) Builds and checks the Module itself just below.
+            validate: false,
           }) as typeof result,
       );
     } catch (e: any) {

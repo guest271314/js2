@@ -3890,6 +3890,8 @@ export async function handleNegativeTest(
       emitWat: false,
       ...(target ? { target } : {}),
       semanticProviders: parseTest262SemanticProviders(process.env.TEST262_SEMANTIC_PROVIDERS),
+      // #6776: the runner validates itself with source-mapped reporting; the library default would turn the negative-test arm's compile failure into an incidental pass (see #2920).
+      validate: false,
     };
 
     let compileMs = 0;
@@ -4466,6 +4468,8 @@ async function runOriginalHarnessVariant(
         sourceMap: true,
         emitWat: false,
         skipSemanticDiagnostics: true,
+        // #6776: the runner validates itself with source-mapped reporting; the library default would turn the negative-test arm's compile failure into an incidental pass (see #2920).
+        validate: false,
         inferModuleStrictArguments: meta.flags?.includes("module") === true,
         // (#2860 F3) Standalone joins the host lane's deferTopLevelInit rule
         // (mirrors scripts/test262-worker.mjs doCompile): under the `(start)`
@@ -4954,6 +4958,8 @@ export async function runSyntheticTest262File(
       fileName: "test.ts",
       sourceMap: true,
       emitWat: false,
+      // #6776: the runner validates itself with source-mapped reporting; the library default would turn the negative-test arm's compile failure into an incidental pass (see #2920).
+      validate: false,
       // (#2119) keep the in-process runner aligned with the sharded worker:
       // only genuine module-goal tests infer module-strictness; script tests
       // keep mapped `arguments` despite the synthetic `export function test()`

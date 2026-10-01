@@ -856,6 +856,8 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                 const multiCompile = await getCompileMulti();
                 const result = await multiCompile(vfiles, fixtureGraph.entryFile, {
                   skipSemanticDiagnostics: true,
+                  // #6776: this path instantiates and classifies the bytes itself; the library default would turn the negative-test arm's compile failure into an incidental pass (see #2920).
+                  validate: false,
                   target: TEST262_TARGET,
                   semanticProviders: TEST262_SEMANTIC_PROVIDERS,
                   inferModuleStrictArguments,
