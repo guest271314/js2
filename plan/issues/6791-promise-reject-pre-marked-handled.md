@@ -1,10 +1,12 @@
 ---
 id: 6791
 title: "runtime: every compiled `Promise.reject(x)` is pre-marked handled (`p.catch(() => {})`) — dropped rejections never reach `unhandledRejection`"
-status: ready
+status: in-progress
 sprint: Backlog
 created: 2026-09-30
-updated: 2026-09-30
+updated: 2026-10-01
+assignee: "ttraenkler/claude-dev-6791"
+branch: "claude/issue-6791-promise-reject-unhandled"
 priority: medium
 horizon: s
 feasibility: easy
@@ -16,6 +18,11 @@ goal: async-model
 related: [5235, 1312, 1151, 5883]
 requested_by: ttraenkler/claude-review
 origin: "2026-09-30 codebase review (plan/agent-context/claude-codebase-review-2026-09-30.md) — H8"
+# 2026-10-01: +1 line — the host-lane `for await` array drive marks each element
+# handled (emitForAwaitMarkHandled), replacing the runtime-wide Promise.reject
+# pre-mark. loops.ts is net -4 overall.
+func-budget-allow:
+  - src/codegen/statements/loops.ts::compileForOfArray
 ---
 
 # #6791 — the builtin swallows the rejection signal for all callers

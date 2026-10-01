@@ -17522,20 +17522,19 @@ assert._isSameValue = isSameValue;
       // a Wasm object-literal thenable must be mirrored before V8 performs
       // PromiseResolve, while ordinary objects remain raw for === identity.
       if (name === "Promise_resolve") return createHostPromiseBuiltinImport(name, _wrapThenable, _wrapPromiseReaction);
-      if (name === "Promise_reject")
-        return (val: any) => {
-          // (#2978) Pre-mark the rejection as handled. Compiled code holds the
-          // promise as an opaque externref and may drop it without attaching a
-          // handler (e.g. the for-await sync drive's bounded step cap discards
-          // one rejected promise per iteration) — without this, each discarded
-          // rejection fires the host's unhandledRejection machinery, and a
-          // capped loop emits a 100k-event storm that vitest/CI runners count
-          // as errors. The no-op catch derives a separate promise; consumers of
-          // the returned promise observe the rejection unchanged.
-          const p = PROMISE_INTRINSICS.reject(val);
-          p.catch(() => {});
-          return p;
+      // (#6791) Bare: a rejection the program drops reaches unhandledRejection as
+      // natively. A `for await` sync drive marks the elements it drops instead,
+      // reacting like the native loop's Await (PromiseResolve, no species read).
+      if (name === "Promise_reject") return (val: any) => PROMISE_INTRINSICS.reject(val);
+      if (name === "__forawait_mark_handled") {
+        const settle = async (v: any) => {
+          try {
+            await v;
+          } catch {}
         };
+        return (v: any) =>
+          v instanceof Promise || v instanceof (globalSandbox?.Promise ?? Promise) ? (void settle(v), v) : v;
+      }
       // (#1042) async/await CPS scheduling primitives. The state machine
       // allocates one pending outer Promise per async function, then settles
       // it from a continuation that runs as a microtask. We stash the
