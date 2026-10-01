@@ -1,10 +1,12 @@
 ---
 id: 6788
 title: "codegen: array carriers skip ToPrimitive/ToString — `String(numArr)` returns the array, `[] + []` is `NaN`, `+[]` is `NaN`, `Number([5])` is `NaN`"
-status: ready
+status: in-progress
 sprint: Backlog
 created: 2026-09-30
-updated: 2026-09-30
+updated: 2026-10-01
+assignee: "ttraenkler/claude-dev-6788"
+branch: "claude/issue-6788-array-carrier-toprimitive"
 priority: high
 horizon: m
 feasibility: medium
