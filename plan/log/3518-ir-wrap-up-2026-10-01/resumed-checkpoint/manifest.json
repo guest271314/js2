@@ -233,5 +233,6 @@
     "released_at": "2026-10-01T04:15:43Z"
   },
   "writers_stopped": true,
-  "heavy_processes_running": false
+  "heavy_processes_running": false,
+  "publication_main": "11661c310659b921af5584ceb4155e7c1209c7d2"
 }
