@@ -1072,7 +1072,7 @@ export function compileTailDispatch(
       }
       if (receiverClassName && ctx.classSet.has(receiverClassName)) {
         const fullName = `${receiverClassName}_${methodName}`;
-        const funcIdx = ctx.funcMap.get(fullName);
+        const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, fullName, "instance")); // (#6772 S4)
         if (funcIdx !== undefined && !elementCallTargetsStaticMethod(ctx, elemAccess.expression, methodName)) {
           // Push self (the receiver) as first argument
           compileExpression(ctx, fctx, elemAccess.expression);
@@ -1116,7 +1116,7 @@ export function compileTailDispatch(
       const structTypeName = resolveStructName(ctx, receiverType);
       if (structTypeName) {
         const fullName = `${structTypeName}_${methodName}`;
-        const funcIdx = ctx.funcMap.get(fullName);
+        const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, fullName, "instance")); // (#6772 S4)
         if (funcIdx !== undefined && !elementCallTargetsStaticMethod(ctx, elemAccess.expression, methodName)) {
           const recvType = compileExpression(ctx, fctx, elemAccess.expression);
           // Check if receiver went through emitGuardedRefCast — null may mean

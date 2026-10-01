@@ -64,9 +64,23 @@ export function classMemberFuncKey(ctx: CodegenContext, fullName: string, kind?:
   if (kind === "static" && ctx.classMethodSet.has(fullName)) {
     key = `__cm$static$${key}`;
   }
+  // (#6772 S4) A MEMBER literally named `new` / `init` (`new() {}` too —
+  // TS cooks the escape) must not take the allocator's `<C>_new` or the
+  // constructor body's `<C>_init` key: registration then skipped the method and
+  // the body fill compiled the method INTO the allocator. Only member callers
+  // pass `kind`; the allocator / `_init` lookups never do.
+  if (kind !== undefined && isConstructorSlotKey(ctx, fullName)) key = `__cm$member$${key}`;
   let n = 0;
   while (ctx.topLevelFunctionNames.has(key)) key = `__cm$${fullName}$${n++}`;
   return key;
+}
+
+/** `<C>_new` / `<C>_init` for a class `C` of this program. */
+function isConstructorSlotKey(ctx: CodegenContext, fullName: string): boolean {
+  for (const suffix of ["_new", "_init"]) {
+    if (fullName.endsWith(suffix) && ctx.classSet.has(fullName.slice(0, -suffix.length))) return true;
+  }
+  return false;
 }
 
 /**

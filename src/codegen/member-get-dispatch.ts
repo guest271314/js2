@@ -217,7 +217,7 @@ export function classMethodCandidatesForProp(
     if (receiverStructTypeIdx === undefined) continue;
     const owner = resolveMethodOwnerClass(ctx, className, propName);
     const methodFullName = `${owner}_${propName}`;
-    const methodFuncIdx = ctx.funcMap.get(classMemberFuncKey(ctx, methodFullName));
+    const methodFuncIdx = ctx.funcMap.get(classMemberFuncKey(ctx, methodFullName, "instance"));
     if (methodFuncIdx === undefined) continue;
     const ownerStructTypeIdx = ctx.structMap.get(owner) ?? receiverStructTypeIdx;
     // Inheritance depth (for children-first arm ordering under subtyping).

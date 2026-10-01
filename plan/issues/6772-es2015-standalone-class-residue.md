@@ -48,6 +48,11 @@ loc-budget-allow:
   # dynamic read, and `typeof`) take one-line hooks into the S2 leaf.
   - src/codegen/property-access.ts
   - src/codegen/typeof-delete.ts
+  # 2026-10-01 (#6772 S4, Opus implementation): the two own-shadow method
+  # lookups in the receiver-call ladder pass the member kind so a method named
+  # `new` / `init` resolves to its relocated slot, not the allocator; prettier
+  # wraps each lookup onto three lines (+4, no new logic).
+  - src/codegen/expressions/call-receiver-method.ts
   # NEW leaves (register each in scripts/compiler-boundaries.json, see Lane protocol)
   - src/codegen/derived-ctor-this-guard.ts
   - src/codegen/ctor-return-override.ts
@@ -73,6 +78,8 @@ func-budget-allow:
   # each, the same shape as the #4204 / #4428 guards beside them.
   - src/codegen/typeof-delete.ts::compileTypeofComparison
   - src/codegen/typeof-delete.ts::compileTypeofExpression
+  # 2026-10-01 (#6772 S4, Opus implementation): same two wrapped lookups.
+  - src/codegen/expressions/call-receiver-method.ts::compileReceiverMethodCall
 ---
 
 ## Problem
@@ -804,7 +811,8 @@ shared lock.
 | S1a | `23c6b10634` | p5e 0 -> 2121 (2121); p5d 21 guard | `arguments/access.js` |
 | S1b | `db43fed38d` | p1 0 -> 3 (3), p2 0 -> 63 (63), p3 14 -> 15 (15), nested 133 -> 3333, g1 880 -> 1023 | `definition/this-access-restriction.js`, `definition/this-check-ordering.js` |
 | S2 | `760fc7205c` | p4 8 -> 63, t2 4608 -> 8191, g6 4 -> 7, g11 10 -> 7, g8 7 -> 31, g2 63 -> 255, g5 63 -> 255; guards g13 63, g16 31, p15 15 | `subclass/class-definition-null-proto-contains-return-override.js`, `subclass/derived-class-return-override-with-object.js`, `subclass/default-constructor-2.js`, `definition/this-access-restriction-2.js` |
-| S3 | (this step) | p5c 0 -> 15 (15); s3a COMPILE-FAIL -> 2 (2); guards s3b 31 (31), p5d 21 | `arguments/default-constructor.js` |
+| S3 | `75220d3415` | p5c 0 -> 15 (15); s3a COMPILE-FAIL -> 2 (2); guards s3b 31 (31), p5d 21 | `arguments/default-constructor.js` |
+| S4 | (this step) | p9 / p9b / p9e invalid Wasm -> 42 (42), p9c invalid -> 7 (7), p9d invalid -> 127 (127), p9f invalid -> 63 (63), t9 (typed, IR-claimed) IR compile error -> 50 (both lanes); guard s4i 3 (3) | `{statements,expressions}/class/ident-name-method-def-new-escaped.js` |
 
 S2 design note (deviates from the plan's "set only on an object return"):
 `$__ctor_override` is a RETURN REGISTER written on EVERY exit of a marked
@@ -831,3 +839,19 @@ before reaching it, so it now throws instead of crashing in `eval-source.ts`.
 Residuals (pinned): `Reflect.apply(C, …)` does not throw (s3c 100, node 1 —
 the dynamic closure-apply terminal has no class identity arm); `apply`'s
 CreateListFromArrayLike on the argument array is not performed.
+
+S4 note: `classMemberFuncKey` relocates a MEMBER (any caller that passes a
+`kind`) whose legacy name is `<C>_new` / `<C>_init` for a class of this program
+to `__cm$member$<C>_new`; the allocator / `_init` lookups pass no kind and keep
+the bare key. Every member-lookup consumer that used to pass no kind now passes
+`"instance"` (identical key for every other name): the receiver-call ladder's
+own-shadow lookups, the tail-dispatch arms, the method-value reads
+(member-get / property-access / property-access-dispatch), the prototype-object
+and subclass method installs, the forward-class ABI finalizer, and the IR
+class projection (`projectClassCallableTarget` for `*-method` units and
+`memberFunc` in ir/integration.ts — the typed probe t9 is IR-claimed and failed
+there on base). Not standalone-gated (the key is lane-independent): host bytes
+of p1/p3/p4/g13/t2/p6/p12 are identical to the pre-S4 merged tree, p9/p9f
+change (they were invalid Wasm). The plan's inheritance residual does not
+occur: s4i (a subclass calling an inherited `new()` / `init()`) answers 3 on
+base and branch.

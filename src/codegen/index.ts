@@ -796,7 +796,7 @@ function projectClassCallableTarget(
     classId,
     declaration,
     expectedKind,
-    classMemberFuncKey(ctx, legacyName),
+    classMemberFuncKey(ctx, legacyName, expectedKind.endsWith("-method") ? "instance" : undefined), // (#6772 S4)
   );
 }
 

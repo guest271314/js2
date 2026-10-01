@@ -1704,7 +1704,7 @@ export function tryPrivateIdentifierRead(
           const canonicalClass = ctx.classExprNameMap.get(cls.className) ?? cls.className;
           const ownerName = resolveMethodOwnerClass(ctx, canonicalClass, cls.fieldName);
           const methodFullName = `${ownerName}_${cls.fieldName}`;
-          const methodFuncIdx = ctx.funcMap.get(classMemberFuncKey(ctx, methodFullName));
+          const methodFuncIdx = ctx.funcMap.get(classMemberFuncKey(ctx, methodFullName, "instance"));
           const ownerStructTypeIdx = ctx.structMap.get(ownerName) ?? structTypeIdx!;
           let emitted = false;
           if (methodFuncIdx !== undefined) {
@@ -2611,7 +2611,7 @@ export function tryPrototypeMethodAndArityReads(
       // (they live on the constructor, not the prototype) and
       // receiver-sensitive accessors (handled by the ordinary path below).
       if (ctx.classMethodSet.has(fullName) && !ctx.staticMethodSet.has(fullName)) {
-        const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, fullName));
+        const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, fullName, "instance"));
         const structTypeIdx = ctx.structMap.get(className);
         if (funcIdx !== undefined && structTypeIdx !== undefined) {
           if (emitCachedMethodClosureAccess(ctx, fctx, fullName, funcIdx, structTypeIdx)) {
@@ -4370,7 +4370,7 @@ export function finalizeStructAndDynamicMemberGet(
       const owner = resolveMethodOwnerClass(ctx, typeName, propName);
       const methodFullName = `${owner}_${propName}`;
       if (ctx.classMethodSet.has(methodFullName) || ctx.staticMethodSet.has(methodFullName)) {
-        const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, methodFullName));
+        const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, methodFullName, "instance"));
         if (funcIdx !== undefined) {
           // #1118: Object literal — read the struct field which holds the closure.
           // Detected by: typeName is a registered struct AND the struct has a

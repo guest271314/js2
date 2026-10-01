@@ -523,3 +523,83 @@ describe("#6772 S3 — class constructors invoked through call / apply throw", (
     ).toBe(100);
   });
 });
+
+describe("#6772 S4 — a member named `new` / `init` does not take the allocator's funcMap key", () => {
+  it("RED on base (invalid Wasm): escaped and plain `new()` methods, class expression and declaration (node 4242)", async () => {
+    expect(
+      await runProbe(`
+        var C1 = class { n\\u0065w() { return 42; } };
+        class C2 { new() { return 42; } other() { return 7; } }
+        __r = new C1()['new']() * 100 + new C2().new();
+      `),
+    ).toBe(4242);
+  });
+
+  it("RED on base (invalid Wasm): dot / element / value reads of `new` and `init`; name, length, instanceof (node 127)", async () => {
+    expect(
+      await runProbe(`
+        class C { new() { return 42; } init() { return 5; } }
+        var obj = new C();
+        var r = 0;
+        try { r += (obj.new() === 42) ? 1 : 0; } catch (e) { r += 1000; }
+        try { r += (obj['new']() === 42) ? 2 : 0; } catch (e) { r += 2000; }
+        try { r += (obj.init() === 5) ? 4 : 0; } catch (e) { r += 4000; }
+        try { r += (typeof obj.new === 'function') ? 8 : 0; } catch (e) { r += 8000; }
+        try { r += (C.name === 'C' && C.length === 0) ? 16 : 0; } catch (e) { r += 16000; }
+        try { r += (obj instanceof C) ? 32 : 0; } catch (e) { r += 32000; }
+        try { var f = obj.new; r += (f.call(obj) === 42) ? 64 : 0; } catch (e) { r += 64000; }
+        __r = r;
+      `),
+    ).toBe(127);
+  });
+
+  it("RED on base (invalid Wasm): static `new`, a derived `init` method, static + instance `init` (node 63)", async () => {
+    expect(
+      await runProbe(`
+        class A { static new() { return 1; } constructor(x) { this.x = x; } }
+        class B extends A { constructor() { super(7); this.y = 2; } init() { return this.x + this.y; } }
+        class D { init(a) { return a * 2; } static init() { return 3; } }
+        var r = 0;
+        try { r += (A.new() === 1) ? 1 : 0; } catch (e) { r += 1000; }
+        try { var b = new B(); r += (b.init() === 9) ? 2 : 0; } catch (e) { r += 2000; }
+        try { r += (b.x === 7 && b.y === 2) ? 4 : 0; } catch (e) { r += 4000; }
+        try { r += (new D().init(4) === 8) ? 8 : 0; } catch (e) { r += 8000; }
+        try { r += (D.init() === 3) ? 16 : 0; } catch (e) { r += 16000; }
+        try { r += (new A(5).x === 5) ? 32 : 0; } catch (e) { r += 32000; }
+        __r = r;
+      `),
+    ).toBe(63);
+  });
+
+  it("guard (base 3): a subclass inherits `new` / `init` methods", async () => {
+    expect(
+      await runProbe(`
+        class A { new() { return 1; } init() { return 2; } }
+        class B extends A {}
+        var b = new B();
+        var r = 0;
+        try { r += (b.new() === 1) ? 1 : 0; } catch (e) { r += 100; }
+        try { r += (b.init() === 2) ? 2 : 0; } catch (e) { r += 200; }
+        __r = r;
+      `),
+    ).toBe(3);
+  });
+
+  it("RED on base (IR compile error): a typed class the IR path claims projects `new` / `init` onto member slots (50)", async () => {
+    const source = `
+      class C {
+        x: number;
+        constructor(x: number) { this.x = x; }
+        new(): number { return 42; }
+        init(a: number): number { return a + this.x; }
+      }
+      export function test(): number { const c = new C(3); return c.new() + c.init(5); }
+    `;
+    for (const target of ["standalone", undefined] as const) {
+      const result = await compile(source, { ...(target ? { target } : {}), fileName: "probe.ts" });
+      expect(result.success, result.errors.map((e) => `L${e.line}: ${e.message}`).join("\n")).toBe(true);
+      const { instance } = await WebAssembly.instantiate(result.binary, result.importObject ?? {});
+      expect((instance.exports as { test: () => number }).test()).toBe(50);
+    }
+  });
+});
