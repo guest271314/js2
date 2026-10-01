@@ -1,10 +1,12 @@
 ---
 id: 6780
 title: "codegen: `await` of a statically-resolved operand (`await null`, `await Promise.resolve()`) does not suspend — the async body runs synchronously past the await"
-status: ready
+status: in-progress
+assignee: "ttraenkler/claude-dev-6780"
+branch: "claude/issue-6780-await-static-resolved"
 sprint: Backlog
 created: 2026-09-30
-updated: 2026-09-30
+updated: 2026-10-01
 priority: critical
 horizon: m
 feasibility: medium
