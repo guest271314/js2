@@ -58,6 +58,7 @@ import { emitToPropertyKeyOnce } from "../expressions/computed-member-reference.
 import { emitLazyProtoGet, emitRegisterDynamicClassParent } from "../expressions/extern.js";
 import { emitStandaloneHeritageCheck } from "../class-heritage-check.js"; // (#5195 r3-5)
 import { classHierarchyHasDynamicMember, dynamicClassKeyGlobalKey } from "../class-dynamic-keys.js"; // (#5195 Step 1 / F1)
+import { computedKeyHasAssignment } from "../class-member-keys.js"; // (#6772 S5)
 import { isForeignEvalNode } from "../expressions/eval-source.js";
 import { ensureNativeArrayFromIterN } from "../iterator-native.js";
 import { ensureObjectRuntime } from "../object-runtime.js";
@@ -466,9 +467,16 @@ export function emitUnresolvedComputedAccessorNameEffects(
         !ts.isSetAccessorDeclaration(member) &&
         !ts.isMethodDeclaration(member)) ||
       !member.name ||
-      !ts.isComputedPropertyName(member.name) ||
-      resolveComputedKeyExpression(ctx, member.name.expression) !== undefined
+      !ts.isComputedPropertyName(member.name)
     ) {
+      continue;
+    }
+    if (resolveComputedKeyExpression(ctx, member.name.expression) !== undefined) {
+      // (#6772 S5) The name folded, but a write inside the key still runs here.
+      if (computedKeyHasAssignment(member.name.expression)) {
+        const effectType = compileExpression(ctx, fctx, member.name.expression);
+        if (effectType !== null && effectType !== (VOID_RESULT as unknown as ValType)) fctx.body.push({ op: "drop" });
+      }
       continue;
     }
     const keyGlobalIdx =

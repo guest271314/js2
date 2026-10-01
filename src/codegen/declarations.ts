@@ -72,6 +72,7 @@ import {
 import { collectClassDeclaration, compileClassBodies, type ClassBodyCompileRouting } from "./class-bodies.js";
 import { shouldCollectTopLevelClassForRuntimeHeritage } from "./class-expression-identity.js";
 import { classHasUnresolvedComputedMemberName, classHierarchyHasDynamicMember } from "./class-dynamic-keys.js"; // (#5195 Step 1 / R2-3)
+import { classHasComputedKeyAssignment } from "./class-member-keys.js"; // (#6772 S5)
 import { routeTopLevelClassBodies } from "./prepared-class-body-cutover.js";
 import {
   collectBindingPatternNames,
@@ -2481,7 +2482,9 @@ function collectPreparedTopLevelClassComputedNameEffects(ctx: CodegenContext, st
   // it: that predicate is `!ctx.standalone && …`, so it never fires here.)
   if (
     ts.isClassDeclaration(statement) &&
-    (classHasUnresolvedComputedMemberName(ctx, statement) || topLevelClassInheritsRuntimeKeys(ctx, statement))
+    (classHasUnresolvedComputedMemberName(ctx, statement) ||
+      classHasComputedKeyAssignment(statement) || // (#6772 S5) a folded key's write runs at definition
+      topLevelClassInheritsRuntimeKeys(ctx, statement))
   ) {
     ctx.moduleInitStatements.push(statement);
     return true;
@@ -4125,7 +4128,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
       const hasRuntimeKeyedClassExpression = stmt.declarationList.declarations.some((declaration) => {
         const init = declaration.initializer;
         if (init === undefined || !ts.isClassExpression(init)) return false;
-        if (classHasUnresolvedComputedMemberName(ctx, init)) return true;
+        if (classHasUnresolvedComputedMemberName(ctx, init) || classHasComputedKeyAssignment(init)) return true; // (#6772 S5)
         const className = ctx.anonClassExprNames.get(init);
         return className !== undefined && classHierarchyHasDynamicMember(ctx, className);
       });

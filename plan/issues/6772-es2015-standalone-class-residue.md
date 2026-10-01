@@ -812,7 +812,8 @@ shared lock.
 | S1b | `db43fed38d` | p1 0 -> 3 (3), p2 0 -> 63 (63), p3 14 -> 15 (15), nested 133 -> 3333, g1 880 -> 1023 | `definition/this-access-restriction.js`, `definition/this-check-ordering.js` |
 | S2 | `760fc7205c` | p4 8 -> 63, t2 4608 -> 8191, g6 4 -> 7, g11 10 -> 7, g8 7 -> 31, g2 63 -> 255, g5 63 -> 255; guards g13 63, g16 31, p15 15 | `subclass/class-definition-null-proto-contains-return-override.js`, `subclass/derived-class-return-override-with-object.js`, `subclass/default-constructor-2.js`, `definition/this-access-restriction-2.js` |
 | S3 | `75220d3415` | p5c 0 -> 15 (15); s3a COMPILE-FAIL -> 2 (2); guards s3b 31 (31), p5d 21 | `arguments/default-constructor.js` |
-| S4 | (this step) | p9 / p9b / p9e invalid Wasm -> 42 (42), p9c invalid -> 7 (7), p9d invalid -> 127 (127), p9f invalid -> 63 (63), t9 (typed, IR-claimed) IR compile error -> 50 (both lanes); guard s4i 3 (3) | `{statements,expressions}/class/ident-name-method-def-new-escaped.js` |
+| S4 | `d2fd895a37` | p9 / p9b / p9e invalid Wasm -> 42 (42), p9c invalid -> 7 (7), p9d invalid -> 127 (127), p9f invalid -> 63 (63), t9 (typed, IR-claimed) IR compile error -> 50 (both lanes); guard s4i 3 (3) | `{statements,expressions}/class/ident-name-method-def-new-escaped.js` |
+| S5 | (this step) | p6 14 -> 15 (15); s5/a 0 -> 1, s5/b 0 -> 2, s5/e 0 -> 1, s5/g 0 -> 1, s5/h (member order) 0 -> 1 (node equal); host lane p6 14 -> 15 too | the four `cpn-class-{decl,expr}[-accessors]-computed-property-name-from-assignment-expression-assignment.js` |
 
 S2 design note (deviates from the plan's "set only on an object return"):
 `$__ctor_override` is a RETURN REGISTER written on EVERY exit of a marked
@@ -855,3 +856,24 @@ of p1/p3/p4/g13/t2/p6/p12 are identical to the pre-S4 merged tree, p9/p9f
 change (they were invalid Wasm). The plan's inheritance residual does not
 occur: s4i (a subclass calling an inherited `new()` / `init()`) answers 3 on
 base and branch.
+
+S5 note: two halves. (1) `emitUnresolvedComputedAccessorNameEffects` keeps
+skipping a member whose key folds, unless the key contains a plain assignment
+(`computedKeyHasAssignment`, class-member-keys.ts — the literals.ts fold reads
+through `x = v`); that key is compiled for effect and dropped, in member order,
+and the folded name stays the property key. (2) The emitter never ran for a
+TOP-LEVEL class whose keys all fold: the module-init collector routes a class
+through `compileNestedClassDeclaration` only when
+`classHasUnresolvedComputedMemberName` holds. `classHasComputedKeyAssignment`
+now joins that gate for declarations and for `let C = class {…}` bindings
+(declarations.ts). Lane-independent: host bytes move for exactly these shapes
+(p6 sha changed; p1/p3/p4/p9/p9f/g13/t2/p11/p12 identical to S4). Separate
+defect found, NOT fixed here (file it): an element-access KEY that folds drops
+its write the same way — `o[x = 'a']`, `c[x = 1]`, `c[String(x = 'm')]()` leave
+`x` unchanged on every lane (probe p6c 2, node 15). The rows pass anyway because
+the class definition performs the write first. Neighbour suites
+issue-5195-es2015-class-r2 / issue-5195-r3-review / issue-5318-r4: the same 6
+cases fail on the pre-S5 tree AND on origin/main a895598841 (5 stale RESIDUAL
+pins whose writes/compiles now succeed — w1 987 on main — and r3-review F1,
+which throws on main too: f1 150 on main and branch); issue-5318-r5 /
+issue-5195-r3-heritage-check 46/46.

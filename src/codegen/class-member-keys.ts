@@ -217,3 +217,25 @@ export function elementCallTargetsStaticMethod(
     ctx.staticMethodSet.has(fullName) && ctx.funcMap.get(classMemberFuncKey(ctx, fullName, "static")) !== undefined
   );
 }
+
+/**
+ * (#6772 S5) True when a computed member key contains a plain assignment
+ * outside any nested function. `resolveComputedKeyExpression` folds
+ * `[x = 1]` to its RHS (literals.ts), so the member's NAME is static — but the
+ * write is still part of ClassDefinitionEvaluation and must run there.
+ */
+export function computedKeyHasAssignment(node: ts.Node): boolean {
+  if (ts.isFunctionLike(node) || ts.isClassLike(node)) return false;
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) return true;
+  return ts.forEachChild(node, (child) => computedKeyHasAssignment(child) || undefined) === true;
+}
+
+/** (#6772 S5) A method / accessor of `decl` whose computed key contains an assignment. */
+export function classHasComputedKeyAssignment(decl: ts.ClassLikeDeclaration): boolean {
+  return decl.members.some(
+    (member) =>
+      (ts.isMethodDeclaration(member) || ts.isGetAccessorDeclaration(member) || ts.isSetAccessorDeclaration(member)) &&
+      ts.isComputedPropertyName(member.name) &&
+      computedKeyHasAssignment(member.name.expression),
+  );
+}

@@ -603,3 +603,49 @@ describe("#6772 S4 — a member named `new` / `init` does not take the allocator
     }
   });
 });
+
+describe("#6772 S5 — a folded computed key still runs its assignment at ClassDefinitionEvaluation", () => {
+  it("RED on base (14): top-level declaration, method + static method keys `[x = 1]` (node 15)", async () => {
+    expect(
+      await runProbe(`
+        let x = 0;
+        class C { [x = 1]() { return 2; } static [x = 1]() { return 3; } }
+        var r = (x === 1) ? 1 : 0;
+        let c = new C();
+        r += (c[x = 1]() === 2) ? 2 : 0;
+        r += (C[x = 1]() === 3) ? 4 : 0;
+        r += (c[String(x = 1)]() === 2) ? 8 : 0;
+        __r = r;
+      `),
+    ).toBe(15);
+  });
+
+  it("RED on base (0): class expressions at top level and in functions, accessor keys (node 7)", async () => {
+    expect(
+      await runProbe(`
+        let x = 0;
+        let C = class { get [x = 1]() { return 2; } static set [x = 1](v) {} };
+        var r = (x === 1) ? 1 : 0;
+        function g() { let y = 0; var D = class { get [y = 1]() { return 2; } }; return y; }
+        r += (g() === 1) ? 2 : 0;
+        function h() { let y = 0; let D = class { [y = 'b']() { return 2; } }; return y === 'b' && new D().b() === 2; }
+        r += h() ? 4 : 0;
+        __r = r;
+      `),
+    ).toBe(7);
+  });
+
+  it("RED on base (0): the write runs in member order between runtime-keyed members (node 1)", async () => {
+    expect(
+      await runProbe(`
+        var log = [];
+        function k() {
+          let y = 0;
+          class A { [(log.push('a'), 'p')]() {} [y = 'q']() {} [(log.push('c'), 'r')]() {} }
+          return log.join() + ':' + y;
+        }
+        __r = k() === 'a,c:q' ? 1 : 0;
+      `),
+    ).toBe(1);
+  });
+});
