@@ -1,6 +1,49 @@
 # IR migration handoff — 2026-10-01
 
-## Current wrap-up
+## Final stand-down: fresh-main continuation preserved
+
+The ready existing [PR6374, “docs(ir): preserve migration handoff and extraction baseline”](https://github.com/loopdive/js2/pull/6374) is being refreshed against freshly verified upstream main `0d94fc71681fd4988ae0ca32dda3a12f614e4b47`. Its one issue-file conflict preserves both the upstream native-realm repair and this lane's source-contract notes. This PR delivers documentation and immutable evidence; the incomplete source implementation is not included as active source. Check the final exact published head, required checks and main content before counting this PR as delivered.
+
+The current source worktree is `/private/tmp/js2-ir-source-contracts-main-20261001`, branch `codex/3518-source-contracts-main-20261001`, HEAD/base `1265c47d6fc41300a380ef7e4abc45fdfcfd2c61`. Its **41 paths remain uncommitted**, with staged and unstaged bytes preserved separately. [The final manifest](final-checkpoint/manifest.json) pins all 76 archives, including [complete file bytes](final-checkpoint/integration-files.raw.txt), both patches, every latest raw test result and terminal log, inventory and specifications. These archives are documentation, never executable historical reconstruction inputs. The earlier worktree and its 34 immutable raw archives remain unchanged; earlier measurements below describe that earlier checkpoint.
+
+Only scoped claim `3518:source-validation-contracts-20261001`, owner `ttraenkler/codex-source-validation-contracts-20261001`, was released again after this continuation. The authoritative branch record was read back: `status=released`, `released_at=2026-10-01T03:42:15Z`, `write_id=76946-fhh4sf6o`. [The exact record](final-checkpoint/claim-final-release-record.json.raw.txt) is preserved. No other claim or reservation was changed. Reclaim after checking the live ledger before resuming source edits. All native writers stopped; no compiler or test process remains running.
+
+### Actual current-source validation
+
+All rows below ran on the preserved source worktree at base `1265c47d`; current main's subsequent `0d94fc71` changes are benchmark/baseline files only. No original fixture, timeout, historical hash or negative control was weakened. All suites have zero pending rows.
+
+| Check | Executed result | Remaining limit |
+| --- | --- | --- |
+| Production TS7 | PASS, terminal exit 0 | No test-source typecheck claim |
+| New live Phase A relocation reader | 65/65 | Authenticated live source and reciprocal reconstruction controls |
+| Source/component tests | 121/121 | Includes original component suites and 53 new contract rows |
+| Original ownership controls | 22/22 | Original controls unchanged |
+| Core vocabulary | **17/20** | Intrinsic, async and string historical receipts still fail |
+| Complete boundary suites | 477/477 | 352 semantic/provider and 125 general controls |
+| New pre-A program reader plus original program seam | **123/123** | 76 new controls plus all 47 original rows; genuine compiler child executed |
+| Runtime data contracts | **69/75** | Six historical receipt failures remain |
+| Original historical runtime mutation suite | **2/631** | 629 rows stop at the shared positive source check; not 629 independently attributed production defects |
+| LOC/function/JsTag/coercion/oracle | PASS | Actual main-based preservation checks; no full migration credit |
+| Inventory | 1761 entries, no inventory errors | Architecture incomplete; all entries tracked, no untracked inputs |
+| Reachability | Preservation 6/6 full and 6/6 cut | Graph OPEN, strict modeled closure FAIL, retirement NOT CERTIFIED |
+
+The program reader is integrated and executed; the earlier 37/47 result is superseded by 47/47 on these new bytes, not erased. Its 4096 MiB real compiler child retains original source, root configuration, diagnostics and timeouts. Historical reads reconstruct authenticated live inputs at the initial read only; current compiler/runtime/type reads remain raw. The complete inventory is durably archived as gzip/base64 text, with original decoded length and SHA256 in the manifest.
+
+### Exact resumption order
+
+1. Verify fresh upstream main, the final manifest and all current-source pins. Reclaim the released slice after checking overlaps. Preserve the 41-path index/worktree split; do not reset, stash or overwrite it. The canonical dirty Deno worktree remains untouched.
+2. Review the frozen **three-file core vocabulary draft**, archived under `final-checkpoint/core-draft/`. Its manifest SHA256 is `994f00785c72338a22b2e3080ce4b71a4c0ba793f9b236f8e2deba7cf19c557d`. The isolated writer still owns `/private/tmp/js2-ir-source-contracts-writer-20261001/.tmp/source-contracts-writer/core-vocabulary-freeze-gOZASp/`. Its 132 rows are **drafted, not executed**, and the files have **not been copied into the current integration**. The helper authenticates 51 raw inputs, performs Phase A once, reconstructs eight originals and reciprocally proves fifteen current owners through 164 transfers and four current-only residues. Root must change only the initial reads in original core receipt rows to `readCoreVocabularyReceiptSource(path, rawReader)`. Do not pre-normalize Phase A again or replace raw current runtime/compiler/type reads. Run all 132 new and 20 original rows before claiming success.
+3. Implement the separate runtime inverse from the preserved `runtime-inverses/` and `runtime-joins/` specs. This work is **not implemented or test-executed**. It specifies 34 bounded spans across eleven modified files, 27 closed production inputs, and actual live ABI-identity donors. Preserve generic provider specialization, canonical aliases, both clock/vector stages, ten link checks, five owner checks and all 631 original controls. Normalize only the initial authenticated raw read; inject historical mutants after normalization. Never normalize a mutated source twice or use stored executable bodies as fallback. The architect's 22 static compatibility checks are not runtime validation evidence.
+4. Rerun the original 75 runtime rows, all 631 historical rows, new inverse adversarial controls, current type/runtime controls and complete preservation gates. Inspect individual failures; preserve every before-run. Only after full affected validation and fresh-main integration should the source branch receive a normal signed commit and ready implementation PR. Never publish it as green based on the documentation PR.
+5. Continue the full extraction specification and mixed source-call integration. Legacy stays until complete tested equality on both backends. No new downstream scope was started during this wrap-up.
+
+### Verified upstream delivery
+
+[PR6371, “feat(ir): add native realm state and structural object access”](https://github.com/loopdive/js2/pull/6371) **landed** as `1265c47d6fc41300a380ef7e4abc45fdfcfd2c61`. Exact signed head `21c7922d5f8601aab52542690815d5b951796a14` is an ancestor of verified main, and repaired source/test bytes were compared with main. [The delivery receipt](final-checkpoint/pr6371-delivery-verification.json.raw.txt) records all **102 actual protected conformance shards** and the final regression gate succeeding, excluding skipped matrix stubs. Merge-group quality, linear, equivalence, CLA and differential checks succeeded; **merge-group issue-tests was cancelled**. Exact PR-head quality and issue-tests succeeded. Do not describe all merge-group CI as green. Original failures and 35-second controls remain preserved.
+
+[PR6372, “fix(ir): retain closure parameter facts across physical projections”](https://github.com/loopdive/js2/pull/6372) remains verified delivered as `d1d7d68583ba312aa04f58f6144b3222a90c2d5e`, with exact main content and all 102 protected shards/regression/CI/CLA/differential checks previously verified. The original public Number fixture remains **5/9**; no further public-fixture or full migration delivery is claimed.
+
+## Earlier wrap-up checkpoint (03:14 UTC)
 
 This ready PR publishes the handoff and preserved evidence. The new source-contract implementation remains uncommitted and incomplete; its historical checks must pass before publication as a ready implementation. Legacy retirement is not certified. All worktrees and original failures are preserved.
 
@@ -42,7 +85,7 @@ Resume in order: verify actual main/base, all archive/current hashes and claim o
 
 Then follow [the full extraction specification](validation-lowering-extraction-spec.md): A closed contracts; B full analysis/verifier/allocation/class-layout bodies; C complete program/runtime rederivation and validator; D generic/Wasm lowering closure; E authentic source identity/fill and linear compatibility. Phase A alone does not make the preserved seven-file mixed source-call draft publishable. That draft remains in `/private/tmp/js2-ir-genuine-mixed-get-call-20261001`, branch `codex/3518-genuine-mixed-get-call-20261001`, base e4737c9, with manifest `.tmp/mixed-invocation/writer/source-target-draft1-glo9qpeg/manifest.json`. Its 43/43 component evidence does not override an invalid dependency inventory.
 
-## Existing PRs and verified delivery
+## Earlier PR observations (superseded by final delivery receipt above)
 
 [PR6371, “feat(ir): add native realm state and structural object access”](https://github.com/loopdive/js2/pull/6371) remains OPEN at exact signed head `21c7922d5f8601aab52542690815d5b951796a14`. Fresh wrap-up reads now show quality and issue-tests SUCCESS, as well as the equivalence gate. Protected auto-merge remains enabled. It has not merged and is not counted delivered. Preserve its original failures, fixtures and 35-second timeout; do not open a duplicate or push unrelated work to that branch. Its repair worktree `/private/tmp/js2-ir-6371-canonical-audit-performance-20261001` is clean. Its signed handoff records 392/392 scoped, 213/213 after main integration, 953/953 normal commit-hook assertions and passing normal push hooks; these local measurements do not replace protected merge-group evidence.
 
