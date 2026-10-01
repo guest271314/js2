@@ -1716,7 +1716,7 @@ function compileDestructuringAssignment(
       if (
         ts.isBinaryExpression(targetExpr) &&
         targetExpr.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-        ts.isIdentifier(targetExpr.left)
+        (ts.isIdentifier(targetExpr.left) || isMemberTarget(targetExpr.left)) // (#6774 S11)
       ) {
         defaultExpr = targetExpr.right;
         targetExpr = targetExpr.left;
@@ -1746,6 +1746,9 @@ function compileDestructuringAssignment(
           }
           continue;
         }
+        // (#6774 S11) absent key ⇒ `undefined` ⇒ the default, PutValue'd to the member.
+        if (defaultExpr && isMemberTarget(targetExpr) && emitMemberDefaultWrite(ctx, fctx, targetExpr, defaultExpr))
+          continue;
         reportSilentFallback(ctx, "lookup-miss-skip", "assignment:destructure-assign-property-field-miss", prop);
         continue;
       }
@@ -1841,6 +1844,7 @@ function compileDestructuringAssignment(
         fctx.body.push({ op: "local.get", index: tmpLocal });
         fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx });
         fctx.body.push({ op: "local.set", index: tmpElem });
+        if (defaultExpr && fieldType.kind === "externref") emitUndefinedDefaultInto(ctx, fctx, tmpElem, defaultExpr);
         emitAssignToTarget(ctx, fctx, targetExpr, tmpElem, fieldType);
       }
       // else: unsupported target expression in property assignment — skip
@@ -6585,3 +6589,49 @@ export {
   compileExternSetFallback,
   compilePropertyAssignment,
 };
+
+function isMemberTarget(node: ts.Expression): node is ts.PropertyAccessExpression | ts.ElementAccessExpression {
+  return ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node);
+}
+
+/** (#6774 S11) `local = local === undefined ? <initializer> : local` for an externref slot. */
+function emitUndefinedDefaultInto(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  local: number,
+  initializer: ts.Expression,
+): void {
+  const undefIdx = ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
+  if (undefIdx === undefined) return;
+  flushLateImportShifts(ctx, fctx);
+  fctx.body.push({ op: "local.get", index: local });
+  fctx.body.push({ op: "call", funcIdx: undefIdx });
+  attachDetachedAssignmentBodies(
+    fctx,
+    (body) => ({
+      then: body(() => {
+        const initType = compileExpression(ctx, fctx, initializer, { kind: "externref" });
+        if (!initType) return;
+        if (initType.kind !== "externref") coerceType(ctx, fctx, initType, { kind: "externref" });
+        fctx.body.push({ op: "local.set", index: local });
+      }),
+      else: body(() => {}),
+    }),
+    (branches) => fctx.body.push({ op: "if", blockType: { kind: "empty" }, ...branches }),
+  );
+}
+
+function emitMemberDefaultWrite(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  target: ts.PropertyAccessExpression | ts.ElementAccessExpression,
+  initializer: ts.Expression,
+): boolean {
+  const dflt = allocLocal(fctx, `__nested_elem_${fctx.locals.length}`, { kind: "externref" });
+  const initType = compileExpression(ctx, fctx, initializer, { kind: "externref" });
+  if (!initType) return true;
+  if (initType.kind !== "externref") coerceType(ctx, fctx, initType, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: dflt });
+  emitAssignToTarget(ctx, fctx, target, dflt, { kind: "externref" });
+  return true;
+}

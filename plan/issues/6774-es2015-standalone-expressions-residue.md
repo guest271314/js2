@@ -92,6 +92,9 @@ func-budget-allow:
   # before the parameter initializers (body in src/codegen/eval-param-scope-hoist.ts).
   - src/codegen/closures.ts::compileLiftedClosureBody
   - src/codegen/function-body.ts::compileFunctionBody
+  # 2026-10-01 (#6774 S11 impl, Opus): member-target `= init` split + two
+  # one-line default hooks (bodies: emitMemberDefaultWrite / emitUndefinedDefaultInto).
+  - src/codegen/expressions/assignment.ts::compileDestructuringAssignment
 ---
 
 ## Problem

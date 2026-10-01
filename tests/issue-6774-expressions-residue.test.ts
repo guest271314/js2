@@ -110,6 +110,12 @@ obj = { ['__proto__']: null }; if (obj.__proto__ === null) bits |= 16;`,
     body: `var g = function* (...[a]) { yield a; }; if (sv(g(8).next().value, 8)) bits |= 1; var o = { m(...[b]) { return b; } }; if (sv(o.m(6), 6)) bits |= 2; var f = function (...[x, y]) { return x * y; }; if (sv(f(3, 4), 12)) bits |= 4;`,
   },
   {
+    name: "obj_pattern_member_target_with_initializer",
+    step: "S11",
+    expected: 3,
+    body: `var holder = {}; var vals = { x: 23 }; ({ x: holder.y = 42 } = vals); if (sv(holder.y, 23)) bits |= 1; var got; ({ x: { set y(v) { got = v; } }.y = 42 } = vals); if (sv(got, 23)) bits |= 2;`,
+  },
+  {
     name: "template_object_frozen",
     step: "S13",
     expected: 3,
