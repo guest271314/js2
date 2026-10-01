@@ -51,8 +51,12 @@ function assert_sameValue(actual: number, expected: number): void {
   }
 }
 let caught: number = 0;
+// (#6779) Built at runtime so it reaches the host harness shim this case
+// covers. A literal argument is inlined at compile time (#1163) and calls the
+// module's own assert_sameValue, which records the failure without throwing.
+const failing: string = ["assert_sameValue(1, ", "2);"].join("");
 try {
-  eval('assert_sameValue(1, 2);');
+  eval(failing);
 } catch (e) {
   caught = 1;
 }

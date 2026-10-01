@@ -6,8 +6,7 @@ describe("#1006 — eval via JS host import", () => {
   async function runTest(src: string): Promise<{ pass: boolean; ret?: unknown; error?: string }> {
     const result = await compile(src, { skipSemanticDiagnostics: true });
     if (!result.success) return { pass: false, error: result.error };
-    // (#6779) The host-eval import runs under the hostEval policy.
-    const importObj = buildImports(result.imports, undefined, result.stringPool, { dynamicCode: "hostEval" });
+    const importObj = buildImports(result.imports, undefined, result.stringPool);
     const { instance } = await WebAssembly.instantiate(result.binary, importObj as any);
     if (typeof (importObj as any).setExports === "function") {
       (importObj as any).setExports(instance.exports);

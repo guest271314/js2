@@ -187,10 +187,27 @@ locally.
 
 Tests: `tests/issue-6779-eval-policy.test.ts` (11 cases; 7 fail against the
 pre-change runtime). Eval-adjacent suites re-run per file; every remaining
-failure also fails at HEAD (`issue-1006` 1, `issue-1073` 1, `issue-2973` 1,
-`issue-3521` 3, `issue-3058-dyn-view` 1, `issue-4484` 3, `issue-3685` 1,
-`lodash-compile` 38) or needs inputs this checkout lacks (test262 submodule,
-QuickJS artifact: `issue-3418`, `issue-3451`, `issue-4162`, `issue-4464`).
+failure also fails at HEAD (`issue-1006` 1, `issue-2973` 1, `issue-3521` 3,
+`issue-3058-dyn-view` 1, `issue-4484` 3, `issue-3685` 1, `lodash-compile` 38)
+or needs inputs this checkout lacks (test262 submodule, QuickJS artifact:
+`issue-3418`, `issue-3451`, `issue-4162`, `issue-4464`). The six changed root
+test files pass under CI's `test:changed-root` with
+`JS2WASM_EVAL_ENGINE=interpreter`.
+
+- `tests/issue-1006.test.ts` is left unchanged: its six eval cases are folded
+  at compile time and pass under `deny`. Its seventh case
+  (`(eval as any)()` → `undefined`) fails identically on `origin/main` under
+  the same env (file-copy A/B of `src/runtime.ts`, `src/runtime-eval.ts`,
+  `src/runtime/dynamic-function-import.ts` and the test): the compiler lowers
+  a no-argument `eval()` to `ref.null extern` (JS `null`) with no runtime
+  import at all — a codegen bug independent of this policy (follow-up).
+- `tests/issue-1073.test.ts` "eval'd assert_sameValue failure throws to outer
+  scope" failed on `origin/main` too: its literal `eval('assert_sameValue(1,
+  2);')` has been inlined at compile time since #1163, so it called the
+  module's own non-throwing `assert_sameValue` and never reached the harness
+  shim the case covers. The string is now built at runtime; the assertion is
+  unchanged and passes under `hostEval` (the unbound-name refusal sends it to
+  the host shim, which throws).
 
 Gates (after merging `origin/main` 3d3dfda3), all exit 0: `typecheck`,
 `lint`, `format:check`, `test:guard` (20 files / 255 tests), LOC / function /
