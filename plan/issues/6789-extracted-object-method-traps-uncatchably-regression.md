@@ -1,7 +1,9 @@
 ---
 id: 6789
 title: "codegen: calling an extracted object-literal method (`const m = obj.m; m()`) traps with an uncatchable null dereference — regression of #2025"
-status: ready
+status: in-progress
+assignee: "ttraenkler/claude-dev-6789"
+branch: "claude/issue-6789-trampoline-null-this"
 sprint: Backlog
 created: 2026-09-30
 updated: 2026-09-30
