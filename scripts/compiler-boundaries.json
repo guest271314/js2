@@ -128,7 +128,13 @@
         "src/ir/analysis/alloc-registry.ts",
         "src/ir/analysis/effects.ts",
         "src/ir/analysis/intrinsics.ts",
-        "src/ir/analysis/async-plan.ts"
+        "src/ir/analysis/async-plan.ts",
+        "src/ir/analysis/lattice.ts",
+        "src/ir/analysis/ownership.ts",
+        "src/ir/analysis/encoding.ts",
+        "src/ir/analysis/escape.ts",
+        "src/ir/analysis/dominance.ts",
+        "src/ir/analysis/alloc-verification.ts"
       ],
       "required": true,
       "entries": [
@@ -136,9 +142,15 @@
         "src/ir/analysis/alloc-registry.ts",
         "src/ir/analysis/effects.ts",
         "src/ir/analysis/intrinsics.ts",
-        "src/ir/analysis/async-plan.ts"
+        "src/ir/analysis/async-plan.ts",
+        "src/ir/analysis/lattice.ts",
+        "src/ir/analysis/ownership.ts",
+        "src/ir/analysis/encoding.ts",
+        "src/ir/analysis/escape.ts",
+        "src/ir/analysis/dominance.ts",
+        "src/ir/analysis/alloc-verification.ts"
       ],
-      "minModules": 5
+      "minModules": 11
     },
     {
       "id": "ir-passes",
@@ -170,9 +182,10 @@
         "src/ir/runtime/ordinary-object-callables.ts",
         "src/ir/runtime/closure-invocation-callables.ts",
         "src/ir/runtime/js-tag-domain.ts",
-        "src/ir/runtime/producer.ts"
+        "src/ir/runtime/producer.ts",
+        "src/ir/runtime/verify.ts"
       ],
-      "minModules": 17
+      "minModules": 18
     },
     {
       "id": "ir-program",
@@ -217,9 +230,11 @@
         "src/ir/program/native-object-result-requirements.ts",
         "src/ir/program/native-object-result-values.ts",
         "src/ir/program/native-prototype-requirements.ts",
-        "src/ir/program/native-realm-requirements.ts"
+        "src/ir/program/native-realm-requirements.ts",
+        "src/ir/program/allocations.ts",
+        "src/ir/program/class-layouts.ts"
       ],
-      "minModules": 38
+      "minModules": 40
     },
     {
       "id": "runtime-contracts",
@@ -1716,6 +1731,28 @@
     {
       "layer": "ir-runtime",
       "entries": ["src/ir/runtime/js-tag-domain.ts", "src/ir/runtime/producer.ts"],
+      "minModules": 2
+    },
+    {
+      "layer": "ir-analysis",
+      "entries": [
+        "src/ir/analysis/lattice.ts",
+        "src/ir/analysis/ownership.ts",
+        "src/ir/analysis/encoding.ts",
+        "src/ir/analysis/escape.ts",
+        "src/ir/analysis/dominance.ts",
+        "src/ir/analysis/alloc-verification.ts"
+      ],
+      "minModules": 6
+    },
+    {
+      "layer": "ir-runtime",
+      "entries": ["src/ir/runtime/verify.ts"],
+      "minModules": 1
+    },
+    {
+      "layer": "ir-program",
+      "entries": ["src/ir/program/allocations.ts", "src/ir/program/class-layouts.ts"],
       "minModules": 2
     }
   ],
@@ -10478,11 +10515,8 @@
     },
     {
       "path": "src/ir/analysis/dominance.ts",
-      "state": "unmigrated",
-      "layer": "mixed-needs-split",
-      "destination": "ir-analysis",
-      "owner": "3518-coordinator",
-      "nextBoundary": "Move the complete dominance implementation into the clean ir-analysis layer; the contract-only subroot does not complete src/ir/analysis."
+      "state": "clean",
+      "layer": "ir-analysis"
     },
     {
       "path": "src/ir/analysis/encoding-inference.ts",
@@ -10494,19 +10528,13 @@
     },
     {
       "path": "src/ir/analysis/encoding.ts",
-      "state": "unmigrated",
-      "layer": "mixed-needs-split",
-      "destination": "ir-core",
-      "owner": "3518-coordinator",
-      "nextBoundary": "Separate pure IR contracts from frontend inventory and physical/backend dependencies."
+      "state": "clean",
+      "layer": "ir-analysis"
     },
     {
       "path": "src/ir/analysis/escape.ts",
-      "state": "unmigrated",
-      "layer": "mixed-needs-split",
-      "destination": "ir-core",
-      "owner": "3518-coordinator",
-      "nextBoundary": "Separate pure IR contracts from frontend inventory and physical/backend dependencies."
+      "state": "clean",
+      "layer": "ir-analysis"
     },
     {
       "path": "src/ir/analysis/i32-coerced-locals.ts",
@@ -10526,11 +10554,8 @@
     },
     {
       "path": "src/ir/analysis/lattice.ts",
-      "state": "unmigrated",
-      "layer": "mixed-needs-split",
-      "destination": "ir-core",
-      "owner": "3518-coordinator",
-      "nextBoundary": "Separate pure IR contracts from frontend inventory and physical/backend dependencies."
+      "state": "clean",
+      "layer": "ir-analysis"
     },
     {
       "path": "src/ir/analysis/linear-memory-plan.ts",
@@ -10558,11 +10583,8 @@
     },
     {
       "path": "src/ir/analysis/ownership.ts",
-      "state": "unmigrated",
-      "layer": "mixed-needs-split",
-      "destination": "ir-core",
-      "owner": "3518-coordinator",
-      "nextBoundary": "Separate pure IR contracts from frontend inventory and physical/backend dependencies."
+      "state": "clean",
+      "layer": "ir-analysis"
     },
     {
       "path": "src/ir/analysis/remainder-fast-path.ts",
@@ -14798,6 +14820,26 @@
       "path": "src/ir/runtime/producer.ts",
       "state": "clean",
       "layer": "ir-runtime"
+    },
+    {
+      "path": "src/ir/analysis/alloc-verification.ts",
+      "state": "clean",
+      "layer": "ir-analysis"
+    },
+    {
+      "path": "src/ir/runtime/verify.ts",
+      "state": "clean",
+      "layer": "ir-runtime"
+    },
+    {
+      "path": "src/ir/program/allocations.ts",
+      "state": "clean",
+      "layer": "ir-program"
+    },
+    {
+      "path": "src/ir/program/class-layouts.ts",
+      "state": "clean",
+      "layer": "ir-program"
     }
   ]
 }
