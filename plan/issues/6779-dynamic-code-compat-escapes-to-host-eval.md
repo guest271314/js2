@@ -1,7 +1,9 @@
 ---
 id: 6779
 title: "runtime: default `dynamicCode: \"compat\"` runs program eval strings in the HOST realm on any non-SyntaxError, and re-executes a string whose body threw"
-status: ready
+status: in-progress
+assignee: "ttraenkler/claude-dev-6779"
+branch: "claude/issue-6779-eval-compat-policy"
 sprint: Backlog
 created: 2026-09-30
 updated: 2026-09-30

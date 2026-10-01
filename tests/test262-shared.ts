@@ -34,7 +34,7 @@ import { getTest262ShardCompletionPath } from "../scripts/validate-test262-compl
 import { discoverFixtureGraph, hasSelfModuleImport } from "../scripts/test262-fixture-graph.mjs";
 // (#4162) ONE import-object finaliser, shared with scripts/test262-worker.mjs
 // and tests/test262-runner.ts.
-import { instantiateTest262Module } from "../scripts/test262-import-object.mjs";
+import { instantiateTest262Module, TEST262_DYNAMIC_CODE_POLICY } from "../scripts/test262-import-object.mjs";
 import { isPoisonCompileError } from "../scripts/test262-poison-error.mjs";
 import { isRecordedVerdictSentinel } from "../scripts/verdict-once.mjs";
 import { findNthAssert } from "./test262-assert-locator.js";
@@ -978,6 +978,7 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                   };
                   const importObj = buildImports(result.imports, { console: consoleProxy }, result.stringPool, {
                     globalSandbox: createTestSandbox(consoleProxy as unknown as Console),
+                    dynamicCode: TEST262_DYNAMIC_CODE_POLICY,
                   });
                   // (#4162) The fixture-graph lane executes in this process
                   // instead of scripts/test262-worker.mjs. Both go through the

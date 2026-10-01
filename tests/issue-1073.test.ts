@@ -5,7 +5,8 @@ import { buildImports } from "../src/runtime.ts";
 async function runTest(src: string): Promise<number> {
   const r = await compile(src, { fileName: "test.ts" });
   if (!r.success) throw new Error("CE: " + (r.errors?.[0]?.message ?? "unknown"));
-  const imports = buildImports(r.imports, undefined, r.stringPool);
+  // (#6779) These tests cover the hostEval policy (the pre-#6779 default).
+  const imports = buildImports(r.imports, undefined, r.stringPool, { dynamicCode: "hostEval" });
   const { instance } = await WebAssembly.instantiate(r.binary, imports as any);
   const test = (instance.exports as any).test;
   return test();
