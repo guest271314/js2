@@ -1,10 +1,12 @@
 ---
 id: 6781
 title: "codegen: a generator whose consumer calls `.throw()`/`.return()` silently takes the eager host-buffer path — body and `finally` run at creation, `throw` escapes the generator's own `catch`"
-status: ready
+status: in-progress
 sprint: Backlog
 created: 2026-09-30
-updated: 2026-09-30
+updated: 2026-10-01
+assignee: "ttraenkler/claude-dev-6781"
+branch: "claude/issue-6781-generator-eager-refuse"
 priority: high
 horizon: m
 feasibility: medium
@@ -16,6 +18,14 @@ goal: generator-model
 related: [1687, 1691, 1344, 2035]
 requested_by: ttraenkler/claude-review
 origin: "2026-09-30 codebase review (plan/agent-context/claude-codebase-review-2026-09-30.md) — H2"
+# 2026-10-01 (#6781): the refusal lives in its own module; the collector gains
+# only the one-line per-source call + import, and the eager runtime's
+# return()/throw() each gain the field resets that complete the generator.
+loc-budget-allow:
+  - src/codegen/declarations/import-collector.ts
+  - src/runtime/iterator-polyfills.ts
+func-budget-allow:
+  - src/codegen/declarations/import-collector.ts::finalizeUnifiedCollector
 ---
 
 # #6781 — refuse, do not silently demote, generators that need `.throw()` / `.return()`
