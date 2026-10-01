@@ -712,7 +712,7 @@ function _compiledAbToHostBuffer(vec: any, exports: Record<string, Function> | u
   }
   // (lib.d.ts here predates the ES2024 options overload — cast the ctor.)
   const AbCtor = ArrayBuffer as unknown as new (len: number, opts?: { maxByteLength?: number }) => ArrayBuffer;
-  let ab = typeof maxLen === "number" && maxLen >= 0 ? new AbCtor(n, { maxByteLength: maxLen }) : new ArrayBuffer(n);
+  const ab = typeof maxLen === "number" && maxLen >= 0 ? new AbCtor(n, { maxByteLength: maxLen }) : new ArrayBuffer(n);
   const view = new Uint8Array(ab);
   for (let i = 0; i < n; i++) view[i] = getFn(vec, i) & 0xff;
   _abHostBufferCache.set(vec, ab);
@@ -2857,11 +2857,7 @@ function _instanceofResult(
   // TypeError. Reached only for an object V, per the step-3 short-circuit above.
   let proto = _compiledFnPrototypeSlot(rawTarget, callbackState);
   if (proto === _SLOT_ABSENT) {
-    try {
-      proto = (target as { prototype?: unknown }).prototype;
-    } catch (e) {
-      throw e;
-    }
+    proto = (target as { prototype?: unknown }).prototype;
   }
   if (proto === null || proto === undefined || (typeof proto !== "object" && typeof proto !== "function")) {
     return _INSTANCEOF_THROW;
@@ -5999,7 +5995,8 @@ function _safeSet(
   // (#1712) A vec read through `_wrapForHost` may return its real-array Proxy
   // view. Numeric writes must target the canonical raw WasmGC vec so the
   // module's element-set dispatcher can mutate the backing array.
-  obj = (_wasmClosureWrapperTargets.has(obj) && Reflect.set(obj, key, val, obj), _unwrapForHost(obj));
+  if (_wasmClosureWrapperTargets.has(obj)) Reflect.set(obj, key, val, obj);
+  obj = _unwrapForHost(obj);
   const accessorKey = typeof key === "number" && Number.isInteger(key) ? String(key) : key;
   const scAccessor = typeof accessorKey === "string" ? _wasmStructProps.get(obj) : undefined;
   if (_argumentsObjects.has(obj) && scAccessor && typeof scAccessor[`__set_${accessorKey}`] === "function") {
@@ -9660,6 +9657,7 @@ function _makeClassCtorMirrorForHost(
   // (#5354) The mirror itself, needed by the prototype facade's `constructor`
   // answer below. Assigned at the end of this function; every read of it
   // happens inside a trap, i.e. strictly after that assignment.
+  // biome-ignore lint/style/useConst: assigned at the end of the function; a `const` there would turn the guarded `mirrorSelf !== undefined` trap reads into TDZ errors.
   let mirrorSelf: any;
   const protoStruct = _classProtoStructs.get(classObj);
   // (#4618) Install the prototype facade even when the proto struct did not
@@ -10824,9 +10822,8 @@ const _tTimeBasicSrc = `${_tHourSrc}(?:${_tMinuteSrc}(?:${_tSecondSrc}${_tFracSr
 const _tOffsetSrc =
   "[+-](?:[01]\\d|2[0-3])(?::[0-5]\\d(?::[0-5]\\d(?:[.,]\\d{1,9})?)?|[0-5]\\d(?:[0-5]\\d(?:[.,]\\d{1,9})?)?)?";
 // TimeZoneAnnotation ::: `[` `!`? (UTCOffset[~SubMinutePrecision] | TimeZoneIANAName) `]`
-const _tTzAnnotationRe = new RegExp(
-  "^\\[!?(?:[+-](?:[01]\\d|2[0-3])(?::?[0-5]\\d)?|[A-Za-z._][A-Za-z._0-9+-]*(?:\\/[A-Za-z._][A-Za-z._0-9+-]*)*)\\]$",
-);
+const _tTzAnnotationRe =
+  /^\[!?(?:[+-](?:[01]\d|2[0-3])(?::?[0-5]\d)?|[A-Za-z._][A-Za-z._0-9+-]*(?:\/[A-Za-z._][A-Za-z._0-9+-]*)*)\]$/;
 // Annotation ::: `[` `!`? AnnotationKey `=` AnnotationValue `]`
 const _tAnnotationRe = /^\[(!?)([a-z_][a-z0-9_-]*)=([A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)\]$/;
 const _tBracketSplitRe = /\[[^\]]*\]/g;
@@ -16225,6 +16222,7 @@ assert._isSameValue = isSameValue;
             try {
               // Probe via a no-op proxy target; only [[Construct]] presence is
               // tested, the proxy is never actually instantiated.
+              // biome-ignore lint/complexity/useArrowFunction: Reflect.construct needs a constructible target; an arrow is not one, so this IsConstructor probe would always throw.
               Reflect.construct(function () {}, [], wrappedCallee);
               isCtor = true;
             } catch {
@@ -16282,6 +16280,7 @@ assert._isSameValue = isSameValue;
           let isCtor = false;
           if (typeof wrappedCallee === "function") {
             try {
+              // biome-ignore lint/complexity/useArrowFunction: Reflect.construct needs a constructible target; an arrow is not one, so this IsConstructor probe would always throw.
               Reflect.construct(function () {}, [], wrappedCallee);
               isCtor = true;
             } catch {
@@ -18975,9 +18974,8 @@ assert._isSameValue = isSameValue;
           if (exports === undefined && args.length > 0 && callbackState) {
             const defer = (callbackState as { deferToExports?: (fn: () => void) => void }).deferToExports;
             if (defer) {
-              const self = this;
               defer(() => {
-                invokeNativeFunctionCallback(id, cap, [self, ...args], callbackState, ASYNC_CALLBACK_EXCEPTION_POLICY);
+                invokeNativeFunctionCallback(id, cap, [this, ...args], callbackState, ASYNC_CALLBACK_EXCEPTION_POLICY);
               });
               return undefined;
             }
