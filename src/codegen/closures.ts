@@ -1,5 +1,6 @@
 import { initializeNativeGeneratorFunctionValue } from "./generators-factory-prototype.js";
 import { snapshotArrowNewTarget } from "./new-target-value.js";
+import { restPatternParamVecType } from "./resolved-rest-param.js"; // (#6774 S7)
 import { widenJsDefaultGuessSlot } from "./js-default-param-type-guess.js";
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
@@ -2189,6 +2190,8 @@ export function computeClosureWrapperSig(
     ) {
       wasmType = { kind: "externref" };
     }
+    // (#6774 S7) a rest BINDING-PATTERN parameter receives the packed rest vec
+    wasmType = restPatternParamVecType(ctx, p, (t) => getOrRegisterVecType(ctx, "externref", t)) ?? wasmType;
     arrowParams.push(wasmType);
   }
 

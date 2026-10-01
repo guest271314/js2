@@ -145,6 +145,12 @@ obj = { ['__proto__']: null }; if (obj.__proto__ === null) bits |= 16;`,
     expected: 1,
     body: `var log = []; var o = { set q(v) { log.push("set"); } }; function t() { log.push("t"); return o; } [t()["q"]] = []; if (log.join() === "t,set") bits |= 1;`,
   },
+  {
+    name: "rest_binding_pattern_params",
+    step: "S7",
+    expected: 7,
+    body: `function* gd(...[a]) { yield a; } var ge = function* (...[b]) { yield b; }; var fe = function (...[c]) { return c; }; if (gd(5).next().value === 5) bits |= 1; if (ge(6).next().value === 6) bits |= 2; if (fe(7) === 7) bits |= 4;`,
+  },
 ];
 
 describe("#6774 ES2015 standalone expressions residue", () => {
