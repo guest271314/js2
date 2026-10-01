@@ -1,4 +1,5 @@
 import { isBigIntType, isBooleanType, isStringType, isSymbolType, isVoidType } from "../checker/type-mapper.js";
+import { emitStandaloneDynamicTagCall } from "./tagged-template-standalone.js"; // (#6774 S17)
 import { widenJsDefaultGuessSymbolSlot } from "./js-default-param-type-guess.js";
 import type { Instr, ValType } from "../ir/types.js";
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
@@ -1778,6 +1779,12 @@ export function compileTaggedTemplateExpression(
         // Coerce tag to externref if needed
         if (tagResult.kind !== "externref") {
           coerceType(ctx, fctx, tagResult, { kind: "externref" });
+        }
+        if (noJsHost(ctx)) {
+          // (#6774 S17) host-free dynamic tag call
+          if (ttRecvBind) emitObjectLiteralMethodThisInstall(ctx, fctx, ttRecvBind);
+          const r = emitStandaloneDynamicTagCall(ctx, fctx, stringsLocal, substitutions);
+          return finishObjectLiteralMethodCall(ctx, fctx, ttRecvBind, r);
         }
         const tagLocal = allocLocal(fctx, `__tt_dyn_tag_${fctx.locals.length}`, { kind: "externref" });
         fctx.body.push({ op: "local.set", index: tagLocal });

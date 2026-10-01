@@ -110,16 +110,46 @@ obj = { ['__proto__']: null }; if (obj.__proto__ === null) bits |= 16;`,
     body: `var g = function* (...[a]) { yield a; }; if (sv(g(8).next().value, 8)) bits |= 1; var o = { m(...[b]) { return b; } }; if (sv(o.m(6), 6)) bits |= 2; var f = function (...[x, y]) { return x * y; }; if (sv(f(3, 4), 12)) bits |= 4;`,
   },
   {
-    name: "obj_pattern_member_target_with_initializer",
-    step: "S11",
-    expected: 3,
-    body: `var holder = {}; var vals = { x: 23 }; ({ x: holder.y = 42 } = vals); if (sv(holder.y, 23)) bits |= 1; var got; ({ x: { set y(v) { got = v; } }.y = 42 } = vals); if (sv(got, 23)) bits |= 2;`,
-  },
-  {
     name: "template_object_frozen",
     step: "S13",
     expected: 3,
     body: `var t = null; (function (p) { t = p; })\`a\`; try { t.x = 1; } catch (e) { if (e instanceof TypeError) bits |= 1; } if (Object.isFrozen(t) && Object.isFrozen(t.raw)) bits |= 2;`,
+  },
+  {
+    name: "loose_eq_string_left_toprimitive_symbol",
+    step: "S19",
+    expected: 3,
+    body: `var y = {}; var rv = "str"; y[Symbol.toPrimitive] = function () { return rv; }; if ("str" == y) bits |= 1; rv = Symbol.toPrimitive; if (Symbol.toPrimitive == y) bits |= 2;`,
+  },
+  {
+    name: "object_pattern_member_target_with_initializer",
+    step: "S11",
+    expected: 3,
+    body: `var holder = {}; var vals = { x: 23 }; ({ x: holder.y = 42 } = vals); if (holder.y === 23) bits |= 1; var got; ({ x: { set y(v) { got = v; } }.y = 42 } = vals); if (got === 23) bits |= 2;`,
+  },
+  {
+    name: "strict_arrow_lexical_this_assigned",
+    step: "S16",
+    expected: 1,
+    body: `var c3 = 1; var h3 = function () { return () => { c3 = this; }; }; h3()(); if (c3 === undefined) bits |= 1;`,
+  },
+  {
+    name: "untyped_iife_tag_host_free",
+    step: "S17",
+    expected: 3,
+    body: `var calls = 0, n = 0; var number = 5; var fn = function () { return 1; }; (function () { return function (site, a, b) { calls++; n = arguments.length; }; })()\`A\${number}B\${fn}\`; if (calls === 1) bits |= 1; if (n === 3) bits |= 2;`,
+  },
+  {
+    name: "super_call_in_arrow",
+    step: "S8",
+    expected: 3,
+    body: `var count = 0; class A { constructor() { count++; } } class B extends A { constructor() { (_ => super())(); } } new B(); if (count === 1) bits |= 1; class D extends A { constructor() { super(); this.af = _ => super(); } } var d = new D(); try { d.af(); } catch (e) { if (e instanceof ReferenceError && count === 3) bits |= 2; }`,
+  },
+  {
+    name: "call_object_element_target",
+    step: "S21",
+    expected: 1,
+    body: `var log = []; var o = { set q(v) { log.push("set"); } }; function t() { log.push("t"); return o; } [t()["q"]] = []; if (log.join() === "t,set") bits |= 1;`,
   },
 ];
 

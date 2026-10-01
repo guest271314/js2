@@ -3719,7 +3719,7 @@ export function compileArrowAsClosure(
   ) {
     const thisLocal = fctx.lexicalThisCaptureLocal ?? allocLocal(fctx, "__arrow_lexical_this", { kind: "externref" });
     fctx.lexicalThisCaptureLocal = thisLocal;
-    const thisNode = findOwnThisReference(body) ?? ts.factory.createThis();
+    const thisNode = findOwnThisReference(body) ?? syntheticThisIn(arrow);
     compileExpression(ctx, fctx, thisNode, { kind: "externref" });
     fctx.body.push({ op: "local.set", index: thisLocal });
   }
@@ -4903,3 +4903,14 @@ function closureBodyUsesArguments(node: ts.Node): boolean {
 // Register compileArrowAsClosure in the shared module so other modules
 // can call it without a direct import cycle.
 registerCompileArrowAsClosure(compileArrowAsClosure);
+
+/**
+ * (#6774 S16) A synthetic `this` parented to `arrow`, so the unbound-`this`
+ * strictness test (`isStrictContext`) sees the arrow's real context instead of
+ * a parentless node (which it reads as sloppy → the global object).
+ */
+function syntheticThisIn(arrow: ts.Node): ts.Expression {
+  const node = ts.factory.createThis();
+  (node as unknown as { parent: ts.Node }).parent = arrow;
+  return node;
+}

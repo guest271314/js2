@@ -36,6 +36,7 @@ loc-budget-allow:
   - src/codegen/string-ops.ts
   - src/codegen/expressions/identifiers.ts
   - src/codegen/object-runtime.ts
+  - src/codegen/index.ts
   # 2026-09-30 (#6774 impl, Opus): S2's own-"__proto__" read arm lives in
   # tryOpenObjectDynamicGet (+10); S4 adds two FunctionContext fields (+4).
   - src/codegen/property-access.ts
@@ -58,6 +59,7 @@ loc-budget-allow:
   - src/codegen/with-call-binding.ts
   - src/codegen/tagged-template-standalone.ts
   - src/codegen/computed-key-members.ts
+  - src/codegen/eval-spread-args.ts
   - scripts/compiler-boundaries.json
 func-budget-allow:
   # 2026-09-30 (#6774 plan): one-to-six-line call sites inside functions already
@@ -92,9 +94,15 @@ func-budget-allow:
   # before the parameter initializers (body in src/codegen/eval-param-scope-hoist.ts).
   - src/codegen/closures.ts::compileLiftedClosureBody
   - src/codegen/function-body.ts::compileFunctionBody
-  # 2026-10-01 (#6774 S11 impl, Opus): member-target `= init` split + two
-  # one-line default hooks (bodies: emitMemberDefaultWrite / emitUndefinedDefaultInto).
+  # 2026-09-30 (#6774 S11, Opus): the member-target default split + one call to
+  # the new emitMemberTargetDefault helper.
   - src/codegen/expressions/assignment.ts::compileDestructuringAssignment
+  # 2026-10-01 (#6774 S18, Opus): a spread EXTRA argument of a folded eval is
+  # stepped (emitDiscardedSpreadArgument in the new leaf eval-spread-args.ts).
+  - src/codegen/expressions/eval-inline.ts::tryStaticEvalInline
+  # 2026-10-01 (#6774 S21, Opus): accessor object-literal types lower to
+  # externref (they are always open `$Object`s at run time).
+  - src/codegen/index.ts::resolveWasmType
 ---
 
 ## Problem
