@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-10-01T21:47:59.069Z",
-  "baseline_generated_at": "2026-10-01T21:47:59.069Z",
-  "baseline_sha": "9ba8f119a715a4fac719d82014f48baa43f4433d",
+  "timestamp": "2026-10-01T22:41:24.523Z",
+  "baseline_generated_at": "2026-10-01T22:41:24.523Z",
+  "baseline_sha": "43abb4e1c96bc8f946c0565f96b0dce749db13a2",
   "oracle_version": 14,
   "mode": {
     "target": "standalone",
@@ -11,24 +11,24 @@
   },
   "summary": {
     "total": 48232,
-    "pass": 41410,
+    "pass": 41411,
     "fail": 4899,
     "compile_error": 1888,
-    "compile_timeout": 17,
+    "compile_timeout": 16,
     "skip": 18,
-    "compilable": 46309,
-    "host_free_pass": 41410,
+    "compilable": 46310,
+    "host_free_pass": 41411,
     "stale": 0,
     "by_category": {
       "standard": {
         "total": 47146,
-        "pass": 40369,
+        "pass": 40370,
         "fail": 4870,
         "compile_error": 1872,
-        "compile_timeout": 17,
+        "compile_timeout": 16,
         "skip": 18,
-        "compilable": 45239,
-        "host_free_pass": 40369,
+        "compilable": 45240,
+        "host_free_pass": 40370,
         "stale": 0,
         "label": "ECMAScript current standard"
       },
@@ -58,25 +58,25 @@
       },
       "official": {
         "total": 48232,
-        "pass": 41410,
+        "pass": 41411,
         "fail": 4899,
         "compile_error": 1888,
-        "compile_timeout": 17,
+        "compile_timeout": 16,
         "skip": 18,
-        "compilable": 46309,
-        "host_free_pass": 41410,
+        "compilable": 46310,
+        "host_free_pass": 41411,
         "stale": 0,
         "label": "standard + annex_b (default)"
       },
       "full": {
         "total": 48735,
-        "pass": 41646,
+        "pass": 41647,
         "fail": 4915,
         "compile_error": 2043,
-        "compile_timeout": 17,
+        "compile_timeout": 16,
         "skip": 114,
-        "compilable": 46561,
-        "host_free_pass": 41646,
+        "compilable": 46562,
+        "host_free_pass": 41647,
         "stale": 0,
         "label": "standard + annex_b + proposals"
       }
@@ -84,35 +84,35 @@
   },
   "official_summary": {
     "total": 48232,
-    "pass": 41410,
+    "pass": 41411,
     "fail": 4899,
     "compile_error": 1888,
-    "compile_timeout": 17,
+    "compile_timeout": 16,
     "skip": 18,
-    "compilable": 46309,
-    "host_free_pass": 41410,
+    "compilable": 46310,
+    "host_free_pass": 41411,
     "stale": 0
   },
   "full_summary": {
     "total": 48735,
-    "pass": 41646,
+    "pass": 41647,
     "fail": 4915,
     "compile_error": 2043,
-    "compile_timeout": 17,
+    "compile_timeout": 16,
     "skip": 114,
-    "compilable": 46561,
-    "host_free_pass": 41646,
+    "compilable": 46562,
+    "host_free_pass": 41647,
     "stale": 0
   },
   "strict_summary": {
     "total": 45721,
-    "pass": 39076,
+    "pass": 39077,
     "fail": 4777,
     "compile_error": 1833,
-    "compile_timeout": 17,
+    "compile_timeout": 16,
     "skip": 18,
-    "compilable": 43853,
-    "host_free_pass": 39076,
+    "compilable": 43854,
+    "host_free_pass": 39077,
     "stale": 0
   },
   "scope_summaries": {
@@ -140,13 +140,13 @@
     },
     "standard": {
       "total": 47146,
-      "pass": 40369,
+      "pass": 40370,
       "fail": 4870,
       "compile_error": 1872,
-      "compile_timeout": 17,
+      "compile_timeout": 16,
       "skip": 18,
-      "compilable": 45239,
-      "host_free_pass": 40369,
+      "compilable": 45240,
+      "host_free_pass": 40370,
       "stale": 0
     }
   },
@@ -781,13 +781,13 @@
     {
       "name": "built-ins/Temporal",
       "path": "built-ins/Temporal",
-      "pass": 4496,
+      "pass": 4497,
       "fail": 102,
       "compile_error": 0,
-      "compile_timeout": 5,
+      "compile_timeout": 4,
       "skip": 0,
       "total": 4603,
-      "host_free_pass": 4496
+      "host_free_pass": 4497
     },
     {
       "name": "built-ins/ThrowTypeError",
@@ -1221,8 +1221,8 @@
   },
   "root_cause_map": {
     "target": "standalone",
-    "total_non_pass_non_skip": 6975,
-    "classified": 6975,
+    "total_non_pass_non_skip": 6974,
+    "classified": 6974,
     "unclassified_threshold": null,
     "has_edition_breakdown": true,
     "buckets": [
@@ -1255,8 +1255,8 @@
           "test/language/expressions/dynamic-import/syntax/valid/top-level-import-defer-script-code-valid.js",
           "test/language/expressions/dynamic-import/catch/nested-async-gen-await-import-source-source-text-module.js",
           "test/language/expressions/dynamic-import/syntax/valid/nested-if-import-source-script-code-valid.js",
-          "test/language/expressions/dynamic-import/catch/nested-if-import-catch-import-source-specifier-tostring.js",
-          "test/language/expressions/dynamic-import/syntax/valid/nested-async-gen-await-import-defer-script-code-valid.js"
+          "test/language/expressions/dynamic-import/syntax/valid/nested-async-gen-await-import-defer-script-code-valid.js",
+          "test/language/expressions/dynamic-import/catch/nested-if-import-catch-import-source-specifier-tostring.js"
         ],
         "sample_signatures": [
           "other:L#:## SyntaxError: import.defer(...) is not supported (Stage # proposal — import-defer / source-phase-imports); L#:## 'import.meta' is only allowed in a module",
@@ -1272,14 +1272,14 @@
           "#661"
         ],
         "label": "Temporal proposal/polyfill gap",
-        "count": 107,
+        "count": 106,
         "statuses": {
           "pass": 0,
           "fail": 102,
           "compile_error": 0,
-          "compile_timeout": 5,
+          "compile_timeout": 4,
           "skip": 0,
-          "total": 107,
+          "total": 106,
           "host_free_pass": 0
         },
         "error_categories": {
@@ -1290,7 +1290,7 @@
           "illegal_cast": 1
         },
         "by_edition": {
-          "ES2026": 107
+          "ES2026": 106
         },
         "sample_files": [
           "test/built-ins/Temporal/Duration/prototype/subtract/precision-no-floating-point-loss.js",
@@ -1466,14 +1466,14 @@
           "test/built-ins/JSON/stringify/replacer-function-result-undefined.js",
           "test/built-ins/JSON/stringify/replacer-array-abrupt.js",
           "test/built-ins/JSON/parse/reviver-context-source-object-literal.js",
-          "test/built-ins/JSON/parse/reviver-context-source-primitive-literal.js"
+          "test/built-ins/JSON/stringify/replacer-array-duplicates.js"
         ],
         "sample_signatures": [
           "assertion_fail:Test262Error:",
           "assertion_fail:Test262Error: Expected SameValue(«\"null\"», «undefined») to be true",
           "type_error:TypeError: Cannot convert undefined or null to object",
-          "assertion_fail:Test262Error: Expected SameValue(«#», «null») to be true",
-          "assertion_fail:Test262Error: Expected SameValue(«\"{\\\"key\\\":null}\"», «\"{\\\"key\\\":true}\"») to be true"
+          "assertion_fail:Test262Error: Expected SameValue(«\"{\\\"key\\\":null}\"», «\"{\\\"key\\\":true}\"») to be true",
+          "assertion_fail:Test262Error: Expected SameValue(«#», «null») to be true"
         ]
       },
       {
@@ -2236,15 +2236,15 @@
         "sample_files": [
           "test/built-ins/Date/parse/year-zero.js",
           "test/built-ins/Date/prototype/setFullYear/arg-date-to-number.js",
-          "test/built-ins/Date/prototype/toJSON/to-primitive-value-of.js",
           "test/built-ins/Date/S15.9.3.1_A3_T6.2.js",
+          "test/built-ins/Date/prototype/toJSON/to-primitive-value-of.js",
           "test/built-ins/Date/S15.9.3.1_A3_T3.2.js"
         ],
         "sample_signatures": [
           "assertion_fail:Test262Error: reject minus zero as extended year Expected SameValue(«-#», «NaN») to be true",
           "assertion_fail:Test262Error: \"this\" value Expected SameValue(«[object Object]», «[object Object]») to be true",
-          "assertion_fail:Test262Error: Expected SameValue(«undefined», «») to be true",
           "assertion_fail:Test262Error: x1.toString() must return \"[object Date]\" Expected SameValue(«\"Sun Dec # # #:#:# GMT+# (Coordinated Universal Time)\"», «\"[object Date]\"») to be true",
+          "assertion_fail:Test262Error: Expected SameValue(«undefined», «») to be true",
           "assertion_fail:Test262Error: parse below minimum time value Expected SameValue(«-#», «NaN») to be true"
         ]
       },
