@@ -1507,8 +1507,23 @@ function compileObjectLiteralWithAccessors(
       fctx.body.push({ op: "local.get", index: objLocal });
       // Host imports require real String keys even with native string storage.
       // Native targets retain their existing native key representation.
-      for (const instr of staticHostPropertyKeyInstrs(ctx, propName)) {
-        fctx.body.push(instr);
+      // (#6774 S15) A well-known-symbol key (`get [Symbol.unscopables]()`) is
+      // the interned symbol carrier, not the "@@name" spelling.
+      const wkSymId = ctx.standalone && propName.startsWith("@@") ? getWellKnownSymbolId(propName.slice(2)) : undefined;
+      const boxSymIdx =
+        wkSymId !== undefined
+          ? ensureLateImport(ctx, "__box_symbol", [{ kind: "i32" }], [{ kind: "externref" }])
+          : undefined;
+      if (wkSymId !== undefined && boxSymIdx !== undefined) {
+        flushLateImportShifts(ctx, fctx);
+        fctx.body.push(
+          { op: "i32.const", value: wkSymId },
+          { op: "call", funcIdx: ctx.funcMap.get("__box_symbol") ?? boxSymIdx },
+        );
+      } else {
+        for (const instr of staticHostPropertyKeyInstrs(ctx, propName)) {
+          fctx.body.push(instr);
+        }
       }
 
       // Getter (or ref.null.extern when only setter is defined).

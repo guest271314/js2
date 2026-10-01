@@ -6,6 +6,7 @@
 import { referencesOwnNewTarget } from "../new-target-value.js"; // (#6774 S4)
 import { tryCompileStandaloneEvalSpread } from "../eval-spread-args.js"; // (#6774 S18)
 import { emitThrowReferenceError } from "../js-errors.js"; // (#6774 S8)
+import { tryCompileWithRoutedCall } from "../with-call-binding.js"; // (#6774 S15)
 import { ts, forEachChild } from "../../ts-api.js";
 import { widenJsDefaultGuessSlot, widenJsDefaultGuessSymbolSlot } from "../js-default-param-type-guess.js";
 import { profilePhase } from "../../compile-profile.js";
@@ -7844,6 +7845,11 @@ function compileCallExpression(
   // isDirect flag (1 = direct call, 0 = indirect) lets the host shim
   // preserve ECMA-262 §19.2.1 scope semantics — direct eval has access to
   // the caller's lexical scope, indirect eval runs in global scope.
+  // (#6774 S15) a bare call resolved through a `with` object environment
+  if (!(ts.isIdentifier(expr.expression) && expr.expression.text === "eval")) {
+    const withCall = tryCompileWithRoutedCall(ctx, fctx, expr);
+    if (withCall !== undefined) return withCall;
+  }
   {
     const evalKind = classifyEvalCallExpression(expr, ctx.checker);
     if (evalKind !== "none") {
