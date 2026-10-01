@@ -6,7 +6,7 @@ created: 2026-07-21
 updated: 2026-10-01
 priority: critical
 feasibility: hard
-reasoning_effort: max
+reasoning_effort: high
 task_type: refactor
 area: ir, codegen, codegen-linear, compiler
 language_feature: compiler-internals
@@ -17,7 +17,7 @@ horizon: xl
 complexity: XL
 es_edition: n/a
 lane: ir-retirement
-model: gpt-6-astra
+model: gpt-6.1-sol
 related: [1373b, 2855, 2950, 3090, 3142, 3143, 3341, 3517, 3529, 3520, 3521, 3522, 3523, 3525, 3526, 3527, 3528, 3678, 3681, 4382, 4576, 4577]
 origin: "2026-07-21 explicit user directive: enable IR-only by default and retire the old direct codegen path"
 oracle-ratchet-allow:
@@ -36,8 +36,9 @@ loc-budget-allow:
   - src/ir/runtime/manifest.ts
   - src/ir/prepared-component-dependencies.ts
   - src/ir/select.ts
-  - src/ir/verify.ts
+  - src/ir/runtime/verify.ts
 func-budget-allow:
+  - src/ir/runtime/verify.ts::verifyInstrStructure
   - src/codegen/index.ts::generateModule
   - src/codegen/index.ts::planIrOverlay
   - src/ir/backend/linear-integration.ts::compileLinearIrFunctions
@@ -18907,3 +18908,148 @@ Additional pre-B boundary baseline: 353/457, 104 existing failures, zero skipped
 ## 2026-10-01 — final Phase B stand-down and publication repair
 
 The user requested wrap-up and handoff publication. Phase B is frozen as 14 pinned paths (13 changed), 133 preserved declaration transfers and 39 drafted controls; no candidate compile, tests or actual boundary gate were run. Production files in the integration remain at the phase-A dependency. The original 212/219 and 353/457 failing baselines remain immutable; the partial initial-reader probe is 0/2, exposing missing historical source projections rather than healthy positives. The complete frozen writer, root patches, original rows, policy review and read-only graph findings are archived as inert raw files in [the continuation handoff](../log/3518-validation-lowering-b-2026-10-01/HANDOFF.md). Only the Phase B claim is released (40138-k7ulq2nc, 2026-10-01T05:53:19Z); verify and reclaim before resuming. PR6378 remains the ready phase-A implementation. Its first quality run found three evidence citations still targeting the old string facade. Their paths now target the exact canonical live declarations, with every quote, verdict, count and ratchet unchanged; the real kind-neutrality gate and all five original evidence controls pass. Fresh canonical main88cdb141 is integrated for the normal signed publication. Only verified main ancestry/content counts delivery. Full IR parity and legacy retirement remain open.
+
+
+## 2026-10-01 — verified Phase B integration and candidate execution
+
+Resume the complete migration goal under canonical scoped claim `3518:validation-lowering-phase-b-20261001`, owner `ttraenkler/codex-validation-lowering-b-20261001`, write_id `63764-feehmtqm`. Isolated integration is `/private/tmp/js2-ir-validation-lowering-b-resume-20261001`, branch `codex/3518-validation-lowering-b-resume-20261001`, exact dependency0e4638af and canonical main88cdb141. Ready PR6378 remains open/unmerged; B publication waits for actual prerequisite main delivery. The complete prior wrap-up and local46-artifact supplement preserve every unfinished draft and failure. The prior stand-down release remains historical evidence, not current ownership.
+
+Implement the already-reviewed full verifier/allocation/class-layout body extraction and exact Phase B policy delta. Root independently verifies all14 writer paths, all9 original donors and fixed before policy, then copies only13 changed source/test paths. All original133 canonical declarations and2 retained wrappers, public API/identity/cache/error order/async attachments/default dominance and optional debug behavior remain required. No old code is retired. The original219 and457 failure populations and first raw outputs remain preserved. Root owns metadata/budget/source-reader joins and one heavy compiler/test/gate slot; three disjoint native writers own only their fixed preservation/graph/policy helpers and tests. Execute the real candidate before drawing conclusions.
+
+Budget transfer (2026-10-01): move the touched-issue LOC allowance from old src/ir/verify.ts to canonical src/ir/runtime/verify.ts, whose complete algorithm is preserved2865→2868 lines solely from imports. Grant only relocated src/ir/runtime/verify.ts::verifyInstrStructure (381 actual inclusive lines, body hash unchanged). verifyBlock is200 actual lines; historical379 baseline is not a current measurement. Remove the obsolete LOC grant, do not duplicate it, and preserve shared baseline files. Full migration/native catalog/source/dynamic/Number/replay/both-backend equality and retirement remain open.
+
+
+### Phase B assigned implementation slices and first measured results
+
+User reaffirmed repo-file issue tracking and native agent fan-out. Root updates this epic for each owned slice; no GitHub issues are created. All native writers run Codex GPT-6 Astra Max, appropriate for complete fail-closed byte-preservation/AST-role/history authority proofs. Integration/evidence owner is Codex GPT-6 Default. Scope is disjoint, existing isolated worktrees are reused and no source/test work is duplicated.
+
+- Source preservation owner `astra_native_builtin_functions`: complete live-only9→13→9 reciprocity helper and fixed receipt, exact135 transfers including2 retained wrappers, seven individually authenticated inline type-import rewrites, full source docs/private/order/import coverage and fresh-read/corruption controls. Original14 candidate paths must remain unchanged.
+- Historical graph owner `native_builtin_callable_inventory`: full4-output/17-input initial-only reconstruction and controls; root owns fixture joins. Actual historical physical authority is now verified from original Git objects and introducing4b00bce, not a narrative or executable archive fallback.
+- Policy owner `astra_builtin_functions_plan`: authenticate full current1765/history94 policy before exact original56/9 projections; retain complete original91 prefix, allowed edges, original174fixture, native98/floor97, legacy nested mutation behavior and all old hashes/counts. Root applies metadata/budgets and owns program-data historical view joins.
+
+Actual integrated production TS7 exits0. All39 new verifier/allocation/class-layout semantic/API/type controls pass, zero skipped or worker errors. First new graph suite measures128/129: one retained-kernel initializer negative fails before detector injection because its text locator is ambiguous. The owner is repairing only the locator to a unique genuine retained declaration; preserve paired healthy source, real mutation and unchanged refusal assertion. Original first raw JSON/log remains under `.tmp/validation-lowering-b-resume/first-integration/graph-controls.*`; this is not a passing129 suite. Policy draft review found a separately scoped issue: its copied history was frozen before original test mutants could edit it. Return a fresh mutable copy for old mutation inputs while keeping full actual-policy/fixed-receipt authority authenticated; add a regression proving no source-policy mutation or successful-cache leakage. Candidate original219-row run is live; no baseline change or full migration/parity conclusion is asserted.
+
+
+### User model-routing amendment — Astra specifications, Sol6.1 implementation
+
+The user explicitly requires Astra to specify hard tasks and write implementation plans in repo issue files, and Sol6.1 to be the default implementer at reasonable effort. Epic implementation defaults are now model:gpt-6.1-sol / reasoning_effort:high; use medium for straightforward bounded repairs and high/xhigh only where the actual task warrants it. AstraMax is retained for hard architectural specification/review, not blanket code implementation. Preserve historical attribution: existing frozen source/helper drafts were produced by AstraMax; any later Sol modifications carry their actual model/effort. Do not relabel inherited code as Sol-authored.
+
+Astra source writer froze its current3-path helper/receipt/test at manifest d52e084aa3af641a279de34f4e49943437440b031dba9ff14e3827b20196a6b9, original14sourcepaths still exact. Native worker `sol_phase_b_preservation`, Sol6.1High, now exclusively owns review/implementation of these3paths in the preserved isolated writer worktree. Astra architect `astra_builtin_functions_plan` owns only a new isolated implementation-plan appendix for the unresolved historical graph edge; root merges that appendix, retaining current issue history. Root remains the integration/evidence owner and sole heavy validator.
+
+New graph/policy controls execute192/192 (129+63), no skipped/worker errors. Original219 remains212/219; exact failed-row names and first error text match pre-edit evidence, zero new failures. Historical metadata positives pass2/2, but both original graph positives still fail exact original edges: inventoryvalid40modules/110edges and44/120, one additional runtime import each. Original109/119 expectations remain untouched. Actual full detector reports are saved for the architect; diagnostic inventory success does not certify historical fidelity.
+
+
+## 2026-10-01 — implementation plan: Phase B initial graph fidelity and complete source preservation
+
+This is an Astra Max architecture specification. Root owns integration, claims, production metadata, budgets, serialized compiler/test/gate execution and publication. The assigned Sol 6.1 High implementer owns only the explicitly dispatched helper/receipt/control files; root merges this section by append. Preserve other writers' source and historical evidence. The scope is faithful preservation of the complete Phase B extraction, not a new intrinsic implementation or a migration-completion grant.
+
+### Measured starting point and exact remaining edge
+
+The current integration is `/private/tmp/js2-ir-validation-lowering-b-resume-20261001`. Its saved `first-integration/reviewed-controls.json` records all 129 initial-graph reconstruction controls and all 63 full-current-policy controls passing. Those helper proofs do not establish the older actual graph assertions. The original 219 behavioral controls still measure 212 passed and the same seven failures, with identical first errors and no new failing rows. Preserve that baseline and its original fixtures. The selected four older boundary controls have two passing policy/history rows and two failing actual graph rows; the other 101 were unselected in that diagnostic, not executed successfully.
+
+The authoritative `first-integration/current40-report.json` and `current44-report.json` both resolve every module and have no unknown/unresolved/forbidden edges, transitive violations or inventory errors. Their edge counts are 110/120, respectively. The unchanged assertions require:
+
+| Historical fixture | Modules | Resolved edges | Import / export-from / import-type | Type-only / runtime |
+| --- | ---: | ---: | --- | --- |
+| Original contract graph | 40 | 109 | 89 / 19 / 1 | 99 / 10 |
+| Original ownership graph | 44 | 119 | 98 / 20 / 1 | 102 / 17 |
+
+The single extra runtime edge is `src/ir/core/types.ts:8` to `src/ir/core/binding-key-primitives.ts`, importing `requireBindingId` for `irSupportRef`. It is a genuine later source evolution. Commit `efe352fee8afc3feb6a28c34d00fc658dc1fb205` introduced the import, support-reference interface/factory, union member and equality branch. Root's complete before/after sources prove that its parent equals the original core-types source at `3a119a88b28bb347f4faaaa2146bd991acf61228`, and its after source equals current production exactly.
+
+The earlier ABI-import suspicion is disproved. `src/ir/program/abi.ts` is byte-identical at canonical introduction `e90f2a14aa263084cf94449b706b3df07bf30d71`, the fixture revision `3a119a88`, and current production: 32,535 bytes, SHA256 `29591c6feab869c6780144aabcc413afafa38e4adbc8c3f8d5b7bcdc7e9c833d`, Git blob `c9240ad8bc83c36774a7def20db27425252f459a`. Preserve its `irSourceGlobalBindingKey` import and `ProgramAbiMap.validateInventoryMembership` guards. Removing that valid unchanged import or changing 109/119 would conceal the actual defect.
+
+Root's source authority is saved under `.tmp/validation-lowering-b-resume/graph-history-authority/`: `manifest.json`, `formatter-support-authority.json`, complete original/introducing-parent/introducing-after files, and `formatter-support-delta.patch.raw.txt` (SHA256 `19b43ecc7cb155dbc00f41388d3923e47b3147aedf4575ee5e53adfb7b474b79`). Archive these as non-executable provenance when publishing. They authorize fixed receipt pins; the eventual helper must never read archived source, Git or a saved executable snapshot at runtime.
+
+### Bounded core-types graph evolution: exact ownership and API
+
+Add only these three independently owned files:
+
+- `tests/helpers/ir-program-core-type-evolution.ts`
+- `tests/helpers/ir-program-core-type-evolution.json`
+- `tests/issue-3518-program-core-type-evolution.test.ts`
+
+Root owns the narrow initial-copy join in `tests/issue-3518-program-data-contract-boundary.test.ts`. Leave the existing `ir-program-initial-graph-evolution.ts/.json` and its 129 controls unchanged: their four-output, seventeen-input authority is already measured and does not own this additional source transformation. Do not repurpose the broader core-vocabulary or runtime inverses; their receipt domains do not implement this core-types evolution.
+
+Expose `reconstructProgramCoreTypeEvolution(rawReader)` returning exactly one historical source entry, `src/ir/core/types.ts`, and an explicit `readBeforeProgramCoreTypeEvolution(path, rawReader)` if needed by the initial reader. Mapped reconstruction must authenticate its fixed receipt digest and the complete live input/dependency pins before returning any output. Unknown paths remain raw; a missing or altered mapped input must throw, never fall back. A diagnostic receipt/span validator may support mutation tests but must not authorize reconstruction with caller-authored receipts.
+
+The receipt must pin:
+
+- Original core types: 31,278 bytes, SHA256 `49f0b751abc784cff47501d3309a1e2d20307ce5c3a460bab1a60ef3bb19dac5`, Git blob `ba531205b0429574c6e675dd456dd8487b22923f`.
+- Current core types: 32,296 bytes, SHA256 `58d3795e4f38002798fbdb93c7599f74cb422555ba0ed84f160a51aec52543a2`, Git blob `db0b740a300009d035b7af28377bf0333e023105`.
+- The genuine newly imported dependency `src/ir/core/binding-key-primitives.ts`: 1,497 bytes, SHA256 `9b5715139c147146b4ed29d972e5ffad677e4fe496c95868b9ecc8935e57fa24`, Git blob `76364db86fb07972f66a78a886d66197e2355f6a`.
+- Original fixture/source revision, actual introducing commit and parent, and full patch authority above. Do not claim the absent canonical ABI path at `f95d8a0` as an original core-types source.
+
+The only five approved removal spans in the current core-types file are zero-based, half-open UTF-8 byte intervals:
+
+| Role | Current interval | Original insertion offset | Current span SHA256 |
+| --- | --- | ---: | --- |
+| `requireBindingId` runtime import, including newline | `[429,493)` | 429 | `c15c8a493239514f1f02b35958fba28ba9988d69b2e403d7419f5474ba7cf338` |
+| `IrSupportRefType`, including attached documentation and spacing | `[1847,2138)` | 1783 | `b92cd6cf1b3b97cef43eea24a9765cf788561a81d06b09d5f0ce517bd6f212f1` |
+| `irSupportRef` factory and trailing spacing | `[2138,2627)` | 1783 | `23431b972e35d90ee52a9d994000681a416ca541995a2cf50eb28482e566c7ff` |
+| `IrType` union member | `[14059,14080)` | 13215 | `3fe70544aa4637ee05df322539fb1fc5a80a496334c577d56a284942cb1f8830` |
+| `irTypeEquals` support-reference branch | `[24757,24910)` | 23892 | `629873380465d9802fb18df627a04c78b2346591ecf891ba21c7e692ae22d9e2` |
+
+These spans total 1,018 bytes. Static byte arithmetic independently reproduced the complete original and then the complete current file from those actual live slices; no compiler, checker or test was run for this proof. The interface and factory share original insertion offset 1783: forward replay must retain their explicit interface-before-factory order, not reverse them through repeated insertion at one offset.
+
+Implementation must check current full-file SHA/blob/length first, then exact declaration/import and nested owner roles with syntax parsing, unique contextual anchors, span bounds, UTF-8 boundaries, order and complete span pins. Reconstruct the historical file from the untouched live remainder only. Authenticate its complete original SHA/blob/length and declaration census, then forward-replay the five captured live spans at their authenticated old coordinates and require byte-for-byte equality with the full current source. Pin attached documentation and the retained `irTypeEquals` body too; do not accept an import-only deletion that leaves an unbound factory. Receipt data contains coordinates, pins and non-executable anchors, not an old factory implementation. Every operation freshly reads its input and dependency; successful source authentication must not be cached across operations.
+
+### Initial-copy placement and required adversarial controls
+
+In the old boundary suite's `fixture(includeOwnership)` (current line 132), keep the actual raw reader and existing runtime/program reconstructions. Compute the new core-types reconstruction from that raw reader before the initial module-copy loop. In the loop select its authenticated result only for `src/ir/core/types.ts`; retain the existing intrinsic and four program-source arms. Do not feed the projected core-types source into the existing seventeen-input program reconstruction: that owner correctly authenticates current core types as a raw dependency. Each source view has one explicit initial-copy purpose.
+
+After copying, `put`, `append`, `run`, ownership additions and all existing source/policy mutants must operate on the actual scratch files without another normalization pass. Keep fixed 40/44 modules, original 109/119 edges, all syntax/type splits, original outgoing ownership edges, policy hashes/floors and transitive witnesses. Do not alter detector logic, allowed edges, activation rules, source lists or timeouts. Current compiler, runtime and type fixtures continue reading real production, including the actual `irSupportRef` implementation and the raw `issue-3518-symbolic-support-ref.test.ts` behavior.
+
+New controls must prove both complete-source inverse and reciprocal replay, exact input/output populations, all five owned roles and their two same-offset insertions. Include meaningful missing-source/dependency, wrong full SHA/blob/length, changed import module or type/value form, deleted/duplicated/reordered interface/factory, changed factory validation/return, changed union member, changed equality condition/body, documentation and unrelated retained-body mutations, shifted/overlapping spans, swapped same-offset replay order, altered provenance/receipt and extra executable declaration failures. Warm a successful read, then mutate the next live read and require refusal; returned history or a caller-supplied mutant must not become an accepted current input. Assert each mutation actually changes its operand. Preserve all existing 129/63 controls and add real post-copy edge/source mutants demonstrating the new projection cannot erase later injections.
+
+Root acceptance is the new helper's complete collected population, both unchanged actual 40/44 positives, then the full original 105 boundary controls and affected semantic/provider boundary cohort, with zero hidden setup omissions or worker errors. Preserve the initial 110/120 failures and the earlier ENOENT diagnostic instrumentation failure. A correct reconstruction helper alone is not a passing original graph; only actual detector execution on the restored fixtures establishes those positive controls.
+
+### Final Phase B nine-to-thirteen source-preservation acceptance
+
+The separately assigned source-preservation implementation remains:
+
+- `tests/helpers/ir-validation-analysis-relocation.ts`
+- `tests/helpers/ir-validation-analysis-relocation.json`
+- `tests/issue-3518-validation-analysis-relocation.test.ts`
+
+Its frozen receipt starts from the nine actual donors: `analysis/{lattice,ownership,encoding,escape,dominance}.ts`, `verify-alloc.ts`, `verify.ts`, `program-allocations.ts`, and `program-class-layouts.ts`. The thirteen live files are those nine plus `analysis/alloc-verification.ts`, `runtime/verify.ts`, `program/allocations.ts`, and `program/class-layouts.ts`, all under `src/ir/`. Preserve the frozen source pins and the genuine 133 canonical declarations plus two retained optional wrappers: 135 one-to-one transfers, 67 transfers between files, and exactly seven inline `ImportType` module-string rewrites. Reconcile these exact records, not just a selected exported-name count.
+
+Implement the fixed receipt against one fresh capture of all thirteen complete current sources per operation. Check SHA256, Git blob, lengths, declaration kind/name/occurrence/order, private members/initializers, attached documentation, import/export form and every exact token rewrite. Reconstruct all nine originals exclusively from live current declaration slices plus non-executable import/export/comment/spacing scaffold, require each whole original pin, then replay all thirteen complete current files. Every current declaration and facade residue needs exact ownership; no executable text may come from a stored historical snapshot or unreviewed replacement template. Keep canonical error class, allocation registry, dominance cache and function identities; preserve complete prepared-async verifier checks and optional intermediate versus mandatory final provenance checks.
+
+The actual facade already imports `assertFinalAllocProvenance as assertVerifiedAllocProvenance`, so the retained optional wrapper's original call spelling and body remain unchanged. Do not add the previously considered executable call rename, duplicate a private algorithm or change production merely to simplify the receipt. Pin only the seven actual inline type-import token rewrites. `lattice.ts` is byte-identical across views; do not promise a distinguishable double-normalization refusal for that unchanged file.
+
+Required controls cover all thirteen mandatory live owners, all nine outputs, missing/wrong source, fixed receipt authority, stale/wrong whole and declaration pins, lost/duplicate/reordered declarations or facade exports, optionality/readonly/docs changes, mutated algorithm and private state, changed type/value import or inline import qualifier, extra executable source, wrong reciprocal coordinates/coverage and fresh-read corruption after a successful operation. Any malformed-receipt component validator remains separate from the fixed reconstruction authority. Existing historical mutants remain raw after their first view is constructed. Actual compiler/type/runtime inputs remain current.
+
+Root runs this complete new proof, the already collected 39 new semantic/identity controls, affected existing verifier/allocation/backend/async controls, and compares the unchanged original 219 population against its preserved 212/219 baseline. No new failure or silent-empty success is acceptable; the seven separately attributed existing failures are retained, not repaired by filtering module-init rows or replacing old intrinsic receipts. Static reconstruction and declaration counts do not establish runtime preservation by themselves.
+
+### Budget transfer and publication limits
+
+Transfer the existing large-file allowance from `src/ir/verify.ts` to its actual canonical owner `src/ir/runtime/verify.ts`. The narrowly required function allowance is `src/ir/runtime/verify.ts::verifyInstrStructure`, preserving the original 381-line body exactly (original lines 640–1020, 16,304 bytes, SHA256 `dea7b10ff74257299961f88eb19c7951dad3c059b269b4ed287d34783fffe5df`, Git blob `562c1e9c992294cbf9db586afb667d8d45b3f333`). Root owns this metadata edit and actual budget gates. The real original `verifyBlock` is 200 lines and `verifyInstrTypeRules` is 299; the stale committed `verifyBlock:379` baseline is not authority for another allowance. Do not edit baseline JSON, expand a global threshold or split unchanged algorithms merely to satisfy a budget.
+
+Keep the reviewed 1,765-row policy, whole 91-record prefix plus exactly three B activations, unchanged allowed edges, exact historic 56/40/44/174 views and raw-current classifications. Current architecture remains incomplete. This preservation checkpoint does not complete genuine mixed Get/Call/Construct, the complete 45-catalog/44-Call/two-Construct population, bound and dynamic Function behavior, eval/with, original public Number 9/9, fresh decoded replay or either backend's full observable equality. All remain required before legacy retirement.
+
+
+Sol 6.1 High scoped mutation-locator repair now executes all 116 source-preservation controls successfully, zero failed or skipped. Only the two test mutation strings changed; the source helper, receipt and all thirteen production owners retain their frozen hashes. First 115/116 evidence remains preserved. Actual corrected execution: `.tmp/validation-lowering-b-resume/first-integration/analysis-corrected.json`.
+
+
+Actual provider/support-ref execution: all352 semantic/provider boundary controls pass on the integrated B candidate. Raw current symbolic support-ref suite measures15/20; the same five rows fail on exact pre-B dependency0e4638af with identical first error text. Its test/coretypes/ABI facade/canonical factory sources are byte-identical before and after B. All five stop at the original two-body relocation hash positive, so their four mutation refusals are not credited. Preserve these existing failures and hashes; do not remove production support-ref behavior to force historical graph counts. Exact paired records are `first-integration/provider-support-controls.json`, `support-ref-before-b.json`, and `support-ref-comparison.json` under `.tmp/validation-lowering-b-resume/`.
+
+
+Sol 6.1 High bounded core-type implementation is integrated as exactly three new helper/receipt/control paths, fixed receipt SHA7656fac126fa982f114f900382e6f3a256d417d3750406a142e96df22d6f80e2. Root independently verifies seven actual live source/blob pins and full reconstructed original bytes against the measured efe352 Git authority (actual parent721cd33a828c89cfc04c851b011f910b76a4d2c5). The earlier129 initial-graph helper files remain byte-identical. All49 new controls execute successfully with zero skipped/failed. Root joins the single core/types historical source only at initial fixture copy, after other inverses independently capture authentic current inputs. Four selected old positives now pass: metadata2/2 plus actual graph40modules/109edges and44modules/119edges. Their original counts, syntax/type populations and policy hashes remain unchanged;101unselected controls are not yet credited. Actual full105 execution is running. Original110/120 failure evidence remains preserved.
+
+
+Complete original program-data boundary executes105/105 with zero skipped, failures or worker errors. Combined with the already executed352/352 semantic/provider controls, both unchanged original boundary populations pass457/457. The first failing baselines, diagnostic110/120 edges and selected-only runs remain preserved. No historical receipt/hash/count/negative assertion changed. Targeted additional TS7 coverage of nine new helper/control paths finds four type-only diagnostics outside the production TS7 project: two Array.isArray callback implicit-any annotations, a syntax Statement-to-NamedDeclaration assertion, and a readonly-to-mutable assertion in an intentional JSON-copy negative. Two existing Sol6.1High isolated workers own these narrow annotation repairs; fixed receipts, runtime expressions, test populations and production code stay unchanged. Preserve the first typed diagnostic log.
+
+
+Targeted TS7 of all nine new B helper/control paths now exits0 after four type-only corrections from the two Sol6.1High workers. Root verifies exact callback annotations, compatible syntax-name cast and readonly JSON-copy mutant cast; runtime expressions, all fixed receipts and every test row/assertion are unchanged. The original first four-diagnostic log remains preserved. New helper revisions are initialgraph0fe14c4a…, analysis05f37c0b…; coretype test15f1a8ba…. Actual production TS7 already passes independently. Original model ownership remains Astra for frozen source/initial helper logic and Sol for the bounded core-type implementation and its scoped later repairs.
+
+
+Actual candidate gates: compiler inventory accepts1765 rows with zero inventory errors, sourceRevision0e4638af and exact canonical-main comparison88cdb141. Four new production files remain unstaged/untracked (1761tracked/4untracked), so do not report final tracked delivery. All nine activated B owners are clean with54 resolved outgoing source edges and zero unknown/unresolved/forbidden outgoing edges; the unchanged pure lattice owner legitimately has zero imports and its whole declaration source is authenticated by preservation pins. A first reporting-only hypothesis requiring imports from every owner was rejected by that measured shape; no detector or gate changed. Global architecture/graph remain incomplete. JsTag and kind-neutrality gates pass. Canonical-main-scoped oracle/coercion gates pass; the earlier default-origin coercion result overincluded64 unrelated codegen files and is retained as a diagnostic, not candidate-scope evidence. LOC/function gates already pass unchanged production against the same exact main base; shared baselines are untouched. Normal signed commit/hooks, prerequisite main delivery and protected publication remain required.
+
+
+Pre-commit delivery evidence: canonical scoped claim63764-feehmtqm reverified, canonical main directly reverified88cdb141, PR6378 still open at exact dependency0e4638af. Explicitly staged B files now produce a real1765/1765 tracked inventory (zero untracked, zero inventory errors), superseding the preserved pre-stage1761/4 snapshot. Whole architecture/graph remain incomplete. Durable49-artifact measured archive is [the Phase B integration handoff](../log/3518-validation-lowering-b-2026-10-01/integration-2026-10-01/HANDOFF.md); manifest f37072aaf032763892dec2930b67e001b0bcd28796d4f0ac30856e253c7ad8d3,819056 raw bytes. Production14 frozen pins and16 previous integration checkpoint pins reverified before stage. Normal signed hooks are next; no bypass or main delivery is claimed.
+
+### 2026-10-01 — normal-hook lint repair, Sol6.1 Medium
+
+The first full normal commit hook stopped at two test-only lints and made no commit. Sol6.1 Medium renamed the local `escape` binding and changed the deliberate sparse-array mutation to `Reflect.deleteProperty`, with explicit successful deletion, unchanged length and absent-own-index assertions. The control still creates a hole; assigning `undefined` was rejected as a semantics change. No production source or fixed receipt changed, and the existing39 verifier and63 policy rows remain the required rerun population. Original failure log, exit and exact before/after test hashes are preserved in `plan/log/3518-validation-lowering-b-2026-10-01/lint-repair-2026-10-01/`. Thirteen production pins stay byte-identical to the original Astra freeze; its original test pin remains immutable historical evidence, superseded only for this reviewed lint repair. Root owns actual validation and full-hook retry.
+
+Root rerun after the lint repair:102/102 affected controls pass (39 verifier,63 policy), zero skipped/unhandled errors; targeted TS7 of all nine new preservation paths exits0. Scoped Biome and Prettier pass. Production freeze hashes verified unchanged. Full normal commit hooks remain the next acceptance step.
