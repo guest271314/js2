@@ -63,3 +63,18 @@ Fresh required preservation gate on this exact stagedmain exits0: corecallers12/
 The clean staged main refresh now includes9ba8f119a715a4fac719d82014f48baa43f4433d. Both dynamic-code policy and array-push fixes are retained. All ten owned uncommitted proof/doc paths were backed up and verified before and after refresh; no unrelated work was discarded. Later canonical9228bb1120042ad5a8a2ed60e0e0c60dc620d070 adds only verified baseline/npm artifacts.
 
 Astra High issue amendment and Sol6.1Medium implementation/review cover exactly two fixed inventory insertions. Old53,693-byte helper prefix, all prior receipts, original304tests and eight capture adapters are intact. New receipt6,159B/SHA785ef0a740ac17ba636bb75b15cf4eed2266ac4ca0ec588e1eb4cff3642a708f is exact. Actual ordinary selected execution70/70 (69new controls plus originalpositive1,303filtered of373); array21/21 and pinned seven-file lint pass. Real boundary inventory1,778tracked, runtime20, owner23direct/21targets/44closure, boundedunknown/unresolved/forbidden0. Wholearchitectureincomplete; retirementnotcertified. Full publication-head normal checks and main delivery remain pending. Raw earlier failures and one-row evidence retained separately.
+
+
+### Current-main integration and second measured reporter repair — 2026-10-02
+
+Root freshly verified canonical main aae72438f707793842af87a351e5f6f3539ec1d7 and merged it cleanly after the original validation process terminated. This also preserves the separately delivered settled-await implementation and regression/equivalence tests from PR6397; its later changes do not alter the host-carrier inventory/source pins. Actual merged policy matches the reviewed1779-row successor exactly. Astra High provided the appended implementation plan; Sol6.1Medium implemented and independently reviewed the eight proof paths. The previous helper68822-byte prefix, immutable two-row receipt, original304+69controls and all prior assertions remain intact. Forty new controls are statically enumerated; execution is pending.
+
+The retained f145 normal runner completed2464/2464 assertions across12suites and exited0, but reported two real onTaskUpdate RPC errors: runtime-program204rows and WKS154rows. This is not zero-unhandled-error evidence. Sol added the same test-local awaited afterEach setImmediate yield to both already-owned suites, preserving assertions, timeouts, runner and error policies. Ordinary focused reruns are required before claiming clean reporter outcomes. Normal final hooks, fork push, ready PR and protected main delivery remain pending. Legacy remains retained and the full migration objective remains incomplete.
+
+
+### Measured host-carrier and reporter validation — 2026-10-02
+
+Ordinary focused Vitest run on the exact current-main integration exited0 with399/399 executed assertions,372 filtered of771 registered:40 new host-carrier controls plus one original Number/C2a positive, complete runtime-program204rows and complete WKS154rows. No unhandled error or RPC timeout was reported. Seven-file pinned lint passed without fixes. This does not claim the full413-row Number suite or complete publication-head validation; normal final hooks and protected main delivery remain pending. Original f1452464-row/two-RPC evidence remains preserved. The incoming array and settled-await fixes and their regression/equivalence tests remain unchanged from current main.
+
+
+Required current-main preservation gate exited0:12/12observed core callers,10/10full and10/10cut core-type references,6/6full and6/6cut source witnesses. Strict graph closure remains OPEN, nonliteral imports UNKNOWN, and retirement NOT CERTIFIED; these limits remain explicit.

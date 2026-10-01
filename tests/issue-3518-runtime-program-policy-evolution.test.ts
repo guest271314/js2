@@ -1,13 +1,16 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { setImmediate } from "node:timers/promises";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   authenticateIrRuntimeProgramPolicy,
   authenticateIrRuntimeProgramPolicyEvolution,
   beforeIrRuntimeProgramPolicy,
   beforeWellKnownSymbolPolicy,
+  beforeHostCarrierInventoryPolicy,
   beforeDynamicCodeInventoryPolicy,
+  beforeHostCarrierInventoryPolicySource,
   beforeDynamicCodeInventoryPolicySource,
   beforeRuntimePreparationPolicy,
   beforeNumberPrerequisitePolicy,
@@ -23,6 +26,10 @@ import {
   beforeIrValidationPolicyActivations,
   historicalIrValidationPolicyView,
 } from "./helpers/ir-validation-policy-evolution.js";
+afterEach(async () => {
+  // Yield between synchronous source proofs so Vitest can process task-update RPCs.
+  await setImmediate();
+});
 const read = (path: string): string => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 const sha = (text: string): string => createHash("sha256").update(text).digest("hex");
 const digest = (value: unknown): string => sha(JSON.stringify(value));
@@ -32,7 +39,9 @@ function actual(): Policy {
   const policy = beforeWellKnownSymbolPolicy(
     beforeNumberPrerequisitePolicy(
       beforeRuntimePreparationPolicy(
-        beforeDynamicCodeInventoryPolicy(JSON.parse(read("scripts/compiler-boundaries.json"))),
+        beforeDynamicCodeInventoryPolicy(
+          beforeHostCarrierInventoryPolicy(JSON.parse(read("scripts/compiler-boundaries.json"))),
+        ),
       ),
     ),
   ) as Policy;
@@ -86,7 +95,9 @@ describe("C1 exact policy inverse and reciprocal B proof", () => {
     const raw = beforeWellKnownSymbolPolicySource(
         beforeNumberPrerequisitePolicySource(
           beforeRuntimePreparationPolicySource(
-            beforeDynamicCodeInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+            beforeDynamicCodeInventoryPolicySource(
+              beforeHostCarrierInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+            ),
           ),
         ),
       ),

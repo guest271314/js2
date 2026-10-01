@@ -13,6 +13,7 @@ import {
   irValidationPolicyActivations,
 } from "./helpers/ir-validation-policy-evolution.js";
 import {
+  beforeHostCarrierInventoryPolicy,
   beforeDynamicCodeInventoryPolicy,
   beforeRuntimePreparationPolicy,
   authenticateNumberPrerequisitePolicy,
@@ -401,7 +402,9 @@ const additions = [
 const policy = () => {
   const actual = beforeRuntimePreparationPolicy(
     beforeDynamicCodeInventoryPolicy(
-      JSON.parse(readFileSync(resolve(repository, "scripts/compiler-boundaries.json"), "utf8")),
+      beforeHostCarrierInventoryPolicy(
+        JSON.parse(readFileSync(resolve(repository, "scripts/compiler-boundaries.json"), "utf8")),
+      ),
     ),
   );
   authenticateNumberPrerequisitePolicy(actual);

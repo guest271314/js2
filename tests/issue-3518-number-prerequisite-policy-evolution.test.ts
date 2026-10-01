@@ -4,6 +4,11 @@ import { readFileSync } from "node:fs";
 import { setImmediate } from "node:timers/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  authenticateHostCarrierPolicyEvolution,
+  authenticateHostCarrierInventoryPolicy,
+  beforeHostCarrierInventoryPolicy,
+  beforeHostCarrierInventoryPolicySource,
+  hostCarrierPolicyReceiptPath,
   authenticateDynamicCodePolicyEvolution,
   authenticateDynamicCodeInventoryPolicy,
   beforeDynamicCodeInventoryPolicy,
@@ -61,7 +66,9 @@ const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 // The original Number historical input is derived from the outer actual C2a policy.
 const raw = (): string =>
   beforeRuntimePreparationPolicySource(
-    beforeDynamicCodeInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+    beforeDynamicCodeInventoryPolicySource(
+      beforeHostCarrierInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+    ),
   );
 const actual = (): Policy => JSON.parse(raw()) as Policy;
 const receiptText = (): string => read(numberPrerequisitePolicyReceiptPath);
@@ -868,7 +875,10 @@ describe("Number prerequisite exact successor of genuine WKS, C1 and B", () => {
 // C2a controls receive authenticated predecessor bytes; the original Number rows keep their historical input.
 describe("C2a exact runtime preparation policy successor", () => {
   const path = "src/ir/runtime/intrinsic-preparation.ts";
-  const currentRaw = (): string => beforeDynamicCodeInventoryPolicySource(read("scripts/compiler-boundaries.json"));
+  const currentRaw = (): string =>
+    beforeDynamicCodeInventoryPolicySource(
+      beforeHostCarrierInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+    );
   const current = (): Policy => JSON.parse(currentRaw()) as Policy;
   const authority = () => authenticateRuntimePreparationPolicyEvolution();
   const accept = (p: Policy): void => {
@@ -1252,7 +1262,7 @@ describe("C2a exact runtime preparation policy successor", () => {
 
 // Exact external-main inventory input; these controls never reuse the historical raw readers.
 describe("dynamic-code inventory successor preserves the C2a policy proof", () => {
-  const latestRaw = (): string => read("scripts/compiler-boundaries.json");
+  const latestRaw = (): string => beforeHostCarrierInventoryPolicySource(read("scripts/compiler-boundaries.json"));
   const latest = (): Policy => JSON.parse(latestRaw()) as Policy;
   const added = { path: "src/runtime/dynamic-code-policy.ts", state: "unmigrated", layer: "legacy-host" };
   const arrayRow: Record<string, string> = {
@@ -1757,5 +1767,346 @@ describe("dynamic-code inventory successor preserves the C2a policy proof", () =
     authenticateDynamicCodePolicyEvolution();
     beforeDynamicCodeInventoryPolicy(p);
     beforeDynamicCodeInventoryPolicySource(text);
+  });
+});
+
+// Direct current-main controls; earlier Number/C2a/two-row readers keep their exact domains.
+describe("host-carrier current-main inventory successor", () => {
+  const hostRaw = (): string => read("scripts/compiler-boundaries.json");
+  const hostPolicy = (): Policy => JSON.parse(hostRaw()) as Policy;
+  const row: Record<string, string> = {
+    path: "src/codegen/host-carrier-to-primitive.ts",
+    state: "unmigrated",
+    layer: "mixed-needs-split",
+    destination: "backend-wasmgc",
+    owner: "3518-coordinator",
+    nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+  };
+  const insertion =
+    '    {\n      "path": "src/codegen/host-carrier-to-primitive.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n';
+  const accept = (p: unknown): void => {
+    expect(authenticateHostCarrierInventoryPolicy(p).files).toHaveLength(1779);
+  };
+  const refuse = (p: unknown): void => {
+    expect(() => authenticateHostCarrierInventoryPolicy(p)).toThrow();
+    expect(() => beforeHostCarrierInventoryPolicy(p)).toThrow();
+  };
+  const restore = (p: Policy, original: string): void => {
+    for (const key of Reflect.ownKeys(p)) expect(Reflect.deleteProperty(p, key)).toBe(true);
+    Object.assign(p, JSON.parse(original));
+    expect(JSON.stringify(p)).toBe(original);
+    accept(p);
+  };
+  const reject = (edit: (p: Policy) => void): void => {
+    const p = hostPolicy(),
+      original = JSON.stringify(p);
+    accept(p);
+    edit(p);
+    expect(JSON.stringify(p)).not.toBe(original);
+    refuse(p);
+    restore(p, original);
+  };
+  it("independently pins current-main bytes and debt row and replays its exact predecessor", () => {
+    const text = hostRaw(),
+      p = hostPolicy();
+    expect(Buffer.byteLength(text)).toBe(568231);
+    expect(sha(text)).toBe("f3af1f31d813eaef9bd2b955466390616e9549f36e1e7ffffdcead812a611ac3");
+    expect(
+      createHash("sha1")
+        .update(`blob ${Buffer.byteLength(text)}\0`)
+        .update(text)
+        .digest("hex"),
+    ).toBe("d61ee74048fa3d16c2986fd3e448d234f4e5594b");
+    expect(digest(p)).toBe("89780e5ff7c660518ca92981369dab0e341b77e55f02f8e23d2312b615a97856");
+    expect(p.files).toHaveLength(1779);
+    expect(digest(p.files)).toBe("ced3f8116817be3978f55f438b657ca6b36ec8d50827db92bd7d708c2940853b");
+    expect(p.files[605]).toEqual(row);
+    expect(Object.keys(p.files[605]!)).toEqual(["path", "state", "layer", "destination", "owner", "nextBoundary"]);
+    expect(p.files[604]!.path).toBe("src/codegen/host-bridge-exports.ts");
+    expect(p.files[606]!.path).toBe("src/codegen/host-fnctor-method-driver.ts");
+    expect(p.layers).toHaveLength(20);
+    expect(p.activationHistory).toHaveLength(101);
+    expect(digest(p.layers)).toBe("3f66bbff64c157092a04740c644ae17d476d7d168faa1bd23629f97492e0c4f7");
+    expect(digest(p.activationHistory)).toBe("9629c457a160096e70c35fc3a986abbd8eca145ac4eb688995194d6c29c83650");
+    expect(digest(p.allowedEdges)).toBe("efe7e7ed8dee1a009d2bef3ff36dba80df1a805cd3f5b7b472e62ec6dcff64c7");
+    for (const [path, bytes, hash] of [
+      [hostCarrierPolicyReceiptPath, 4673, "30c0912d7868e4da44c083243bb68073e48e70e7eb4b26dbc1b1e73090a5f583"],
+      [dynamicCodePolicyReceiptPath, 6159, "785ef0a740ac17ba636bb75b15cf4eed2266ac4ca0ec588e1eb4cff3642a708f"],
+      [
+        "src/codegen/host-carrier-to-primitive.ts",
+        14025,
+        "6f74bd8c4b97789a1dbfe92dc18dd6e71e11860b0e8efd913c523bca032ce504",
+      ],
+    ] as const) {
+      const source = read(path);
+      expect(Buffer.byteLength(source)).toBe(bytes);
+      expect(sha(source)).toBe(hash);
+    }
+    const prefix = Buffer.from(read("tests/helpers/ir-runtime-program-policy-evolution.ts")).subarray(0, 68822);
+    expect(prefix.length).toBe(68822);
+    expect(createHash("sha256").update(prefix).digest("hex")).toBe(
+      "90dce1410780cf924e78bdd4086be5b1b8c35cdbeb676c46126ac7e0f5f47c5c",
+    );
+    accept(p);
+    const twoRaw = beforeHostCarrierInventoryPolicySource(text),
+      two = beforeHostCarrierInventoryPolicy(p);
+    expect(Buffer.byteLength(twoRaw)).toBe(567908);
+    expect(sha(twoRaw)).toBe("5c1c4a16928b421c112eb81180a315d31e116ff442a40375e8c6efb4f220c685");
+    expect(two.files).toHaveLength(1778);
+    expect(digest(two)).toBe("65b382b173594abd15ffdef1a51f96daf017f4d91bd60e47f6308da434ab97b3");
+    expect(JSON.parse(twoRaw)).toEqual(two);
+    expect(Buffer.byteLength(insertion)).toBe(323);
+    expect(twoRaw.slice(239710).startsWith('    {\n      "path": "src/codegen/host-fnctor-method-driver.ts",')).toBe(
+      true,
+    );
+    expect(twoRaw.slice(0, 239710) + insertion + twoRaw.slice(239710)).toBe(text);
+    const replay = clone(two);
+    replay.files.splice(605, 0, { ...row });
+    expect(replay).toEqual(p);
+    authenticateDynamicCodeInventoryPolicy(two);
+    const c2a = beforeDynamicCodeInventoryPolicy(two);
+    authenticateRuntimePreparationPolicy(c2a);
+    const number = beforeRuntimePreparationPolicy(c2a);
+    authenticateNumberPrerequisitePolicy(number);
+    const wks = beforeNumberPrerequisitePolicy(number);
+    authenticateWellKnownSymbolPolicy(wks);
+    const c1 = beforeWellKnownSymbolPolicy(wks);
+    authenticateIrRuntimeProgramPolicy(c1);
+    authenticateIrValidationPolicy(beforeIrRuntimeProgramPolicy(c1));
+    beforeDynamicCodeInventoryPolicySource(twoRaw);
+  });
+  const mutations: readonly [string, (p: Policy) => void][] = [
+    [
+      "missing",
+      (p) => {
+        p.files.splice(605, 1);
+      },
+    ],
+    [
+      "duplicate",
+      (p) => {
+        p.files.splice(605, 0, { ...row });
+      },
+    ],
+    [
+      "moved",
+      (p) => {
+        const moved = p.files.splice(605, 1)[0]!;
+        p.files.splice(606, 0, moved);
+      },
+    ],
+    ...["path", "state", "layer", "destination", "owner", "nextBoundary"].map(
+      (field): [string, (p: Policy) => void] => [
+        field,
+        (p) => {
+          p.files[605]![field] += ".changed";
+        },
+      ],
+    ),
+    [
+      "extra field",
+      (p) => {
+        p.files[605]!.extra = "changed";
+      },
+    ],
+    [
+      "previous neighbor",
+      (p) => {
+        p.files[604]!.path += ".changed";
+      },
+    ],
+    [
+      "next neighbor",
+      (p) => {
+        p.files[606]!.state = "clean";
+      },
+    ],
+    [
+      "retained prefix",
+      (p) => {
+        p.files[0]!.state = "changed";
+      },
+    ],
+    [
+      "unrelated layer",
+      (p) => {
+        p.layers[0]!.roots.push("src/unreviewed");
+      },
+    ],
+    [
+      "activation",
+      (p) => {
+        p.activationHistory[0]!.minModules++;
+      },
+    ],
+    [
+      "allowed edge",
+      (p) => {
+        p.allowedEdges.unreviewed = ["legacy-host"];
+      },
+    ],
+    [
+      "top level",
+      (p) => {
+        p.description = "changed";
+      },
+    ],
+  ];
+  it.each(mutations)("refuses host-carrier inventory %s after success and restores", (_label, edit) => reject(edit));
+  it.each(["whitespace", "offset", "missing", "duplicate", "fragment"] as const)(
+    "refuses host-carrier raw %s",
+    (change) => {
+      const text = hostRaw();
+      beforeHostCarrierInventoryPolicySource(text);
+      const at = 239710;
+      const mutant =
+        change === "whitespace"
+          ? text + "\n"
+          : change === "offset"
+            ? " " + text
+            : change === "missing"
+              ? text.slice(0, at) + text.slice(at + insertion.length)
+              : change === "duplicate"
+                ? text.slice(0, at) + insertion + text.slice(at)
+                : text.slice(0, at) + "X" + text.slice(at + 1);
+      expect(mutant).not.toBe(text);
+      expect(() => beforeHostCarrierInventoryPolicySource(mutant)).toThrow();
+      beforeHostCarrierInventoryPolicySource(text);
+    },
+  );
+  it.each(["accessor", "hidden", "symbol", "prototype", "cycle", "toJSON"] as const)(
+    "captures host-carrier %s before authority I/O or caller execution",
+    (shape) => {
+      const p = hostPolicy(),
+        original = JSON.stringify(p);
+      accept(p);
+      let calls = 0;
+      if (shape === "accessor")
+        Object.defineProperty(p, "description", {
+          configurable: true,
+          enumerable: true,
+          get() {
+            calls++;
+            return "changed";
+          },
+        });
+      if (shape === "hidden") Object.defineProperty(p.files[605]!, "path", { enumerable: false });
+      if (shape === "symbol")
+        Object.defineProperty(p, Symbol("extra"), { configurable: true, enumerable: true, value: 1 });
+      if (shape === "prototype") Object.setPrototypeOf(p.files[605]!, { inherited: true });
+      if (shape === "cycle") p.extra = p;
+      if (shape === "toJSON")
+        p.toJSON = () => {
+          calls++;
+          return hostPolicy();
+        };
+      const exact = new URL(`../${hostCarrierPolicyReceiptPath}`, import.meta.url).pathname;
+      try {
+        intercepted.set(exact, 0);
+        interceptedReads.set(exact, 0);
+        refuse(p);
+        expect(interceptedReads.get(exact)).toBe(0);
+        expect(calls).toBe(0);
+      } finally {
+        intercepted.delete(exact);
+        interceptedReads.delete(exact);
+      }
+      restore(p, original);
+    },
+  );
+  it("returns detached frozen current and recaptures the same changed object", () => {
+    const p = hostPolicy(),
+      original = JSON.stringify(p);
+    accept(p);
+    const frozen = authenticateHostCarrierInventoryPolicy(p),
+      first = beforeHostCarrierInventoryPolicy(p),
+      second = beforeHostCarrierInventoryPolicy(p);
+    expect(Object.isFrozen(frozen)).toBe(true);
+    expect(Object.isFrozen(frozen.files[605])).toBe(true);
+    expect(first).not.toBe(second);
+    expect(first.files).not.toBe(second.files);
+    p.files[605]!.state = "clean";
+    expect(frozen.files[605]!.state).toBe("unmigrated");
+    refuse(p);
+    restore(p, original);
+  });
+  it("refuses predecessor domains and sends a captured two-row mutant to the unchanged guard", () => {
+    const p = hostPolicy();
+    accept(p);
+    expect(() => authenticateDynamicCodeInventoryPolicy(p)).toThrow("dynamic code inventory policy evolution:");
+    expect(() => beforeDynamicCodeInventoryPolicySource(hostRaw())).toThrow("dynamic code inventory policy evolution:");
+    const twoRaw = beforeHostCarrierInventoryPolicySource(hostRaw()),
+      two = beforeHostCarrierInventoryPolicy(p),
+      original = JSON.stringify(two);
+    authenticateDynamicCodeInventoryPolicy(two);
+    refuse(two);
+    expect(() => beforeHostCarrierInventoryPolicySource(twoRaw)).toThrow();
+    const c2a = beforeDynamicCodeInventoryPolicy(two);
+    refuse(c2a);
+    expect(() => beforeHostCarrierInventoryPolicySource(beforeDynamicCodeInventoryPolicySource(twoRaw))).toThrow();
+    two.files[202]!.state = "clean";
+    expect(() => authenticateDynamicCodeInventoryPolicy(two)).toThrow("dynamic code inventory policy evolution:");
+    expect(() => beforeDynamicCodeInventoryPolicy(two)).toThrow("dynamic code inventory policy evolution:");
+    expect(two.files[202]!.state).toBe("clean");
+    Object.assign(two, JSON.parse(original));
+    authenticateDynamicCodeInventoryPolicy(two);
+  });
+  it("refuses wrapped source strings before conversion", () => {
+    accept(hostPolicy());
+    let calls = 0;
+    const wrapped = Object(hostRaw());
+    wrapped.toString = () => {
+      calls++;
+      return hostRaw();
+    };
+    expect(() => beforeHostCarrierInventoryPolicySource(wrapped)).toThrow("raw input must be a primitive string");
+    expect(() => authenticateHostCarrierPolicyEvolution(wrapped)).toThrow("receipt digest mismatch");
+    expect(calls).toBe(0);
+  });
+  it.each(["whitespace", "schema", "profile", "span"] as const)(
+    "refuses immutable host-carrier receipt %s",
+    (change) => {
+      accept(hostPolicy());
+      const text = read(hostCarrierPolicyReceiptPath),
+        receipt = clone(authenticateHostCarrierPolicyEvolution());
+      if (change === "schema") receipt.schema += ".changed";
+      if (change === "profile") receipt.current.fileCount++;
+      if (change === "span") receipt.addition.rawSpan.afterOffset++;
+      const mutant = change === "whitespace" ? text + "\n" : JSON.stringify(receipt);
+      expect(mutant).not.toBe(text);
+      expect(() => authenticateHostCarrierPolicyEvolution(mutant)).toThrow("receipt digest mismatch");
+    },
+  );
+  it.each([
+    hostCarrierPolicyReceiptPath,
+    dynamicCodePolicyReceiptPath,
+    "tests/helpers/ir-runtime-program-policy-evolution.ts",
+    "src/codegen/host-carrier-to-primitive.ts",
+  ])("recaptures changed host-carrier authority %s after success", (path) => {
+    const p = hostPolicy(),
+      text = hostRaw(),
+      original = read(path),
+      exact = new URL(`../${path}`, import.meta.url).pathname;
+    accept(p);
+    authenticateHostCarrierPolicyEvolution();
+    beforeHostCarrierInventoryPolicy(p);
+    beforeHostCarrierInventoryPolicySource(text);
+    try {
+      intercepted.set(exact, 0);
+      interceptedReads.set(exact, 0);
+      expect(read(path)).not.toBe(original);
+      expect(() => authenticateHostCarrierPolicyEvolution()).toThrow();
+      refuse(p);
+      expect(() => beforeHostCarrierInventoryPolicySource(text)).toThrow();
+      expect(interceptedReads.get(exact)).toBeGreaterThanOrEqual(5);
+    } finally {
+      intercepted.delete(exact);
+      interceptedReads.delete(exact);
+    }
+    expect(read(path)).toBe(original);
+    accept(p);
+    authenticateHostCarrierPolicyEvolution();
+    beforeHostCarrierInventoryPolicy(p);
+    beforeHostCarrierInventoryPolicySource(text);
   });
 });

@@ -13,6 +13,7 @@ import {
 import {
   beforeIrRuntimeProgramPolicy,
   beforeWellKnownSymbolPolicy,
+  beforeHostCarrierInventoryPolicy,
   beforeDynamicCodeInventoryPolicy,
   beforeRuntimePreparationPolicy,
   beforeNumberPrerequisitePolicy,
@@ -34,7 +35,9 @@ function actual(): MutablePolicy {
     beforeWellKnownSymbolPolicy(
       beforeNumberPrerequisitePolicy(
         beforeRuntimePreparationPolicy(
-          beforeDynamicCodeInventoryPolicy(JSON.parse(read("scripts/compiler-boundaries.json"))),
+          beforeDynamicCodeInventoryPolicy(
+            beforeHostCarrierInventoryPolicy(JSON.parse(read("scripts/compiler-boundaries.json"))),
+          ),
         ),
       ),
     ),

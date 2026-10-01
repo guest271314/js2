@@ -1618,3 +1618,243 @@ export function beforeDynamicCodeInventoryPolicySource(raw: string): string {
     dynamicFail("raw and semantic reciprocal proof disagree");
   return predecessor;
 }
+
+// Exact host-carrier inventory successor over the complete committed two-row proof.
+export const hostCarrierPolicyReceiptPath = "tests/helpers/ir-runtime-program-policy-host-carrier.json";
+const hostCarrierReceiptSha256 = "30c0912d7868e4da44c083243bb68073e48e70e7eb4b26dbc1b1e73090a5f583";
+const hostCarrierBeforeProfile = dynamicCurrentProfile;
+const hostCarrierCurrentProfile = {
+  source: {
+    bytes: 568231,
+    sha256: "f3af1f31d813eaef9bd2b955466390616e9549f36e1e7ffffdcead812a611ac3",
+    gitBlob: "d61ee74048fa3d16c2986fd3e448d234f4e5594b",
+  },
+  dataSha256: "89780e5ff7c660518ca92981369dab0e341b77e55f02f8e23d2312b615a97856",
+  fileCount: 1779,
+  filesSha256: "ced3f8116817be3978f55f438b657ca6b36ec8d50827db92bd7d708c2940853b",
+  activationCount: 101,
+  activationHistorySha256: "9629c457a160096e70c35fc3a986abbd8eca145ac4eb688995194d6c29c83650",
+  layersSha256: "3f66bbff64c157092a04740c644ae17d476d7d168faa1bd23629f97492e0c4f7",
+  allowedEdgesSha256: "efe7e7ed8dee1a009d2bef3ff36dba80df1a805cd3f5b7b472e62ec6dcff64c7",
+};
+const hostCarrierPrefix = {
+  path: "tests/helpers/ir-runtime-program-policy-evolution.ts",
+  bytes: 68822,
+  sha256: "90dce1410780cf924e78bdd4086be5b1b8c35cdbeb676c46126ac7e0f5f47c5c",
+};
+const hostCarrierDynamicReceipt = {
+  path: "tests/helpers/ir-runtime-program-policy-dynamic-code.json",
+  bytes: 6159,
+  sha256: "785ef0a740ac17ba636bb75b15cf4eed2266ac4ca0ec588e1eb4cff3642a708f",
+};
+// Literal fixed authority; never derive membership or expected spans from caller input.
+const hostCarrierAddition: DynamicInventoryAddition = {
+  fileIndex: 605,
+  beforeIndex: 605,
+  row: {
+    path: "src/codegen/host-carrier-to-primitive.ts",
+    state: "unmigrated",
+    layer: "mixed-needs-split",
+    destination: "backend-wasmgc",
+    owner: "3518-coordinator",
+    nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+  },
+  previous: {
+    path: "src/codegen/host-bridge-exports.ts",
+    state: "unmigrated",
+    layer: "mixed-needs-split",
+    destination: "backend-wasmgc",
+    owner: "3518-coordinator",
+    nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+  },
+  next: {
+    path: "src/codegen/host-fnctor-method-driver.ts",
+    state: "unmigrated",
+    layer: "mixed-needs-split",
+    destination: "backend-wasmgc",
+    owner: "3518-coordinator",
+    nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+  },
+  sourcePin: {
+    path: "src/codegen/host-carrier-to-primitive.ts",
+    bytes: 14025,
+    sha256: "6f74bd8c4b97789a1dbfe92dc18dd6e71e11860b0e8efd913c523bca032ce504",
+  },
+  rawSpan: {
+    beforeOffset: 239710,
+    afterOffset: 239710,
+    before:
+      '    {\n      "path": "src/codegen/host-fnctor-method-driver.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n',
+    after:
+      '    {\n      "path": "src/codegen/host-carrier-to-primitive.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n    {\n      "path": "src/codegen/host-fnctor-method-driver.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n',
+    beforeSha256: "3e551509901b9201393becb318e31b2c40e5a8be0d17fa97975556e33dda6bdc",
+    afterSha256: "84ec8fc955578c6b77c59141a048c9233b0be087e2e45d3f5a11eb2e275a36db",
+  },
+};
+interface HostCarrierPolicyReceipt {
+  schema: string;
+  kind: string;
+  checkpoint: string;
+  incomingMain: string;
+  before: Profile & { allowedEdgesSha256: string };
+  current: Profile & { allowedEdgesSha256: string };
+  helperPrefix: typeof hostCarrierPrefix;
+  dynamicReceipt: typeof hostCarrierDynamicReceipt;
+  addition: DynamicInventoryAddition;
+}
+function hostCarrierFail(detail: string): never {
+  throw new Error("host carrier inventory policy evolution: " + detail);
+}
+/** Recheck the exact receipt, complete prior helper and both source/receipt authorities afresh. */
+export function authenticateHostCarrierPolicyEvolution(
+  text = readFileSync(new URL(`../../${hostCarrierPolicyReceiptPath}`, import.meta.url), "utf8"),
+): HostCarrierPolicyReceipt {
+  if (typeof text !== "string" || Buffer.byteLength(text) !== 4673 || sha(text) !== hostCarrierReceiptSha256)
+    hostCarrierFail("receipt digest mismatch");
+  const receipt = JSON.parse(text) as HostCarrierPolicyReceipt;
+  if (
+    !same(Object.keys(receipt), [
+      "schema",
+      "kind",
+      "checkpoint",
+      "incomingMain",
+      "before",
+      "current",
+      "helperPrefix",
+      "dynamicReceipt",
+      "addition",
+    ]) ||
+    receipt.schema !== "ir-runtime-program-policy-host-carrier-v1" ||
+    receipt.kind !== "external-main-host-carrier-inventory-successor" ||
+    receipt.checkpoint !== "f145ce94178071753e418021a586631441d19977" ||
+    receipt.incomingMain !== "4509239df1d3454163b4656d39dfe8733714a47b" ||
+    !same(receipt.before, hostCarrierBeforeProfile) ||
+    !same(receipt.current, hostCarrierCurrentProfile) ||
+    !same(receipt.helperPrefix, hostCarrierPrefix) ||
+    !same(receipt.dynamicReceipt, hostCarrierDynamicReceipt) ||
+    !same(receipt.addition, hostCarrierAddition)
+  )
+    hostCarrierFail("fixed receipt population mismatch");
+  const span = receipt.addition.rawSpan;
+  if (
+    receipt.addition.fileIndex !== 605 ||
+    receipt.addition.beforeIndex !== 605 ||
+    !span.before ||
+    !span.after ||
+    span.beforeOffset !== 239710 ||
+    span.afterOffset !== 239710 ||
+    sha(span.before) !== span.beforeSha256 ||
+    sha(span.after) !== span.afterSha256 ||
+    Buffer.byteLength(span.after) - Buffer.byteLength(span.before) !== 323
+  )
+    hostCarrierFail("fixed row or raw anchor mismatch");
+  const helper = readFileSync(new URL("./ir-runtime-program-policy-evolution.ts", import.meta.url));
+  if (
+    helper.length < hostCarrierPrefix.bytes ||
+    createHash("sha256").update(helper.subarray(0, hostCarrierPrefix.bytes)).digest("hex") !== hostCarrierPrefix.sha256
+  )
+    hostCarrierFail("complete predecessor helper prefix changed");
+  for (const pin of [hostCarrierDynamicReceipt, hostCarrierAddition.sourcePin]) {
+    const bytes = readFileSync(new URL(`../../${pin.path}`, import.meta.url));
+    if (bytes.length !== pin.bytes || createHash("sha256").update(bytes).digest("hex") !== pin.sha256)
+      hostCarrierFail("full-file input changed: " + pin.path);
+  }
+  const predecessor = authenticateDynamicCodePolicyEvolution();
+  if (!same(predecessor.current, hostCarrierBeforeProfile)) hostCarrierFail("two-row predecessor authority mismatch");
+  return freeze(receipt);
+}
+function hostCarrierSemanticProfile(
+  policy: MutableIrRuntimeProgramPolicy,
+  profile: HostCarrierPolicyReceipt["current"],
+): void {
+  if (
+    digest(policy) !== profile.dataSha256 ||
+    policy.files.length !== profile.fileCount ||
+    policy.activationHistory.length !== profile.activationCount ||
+    digest(policy.files) !== profile.filesSha256 ||
+    digest(policy.activationHistory) !== profile.activationHistorySha256 ||
+    digest(policy.layers) !== profile.layersSha256 ||
+    digest(policy.allowedEdges) !== profile.allowedEdgesSha256
+  )
+    hostCarrierFail("complete policy profile mismatch");
+}
+function proveHostCarrierInventoryPolicy(
+  value: unknown,
+  freshlyVerifiedReceipt?: HostCarrierPolicyReceipt,
+): { current: MutableIrRuntimeProgramPolicy; predecessor: MutableIrRuntimeProgramPolicy } {
+  // Descriptor-safe capture precedes authority I/O, caller reads and serialization.
+  const current = capture(value) as MutableIrRuntimeProgramPolicy;
+  const receipt = freshlyVerifiedReceipt ?? authenticateHostCarrierPolicyEvolution();
+  hostCarrierSemanticProfile(current, receipt.current);
+  const addition = receipt.addition;
+  if (
+    !same(Object.keys(current), wksTopKeys) ||
+    current.layers.length !== 20 ||
+    !same(Object.keys(current.files[605]!), Object.keys(addition.row)) ||
+    !same(current.files[604], addition.previous) ||
+    !same(current.files[605], addition.row) ||
+    !same(current.files[606], addition.next) ||
+    current.files.filter((row) => row.path === addition.row.path).length !== 1
+  )
+    hostCarrierFail("fixed file row schema/order or neighbors mismatch");
+  const predecessor = capture(current) as MutableIrRuntimeProgramPolicy;
+  predecessor.files.splice(605, 1);
+  hostCarrierSemanticProfile(predecessor, receipt.before);
+  // Preserve the unchanged two-row -> C2a -> Number -> WKS -> C1 -> B guards.
+  const verified = authenticateDynamicCodeInventoryPolicy(predecessor);
+  const replay = capture(verified) as MutableIrRuntimeProgramPolicy;
+  if (!same(replay.files[604], addition.previous) || !same(replay.files[605], addition.next))
+    hostCarrierFail("predecessor replay neighbors mismatch");
+  replay.files.splice(605, 0, capture(addition.row) as MutableIrRuntimeProgramPolicy["files"][number]);
+  hostCarrierSemanticProfile(replay, receipt.current);
+  if (!same(replay, current)) hostCarrierFail("complete independent reciprocal replay mismatch");
+  return { current, predecessor };
+}
+export function authenticateHostCarrierInventoryPolicy(value: unknown): IrValidationPolicy {
+  return freeze(proveHostCarrierInventoryPolicy(value).current) as IrValidationPolicy;
+}
+export function beforeHostCarrierInventoryPolicy(value: unknown): MutableIrRuntimeProgramPolicy {
+  return proveHostCarrierInventoryPolicy(value).predecessor;
+}
+function hostCarrierRawProfile(raw: string, profile: Profile): void {
+  const bytes = Buffer.byteLength(raw);
+  if (
+    bytes !== profile.source.bytes ||
+    sha(raw) !== profile.source.sha256 ||
+    createHash("sha1").update(`blob ${bytes}\0`).update(raw).digest("hex") !== profile.source.gitBlob
+  )
+    hostCarrierFail("complete raw source profile mismatch");
+}
+function applyHostCarrierInventoryRaw(raw: string, receipt: HostCarrierPolicyReceipt, forward: boolean): string {
+  hostCarrierRawProfile(raw, forward ? receipt.before : receipt.current);
+  const span = receipt.addition.rawSpan,
+    at = forward ? span.beforeOffset : span.afterOffset;
+  const from = forward ? span.before : span.after,
+    to = forward ? span.after : span.before;
+  // Explicit UTF-16 code-unit offsets; both frozen prefixes also have equal UTF-8 byte counts.
+  if (
+    !from ||
+    !to ||
+    Buffer.byteLength(raw.slice(0, at)) !== at ||
+    raw.slice(at, at + from.length) !== from ||
+    raw.indexOf(from) !== at ||
+    raw.lastIndexOf(from) !== at
+  )
+    hostCarrierFail("raw fragment missing, duplicated or reordered");
+  const output = raw.slice(0, at) + to + raw.slice(at + from.length);
+  hostCarrierRawProfile(output, forward ? receipt.current : receipt.before);
+  return output;
+}
+/** One fixed anchored raw inverse, semantic agreement and unchanged full two-row raw proof. */
+export function beforeHostCarrierInventoryPolicySource(raw: string): string {
+  if (typeof raw !== "string") hostCarrierFail("raw input must be a primitive string");
+  const receipt = authenticateHostCarrierPolicyEvolution();
+  const predecessor = applyHostCarrierInventoryRaw(raw, receipt, false);
+  const semantic = proveHostCarrierInventoryPolicy(JSON.parse(raw), receipt);
+  const parsed = JSON.parse(predecessor) as MutableIrRuntimeProgramPolicy;
+  hostCarrierSemanticProfile(parsed, receipt.before);
+  beforeDynamicCodeInventoryPolicySource(predecessor);
+  if (!same(parsed, semantic.predecessor) || applyHostCarrierInventoryRaw(predecessor, receipt, true) !== raw)
+    hostCarrierFail("raw and semantic reciprocal proof disagree");
+  return predecessor;
+}

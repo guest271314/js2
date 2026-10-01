@@ -1,11 +1,13 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { setImmediate } from "node:timers/promises";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   authenticateWellKnownSymbolPolicyEvolution,
   authenticateWellKnownSymbolPolicy,
   beforeWellKnownSymbolPolicy,
+  beforeHostCarrierInventoryPolicySource,
   beforeDynamicCodeInventoryPolicySource,
   beforeRuntimePreparationPolicySource,
   beforeNumberPrerequisitePolicySource,
@@ -18,6 +20,10 @@ import {
   type MutableIrRuntimeProgramPolicy as Policy,
 } from "./helpers/ir-runtime-program-policy-evolution.js";
 import { authenticateIrValidationPolicy } from "./helpers/ir-validation-policy-evolution.js";
+afterEach(async () => {
+  // Yield between synchronous source proofs so Vitest can process task-update RPCs.
+  await setImmediate();
+});
 const read = (path: string): string => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 const sha = (text: string): string => createHash("sha256").update(text).digest("hex");
 const digest = (value: unknown): string => sha(JSON.stringify(value));
@@ -25,7 +31,9 @@ const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 const raw = (): string =>
   beforeNumberPrerequisitePolicySource(
     beforeRuntimePreparationPolicySource(
-      beforeDynamicCodeInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+      beforeDynamicCodeInventoryPolicySource(
+        beforeHostCarrierInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+      ),
     ),
   );
 const actual = (): Policy => JSON.parse(raw()) as Policy;
