@@ -104,6 +104,12 @@ obj = { ['__proto__']: null }; if (obj.__proto__ === null) bits |= 16;`,
     body: `var s1 = Symbol(), s2 = Symbol(); class C { static a() {} static [s1]() { return 1; } static [ID(s2)]() { return 2; } } var syms = Object.getOwnPropertySymbols(C); if (syms.length === 2 && syms[0] === s1 && syms[1] === s2) bits |= 1; if (C[s2]() === 2) bits |= 2;`,
   },
   {
+    name: "rest_binding_pattern_closures",
+    step: "S7",
+    expected: 7,
+    body: `var g = function* (...[a]) { yield a; }; if (sv(g(8).next().value, 8)) bits |= 1; var o = { m(...[b]) { return b; } }; if (sv(o.m(6), 6)) bits |= 2; var f = function (...[x, y]) { return x * y; }; if (sv(f(3, 4), 12)) bits |= 4;`,
+  },
+  {
     name: "template_object_frozen",
     step: "S13",
     expected: 3,

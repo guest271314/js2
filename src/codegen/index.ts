@@ -1,5 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { ts, forEachChild } from "../ts-api.js";
+import { restPatternParamSlot } from "./resolved-rest-param.js"; // (#6774 S7)
 import { widenJsDefaultGuessSlot } from "./js-default-param-type-guess.js";
 import { isAccessorObjectLiteralType, propertyValueIsAccessorObjectLiteral } from "./accessor-value-field.js";
 import { registerAnnexBGlobalLiveBindings } from "./annexb-global-live-binding.js";
@@ -13660,7 +13661,7 @@ export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void 
         if (hasBindingPattern && !paramDecl.type && !paramDecl.dotDotDotToken && wasmType.kind !== "externref") {
           wasmType = { kind: "externref" };
         }
-        methodParams.push(wasmType);
+        methodParams.push(restPatternParamSlot(ctx, paramDecl, wasmType)); // (#6774 S7)
       } else if (paramDecl) {
         const pt = ctx.checker.getTypeAtLocation(paramDecl);
         methodParams.push(resolveWasmType(ctx, pt));

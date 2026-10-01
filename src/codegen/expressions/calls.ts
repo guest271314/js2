@@ -3,6 +3,7 @@
  * Call expression compilation: direct calls, optional calls, closure calls,
  * property method calls, IIFEs, and conditional callees.
  */
+import { hoistParameterEvalVars } from "../eval-param-scope-hoist.js"; // (#6774 S7)
 import { referencesOwnNewTarget } from "../new-target-value.js"; // (#6774 S4)
 import { tryCompileStandaloneEvalSpread } from "../eval-spread-args.js"; // (#6774 S18)
 import { emitThrowReferenceError } from "../js-errors.js"; // (#6774 S8)
@@ -10641,6 +10642,7 @@ function compileIIFE(ctx: CodegenContext, fctx: FunctionContext, expr: ts.CallEx
   // source FunctionDeclaration. The old path only padded missing numeric
   // arguments with NaN and entered the body directly, so `function (x = 1)`
   // observed NaN whenever the call omitted `x`.
+  hoistParameterEvalVars(ctx, liftedFctx, funcExpr); // (#6774 S7)
   emitDefaultParamInit(ctx, liftedFctx, funcExpr, paramTypes, captures.length);
 
   if (ts.isBlock(body)) {

@@ -12,6 +12,7 @@ import { ts } from "../ts-api.js";
 import type { ValType } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
 import { getVecInfo } from "./type-coercion.js";
+import { getOrRegisterVecType } from "./registry/types.js";
 
 export function registerResolvedRestParam(
   ctx: CodegenContext,
@@ -46,4 +47,9 @@ export function restPatternParamVecType(
 ): ValType | undefined {
   if (!ctx.standalone || param.dotDotDotToken === undefined || ts.isIdentifier(param.name)) return undefined;
   return { kind: "ref_null", typeIdx: vecOf({ kind: "externref" }) };
+}
+
+/** `restPatternParamVecType` over the shared externref vec, else `slot` unchanged. */
+export function restPatternParamSlot(ctx: CodegenContext, param: ts.ParameterDeclaration, slot: ValType): ValType {
+  return restPatternParamVecType(ctx, param, (t) => getOrRegisterVecType(ctx, "externref", t)) ?? slot;
 }
