@@ -205,8 +205,7 @@ export function createBoundaryObjectAdapter(
           Reflect.construct(function () {}, [], value);
           constructible = 2;
         } catch {
-          // Callable-only values (arrows, methods, revoked callable-only
-          // proxies) deliberately keep only bit 0.
+          // Callable-only values (arrows, methods, revoked callable-only proxies) deliberately keep only bit 0.
         }
         return 1 | constructible;
       };

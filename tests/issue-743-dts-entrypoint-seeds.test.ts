@@ -41,7 +41,7 @@ const ENV_KEYS = [
 const saved = new Map(ENV_KEYS.map((key) => [key, process.env[key]]));
 afterEach(() => {
   for (const [key, value] of saved) {
-    // Only `delete` truly unsets an env var
+    // biome-ignore lint/performance/noDelete: only `delete` truly unsets an env var
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
   }
