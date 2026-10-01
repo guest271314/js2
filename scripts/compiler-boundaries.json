@@ -314,9 +314,11 @@
         "src/backend/wasmgc/resources/native-realm-object-layouts.ts",
         "src/backend/wasmgc/resources/native-object-realm.ts",
         "src/backend/wasmgc/resources/native-mixed-object-access.ts",
-        "src/backend/wasmgc/resources/native-well-known-symbols.ts"
+        "src/backend/wasmgc/resources/native-well-known-symbols.ts",
+        "src/backend/wasmgc/resources/native-bigint-number.ts",
+        "src/backend/wasmgc/resources/native-number-primitive-classifier.ts"
       ],
-      "minModules": 50
+      "minModules": 52
     },
     {
       "id": "native-runtime",
@@ -421,9 +423,11 @@
         "src/runtime/wasmgc/values/create-list-from-array-like-body.ts",
         "src/runtime/wasmgc/values/function-prototype-invoker-bodies.ts",
         "src/runtime/wasmgc/values/realm-object-layouts.ts",
-        "src/runtime/wasmgc/values/mixed-object-access-bodies.ts"
+        "src/runtime/wasmgc/values/mixed-object-access-bodies.ts",
+        "src/runtime/wasmgc/values/bigint-to-number-body.ts",
+        "src/runtime/wasmgc/values/number-from-value-body.ts"
       ],
-      "minModules": 97
+      "minModules": 99
     },
     {
       "id": "standalone-platform",
@@ -1784,6 +1788,22 @@
       "layer": "backend-wasmgc",
       "entries": ["src/backend/wasmgc/resources/native-well-known-symbols.ts"],
       "minModules": 1
+    },
+    {
+      "layer": "native-runtime",
+      "entries": [
+        "src/runtime/wasmgc/values/bigint-to-number-body.ts",
+        "src/runtime/wasmgc/values/number-from-value-body.ts"
+      ],
+      "minModules": 2
+    },
+    {
+      "layer": "backend-wasmgc",
+      "entries": [
+        "src/backend/wasmgc/resources/native-bigint-number.ts",
+        "src/backend/wasmgc/resources/native-number-primitive-classifier.ts"
+      ],
+      "minModules": 2
     }
   ],
   "nonModules": [
@@ -14898,6 +14918,26 @@
     },
     {
       "path": "src/backend/wasmgc/resources/native-well-known-symbols.ts",
+      "state": "clean",
+      "layer": "backend-wasmgc"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/bigint-to-number-body.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/number-from-value-body.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/backend/wasmgc/resources/native-bigint-number.ts",
+      "state": "clean",
+      "layer": "backend-wasmgc"
+    },
+    {
+      "path": "src/backend/wasmgc/resources/native-number-primitive-classifier.ts",
       "state": "clean",
       "layer": "backend-wasmgc"
     }
