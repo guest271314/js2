@@ -55,6 +55,13 @@ loc-budget-allow:
   # 2026-10-01 (#6775 S11, Opus): +48 — the `<target> = yield` statement arm
   # (predicate + arm + spill typing) in the native generator planner.
   - src/codegen/generators-native.ts
+  # 2026-10-01 (#6775 S14, Opus): +3 — one dispatch line + import into the new
+  # `class-builtin-species-read.ts` leaf (the arm body lives there).
+  - src/codegen/property-access.ts
+  # 2026-10-01 (#6775 S16/S18, Opus): Function.prototype own `name`/`length`
+  # seeding + `@@<name>` member-key ids; the `@@hasInstance` own-prototype arm.
+  - src/codegen/native-proto.ts
+  - src/codegen/function-proto-has-instance.ts
 func-budget-allow:
   # 2026-09-30 (#6775 S4, Opus): +8 — the JSON boolean box picks the real
   # `$__box_boolean_struct` when the module has it (two-arm literal).
@@ -69,6 +76,9 @@ func-budget-allow:
   # 2026-10-01 (#6775 S11, Opus): the `<target> = yield` arm (helper closure,
   # spill typing) lives inside the planner's closure scope by construction.
   - src/codegen/generators-native.ts::buildNativeGeneratorPlan
+  # 2026-10-01 (#6775 S14, Opus): +1 — the `@@species` class read chained onto
+  # the existing `@@hasInstance` read with `??`.
+  - src/codegen/property-access.ts::compileElementAccess
 ---
 
 ## Problem

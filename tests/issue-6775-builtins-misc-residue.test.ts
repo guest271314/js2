@@ -159,6 +159,34 @@ const PROBES: { name: string; what: string; expected: number; source: string }[]
     source:
       "var __r = 0;\nvar obj = { foo: 'not modified' };\nfunction* g() { try { obj.foo = yield; } finally { return 1; } }\nvar iter = g();\niter.next();\nvar result = iter.return(45).value;\nif (obj.foo === 'not modified') __r |= 1;\nif (result === 1) __r |= 2;\nvar o2 = { a: 0, b: 0 };\nfunction* g2() { o2.a = yield; o2.b = yield 5; }\nvar it2 = g2(); it2.next(); it2.next(3); it2.next(4);\nif (o2.a === 3 && o2.b === 4) __r |= 4;\nvar o3 = { c: 0 };\nfunction* g3() { try { o3.c = yield; } finally { o3.d = 1; } }\nvar it3 = g3(); it3.next(); it3.next(7);\nif (o3.c === 7 && o3.d === 1) __r |= 8;\nexport function readResult() { return __r; }\n",
   },
+  {
+    name: "s14",
+    what: "S14 \u2014 C[Symbol.species] for class C extends <species owner> answers C",
+    expected: 85,
+    source:
+      "var __r = 0;\nclass MyRegExp extends RegExp {}\ntry { if (MyRegExp[Symbol.species] === MyRegExp) __r |= 1; } catch (e) { __r |= 2; }\ntry { if (RegExp[Symbol.species] === RegExp) __r |= 4; } catch (e) { __r |= 8; }\nclass MyArr extends Array {}\ntry { if (MyArr[Symbol.species] === MyArr) __r |= 16; } catch (e) { __r |= 32; }\nclass MyMap extends Map {}\ntry { if (MyMap[Symbol.species] === MyMap) __r |= 64; } catch (e) { __r |= 128; }\nexport function readResult() { return __r; }\n",
+  },
+  {
+    name: "s18",
+    what: "S18 \u2014 Function.prototype.toString.call(<proxy>): callable \u2192 native source, non-callable \u2192 TypeError",
+    expected: 337,
+    source:
+      "var __r = 0;\ntry { var s = Function.prototype.toString.call(new Proxy(class {}, {})); if (typeof s === 'string' && s.indexOf('[native code]') >= 0) __r |= 1; else if (s === '[object Function]') __r |= 2; } catch (e) { __r |= 4; }\ntry { Function.prototype.toString.call(new Proxy({}, {})); __r |= 8; } catch (e) { if (e instanceof TypeError) __r |= 16; else __r |= 32; }\ntry { var s2 = Function.prototype.toString.call(new Proxy(function () {}, {})); if (s2.indexOf('[native code]') >= 0) __r |= 64; } catch (e) { __r |= 128; }\ntry { var f = function () {}; if (typeof Function.prototype.toString.call(f) === 'string') __r |= 256; } catch (e) { __r |= 512; }\nexport function readResult() { return __r; }\n",
+  },
+  {
+    name: "s16a",
+    what: "S16 \u2014 %Function.prototype% own name/length {w:F,e:F,c:T}; @@hasInstance {w:F,e:F,c:F} named [Symbol.hasInstance]",
+    expected: 85,
+    source:
+      "var __r = 0;\nvar FP = Function.prototype;\ntry { var d = Object.getOwnPropertyDescriptor(FP, 'name'); if (d && d.value === '' && !d.writable && !d.enumerable && d.configurable) __r |= 1; } catch (e) { __r |= 2; }\ntry { if (typeof FP[Symbol.hasInstance] === 'function') __r |= 4; } catch (e) { __r |= 8; }\ntry { var d2 = Object.getOwnPropertyDescriptor(FP, Symbol.hasInstance); if (d2 && !d2.writable && !d2.enumerable && !d2.configurable) __r |= 16; } catch (e) { __r |= 32; }\ntry { var d3 = Object.getOwnPropertyDescriptor(FP[Symbol.hasInstance], 'name'); if (d3 && d3.value === '[Symbol.hasInstance]') __r |= 64; } catch (e) { __r |= 128; }\nexport function readResult() { return __r; }\n",
+  },
+  {
+    name: "s16b",
+    what: "S16 \u2014 f[Symbol.hasInstance](o) runs an own prototype getter (its throw propagates)",
+    expected: 18,
+    source:
+      "var __r = 0;\nvar f = Object.getOwnPropertyDescriptor({ get f() {} }, 'f').get;\nObject.defineProperty(f, 'prototype', { get: function () { throw new RangeError('p'); } });\ntry { f[Symbol.hasInstance]({}); __r |= 1; } catch (e) { if (e instanceof RangeError) __r |= 2; else if (e instanceof TypeError) __r |= 4; else __r |= 8; }\nfunction h() {}\ntry { if (h[Symbol.hasInstance](new h()) === true) __r |= 16; } catch (e) { __r |= 32; }\nexport function readResult() { return __r; }\n",
+  },
 ];
 
 describe("#6775 ES2015 standalone built-ins misc residue", () => {

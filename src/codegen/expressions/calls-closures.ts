@@ -103,7 +103,12 @@ import {
 import { tryCompileGetPrototypeOfIsPrototypeOf } from "./object-get-prototype-of.js";
 import { tryEmitStaticOrNativeIsPrototypeOf } from "../native-is-prototype-of.js";
 import { ensureFunctionNativeProtoGlue } from "../array-object-proto.js";
-import { ensureFunctionProtoEdge, FUNCTION_PROTO_HAS_INSTANCE_MEMBER } from "../function-proto-has-instance.js";
+import {
+  emitNullishHasInstanceReceiverThrow,
+  ensureFunctionProtoEdge,
+  FUNCTION_PROTO_HAS_INSTANCE_MEMBER,
+  isNullableFunctionFact,
+} from "../function-proto-has-instance.js";
 import { tryEmitHostFunctionHasInstanceCall } from "../host-function-has-instance.js";
 import { ensureStandaloneNativeMethodClosure } from "../native-proto.js";
 import { pushBuiltinFnSingletonValueInstrs } from "../builtin-fn-meta.js";
@@ -2158,10 +2163,15 @@ export function compileCallableElementAccessCall(
       !fctx.localMap.has("Function") &&
       !(fctx.boxedCaptures?.has("Function") ?? false);
     const sourceText = elemAccess.getSourceFile().text;
-    const hasCustomPrototype =
-      sourceText.includes("prototype") && (sourceText.includes("defineProperty") || /\.prototype\s*=/.test(sourceText));
+    // (#6775 S16) A `defineProperty`-installed own `prototype` is now read by
+    // the native body itself (`function-proto-has-instance.ts`); only a
+    // reassigned fnctor `prototype` still declines.
+    const hasCustomPrototype = sourceText.includes("prototype") && /\.prototype\s*=/.test(sourceText);
     if (
-      (fact.kind === "function" || (fact.kind === "builtin" && fact.name === "Function") || directFunctionProto) &&
+      (fact.kind === "function" ||
+        isNullableFunctionFact(fact) ||
+        (fact.kind === "builtin" && fact.name === "Function") ||
+        directFunctionProto) &&
       !hasCustomPrototype
     ) {
       ensureFunctionProtoEdge(ctx, fctx, receiver);
@@ -2172,6 +2182,7 @@ export function compileCallableElementAccessCall(
           kind: "externref",
         });
         fctx.body.push({ op: "local.set", index: receiverLocal });
+        if (fact.kind === "union") emitNullishHasInstanceReceiverThrow(ctx, fctx, receiverLocal);
 
         const brand = ensureFunctionNativeProtoGlue(ctx);
         const closure =
