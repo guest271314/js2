@@ -59,6 +59,7 @@ import { admitsObjectAddition, emitObjectAdd } from "./addition-to-primitive.js"
 import { admitsObjectRelational, reduceRelationalOperandsToPrimitive } from "./relational-to-primitive.js";
 // (#4491 T4) §13.15.3 `+` over object operands.
 import { admitsObjectAdd } from "./add-to-primitive.js";
+import { emitHostArrayCarrierBinary, hostArrayCarrierBinaryArm } from "./host-carrier-to-primitive.js"; // (#6788)
 import { addStringImports, addUnionImports, resolveWasmType } from "./index.js";
 import { isI32CompatibleOperand, nativeTypeOfExpression } from "./native-type-annotations.js";
 import type { InnerResult } from "./shared.js";
@@ -1716,6 +1717,9 @@ export function compileBinaryExpression(
   if (objectPlus && admitsObjectAddition(ctx, leftTsType, rightTsType, expr.left, expr.right)) {
     return emitObjectAdd(ctx, fctx, expr);
   }
+  // (#6788) JS-host twin for an ARRAY operand — see host-carrier-to-primitive.ts.
+  const hostCarrierArm = hostArrayCarrierBinaryArm(ctx, expr, leftTsType, rightTsType);
+  if (hostCarrierArm !== undefined) return emitHostArrayCarrierBinary(ctx, fctx, expr, hostCarrierArm);
   if (
     !wrapperEquality &&
     isStringType(leftTsType) &&
