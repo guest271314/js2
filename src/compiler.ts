@@ -95,6 +95,7 @@ import {
   foldGroundCallsInMultiFilesForCompile as foldGroundCallsInMulti,
   foldGroundExportCallsForCompile as foldGroundCalls,
 } from "./compiler/ground-call-fold.js";
+import { readEnv } from "./env.js";
 export { compileToObjectSource } from "./compiler/output.js";
 export type { ObjectCompileResult } from "./compiler/output.js";
 
@@ -1048,7 +1049,8 @@ function runPipeline(input: PipelineInput): CompileResult {
       // exactly the #3143 IR-first divergence population) so a whole test-suite
       // run doubles as an empirical throw-site meter. Same env-gated telemetry
       // pattern as JS2WASM_LOG_IR_FALLBACKS; inert (no fs touch) when unset.
-      if (process.env.JS2WASM_IR_POSTCLAIM_LOG && result.irPostClaimErrors?.length) {
+      const postClaimLog = readEnv("JS2WASM_IR_POSTCLAIM_LOG");
+      if (postClaimLog && result.irPostClaimErrors?.length) {
         try {
           // Dynamic import kept out of the module graph on purpose: this is
           // node-only telemetry and `compiler.ts` is also bundled for the
@@ -1064,7 +1066,7 @@ function runPipeline(input: PipelineInput): CompileResult {
           const lines = result.irPostClaimErrors
             .map((e) => JSON.stringify({ file, func: e.func, kind: e.kind, message: e.message }))
             .join("\n");
-          appendFileSync(process.env.JS2WASM_IR_POSTCLAIM_LOG, lines + "\n");
+          appendFileSync(postClaimLog, lines + "\n");
         } catch {
           // Telemetry must never fail a compile.
         }

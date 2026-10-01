@@ -19,6 +19,7 @@ import { registerAnyEqHelpers } from "./any-eq-helpers.js";
 import { buildAnyTag5ExternProjection } from "./any-to-extern-projection.js";
 import { buildFastStrictEqDispatch } from "./extern-eq-fast.js";
 import { bigIntCarrierEqInstrs } from "./bigint-wide.js";
+import { readEnv } from "../env.js";
 export const NATIVE_PROMISE_NUMBER_BOUNDARY_HELPERS = ["__typeof_number", "__unbox_number"] as const;
 /**
  * Register the $AnyValue struct type for boxing `any` typed values.
@@ -284,7 +285,7 @@ export function emitIsNullishAnyAt(ctx: CodegenContext, fctx: FunctionContext, a
  * constant would freeze the arm at import time and defeat the pairing.
  */
 export function ab4519RevertsToBase(): boolean {
-  return process.env.JS2WASM_4519_AB === "base";
+  return readEnv("JS2WASM_4519_AB") === "base";
 }
 
 /**

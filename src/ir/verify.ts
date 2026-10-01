@@ -54,6 +54,7 @@ import { parseIrCountedStringAppendSiteId } from "./counted-string-append-proven
 // #4418 — shared, cached dominance analysis (formerly a private set-based
 // computation in this file, #1850).
 import { crossCheckDominance, dominanceOf, type DominanceInfo } from "./analysis/dominance.js";
+import { readEnv } from "../env.js";
 
 /**
  * #1850 — map every SSA value (instruction result or block arg) to the id of
@@ -457,7 +458,7 @@ export function verifyIrFunction(
   // tests run the same cross-check on synthetic general graphs.
   if (
     dominance &&
-    (options === undefined ? process.env.JS2WASM_IR_VERIFY_DOMINANCE_NAIVE === "1" : options.verifyDominanceNaive)
+    (options === undefined ? readEnv("JS2WASM_IR_VERIFY_DOMINANCE_NAIVE") === "1" : options.verifyDominanceNaive)
   ) {
     for (const msg of crossCheckDominance(func, dominance)) {
       errors.push({ message: `dominance self-check: ${msg}`, func: func.name });

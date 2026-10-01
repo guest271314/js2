@@ -24,6 +24,7 @@ import { addFuncType } from "./registry/types.js";
 import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
 import { lazyStrFlattenEnabled, relocatedFlattenPreamble } from "./lazy-str-flatten.js";
 import type { NativeStrShared } from "./native-strings-shared.js";
+import { readEnv } from "../env.js";
 
 /**
  * Concatenation: `__str_concat` (builds a ConsString) and the
@@ -43,7 +44,7 @@ export function emitStrConcatHelpers(shared: NativeStrShared): void {
 
     const definition = buildStringConcatDefinition(
       { strTypeIdx, strDataTypeIdx, anyStrTypeIdx, consStrTypeIdx },
-      { flattenIdx, emptyIdentity: process.env.JS2WASM_STR_CONCAT_EMPTY_IDENTITY !== "0" },
+      { flattenIdx, emptyIdentity: readEnv("JS2WASM_STR_CONCAT_EMPTY_IDENTITY") !== "0" },
     );
     pushDefinedFunc(ctx, funcIdx, {
       name: "__str_concat",

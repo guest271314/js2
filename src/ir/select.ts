@@ -118,6 +118,7 @@ import type { IrFnctorAdmission, IrFnctorSelectionAdmissionResolver, LatticeType
 import type { RecursiveTypeEvidence } from "./type-evidence.js";
 import type { IntrinsicId } from "./intrinsics.js";
 import type { IrFallbackReason } from "../shared/contracts/ir-preparation-failure.js";
+import { readEnv } from "../env.js";
 export type { IrFallbackReason } from "../shared/contracts/ir-preparation-failure.js";
 // excluded here (eval, non-selected with shapes, import(), Proxy)
 
@@ -146,7 +147,7 @@ export interface IrFallback {
  * Behaviour is byte-identical when the env var is unset: `shapeNo` becomes a
  * bare `return false`, the recorder stays null, and no `detail` is attached.
  */
-const SHAPE_DIAG_ON = process.env.JS2WASM_IR_SHAPE_DIAG === "1";
+const SHAPE_DIAG_ON = readEnv("JS2WASM_IR_SHAPE_DIAG") === "1";
 let shapeRejectDetail: string | null = null;
 // #3529 P1 — stable reason paired with the existing boolean shape walk. The
 // deep isPhase1* recursion deliberately remains boolean; a capability reject
@@ -6953,7 +6954,7 @@ export function boundedMixedConditionalPrimitiveFamily(
 }
 
 function exactMixedPrimitiveConditionalContextReady(node: ts.Node): boolean {
-  if (process.env.JS2WASM_IR_MIXED_PRIMITIVE_CONDITIONAL === "0") return false;
+  if (readEnv("JS2WASM_IR_MIXED_PRIMITIVE_CONDITIONAL") === "0") return false;
   if (
     currentSubjectIsModuleInit ||
     currentSelectionSubject === null ||
@@ -7124,7 +7125,7 @@ function exactMixedPrimitiveWrapperCall(
   requireCurrentSubject = true,
 ): ExactMixedPrimitiveWrapperCall | null {
   if (
-    process.env.JS2WASM_IR_MIXED_PRIMITIVE_CONDITIONAL === "0" ||
+    readEnv("JS2WASM_IR_MIXED_PRIMITIVE_CONDITIONAL") === "0" ||
     !ts.isIdentifier(expr.expression) ||
     (expr.expression.text !== "String" && expr.expression.text !== "Number") ||
     !selectorSeesAmbientWrapperConstructor(expr.expression) ||

@@ -1,10 +1,10 @@
 ---
 id: 6782
 title: "api: the published library does not run under plain Node ESM (`compileFiles()` → `require is not defined`) and hard-requires a global `process` (browser bundles throw)"
-status: ready
+status: in-progress
 sprint: Backlog
 created: 2026-09-30
-updated: 2026-09-30
+updated: 2026-10-01
 priority: critical
 horizon: m
 feasibility: medium
@@ -16,6 +16,38 @@ goal: npm-library-support
 related: [4419, 1927, 1757]
 requested_by: ttraenkler/claude-review
 origin: "2026-09-30 codebase review (plan/agent-context/claude-codebase-review-2026-09-30.md) — C4/H20/#6"
+assignee: "ttraenkler/claude-dev-6782"
+branch: "claude/issue-6782-esm-process"
+# #6782 process.env → readEnv codemod, 2026-10-01: every listed god-file grows only
+# by the one `import { readEnv } from "…/env.js"` line the codemod adds (the reads
+# themselves are a same-length token swap); src/compiler.ts also gains one hoisted
+# `const` so the env-provided path keeps its narrowed `string` type.
+loc-budget-allow:
+  - src/codegen/any-helpers.ts
+  - src/codegen/binary-ops.ts
+  - src/codegen/class-bodies.ts
+  - src/codegen/closed-method-dispatch.ts
+  - src/codegen/closure-exports.ts
+  - src/codegen/closures.ts
+  - src/codegen/declarations.ts
+  - src/codegen/declarations/object-shape-widening.ts
+  - src/codegen/dyn-read.ts
+  - src/codegen/expressions/call-identifier.ts
+  - src/codegen/expressions/call-receiver-method.ts
+  - src/codegen/expressions/calls.ts
+  - src/codegen/fnctor-escape-gate.ts
+  - src/codegen/ir-inline.ts
+  - src/codegen/literals.ts
+  - src/codegen/multi-prepared-program.ts
+  - src/codegen/numeric-property-analysis.ts
+  - src/codegen/property-access.ts
+  - src/codegen/stack-balance.ts
+  - src/codegen/statements/control-flow.ts
+  - src/codegen/string-ops.ts
+  - src/codegen/typed-this.ts
+  - src/compiler.ts
+  - src/ir/propagate.ts
+  - src/runtime.ts
 ---
 
 # #6782 — the library must work from `dist/` under plain ESM and in a browser bundle

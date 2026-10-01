@@ -26,6 +26,7 @@
 import type { AllocSiteRegistry } from "./alloc-registry.js";
 import type { AllocKind, AllocSiteId, IrFunction, IrInstr } from "./nodes.js";
 import { IrInvariantError } from "./outcomes.js";
+import { readEnv } from "../env.js";
 
 export interface AllocVerifyError {
   readonly message: string;
@@ -55,7 +56,7 @@ const ALLOC_INSTR_KIND: Readonly<Record<string, AllocKind>> = {
 
 /** True iff the env/debug flag enables the alloc-provenance walk. */
 export function allocVerifyEnabled(): boolean {
-  return process.env.IR_VERIFY_ALLOC === "1" || process.env.IR_VERIFY_ALLOC === "true";
+  return readEnv("IR_VERIFY_ALLOC") === "1" || readEnv("IR_VERIFY_ALLOC") === "true";
 }
 
 /**

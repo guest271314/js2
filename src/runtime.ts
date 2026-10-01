@@ -160,6 +160,7 @@ import {
   _updateLegacyRegExpState,
   type LegacyRegExpState,
 } from "./runtime/legacy-regexp.js";
+import { readEnv } from "./env.js";
 export { buildWasiPolyfill } from "./runtime/wasi-polyfill.js";
 
 // (#4616) Internal runtime decisions (arg conversion, deep equal, trampolines)
@@ -8196,7 +8197,7 @@ function _resolveHostField(obj: any, key: any, exports: Record<string, Function>
   // prototype object. Accessors run with the live-mirror proxy as the receiver.
   const protoDesc = _fnctorProtoLookup(obj, key, exports);
   if (protoDesc) {
-    if (process.env.DEBUG_1712)
+    if (readEnv("DEBUG_1712"))
       console.error(
         "[protoHook]",
         String(key),
@@ -9036,7 +9037,7 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
       const val = safeGetField(key);
       const primitiveValue = _nativePrimitiveToHost(val, currentExports());
       if (primitiveValue !== _MISS) return primitiveValue;
-      if (process.env.JS2WASM_DEBUG_3051) {
+      if (readEnv("JS2WASM_DEBUG_3051")) {
         console.error(
           "[3051] proxy.get",
           String(key),
@@ -17713,7 +17714,7 @@ assert._isSameValue = isSameValue;
               materialize?: () => void;
             } = { buf: [], index: 0, pendingThrow: null, retVal: undefined, thunk: buf };
             st.materialize = () => {
-              const DBG = process.env.GEN_DEBUG === "1";
+              const DBG = readEnv("GEN_DEBUG") === "1";
               const thunk = st.thunk;
               st.thunk = undefined;
               st.materialize = undefined;
