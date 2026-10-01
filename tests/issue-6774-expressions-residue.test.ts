@@ -131,7 +131,19 @@ obj = { ['__proto__']: null }; if (obj.__proto__ === null) bits |= 16;`,
     name: "untyped_iife_tag_host_free",
     step: "S17",
     expected: 3,
-    body: `var calls = 0, seen; (function () { return function (site, n) { calls++; seen = n; }; })()\`a\${7}b\`; if (calls === 1) bits |= 1; if (seen === 7) bits |= 2;`,
+    body: `var calls = 0, n = 0; var number = 5; var fn = function () { return 1; }; (function () { return function (site, a, b) { calls++; n = arguments.length; }; })()\`A\${number}B\${fn}\`; if (calls === 1) bits |= 1; if (n === 3) bits |= 2;`,
+  },
+  {
+    name: "super_call_in_arrow",
+    step: "S8",
+    expected: 3,
+    body: `var count = 0; class A { constructor() { count++; } } class B extends A { constructor() { (_ => super())(); } } new B(); if (count === 1) bits |= 1; class D extends A { constructor() { super(); this.af = _ => super(); } } var d = new D(); try { d.af(); } catch (e) { if (e instanceof ReferenceError && count === 3) bits |= 2; }`,
+  },
+  {
+    name: "call_object_element_target",
+    step: "S21",
+    expected: 1,
+    body: `var log = []; var o = { set q(v) { log.push("set"); } }; function t() { log.push("t"); return o; } [t()["q"]] = []; if (log.join() === "t,set") bits |= 1;`,
   },
 ];
 

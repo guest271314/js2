@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { ts, forEachChild } from "../ts-api.js";
 import { widenJsDefaultGuessSlot } from "./js-default-param-type-guess.js";
-import { propertyValueIsAccessorObjectLiteral } from "./accessor-value-field.js";
+import { isAccessorObjectLiteralType, propertyValueIsAccessorObjectLiteral } from "./accessor-value-field.js";
 import { registerAnnexBGlobalLiveBindings } from "./annexb-global-live-binding.js";
 import { exactClassExpressionTypeName } from "./class-expression-identity.js";
 import { emitToBoolean } from "./coercion-engine.js";
@@ -12589,6 +12589,9 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
   }
   const jsBodyArrayReturnOverride = ctx.jsBodyArrayReturnOverrides?.get(tsType);
   if (jsBodyArrayReturnOverride) return jsBodyArrayReturnOverride;
+  // (#6774 S21) An accessor object literal is ALWAYS an open `$Object` at run
+  // time; a struct-ref view of its type casts it away at every boundary.
+  if (ctx.standalone && isAccessorObjectLiteralType(tsType)) return { kind: "externref" };
 
   // Fast mode: string → ref $AnyString (not externref).
   // The String WRAPPER object (`new String(x)`) is excluded here — `isStringType`

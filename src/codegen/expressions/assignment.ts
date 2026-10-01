@@ -3053,6 +3053,10 @@ export function emitAssignToTarget(
         ],
         else: [],
       });
+    } else if (ctx.standalone) {
+      // (#6774 S21) A non-vec struct receiver (`t()[k]` where `t` returns an
+      // object): the write used to be dropped. PutValue through the generic set.
+      emitDynamicElementSet(ctx, fctx, target, arrType, valueLocal, valueType);
     }
   }
 }
