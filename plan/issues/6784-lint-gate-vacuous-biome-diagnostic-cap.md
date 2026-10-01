@@ -1,10 +1,12 @@
 ---
 id: 6784
 title: "ci: the `lint` gate cannot fail — Biome's default 20-diagnostic cap is consumed by `noExplicitAny` warnings, so 11 real lint errors sit on main with exit 0; the cheap gate marks lint 'not blocking'"
-status: ready
+status: in-progress
 sprint: Backlog
 created: 2026-09-30
-updated: 2026-09-30
+updated: 2026-10-01
+assignee: "ttraenkler/claude-dev-6784"
+branch: "claude/issue-6784-lint-gate"
 priority: high
 horizon: s
 feasibility: easy
@@ -16,6 +18,10 @@ goal: ci-hardening
 related: [1399, 6783]
 requested_by: ttraenkler/claude-review
 origin: "2026-09-30 codebase review (plan/agent-context/claude-codebase-review-2026-09-30.md) — H15/H16"
+# 2026-10-01 (#6784): +1 line each from behaviour-preserving lint fixes — _safeSet splits a comma expression into an if + assignment; resolveImport gains two biome-ignore lines (the IsConstructor probes must stay constructible) and loses one this-alias line.
+func-budget-allow:
+  - src/runtime.ts::_safeSet
+  - src/runtime.ts::resolveImport
 ---
 
 # #6784 — `pnpm run lint` is green with real errors in tree

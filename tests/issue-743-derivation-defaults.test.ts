@@ -41,7 +41,7 @@ const saved = new Map(VARS.map((v) => [v, process.env[v]]));
 afterEach(() => {
   for (const [v, value] of saved) {
     if (value === undefined) {
-      // biome-ignore lint/performance/noDelete: only `delete` truly unsets an env var
+      // Only `delete` truly unsets an env var
       delete process.env[v];
     } else {
       process.env[v] = value;
@@ -53,7 +53,7 @@ afterEach(() => {
 function setAll(value: string | undefined): void {
   for (const v of VARS) {
     if (value === undefined) {
-      // biome-ignore lint/performance/noDelete: only `delete` truly unsets an env var
+      // Only `delete` truly unsets an env var
       delete process.env[v];
     } else {
       process.env[v] = value;
