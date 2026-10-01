@@ -430,7 +430,7 @@ interface FoldedEvalDeclarationNames {
 /** Collect ordinary VarDeclaredNames separately from sloppy Annex-B block
  * functions. The former collide with intervening lexical records; the latter
  * use B.3.3's cancellation rule and must fall back instead of throwing. */
-function foldedEvalDeclarationNames(sourceFile: ts.SourceFile): FoldedEvalDeclarationNames {
+export function foldedEvalDeclarationNames(sourceFile: ts.SourceFile): FoldedEvalDeclarationNames {
   const varNames = new Set<string>();
   const blockFunctionNames = new Set<string>();
   const visit = (node: ts.Node): void => {

@@ -48,6 +48,9 @@ loc-budget-allow:
   - src/codegen/binary-ops-typed-dispatch.ts
   - src/codegen/declarations.ts
   - src/codegen/declarations/param-return-inference.ts
+  # 2026-10-01 (#6774 S7 impl, Opus): one import + one wrapped push in the
+  # object-literal method pre-registration (rest pattern → rest vec slot).
+  - src/codegen/index.ts
   # NEW leaves (register each in scripts/compiler-boundaries.json, see Lane protocol)
   - src/codegen/new-target-value.ts
   - src/codegen/eval-param-scope-hoist.ts
@@ -85,6 +88,10 @@ func-budget-allow:
   - src/codegen/declarations.ts::collectDeclarations
   - src/codegen/expressions/call-builtin-static.ts::compileBuiltinStaticCall
   - src/codegen/object-runtime.ts::ensureObjectRuntime
+  # 2026-10-01 (#6774 S7 impl, Opus): one-line hoistParameterEvalVars hooks
+  # before the parameter initializers (body in src/codegen/eval-param-scope-hoist.ts).
+  - src/codegen/closures.ts::compileLiftedClosureBody
+  - src/codegen/function-body.ts::compileFunctionBody
 ---
 
 ## Problem
