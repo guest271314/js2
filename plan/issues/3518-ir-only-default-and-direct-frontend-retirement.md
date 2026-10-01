@@ -6,7 +6,7 @@ created: 2026-07-21
 updated: 2026-10-01
 priority: critical
 feasibility: hard
-reasoning_effort: high
+reasoning_effort: medium
 task_type: refactor
 area: ir, codegen, codegen-linear, compiler
 language_feature: compiler-internals
@@ -18917,3 +18917,47 @@ Bounded Sol6.1 Medium implementation plan: own only tests/issue-3518-historical-
 Scoped canonical ownership verified: `3518:pr6378-historical-capture-20261001`, owner `ttraenkler/codex-pr6378-historical-capture-20261001`, branch `codex/3518-pr6378-historical-capture-20261001`, write_id `18840-to2baw11`. Sol6.1 Medium owns the one existing positive test only; root owns issue evidence, Git, all actual verification and existing-PR update.
 
 Root exact selected comparison on the unchanged Node25/Vitest single-fork harness: original positive passes1/1 in23419ms; Sol Medium repaired positive passes1/1 in859ms. Both intentionally leave630 unselected rows uncredited. All18 assertion expressions/41 literal values and the53251-byte outside-proof residue remain unchanged; existing35000ms timeout and every helper/receipt/mutation function are unchanged. Scoped Biome/Prettier pass. Full631 acceptance awaits the normal signed commit hook. Exact CI failure, original/current patch and selected runs are preserved in `plan/log/3518-pr6378-quality-capture-2026-10-01/`. User routing is now reflected in epic frontmatter: Sol6.1 default, high for this complex epic; Medium for this bounded repair, Astra for hard specs.
+
+
+## 2026-10-01 — isolated WAT numeric-type preservation dependency
+
+Root owns canonical slice `3518:wat-type-index-preservation-20261001`, assignee `ttraenkler/codex-wat-type-index-preservation-20261001`, branch `codex/3518-wat-type-index-preservation-20261001`, freshly verified base `a8955988411c197304f1897ae592c7bb606ac122`. Claim write and canonical effect verification succeeded; the script also warned its main issue lookup found no file, so that warning is retained in the raw receipt rather than treated as issue absence. The issue is present in this exact checkout. Default implementation: Codex GPT-6.1 Sol Medium; Astra hard planning remains Codex GPT-6 Astra High. Root owns integration, heavy validation and delivery.
+
+The repaired non-recursive type-declaration loop is deliberately isolated from this root's paused physical exception slice. It changes only `src/emit/wat.ts` non-recursive declaration retention/comment and adds `tests/issue-3518-wat-type-index-preservation.test.ts`. Preserve every other source and the original physical 21-row suite. The fresh complete 14-open-PR census found PR 5753's WAT traversal patch entirely at line 362 onward, disjoint from this loop; its head and base were checked again after reading all files. No competing declaration-loop writer is dispatched.
+
+### Implementation Plan — Astra High, retained verbatim
+
+### 2026-10-01 — measured physical failures and narrow WAT declaration repair
+
+Root's preserved `.tmp/exception-reference/validation-v2/runtime.log` and `results.json` report **18 passed / 20 tests, 2 failed**. This architect read the actual log and inspected source only; no validation was rerun. The direct emitted-binary native/foreign/host replay, tagged catch-reference, success and trap controls pass in that run. Actual object-link replay with only function/global/type displacement fails engine validation: `throw_ref` expects exnref but receives an i32 global at byte 176. Actual WAT assembly fails the `count` and `status` returns because they are assigned an externref result signature but produce i32. Thus neither the allegedly bounded three-space link nor WAT round-trip is passing evidence. The suite's passing incompatible-tag-prefix negative establishes an invalid linked module, but cannot yet attribute that invalidity solely to tags: independent global-index corruption can satisfy the same negative. Preserve the raw results and obtain the isolated tag mutation control after the actual link is repaired.
+
+The WAT defect is in the existing non-recursive **type declaration selection**, outside exception type spelling and outside instruction traversal. In `src/emit/wat.ts`, `computeInlineableTypes` selects types used by one defined function; the non-recursive loop in `emitWat` then omits those declarations (`if (inlineableTypes.has(i)) continue`, inspected at line 146). Other functions/imports/tags/instructions retain original numeric type references. Names on the declarations do not assign their numeric index.
+
+The current mixed replay fixture reserves types in this order: native tag 0, zero tag 1, mixed tag 2, init signature 3, shared `() -> i32` count/status signature 4, publication `() -> externref` signature 5. Init and publication signatures are single-use. Skipping original type 3 moves the explicit count/status declaration to WAT index 3, but both functions still print `(type 4)`. The inline init signature supplies an implicit type with an externref result at the resulting index 4; the assembler's exact count/status return failures match this displacement. The underlying physical signatures and the direct binary are not repaired by changing count/status to return references, and the exnref spelling is not the cause.
+
+**Narrow repair recommendation, pending root's explicit sub-scope extension:** keep every original `mod.types` declaration in order in the non-recursive `emitWat` declaration loop. Remove the declaration skip and document that inline function signatures do not permit deleting numeric type slots. Retain `computeInlineableTypes` and `formatFunction`'s existing inline parameter/result formatting so the human-readable function lines remain useful. Retain the explicit-rec physical-table branch as-is. No index-remapping table is needed when all declaration slots remain; do not compensate by changing fixture order, adding fake type uses, forcing a rec group, replacing only selected numeric references with names, or special-casing exnref/EH modules.
+
+This requires **no new production path** beyond the already held `src/emit/wat.ts`, but it does require expanding its currently authorized sub-scope from `formatValType`/null printing to the non-recursive declaration loop inside `emitWat` (inspected lines 144–148) and its explanatory comment. Root must record that precise extension against the fresh foreign-PR evidence before dispatch. The later `formatInstrIndented`/`instructionFrames` traversal remains outside scope and must preserve PR 5753's work exactly. No codegen, linker or generic exception helper is part of this WAT repair. The existing `tests/issue-3518-exception-reference-replay.test.ts` can own the additional focused assertions under its current path claim.
+
+Required verification after the repair is implemented:
+
+1. Assemble the unchanged real `emitWat(fixture("mixed").module)` output and execute the existing repeated-replay assertions, including `count() === 1`, `status() === -1`, absent publication and every original mixed payload/identity. Assert all six fixture type declarations survive in their original order and count/status still reference the real shared signature. Do not replace the assembler with string-only checks.
+2. Add a small non-EH physical control to the same suite: an earlier single-use signature followed by a different shared signature used by two exported functions, with distinct executable results. Assemble real WAT and execute both shared functions. This isolates the generic numeric-type displacement from exception syntax and supplies a meaningful ordinary-code control.
+3. Keep `tests/issue-319.test.ts` for “[ts2wasm] Codegen: Inline single-use function type signatures in WAT output” unchanged, including its inline function-line checks. Static inspection shows its title mentioning absent standalone types is not an assertion that declarations are absent; do not weaken or rewrite it. Retain `tests/issue-3518-explicit-rec-emission.test.ts` and the already required WAT/physical controls. Root runs appropriate serial checks and reports the resulting denominators; this plan itself establishes no new pass.
+
+**Correction to the earlier API spelling in this addendum:** `TagLinkage` in the inspected physical reservation API uses `{ kind: "defined", name }`, not `{ kind: "define", name }`. Use the actual typed `reserveTag` API and existing `prefix(true)` builder; do not cast the earlier misspelling into acceptance. This correction changes no tag ownership, linking requirement or acceptance boundary. Linker ownership remains pending independently of the WAT declaration repair.
+
+
+### Isolated delivery acceptance
+
+Use an ordinary non-EH module built through real physical reservations with an earlier single-use signature and two shared-signature exports. Assemble actual emitted WAT with installed wat2wasm and execute distinct results, comparing to actual direct emitted binary. Demonstrate the exact test fails with baseline emitWat and passes with the declaration repair. Preserve unchanged issue-319 inline formatting and explicit-rec tests. No exception flag or linker change is required by this narrow ordinary test. Root verifies focused configured typing, appropriate required gates, normal signed hooks and protected PR admission.
+
+Existing broader evidence remains **55/56** (physical 20/21, unchanged issue-319 6/6, explicit-rec 29/29); the actual displaced object-link failure is still open and its original test is unchanged. This separate dependency never earns physical linked replay, full native/public Number, backend equality, frontend retirement or main-delivery credit before its own verified merge.
+
+Fresh main integrated before validation: `5dfc21de143e8db1da8b273871cf119510101f05` (PR 6379 npm-compat refresh), a descendant of the claim base. Actual six-file diff changes benchmark artifacts only; no source/test/issue path changed. Implementation pins: WAT `af9b4919d339b350def32993527d6b66dacca981b1b79cfe2cec835e383b8649`; new ordinary test `c43073896f40feae63f05b750d17971bf0a5978d5108e2541dd162a78bed7858`. Unchanged issue-319 and explicit-rec tests are preserved. Sol 6.1 Medium source handback, root configured heavy validation pending.
+
+### Current execution evidence before normal commit
+
+Root configured focused TypeScript7 test/dependency check: exit0, zero diagnostics. Actual baseline source at exact `5dfc21de143e8db1da8b273871cf119510101f05` against the unchanged new ordinary test: **0/1 passed**, exit1, actual wat2wasm reported both i32 exports expected f64 at implicit return after omitted type slot. The independent direct binary executed correctly before assembly failure. Baseline bytes/log/results are retained, and the reviewed candidate source was restored byte-exact in a finally block. Candidate serial suites: **36/36, zero skipped** = new ordinary1 + unchanged inline-signature6 + unchanged explicit-rec29. Actual direct-binary and assembled-WAT values both `[12.75,17,41]`, zero imports. WABT wat2wasm1.0.41; no experimental exception flags.
+
+Normal hooks, push gates and protected CI/queue delivery are still pending; this is current local evidence, not main delivery or full exception/native/IR completion. Implementation by Codex GPT-6.1 Sol Medium; issue integration/validation/delivery by Codex GPT-6 Default.
