@@ -204,9 +204,10 @@
         "src/ir/program/native-getter-invocation-requirements.ts",
         "src/ir/program/native-object-result-requirements.ts",
         "src/ir/program/native-object-result-values.ts",
-        "src/ir/program/native-prototype-requirements.ts"
+        "src/ir/program/native-prototype-requirements.ts",
+        "src/ir/program/native-realm-requirements.ts"
       ],
-      "minModules": 37
+      "minModules": 38
     },
     {
       "id": "runtime-contracts",
@@ -221,9 +222,10 @@
         "src/runtime/contracts/timer-capability.ts",
         "src/runtime/contracts/builtin-brands.ts",
         "src/runtime/contracts/collection-kind.ts",
-        "src/runtime/contracts/js-value-tags.ts"
+        "src/runtime/contracts/js-value-tags.ts",
+        "src/runtime/contracts/native-realm-catalog.ts"
       ],
-      "minModules": 8
+      "minModules": 9
     },
     {
       "id": "backend-wasmgc",
@@ -274,9 +276,14 @@
         "src/backend/wasmgc/resources/native-primitive-wrapper-storage.ts",
         "src/backend/wasmgc/resources/native-builtin-function-requests.ts",
         "src/backend/wasmgc/resources/native-builtin-functions.ts",
-        "src/backend/wasmgc/resources/native-invocation-substrate.ts"
+        "src/backend/wasmgc/resources/native-invocation-substrate.ts",
+        "src/backend/wasmgc/program/native-realm-literals.ts",
+        "src/backend/wasmgc/program/native-realm.ts",
+        "src/backend/wasmgc/resources/native-realm-object-layouts.ts",
+        "src/backend/wasmgc/resources/native-object-realm.ts",
+        "src/backend/wasmgc/resources/native-mixed-object-access.ts"
       ],
-      "minModules": 44
+      "minModules": 49
     },
     {
       "id": "native-runtime",
@@ -377,9 +384,13 @@
         "src/runtime/wasmgc/values/builtin-function-layouts.ts",
         "src/runtime/wasmgc/values/builtin-function-bodies.ts",
         "src/runtime/wasmgc/values/builtin-function-property-bodies.ts",
-        "src/runtime/wasmgc/values/builtin-function-prototype-bodies.ts"
+        "src/runtime/wasmgc/values/builtin-function-prototype-bodies.ts",
+        "src/runtime/wasmgc/values/create-list-from-array-like-body.ts",
+        "src/runtime/wasmgc/values/function-prototype-invoker-bodies.ts",
+        "src/runtime/wasmgc/values/realm-object-layouts.ts",
+        "src/runtime/wasmgc/values/mixed-object-access-bodies.ts"
       ],
-      "minModules": 93
+      "minModules": 97
     },
     {
       "id": "standalone-platform",
@@ -14655,6 +14666,61 @@
     },
     {
       "path": "src/backend/wasmgc/resources/native-invocation-substrate.ts",
+      "state": "clean",
+      "layer": "backend-wasmgc"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/create-list-from-array-like-body.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/function-prototype-invoker-bodies.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/runtime/contracts/native-realm-catalog.ts",
+      "state": "clean",
+      "layer": "runtime-contracts"
+    },
+    {
+      "path": "src/ir/program/native-realm-requirements.ts",
+      "state": "clean",
+      "layer": "ir-program"
+    },
+    {
+      "path": "src/backend/wasmgc/program/native-realm-literals.ts",
+      "state": "clean",
+      "layer": "backend-wasmgc"
+    },
+    {
+      "path": "src/backend/wasmgc/program/native-realm.ts",
+      "state": "clean",
+      "layer": "backend-wasmgc"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/realm-object-layouts.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/backend/wasmgc/resources/native-realm-object-layouts.ts",
+      "state": "clean",
+      "layer": "backend-wasmgc"
+    },
+    {
+      "path": "src/backend/wasmgc/resources/native-object-realm.ts",
+      "state": "clean",
+      "layer": "backend-wasmgc"
+    },
+    {
+      "path": "src/runtime/wasmgc/values/mixed-object-access-bodies.ts",
+      "state": "clean",
+      "layer": "native-runtime"
+    },
+    {
+      "path": "src/backend/wasmgc/resources/native-mixed-object-access.ts",
       "state": "clean",
       "layer": "backend-wasmgc"
     }
