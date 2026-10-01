@@ -13,6 +13,7 @@ import {
 import {
   beforeIrRuntimeProgramPolicy,
   beforeWellKnownSymbolPolicy,
+  beforeNumberPrerequisitePolicy,
 } from "./helpers/ir-runtime-program-policy-evolution.js";
 
 interface MutablePolicy {
@@ -28,7 +29,7 @@ const receiptText = read(irValidationPolicyReceiptPath);
 const receipt = authenticateIrValidationPolicyEvolution(receiptText);
 function actual(): MutablePolicy {
   const policy = beforeIrRuntimeProgramPolicy(
-    beforeWellKnownSymbolPolicy(JSON.parse(read("scripts/compiler-boundaries.json"))),
+    beforeWellKnownSymbolPolicy(beforeNumberPrerequisitePolicy(JSON.parse(read("scripts/compiler-boundaries.json")))),
   ) as MutablePolicy;
   // Every negative begins with a genuinely passing current-policy control.
   authenticateIrValidationPolicy(policy);
