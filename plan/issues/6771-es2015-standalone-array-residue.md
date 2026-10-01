@@ -92,6 +92,12 @@ loc-budget-allow:
   # bodies in array-set-length-coercion.ts.
   - src/codegen/vec-elem-fidelity.ts
   - src/codegen/vec-length-set.ts
+  # S7 follow-up (2026-09-30): `var r = Array.from.call(C, …)` / an O-returning
+  # or species-creating `Array.prototype.X.call(…)` keeps an externref slot —
+  # one call in `transferredArrayLikeResultNeedsExternref` + its import (the
+  # #6651 E5 hook); the predicate lives in array-ctor-this.ts.
+  - src/codegen/statements/variables.ts
+  - src/codegen/array-ctor-this.ts
 func-budget-allow:
   # 2026-09-30 (#6771 plan): each gains one arm / one guard / one route.
   - src/codegen/array-methods.ts::setupArrayLoop

@@ -158,3 +158,53 @@ export function objectConstructArm(ctx: CodegenContext): Instr[] {
   }
   return out;
 }
+
+/** §23.1.3.4/7/26/30: these return `O` itself — the receiver, not a new array. */
+const RETURNS_RECEIVER = new Set(["copyWithin", "fill", "reverse", "sort"]);
+/** These build their result with ArraySpeciesCreate (§10.4.2.3). */
+const SPECIES_CREATORS = new Set(["concat", "filter", "flat", "flatMap", "map", "slice", "splice"]);
+
+/**
+ * `var r = <call>` whose checker type is an Array but whose VALUE is not a
+ * fresh array of the binding's element type (standalone):
+ *
+ * - `Array.from.call(C, …)` / `Array.of.apply(C, …)` with a `this` other than
+ *   `Array` — `Construct(C)`'s object (`Array/of/return-a-custom-instance.js`,
+ *   `sets-length.js`);
+ * - `Array.prototype.{copyWithin,fill,reverse,sort}.call(O, …)` — `O` itself;
+ * - `Array.prototype.{concat,filter,flat,flatMap,map,slice,splice}.call(O, …)`
+ *   in a module where ArraySpeciesCreate is observable (`Symbol.species` /
+ *   `.constructor` writes) or a Proxy exists — the species constructor's object
+ *   (the #6651 H6 `create-proxy.js` shape bound to a `var`).
+ *
+ * A vec-typed slot MATERIALIZES a copy at the declaration store, so
+ * `r instanceof C`, `r === O` and `thisVal === r` went false. The binding keeps
+ * the externref the call returned — the #6651 E5 answer for the TypedArray
+ * `from`/`of` twins, through the same slot hook.
+ */
+export function reflectiveArrayCallNeedsExternref(
+  ctx: CodegenContext,
+  initializer: ts.Expression | undefined,
+): boolean {
+  if (!ctx.standalone || !initializer || !ts.isCallExpression(initializer)) return false;
+  const callee = initializer.expression;
+  if (!ts.isPropertyAccessExpression(callee) || (callee.name.text !== "call" && callee.name.text !== "apply")) {
+    return false;
+  }
+  const member = callee.expression;
+  if (!ts.isPropertyAccessExpression(member)) return false;
+  const owner = member.expression;
+  const name = member.name.text;
+  if ((name === "from" || name === "of") && ts.isIdentifier(owner) && owner.text === "Array") {
+    const thisArg = initializer.arguments[0];
+    return thisArg !== undefined && !(ts.isIdentifier(thisArg) && thisArg.text === "Array");
+  }
+  const speciesObservable = ctx.arraySpeciesDirty || ctx.proxyDirty === true;
+  return (
+    (RETURNS_RECEIVER.has(name) || (SPECIES_CREATORS.has(name) && speciesObservable)) &&
+    ts.isPropertyAccessExpression(owner) &&
+    owner.name.text === "prototype" &&
+    ts.isIdentifier(owner.expression) &&
+    owner.expression.text === "Array"
+  );
+}
