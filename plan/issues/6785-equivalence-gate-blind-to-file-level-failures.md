@@ -1,11 +1,12 @@
 ---
 id: 6785
 title: "ci: `equivalence-gate` (required) reads only `assertionResults` — a file that fails to import, a deleted test file, or a fork OOM has zero assertions and passes as 'no new regressions'"
-status: in-progress
+status: done
 sprint: Backlog
 assignee: "ttraenkler/claude-dev-6785"
 branch: "claude/issue-6785-equivalence-gate-floor"
 created: 2026-09-30
+completed: 2026-10-01
 updated: 2026-10-01
 priority: high
 horizon: s
@@ -112,3 +113,40 @@ code 1`). The real suite is the directory `tests/equivalence/`.
    class plus the clean control; `tests/issue-4609-…` now marks its one-test
    synthetic partial as a single shard (`SHARD=1/8`), since the merged scope
    would otherwise trip the floor before the membership check it pins.
+
+## Resolution
+
+**Banked floor** (`node scripts/equivalence-gate.mjs --update`, single fork,
+1 GB fork heap, this branch = origin/main @ 4a860ee9 + #6785): 223 files,
+1,740 passing, 22 failing, 3 todo. The 22 failures are exactly the existing
+`knownFailures` (unchanged); `passingFloor: 1740`, `fileCount: 223`.
+
+**Before → after** (old gate = `origin/main:scripts/equivalence-gate.mjs`, both
+fed the same data through `MERGE_PARTIALS_DIR`):
+
+| Input | Old gate | New gate |
+| --- | --- | --- |
+| Real vitest report: a broken import, a syntax error, a collect-time throw (3 probe files, scored as shard 1/8) | exit 0, "No new equivalence regressions" | exit 1, 3 × `FILE FAILURE: <file> — no tests collected: <error>` |
+| Real full run with `typeof-extended.test.ts` removed from the report | exit 0, "No new equivalence regressions" | exit 1, `FILE FAILURE … absent from the report`, `FLOOR: 1733 < 1740`, `FLOOR: 222 files < 223` |
+| Real full run, unmodified | exit 0 | exit 0 |
+
+**Tests:** `tests/equivalence-gate.test.ts` (new, 16 cases): assertion failure
+vs known list, import / syntax / file-level / unfinished-test failures,
+unexplained `success:false`, passing-count drop, file-count drop, on-disk file
+missing from the report, baseline without floors fails closed, single shard
+skips the floor, merged JSON partials meet it, missing shard partial fails,
+`--update` raises and never lowers, and two CLI runs (exit codes + messages).
+`tests/issue-4609-…` passes with its synthetic partial scored as one shard.
+
+**Known limit, deliberately left:** vitest's JSON report has no per-`describe`
+result, so an `afterAll` error inside a `describe` of a file that ALSO has a
+failing test is only visible as that file's failure. If the failing test is a
+known one, the hook error stays masked. A hook error in a file with no failing
+test, or at file level, is caught.
+
+**`vitest.config.ts`:** the default fork heap is now 1024 MB, the same as the
+gate. `maxForks` is capped by `freemem / 1.5 GB`, which leaves 3 forks on an
+idle 4-core / 16 GB box. I did not re-measure the OOM repro: my
+default-config `npx vitest run tests/equivalence` was killed when the
+container restarted under other agents' load, so whether the 3-fork default
+now completes is not verified here.
