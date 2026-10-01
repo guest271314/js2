@@ -5,7 +5,7 @@ status: in-progress
 assignee: ttraenkler/opus-6771
 sprint: current
 created: 2026-09-30
-updated: 2026-09-30
+updated: 2026-10-01
 priority: high
 horizon: xl
 feasibility: hard
@@ -895,3 +895,185 @@ matters for the gate): `Array/prototype/concat` 56, `Array/length` 28,
   trailer naming the dispatched model and effort (AGENTS.md § Commit
   Attribution).
 - No `git stash`; A/B by file copy from `.tmp/6771/base-src`.
+
+## 2026-10-01 — implementation record (Opus)
+
+Branch `issue-6771-array-residue`: S1–S10b, the S3 and S7 follow-ups and the
+pin suite, merged with `origin/main` @ `5dfc21de14` (every measurement below
+ran on the merge with `a895598841`; `5dfc21de14` adds only npm-compat
+artifacts, no `src/`). By lead decision S10c (the
+`Reflect.defineProperty` false channel) is **#6770 S4** and S11 (lazy
+`GetMethod` per Proxy trap) is **#6770 S8** — neither is built here. #6770 S4
+is on `origin/issue-6770-object-reflect-residue` (`9173486efc`), not on main.
+
+### Rows — 34, `flock … run-test262-paths.mts .tmp/6771/rows.txt --isolate --standalone`
+
+| tree | pass | fail | CE | log (`.tmp/6771/`) |
+| --- | ---: | ---: | ---: | --- |
+| `origin/main` @ `2ef807a68e` (plan) | 0 | 33 | 1 | `rows-base-2ef807a68e.log` |
+| `origin/main` @ `a895598841` (today's base, re-measured) | **0** | 33 | 1 | `rows-base-a8955.log` |
+| after S1 (measured mid-step, before the trap-return widening) | 10 | 23 | 1 | `rows-s1.log` |
+| after S1–S9 | 29 | 5 | 0 | `rows-m3.log` |
+| after S10a/S10b | 30 | 4 | 0 | `ctl-out/c000-rows.log` |
+| **head, merged with `a895598841`** | **30** | 4 | 0 | `rows-m5.log` (std runner) = `iso-rows.log` (row for row) |
+| head + #6770's branch, trial merge (not committed) — the 4 residual rows | 2 of 4 | 2 | 0 | `rows-with6770.log` |
+
+Per step (each row is attributed to the step whose mechanism it failed on;
+the cumulative counts above are the measurements):
+
+| step | rows | n |
+| --- | --- | ---: |
+| S1 | `{slice,splice,map,filter,concat}/create-proxy.js`, `{map,splice}/create-species-undef-invalid-len.js`, `slice/create-proxied-array-invalid-len.js`, `concat/arg-length-exceeding-integer-limit.js`, `copyWithin/return-abrupt-from-{has-start,delete-proxy-target}.js` | 11 |
+| S2 | `concat/Array.prototype.concat_spreadable-{function,string-wrapper,reg-exp}.js`, `concat_{large,small}-typed-array.js`, `concat_array-like-to-length-throws.js` | 6 |
+| S3 | `concat/Array.prototype.concat_spreadable-sparse-object.js` | 1 |
+| S4 | `flat/target-array-{non-extensible,with-non-configurable-property}.js`, `flatMap/target-array-non-extensible.js` | 3 |
+| S5 | `Symbol.unscopables/{prop-desc,value}.js` | 2 |
+| S6 | `toLocaleString/primitive_this_value{,_getter}.js` | 2 |
+| S7 (+ follow-up) | `from/iter-cstm-ctor.js`, `from/source-object-constructor.js` | 2 |
+| S8 | `from/source-object-length.js` | 1 |
+| S9 | `of/does-not-use-prototype-properties.js` | 1 |
+| S10a/S10b | `length/define-own-prop-length-coercion-order-set.js` | 1 |
+| | **total** | **30** |
+
+### Residual rows (4) — first failing assertion and mechanism
+
+1. `length/define-own-prop-length-no-value-order.js` — `!Reflect.defineProperty([],
+   "length", {enumerable: true})`: the standalone `Reflect.defineProperty` arm
+   lets the applier's TypeError escape instead of answering `false` (S10c).
+   **Passes on the trial merge with #6770's branch** (`rows-with6770.log`).
+2. `length/define-own-prop-length-coercion-order.js` — first assertion,
+   `Object.defineProperty(array, "length", {value: length, writable: true})`
+   throws a TypeError: "no exception". **Not an ArraySetLength defect** — the
+   test262 assembly is a SCRIPT (no import/export), so TypeScript MERGES the
+   row's top-level `var length = {valueOf …}` with lib.dom's
+   `declare var length: number` (Window.length). The binding is checker-typed
+   `number`, its initializer is ToNumber'd once at the declaration (`valueOf`
+   runs there, `valueOfCalls` = 1), and the define receives the number 2.
+   Isolated: `.tmp/6771/q14.js` (no exports) reads `typeof length ===
+   "number"` (node: `"object"`); one added `export` (`co-x1.js`) makes it a
+   module and the define throws the TypeError; the row copy with the binding
+   renamed (`rowcopy/co2.js`) passes the first assertion on the branch and
+   the WHOLE row on the #6770 trial merge (`with6770/`, in-process dev
+   check). #2176's `resolveIdentifierType` handles the non-merging
+   `const name` collider; a MERGING top-level `var` keeps lib.dom's type.
+   10 test262 files declare such a top-level var (`var
+   length|status|top|origin|parent|self|…`): the two
+   `Array/length/define-own-prop-length-coercion-order*.js`,
+   `Promise/race/resolve-self.js`,
+   `Iterator/zipKeyed/iterables-iteration-inherited.js`,
+   `Symbol/{for,keyFor}/cross-realm.js`,
+   `language/reserved-words/unreserved-words.js`,
+   `language/expressions/super/prop-{dot,expr}-obj-ref-this.js`,
+   `language/statements/function/13.2-30-s.js`. Needs its own issue
+   (checker level: a user `var` merged with a lib.dom global, or a DOM-free
+   lib for `--target standalone`), plus #6770 S4 for the Reflect half.
+3. `from/source-array-boundary.js` — `this.arrayIndex` in the `Array.from`
+   callback does not alias the top-level `var arrayIndex` (global object ↔
+   script `var`, #2727). Not an Array mechanism; recorded, not planned.
+4. `splice/property-traps-order-with-species.js` — trap log starts `get, set,
+   has, apply, …` (ProxyCreate snapshots all 13 traps): S11, #6770 S8. Also
+   fails on the #6770 trial merge (S8 is not on that branch yet).
+
+### Probe table (`.tmp/6771/probes-all.sh`; node / branch head / `origin/main` @ `a895598841`)
+
+| probe | node | branch | base | |
+| --- | ---: | ---: | ---: | --- |
+| p14 | 255 | **255** | 0 | |
+| p14b | 511 | 0 | 0 | residual (a) |
+| p15 | 31 | **31** | trap | |
+| p1f | 1 | **1** | trap | |
+| p13b | 7 | **7** | 7168 | |
+| p1b | 63 | **63** | 3 | |
+| p1e | 7 | **7** | 4 | |
+| p1g | 63 | **63** | 35 | |
+| p1h | 127 | **127** | 84 | |
+| p1h7 | 255 | **255** | CE (#1539) | |
+| p2 | 127 | 85 | 21 | residual (b); plan asked ≥ 125 |
+| p1d5 | 103 | **103** | 273 | |
+| p1d3 | 255 | 243 | 179 | residual (c) |
+| p1d4 | 63 | **63** | 17 | |
+| p11a | 15 | **15** | 8 | |
+| p11b | 1 | **1** | CE (#2717) | |
+| p5 | 511 | **511** | 449 | |
+| p6 | 63 | 47 | 33 | residual (d) |
+| p6b | 7 | **7** | 0 | |
+| p7 / p7u | 1023 | **1023** | 200 / 205 | |
+| p8 | 63 | **63** | 55 | |
+| p8c | 1 | 1 | 1 | |
+| p8d | 7 | trap | trap | residual (e), "record, do not fix" |
+| p9 / p9b | 127 / 511 | **127 / 511** | 122 / 27 | |
+| p3 | 511 | throws | 1 | the uncaught `Reflect.defineProperty` TypeError (bits 128/256, S10c); its S10a/S10b bits are the S10 pin |
+| p3b / p3c | 127 / 135 | **127 / 135** | 55 / 267 | |
+| p4 | 127 | 7253 | 7253 | S10c — **127 on the #6770 trial merge** |
+| p16 | 123 | 20 | 20 | S11 (#6770 S8) |
+
+Residual mechanisms (no row in this bucket):
+
+- (a) `var s = arr.slice()` in a species-observable module with NO Proxy:
+  TypeScript types the call `any[]`, the declaration materialises a copy of
+  the species result, so `getPrototypeOf` / `instanceof` / `.constructor` see
+  an Array. The S7 follow-up's externref-slot predicate covers only the
+  `.call` spellings; the inline reads (p14 bits 32/64/128, the rows) are
+  exact.
+- (b) bits 2/8/32: a STATIC TypedArray carrier (`var ta = new
+  Uint8Array(1)`) has no expando side-table, so `Object.defineProperty(ta,
+  "length", …)` is not recorded (`gOPD` answers `undefined`,
+  `.tmp/6771/q9.js`) and the static `ta.length` / concat reads see the native
+  length — the gap #6651's TypedArray record already names. The rows'
+  harness shape (a dyn view through a parameter) is S2c and passes.
+- (c) bits 4/8: `[].map.call(<holes>, String)` writes the mapped value into
+  the holes (map over holes, pre-existing).
+- (d) bit 16: `[true, "x"].toLocaleString()` — a MIXED-element array takes
+  the generic element arm, which does not consult the Boolean companion.
+- (e) `Object.keys` on a closed struct after `delete obj[2]` traps
+  `illegal cast` on both trees.
+- `indexOf` / `lastIndexOf(undefined)` over a run of holes answers 0 in some
+  module shapes on BOTH trees (`.tmp/6771/q3.js`–`q6.js`: e.g. the inline
+  `new Array(3).indexOf(undefined)`, and `h.lastIndexOf(undefined)` in a
+  module without an elision literal); route-dependent, not hole storage.
+
+### Pins
+
+`tests/issue-6771-array-residue.test.ts` (29 cases, one per probe
+mechanism): **29/29 on the branch**; on `origin/main` @ `a895598841` sources
+(`.tmp/6771/base-a8955`, the pin file copied in) **23 failed / 6 passed** —
+the 23 "RED on base" cases fail, the 6 guards pass on both
+(`.tmp/6771/pins-{branch,base}.log`). Bits whose mechanism is out of scope
+(S10c, residuals (a)–(e), the hole-search shapes) are left out of the masks.
+
+### Controls
+
+Union of every pin set named in the plan, extracted from the standalone
+baseline (`status:"pass"`, promoted 2026-09-30 18:49): **9,593 rows**, every
+one baseline-pass — ES5 4,222 · ES2015 2,330 · unclassified (-3) 1,994 ·
+later editions 1,047. Run on a snapshot of the head's sources
+(`.tmp/6771/snap-f5`, `diff -r` identical to `src/`), 60-row chunks, each
+under the shared lock, ES5 first (`.tmp/6771/ctlrun5.sh`; logs
+`.tmp/6771/ctl5-out/`). Runner: `.tmp/6771/iso.mts` — the `--isolate`
+semantics (one fresh node process per row, the tree's own `runTest262File`,
+the same 120 s budget) with the NEXT row's process started while the current
+row runs, which hides the ~4.5 s runner import per row. Parity on the 34
+rows: identical verdicts and messages to `run-test262-paths.mts --isolate`
+(`iso-rows.log` vs `rows-m5.log`).
+
+CONTROL-RESULTS-PENDING
+
+### Gates
+
+`LOC_GATE_BASE=$(git rev-parse origin/main)` loc + func budgets, coercion
+sites, oracle ratchet, dead exports, compiler boundaries (`--mode inventory
+--base origin/main`), typecheck: all exit 0 (`.tmp/6771/gates5.log`).
+
+### Acceptance
+
+- ≥ 32 of 34 rows: **not met on this branch alone — 30.** The two rows the
+  plan counted on beyond 30 depend on S10c: with #6770's branch merged,
+  `no-value-order` passes (31); `coercion-order` additionally needs the
+  lib.dom `var length` merge fixed (residual 2) — not an Array mechanism.
+  `source-array-boundary` (#2727) and `property-traps-order-with-species`
+  (#6770 S8) are the plan's allowed residuals.
+- Probe answers: met except p2 (85; plan ≥ 125), p1d3 (243), p6 (47) —
+  residuals (b)–(d) — and p3 / p4 / p16 (#6770 S4 / S8).
+- Pins red on base: met (23 of 23 RED cases).
+- Status stays `in-progress`: the remaining rows wait on #6770 S4 / S8 and a
+  new lib.dom-merge issue, not on work in this lane.
