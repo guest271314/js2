@@ -1,10 +1,10 @@
 ---
 id: 6787
 title: "codegen: `Array.prototype.push` fast path reads the length before evaluating its arguments — re-entrant mutation in the argument is lost"
-status: ready
+status: in-progress
 sprint: Backlog
 created: 2026-09-30
-updated: 2026-09-30
+updated: 2026-10-01
 priority: high
 horizon: s
 feasibility: easy
@@ -15,6 +15,8 @@ language_feature: array-methods
 goal: core-semantics
 related: [1143, 840]
 requested_by: ttraenkler/claude-review
+assignee: "ttraenkler/claude-dev-6787"
+branch: "claude/issue-6787-push-arg-order"
 origin: "2026-09-30 codebase review (plan/agent-context/claude-codebase-review-2026-09-30.md) — H1"
 ---
 
