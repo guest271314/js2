@@ -43,9 +43,12 @@ import {
 
 import { readRuntimeContractReceiptSource } from "./helpers/ir-runtime-contract-evolution.js";
 
+import { beforeRuntimePreparationRelocation } from "./helpers/ir-runtime-preparation-relocation.js";
+
 const root = resolve(import.meta.dirname, "..");
 const read = (path: string) => readFileSync(resolve(root, path), "utf8");
-const historicalRead = (path: string) => readRuntimeContractReceiptSource(path, read);
+const historicalRead = (path: string) =>
+  readRuntimeContractReceiptSource(path, beforeRuntimePreparationRelocation(read));
 const hash = (rows: unknown) => createHash("sha256").update(JSON.stringify(rows)).digest("hex");
 
 // Measured from f95d8a0bf318e857d981863b1018a9d776483a46, source-qualified:

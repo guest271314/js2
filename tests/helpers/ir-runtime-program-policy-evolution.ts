@@ -978,3 +978,316 @@ export function beforeNumberPrerequisitePolicySource(raw: string): string {
     numberFail("raw and semantic reciprocal proof disagree");
   return before;
 }
+
+// C2a: one fixed runtime-preparation successor; historical guards above are unchanged.
+export const runtimePreparationPolicyReceiptPath = "tests/helpers/ir-runtime-program-policy-runtime-preparation.json";
+const preparationReceiptSha256 = "3ebfca62d268ca5bcc8b1c461ef6e71b55bd513a5649bf6bce3fe6ee689032ca";
+const preparationBeforeProfile = {
+  source: {
+    bytes: 567166,
+    sha256: "8213f6d2d3bf112544ca2aa50b68e585f4ba2c1f9795acc240c9e8495712e7df",
+    gitBlob: "0d90f336925232fd22c98c438121b93e7e5bcf52",
+  },
+  dataSha256: "5dea4a676b8ddbc6fc50c7c77446e799ee4db12f4113c1fdf4edff33de848b21",
+  fileCount: 1775,
+  filesSha256: "82448a8b5bf6373b7ef203924f3ac4f0d33e69ca1df77b322812b63613fe8bec",
+  activationCount: 100,
+  activationHistorySha256: "f6716a46656b3e4e7292e6d6c2cfdb5681becc9fb0e688ebad01a49c48d044ab",
+  layersSha256: "ab456c917964e4e4d51c7110ce854e8c8648827a72eb4e6e61e2d74dc7f08a05",
+};
+const preparationCurrentProfile = {
+  source: {
+    bytes: 567465,
+    sha256: "92d653aff02d823339071f24721b803d88da4f31bdbd721859b0ac48b6c9c7f7",
+    gitBlob: "70b280c7cf2a56cbd5cbfa88b484b57414d2ef7c",
+  },
+  dataSha256: "28ae111b7b9f0f6eda144d5d57beaf76fd5c7617b474846d39409a56cc196e08",
+  fileCount: 1776,
+  filesSha256: "ca4d9d7d5c999a4e742abd7773d847f1652ca8fe995a491a594fca1e5cf37a1a",
+  activationCount: 101,
+  activationHistorySha256: "9629c457a160096e70c35fc3a986abbd8eca145ac4eb688995194d6c29c83650",
+  layersSha256: "3f66bbff64c157092a04740c644ae17d476d7d168faa1bd23629f97492e0c4f7",
+};
+const preparationPrefix = {
+  bytes: 40368,
+  sha256: "2b6358379b9f9145b54a5287b6a74f61a89ef9deff215ce6fb21a2174ee1845e",
+};
+const preparationNumberReceipt = {
+  path: "tests/helpers/ir-runtime-program-policy-number-prerequisites.json",
+  bytes: 12726,
+  sha256: "92c0539b00d3b8ba5bb58951c1612f62fa334627f2b928e6ff1485ae9cd25845",
+};
+const preparationSourceInputs = [
+  {
+    path: "src/ir/intrinsic-support.ts",
+    bytes: 850,
+    sha256: "584322a7384556a6f3b82dc85cc30c2213510fe70f2cd437ccbef97826156351",
+  },
+  {
+    path: "src/ir/runtime/intrinsic-preparation.ts",
+    bytes: 49541,
+    sha256: "bd27170fd1df4a9bbad2874e5f2db34bc455fb6807b26523da4be8c182f3622b",
+  },
+  {
+    path: "tests/helpers/ir-runtime-preparation-relocation.json",
+    bytes: 19505,
+    sha256: "226efc69784e601980b4285fb0e562aed23f225be4d8735c233ecc6070000458",
+  },
+  {
+    path: "tests/helpers/ir-runtime-preparation-relocation.ts",
+    bytes: 7007,
+    sha256: "8adf44a0f063d8b7fb7ed413a37e693c2c3e420b5a52cf6f9161cfceb9a901df",
+  },
+];
+const preparationLayer = {
+  index: 8,
+  id: "ir-runtime",
+  beforeEntries: 19,
+  currentEntries: 20,
+  beforeMinModules: 19,
+  currentMinModules: 20,
+  beforeClassified: 19,
+  currentClassified: 20,
+};
+const preparationFile = {
+  path: "src/ir/runtime/intrinsic-preparation.ts",
+  state: "clean",
+  layer: "ir-runtime",
+};
+const preparationActivation = {
+  layer: "ir-runtime",
+  entries: ["src/ir/runtime/intrinsic-preparation.ts"],
+  minModules: 1,
+};
+const preparationRawPins = [
+  {
+    role: "runtime-layer-tail",
+    beforeOffset: 6444,
+    afterOffset: 6444,
+    beforeSha256: "30d6b3d2844adec2c20019162f41b792554a8318ffaf593562dfe64a9b2984db",
+    afterSha256: "0fb91016dca1d3ba652a1e1c1622f4a486292e82384be2e46a08a01dfc86d058",
+  },
+  {
+    role: "activation-history-tail",
+    beforeOffset: 65731,
+    afterOffset: 65782,
+    beforeSha256: "0e51cdca0a46e556233d7346ebbcbe9d8c6013789926f4392698734146ecc610",
+    afterSha256: "a014b410b320473b7b40780c7b6b88ecd10c39bdbdfaf1fffb89af040add274f",
+  },
+  {
+    role: "files-tail",
+    beforeOffset: 566806,
+    afterOffset: 566983,
+    beforeSha256: "690dc5485a5f7cabaf4cc1cbdca969dfafd96a79976728b6e4a1eacbddfb244c",
+    afterSha256: "5b58f77c2d14008613ef192e5ed99eda9e3c4d414e6f8b9cb7f2a9e9e0ccfd4c",
+  },
+];
+interface RuntimePreparationPolicyReceipt {
+  schema: string;
+  baseMain: string;
+  before: Profile;
+  current: Profile;
+  allowedEdgesSha256: string;
+  helperPrefix: { bytes: number; sha256: string };
+  numberReceipt: { path: string; bytes: number; sha256: string };
+  sourceInputs: { path: string; bytes: number; sha256: string }[];
+  runtimeLayer: typeof preparationLayer;
+  fileAppend: typeof preparationFile;
+  activationAppend: typeof preparationActivation;
+  raw: {
+    offsetUnit: string;
+    spans: {
+      role: string;
+      beforeOffset: number;
+      afterOffset: number;
+      before: string;
+      after: string;
+      beforeSha256: string;
+      afterSha256: string;
+    }[];
+  };
+}
+function preparationFail(detail: string): never {
+  throw new Error("runtime preparation policy evolution: " + detail);
+}
+/** Bind the root's exact receipt, complete sources and original helper prefix afresh. */
+export function authenticateRuntimePreparationPolicyEvolution(
+  text = readFileSync(new URL(`../../${runtimePreparationPolicyReceiptPath}`, import.meta.url), "utf8"),
+): RuntimePreparationPolicyReceipt {
+  if (typeof text !== "string" || Buffer.byteLength(text, "utf8") !== 6239 || sha(text) !== preparationReceiptSha256)
+    preparationFail("receipt digest mismatch");
+  const receipt = JSON.parse(text) as RuntimePreparationPolicyReceipt;
+  if (
+    !same(Object.keys(receipt), [
+      "schema",
+      "baseMain",
+      "before",
+      "current",
+      "allowedEdgesSha256",
+      "helperPrefix",
+      "numberReceipt",
+      "sourceInputs",
+      "runtimeLayer",
+      "fileAppend",
+      "activationAppend",
+      "raw",
+    ]) ||
+    receipt.schema !== "ir-runtime-program-policy-runtime-preparation-v1" ||
+    receipt.baseMain !== "3444df3d6d355aa745301ee248ce8f7ea2a80be7" ||
+    !same(receipt.before, preparationBeforeProfile) ||
+    !same(receipt.current, preparationCurrentProfile) ||
+    receipt.allowedEdgesSha256 !== edges ||
+    !same(receipt.helperPrefix, preparationPrefix) ||
+    !same(receipt.numberReceipt, preparationNumberReceipt) ||
+    !same(receipt.sourceInputs, preparationSourceInputs) ||
+    !same(receipt.runtimeLayer, preparationLayer) ||
+    !same(receipt.fileAppend, preparationFile) ||
+    !same(receipt.activationAppend, preparationActivation) ||
+    receipt.raw.offsetUnit !== "utf16-code-unit" ||
+    receipt.raw.spans.length !== 3
+  )
+    preparationFail("fixed receipt population mismatch");
+  let beforeEnd = -1,
+    afterEnd = -1,
+    displacement = 0;
+  receipt.raw.spans.forEach((span, index) => {
+    const { before, after, ...pin } = span;
+    if (
+      !same(pin, preparationRawPins[index]) ||
+      !before ||
+      !after ||
+      sha(before) !== span.beforeSha256 ||
+      sha(after) !== span.afterSha256 ||
+      span.beforeOffset <= beforeEnd ||
+      span.afterOffset <= afterEnd ||
+      span.afterOffset !== span.beforeOffset + displacement
+    )
+      preparationFail("raw span anchors or order");
+    beforeEnd = span.beforeOffset + before.length;
+    afterEnd = span.afterOffset + after.length;
+    displacement += after.length - before.length;
+  });
+  for (const pin of [preparationNumberReceipt, ...preparationSourceInputs]) {
+    const bytes = readFileSync(new URL(`../../${pin.path}`, import.meta.url));
+    if (bytes.length !== pin.bytes || createHash("sha256").update(bytes).digest("hex") !== pin.sha256)
+      preparationFail("full-file input changed: " + pin.path);
+  }
+  const helper = readFileSync(new URL("./ir-runtime-program-policy-evolution.ts", import.meta.url));
+  if (
+    helper.length < preparationPrefix.bytes ||
+    createHash("sha256").update(helper.subarray(0, preparationPrefix.bytes)).digest("hex") !== preparationPrefix.sha256
+  )
+    preparationFail("original Number helper prefix changed");
+  const number = authenticateNumberPrerequisitePolicyEvolution();
+  if (!same(number.current, preparationBeforeProfile)) preparationFail("Number predecessor authority mismatch");
+  return freeze(receipt);
+}
+function preparationSemanticProfile(policy: MutableIrRuntimeProgramPolicy, profile: Profile): void {
+  if (
+    digest(policy) !== profile.dataSha256 ||
+    policy.files.length !== profile.fileCount ||
+    policy.activationHistory.length !== profile.activationCount ||
+    digest(policy.files) !== profile.filesSha256 ||
+    digest(policy.activationHistory) !== profile.activationHistorySha256 ||
+    digest(policy.layers) !== profile.layersSha256
+  )
+    preparationFail("complete policy profile mismatch");
+}
+function proveRuntimePreparationPolicy(
+  value: unknown,
+  freshlyVerifiedReceipt?: RuntimePreparationPolicyReceipt,
+): { current: MutableIrRuntimeProgramPolicy; before: MutableIrRuntimeProgramPolicy } {
+  const current = capture(value) as MutableIrRuntimeProgramPolicy;
+  const receipt = freshlyVerifiedReceipt ?? authenticateRuntimePreparationPolicyEvolution();
+  preparationSemanticProfile(current, receipt.current);
+  if (
+    !same(Object.keys(current), wksTopKeys) ||
+    current.layers.length !== 20 ||
+    digest(current.allowedEdges) !== edges ||
+    digest(current.files.slice(0, 1775)) !== preparationBeforeProfile.filesSha256 ||
+    digest(current.activationHistory.slice(0, 100)) !== preparationBeforeProfile.activationHistorySha256 ||
+    !same(current.files.slice(1775), [preparationFile]) ||
+    !same(current.activationHistory.slice(100), [preparationActivation]) ||
+    current.files.filter((row) => row.layer === "ir-runtime").length !== 20
+  )
+    preparationFail("ordered current prefix or suffix mismatch");
+  const before = capture(current) as MutableIrRuntimeProgramPolicy;
+  const layer = before.layers[8]!;
+  if (
+    layer.id !== "ir-runtime" ||
+    layer.status !== "active" ||
+    layer.required !== true ||
+    !same(layer.roots, ["src/ir/runtime"]) ||
+    layer.entries?.length !== 20 ||
+    layer.minModules !== 20 ||
+    !same(layer.entries.slice(19), [preparationFile.path])
+  )
+    preparationFail("exact layer delta mismatch");
+  before.files.length = 1775;
+  before.activationHistory.length = 100;
+  layer.entries.length = 19;
+  layer.minModules = 19;
+  preparationSemanticProfile(before, receipt.before);
+  // This unchanged guard independently proves Number -> WKS -> C1 -> B.
+  const verifiedNumber = authenticateNumberPrerequisitePolicy(before);
+  const replay = capture(verifiedNumber) as MutableIrRuntimeProgramPolicy;
+  replay.files.push(capture(preparationFile) as MutableIrRuntimeProgramPolicy["files"][number]);
+  replay.activationHistory.push(
+    capture(preparationActivation) as MutableIrRuntimeProgramPolicy["activationHistory"][number],
+  );
+  replay.layers[8]!.entries!.push(preparationFile.path);
+  replay.layers[8]!.minModules = 20;
+  preparationSemanticProfile(replay, receipt.current);
+  if (!same(replay, current)) preparationFail("complete independent reciprocal replay mismatch");
+  return { current, before };
+}
+/** Fresh detached frozen C2a current; prior policy stages are not accepted here. */
+export function authenticateRuntimePreparationPolicy(value: unknown): IrValidationPolicy {
+  return freeze(proveRuntimePreparationPolicy(value).current) as IrValidationPolicy;
+}
+/** Derive a fresh mutable Number predecessor without substituting caller mutations. */
+export function beforeRuntimePreparationPolicy(value: unknown): MutableIrRuntimeProgramPolicy {
+  return proveRuntimePreparationPolicy(value).before;
+}
+function preparationRawProfile(raw: string, profile: Profile): void {
+  const bytes = Buffer.byteLength(raw, "utf8");
+  const blob = createHash("sha1").update(`blob ${bytes}\0`).update(raw).digest("hex");
+  if (bytes !== profile.source.bytes || sha(raw) !== profile.source.sha256 || blob !== profile.source.gitBlob)
+    preparationFail("complete raw source profile mismatch");
+}
+function applyRuntimePreparationRaw(raw: string, receipt: RuntimePreparationPolicyReceipt, forward: boolean): string {
+  preparationRawProfile(raw, forward ? receipt.before : receipt.current);
+  let end = 0;
+  const pieces: string[] = [];
+  for (const span of receipt.raw.spans) {
+    const offset = forward ? span.beforeOffset : span.afterOffset;
+    const from = forward ? span.before : span.after;
+    const to = forward ? span.after : span.before;
+    if (
+      offset < end ||
+      raw.slice(offset, offset + from.length) !== from ||
+      raw.indexOf(from) !== offset ||
+      raw.lastIndexOf(from) !== offset
+    )
+      preparationFail("raw fragment missing, duplicated or reordered");
+    pieces.push(raw.slice(end, offset), to);
+    end = offset + from.length;
+  }
+  pieces.push(raw.slice(end));
+  const output = pieces.join("");
+  preparationRawProfile(output, forward ? receipt.current : receipt.before);
+  return output;
+}
+/** Exact three-span inverse, semantic agreement and unchanged Number raw proof. */
+export function beforeRuntimePreparationPolicySource(raw: string): string {
+  if (typeof raw !== "string") preparationFail("raw input must be a primitive string");
+  const receipt = authenticateRuntimePreparationPolicyEvolution();
+  const before = applyRuntimePreparationRaw(raw, receipt, false);
+  const semantic = proveRuntimePreparationPolicy(JSON.parse(raw), receipt);
+  const parsedBefore = JSON.parse(before) as MutableIrRuntimeProgramPolicy;
+  preparationSemanticProfile(parsedBefore, receipt.before);
+  beforeNumberPrerequisitePolicySource(before);
+  if (!same(parsedBefore, semantic.before) || applyRuntimePreparationRaw(before, receipt, true) !== raw)
+    preparationFail("raw and semantic reciprocal proof disagree");
+  return before;
+}

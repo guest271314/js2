@@ -1,8 +1,14 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { describe, expect, it, vi } from "vitest";
+import { setImmediate } from "node:timers/promises";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  authenticateRuntimePreparationPolicyEvolution,
+  authenticateRuntimePreparationPolicy,
+  beforeRuntimePreparationPolicy,
+  beforeRuntimePreparationPolicySource,
+  runtimePreparationPolicyReceiptPath,
   authenticateNumberPrerequisitePolicyEvolution,
   authenticateNumberPrerequisitePolicy,
   beforeNumberPrerequisitePolicy,
@@ -17,6 +23,10 @@ import {
   type MutableIrRuntimeProgramPolicy as Policy,
 } from "./helpers/ir-runtime-program-policy-evolution.js";
 import { authenticateIrValidationPolicy } from "./helpers/ir-validation-policy-evolution.js";
+afterEach(async () => {
+  // Yield between synchronous source proofs so Vitest can process task-update RPCs.
+  await setImmediate();
+});
 const { intercepted, interceptedReads } = vi.hoisted(() => ({
   intercepted: new Map<string, number>(),
   interceptedReads: new Map<string, number>(),
@@ -43,7 +53,8 @@ const read = (path: string): string => readFileSync(new URL(`../${path}`, import
 const sha = (text: string): string => createHash("sha256").update(text).digest("hex");
 const digest = (value: unknown): string => sha(JSON.stringify(value));
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
-const raw = (): string => read("scripts/compiler-boundaries.json");
+// The original Number historical input is derived from the outer actual C2a policy.
+const raw = (): string => beforeRuntimePreparationPolicySource(read("scripts/compiler-boundaries.json"));
 const actual = (): Policy => JSON.parse(raw()) as Policy;
 const receiptText = (): string => read(numberPrerequisitePolicyReceiptPath);
 const receipt = () => authenticateNumberPrerequisitePolicyEvolution(receiptText());
@@ -844,4 +855,389 @@ describe("Number prerequisite exact successor of genuine WKS, C1 and B", () => {
         minModules: 1,
       });
     }));
+});
+
+// C2a current controls read disk directly; the original Number rows above keep their derived historical input.
+describe("C2a exact runtime preparation policy successor", () => {
+  const path = "src/ir/runtime/intrinsic-preparation.ts";
+  const currentRaw = (): string => read("scripts/compiler-boundaries.json");
+  const current = (): Policy => JSON.parse(currentRaw()) as Policy;
+  const authority = () => authenticateRuntimePreparationPolicyEvolution();
+  const accept = (p: Policy): void => {
+    expect(authenticateRuntimePreparationPolicy(p).files).toHaveLength(1776);
+  };
+  const refuse = (p: unknown): void => {
+    expect(() => authenticateRuntimePreparationPolicy(p)).toThrow();
+    expect(() => beforeRuntimePreparationPolicy(p)).toThrow();
+  };
+  const restore = (p: Policy, original: string): void => {
+    for (const key of Reflect.ownKeys(p)) expect(Reflect.deleteProperty(p, key)).toBe(true);
+    Object.assign(p, JSON.parse(original));
+    expect(JSON.stringify(p)).toBe(original);
+    accept(p);
+  };
+  const reject = (change: (p: Policy) => void): void => {
+    const p = current(),
+      original = JSON.stringify(p);
+    accept(p);
+    change(p);
+    expect(JSON.stringify(p)).not.toBe(original);
+    refuse(p);
+    restore(p, original);
+  };
+  function replay(number: Policy): Policy {
+    const p = clone(number);
+    p.files.push({ path, state: "clean", layer: "ir-runtime" });
+    p.layers[8]!.entries!.push(path);
+    p.layers[8]!.minModules = 20;
+    p.activationHistory.push({ layer: "ir-runtime", entries: [path], minModules: 1 });
+    return p;
+  }
+
+  it("pins actual complete current bytes, ordered populations and all new full-file authorities", () => {
+    const text = currentRaw(),
+      p = current(),
+      r = authority();
+    expect([Buffer.byteLength(text), sha(text), digest(p)]).toEqual([
+      567465,
+      "92d653aff02d823339071f24721b803d88da4f31bdbd721859b0ac48b6c9c7f7",
+      "28ae111b7b9f0f6eda144d5d57beaf76fd5c7617b474846d39409a56cc196e08",
+    ]);
+    expect(
+      createHash("sha1")
+        .update(`blob ${Buffer.byteLength(text)}\0`)
+        .update(text)
+        .digest("hex"),
+    ).toBe("70b280c7cf2a56cbd5cbfa88b484b57414d2ef7c");
+    expect([p.files.length, p.activationHistory.length, p.layers.length]).toEqual([1776, 101, 20]);
+    expect([
+      p.layers[8]!.entries!.length,
+      p.layers[8]!.minModules,
+      p.files.filter((row) => row.layer === "ir-runtime").length,
+    ]).toEqual([20, 20, 20]);
+    expect([digest(p.files), digest(p.activationHistory), digest(p.layers), digest(p.allowedEdges)]).toEqual([
+      "ca4d9d7d5c999a4e742abd7773d847f1652ca8fe995a491a594fca1e5cf37a1a",
+      "9629c457a160096e70c35fc3a986abbd8eca145ac4eb688995194d6c29c83650",
+      "3f66bbff64c157092a04740c644ae17d476d7d168faa1bd23629f97492e0c4f7",
+      "efe7e7ed8dee1a009d2bef3ff36dba80df1a805cd3f5b7b472e62ec6dcff64c7",
+    ]);
+    expect([
+      Buffer.byteLength(read(runtimePreparationPolicyReceiptPath)),
+      sha(read(runtimePreparationPolicyReceiptPath)),
+    ]).toEqual([6239, "3ebfca62d268ca5bcc8b1c461ef6e71b55bd513a5649bf6bce3fe6ee689032ca"]);
+    expect(r.sourceInputs).toEqual([
+      {
+        path: "src/ir/intrinsic-support.ts",
+        bytes: 850,
+        sha256: "584322a7384556a6f3b82dc85cc30c2213510fe70f2cd437ccbef97826156351",
+      },
+      { path, bytes: 49541, sha256: "bd27170fd1df4a9bbad2874e5f2db34bc455fb6807b26523da4be8c182f3622b" },
+      {
+        path: "tests/helpers/ir-runtime-preparation-relocation.json",
+        bytes: 19505,
+        sha256: "226efc69784e601980b4285fb0e562aed23f225be4d8735c233ecc6070000458",
+      },
+      {
+        path: "tests/helpers/ir-runtime-preparation-relocation.ts",
+        bytes: 7007,
+        sha256: "8adf44a0f063d8b7fb7ed413a37e693c2c3e420b5a52cf6f9161cfceb9a901df",
+      },
+    ]);
+    for (const pin of [...r.sourceInputs, r.numberReceipt]) {
+      expect([Buffer.byteLength(read(pin.path)), sha(read(pin.path))]).toEqual([pin.bytes, pin.sha256]);
+    }
+    const helper = Buffer.from(read("tests/helpers/ir-runtime-program-policy-evolution.ts"));
+    expect(createHash("sha256").update(helper.subarray(0, 40368)).digest("hex")).toBe(
+      "2b6358379b9f9145b54a5287b6a74f61a89ef9deff215ce6fb21a2174ee1845e",
+    );
+    frozen(r);
+    accept(p);
+  });
+
+  it("independently subtracts and replays only three deltas through unchanged Number, WKS, C1 and B", () => {
+    const p = current(),
+      number = clone(p);
+    expect(number.files.pop()).toEqual({ path, state: "clean", layer: "ir-runtime" });
+    expect(number.activationHistory.pop()).toEqual({ layer: "ir-runtime", entries: [path], minModules: 1 });
+    expect(number.layers[8]!.entries!.pop()).toBe(path);
+    number.layers[8]!.minModules = 19;
+    expect(digest(number)).toBe("5dea4a676b8ddbc6fc50c7c77446e799ee4db12f4113c1fdf4edff33de848b21");
+    authenticateNumberPrerequisitePolicy(number);
+    expect(beforeRuntimePreparationPolicy(p)).toEqual(number);
+    expect(replay(number)).toEqual(p);
+    const wks = beforeNumberPrerequisitePolicy(number),
+      c1 = beforeWellKnownSymbolPolicy(wks),
+      b = beforeIrRuntimeProgramPolicy(c1);
+    authenticateWellKnownSymbolPolicy(wks);
+    authenticateIrRuntimeProgramPolicy(c1);
+    authenticateIrValidationPolicy(b);
+    for (const old of [number, wks, c1, b]) refuse(old);
+    const a = authenticateRuntimePreparationPolicy(p),
+      a2 = authenticateRuntimePreparationPolicy(p);
+    frozen(a);
+    expect(a).not.toBe(p);
+    expect(a2).not.toBe(a);
+    const n1 = beforeRuntimePreparationPolicy(p),
+      n2 = beforeRuntimePreparationPolicy(p);
+    expect(n1).not.toBe(n2);
+    expect(n1.files[0]).not.toBe(n2.files[0]);
+    expect(Object.isFrozen(n1)).toBe(false);
+    expect(Object.isFrozen(n1.layers[8]!.entries)).toBe(false);
+    expect(p).toEqual(current());
+  });
+
+  it("independently applies all three unique raw spans and proves reciprocal bytes and old raw guards", () => {
+    const text = currentRaw(),
+      r = authority();
+    expect(r.raw.spans.map((span) => [span.role, span.beforeOffset, span.afterOffset])).toEqual([
+      ["runtime-layer-tail", 6444, 6444],
+      ["activation-history-tail", 65731, 65782],
+      ["files-tail", 566806, 566983],
+    ]);
+    const apply = (input: string, forward: boolean): string => {
+      let end = 0,
+        output = "",
+        displacement = 0;
+      for (const span of r.raw.spans) {
+        expect(span.afterOffset).toBe(span.beforeOffset + displacement);
+        const offset = forward ? span.beforeOffset : span.afterOffset,
+          from = forward ? span.before : span.after;
+        expect(input.indexOf(from)).toBe(offset);
+        expect(input.lastIndexOf(from)).toBe(offset);
+        expect(offset).toBeGreaterThanOrEqual(end);
+        output += input.slice(end, offset) + (forward ? span.after : span.before);
+        end = offset + from.length;
+        displacement += span.after.length - span.before.length;
+      }
+      return output + input.slice(end);
+    };
+    const numberRaw = apply(text, false);
+    expect([Buffer.byteLength(numberRaw), sha(numberRaw)]).toEqual([
+      567166,
+      "8213f6d2d3bf112544ca2aa50b68e585f4ba2c1f9795acc240c9e8495712e7df",
+    ]);
+    expect(beforeRuntimePreparationPolicySource(text)).toBe(numberRaw);
+    expect(JSON.parse(numberRaw)).toEqual(beforeRuntimePreparationPolicy(current()));
+    expect(apply(numberRaw, true)).toBe(text);
+    const wksRaw = beforeNumberPrerequisitePolicySource(numberRaw);
+    expect(sha(wksRaw)).toBe("451258b5feed7669d08553de966cb654a88f134a1d197fb9768fa97607843e59");
+    expect(sha(beforeWellKnownSymbolPolicySource(wksRaw))).toBe(
+      "460eb6835dff1d22322ac9fb0fdd9526f04cd09d99d4dec8138f8e66b91ffd57",
+    );
+    expect(() => beforeRuntimePreparationPolicySource(numberRaw)).toThrow();
+  });
+
+  for (const operation of [
+    "file-delete",
+    "file-duplicate",
+    "file-state",
+    "file-layer",
+    "file-order",
+    "entry-delete",
+    "entry-duplicate",
+    "entry-order",
+    "floor-lower",
+    "floor-higher",
+    "history-delete",
+    "history-extra",
+    "history-order",
+    "history-change",
+    "old-file",
+    "old-history",
+    "old-layer",
+    "edge",
+    "unrelated",
+    "key-order",
+  ] as const)
+    it(`rejects C2a ${operation} after success and restores the same object`, () =>
+      reject((p) => {
+        const layer = p.layers[8]!,
+          entries = layer.entries!;
+        if (operation === "file-delete") p.files.pop();
+        if (operation === "file-duplicate") p.files.push(clone(p.files[1775]!));
+        if (operation === "file-state") p.files[1775]!.state = "unmigrated";
+        if (operation === "file-layer") p.files[1775]!.layer = "ir-core";
+        if (operation === "file-order") [p.files[1774], p.files[1775]] = [p.files[1775]!, p.files[1774]!];
+        if (operation === "entry-delete") entries.pop();
+        if (operation === "entry-duplicate") entries.push(path);
+        if (operation === "entry-order") entries.reverse();
+        if (operation === "floor-lower") layer.minModules = 19;
+        if (operation === "floor-higher") layer.minModules = 21;
+        if (operation === "history-delete") p.activationHistory.pop();
+        if (operation === "history-extra") p.activationHistory.push(clone(p.activationHistory[100]!));
+        if (operation === "history-order")
+          [p.activationHistory[99], p.activationHistory[100]] = [p.activationHistory[100]!, p.activationHistory[99]!];
+        if (operation === "history-change") p.activationHistory[100]!.minModules = 2;
+        if (operation === "old-file") p.files[0]!.state = "unmigrated";
+        if (operation === "old-history") p.activationHistory[0]!.minModules++;
+        if (operation === "old-layer") p.layers[0]!.id = "changed";
+        if (operation === "edge") p.allowedEdges["ir-core"]!.push("unknown");
+        if (operation === "unrelated") p.description = "changed";
+        if (operation === "key-order") {
+          const schema = p.schema;
+          Reflect.deleteProperty(p, "schema");
+          p.schema = schema;
+        }
+      }));
+
+  for (const shape of ["accessor", "hidden", "sparse", "cycle", "function", "symbol", "alias-mutation"] as const)
+    it(`captures C2a ${shape} safely after success and reaccepts the restored same object`, () => {
+      const p = current(),
+        original = JSON.stringify(p);
+      accept(p);
+      let calls = 0;
+      if (shape === "accessor")
+        Object.defineProperty(p, "description", {
+          configurable: true,
+          enumerable: true,
+          get() {
+            calls++;
+            return "changed";
+          },
+        });
+      if (shape === "hidden") Object.defineProperty(p.files[1775]!, "path", { enumerable: false });
+      if (shape === "sparse") Reflect.deleteProperty(p.files, "1775");
+      if (shape === "cycle") p.cycle = p;
+      if (shape === "function")
+        p.extra = () => {
+          calls++;
+          return 1;
+        };
+      if (shape === "symbol")
+        Object.defineProperty(p, Symbol("extra"), { configurable: true, enumerable: true, value: 1 });
+      if (shape === "alias-mutation") {
+        const alias = p.files[1775]!;
+        alias.state = "unmigrated";
+      }
+      refuse(p);
+      expect(calls).toBe(0);
+      restore(p, original);
+    });
+
+  for (const drift of ["whitespace", "schema", "profile", "span-offset", "span-fragment", "span-order"] as const)
+    it(`refuses fixed C2a receipt ${drift}`, () => {
+      const p = current();
+      accept(p);
+      const text = read(runtimePreparationPolicyReceiptPath),
+        r = clone(authority());
+      if (drift === "schema") r.schema += "changed";
+      if (drift === "profile") r.current.source.bytes++;
+      if (drift === "span-offset") r.raw.spans[0]!.afterOffset++;
+      if (drift === "span-fragment") r.raw.spans[0]!.after += "changed";
+      if (drift === "span-order") r.raw.spans.reverse();
+      const mutant = drift === "whitespace" ? " " + text : JSON.stringify(r);
+      expect(sha(mutant)).not.toBe(sha(text));
+      expect(() => authenticateRuntimePreparationPolicyEvolution(mutant)).toThrow("receipt digest mismatch");
+      accept(p);
+    });
+
+  for (const pin of [
+    "src/ir/intrinsic-support.ts",
+    path,
+    "tests/helpers/ir-runtime-preparation-relocation.json",
+    "tests/helpers/ir-runtime-preparation-relocation.ts",
+    "tests/helpers/ir-runtime-program-policy-evolution.ts",
+    runtimePreparationPolicyReceiptPath,
+    numberPrerequisitePolicyReceiptPath,
+  ])
+    it(`freshly refuses changed C2a authority ${pin} on every public action and restores`, () => {
+      const p = current(),
+        text = currentRaw(),
+        original = read(pin),
+        exact = new URL(`../${pin}`, import.meta.url).pathname;
+      accept(p);
+      authority();
+      beforeRuntimePreparationPolicy(p);
+      beforeRuntimePreparationPolicySource(text);
+      try {
+        intercepted.set(exact, 0);
+        interceptedReads.set(exact, 0);
+        expect(read(pin)).not.toBe(original);
+        expect(() => authenticateRuntimePreparationPolicyEvolution()).toThrow();
+        refuse(p);
+        expect(() => beforeRuntimePreparationPolicySource(text)).toThrow();
+        expect(interceptedReads.get(exact)).toBeGreaterThanOrEqual(5);
+      } finally {
+        intercepted.delete(exact);
+        interceptedReads.delete(exact);
+      }
+      expect(read(pin)).toBe(original);
+      accept(p);
+      authority();
+      beforeRuntimePreparationPolicy(p);
+      beforeRuntimePreparationPolicySource(text);
+    });
+
+  for (const index of [0, 1, 2])
+    for (const mutation of ["missing", "duplicate", "offset", "fragment"] as const)
+      it(`refuses C2a raw span ${index} ${mutation}`, () => {
+        const text = currentRaw(),
+          span = authority().raw.spans[index]!;
+        beforeRuntimePreparationPolicySource(text);
+        const at = span.afterOffset;
+        const mutant =
+          mutation === "missing"
+            ? text.slice(0, at) + text.slice(at + span.after.length)
+            : mutation === "duplicate"
+              ? text.slice(0, at) + span.after + text.slice(at)
+              : mutation === "offset"
+                ? " " + text
+                : text.slice(0, at) + "X" + text.slice(at + 1);
+        expect(mutant).not.toBe(text);
+        expect(() => beforeRuntimePreparationPolicySource(mutant)).toThrow();
+        expect(beforeRuntimePreparationPolicySource(text)).toBe(raw());
+      });
+
+  it("refuses nonprimitive C2a raw without conversion and captures descriptors before corrupted authority reads", () => {
+    const p = current();
+    accept(p);
+    let calls = 0;
+    expect(() =>
+      beforeRuntimePreparationPolicySource({
+        toString() {
+          calls++;
+          return currentRaw();
+        },
+      } as unknown as string),
+    ).toThrow();
+    const original = Object.getOwnPropertyDescriptor(p, "description")!;
+    const exact = new URL(`../${runtimePreparationPolicyReceiptPath}`, import.meta.url).pathname;
+    try {
+      Object.defineProperty(p, "description", {
+        configurable: true,
+        enumerable: true,
+        get() {
+          calls++;
+          return original.value;
+        },
+      });
+      intercepted.set(exact, 0);
+      interceptedReads.set(exact, 0);
+      expect(() => authenticateRuntimePreparationPolicy(p)).toThrow("accessor or hidden policy field");
+      expect(interceptedReads.get(exact)).toBe(0);
+      expect(calls).toBe(0);
+    } finally {
+      Object.defineProperty(p, "description", original);
+      intercepted.delete(exact);
+      interceptedReads.delete(exact);
+    }
+    accept(p);
+  });
+
+  it("passes a post-capture Number-space mutant to the unchanged Number guard without replacing it", () => {
+    const p = current();
+    accept(p);
+    const number = beforeRuntimePreparationPolicy(p),
+      original = JSON.stringify(number);
+    authenticateNumberPrerequisitePolicy(number);
+    number.files[1771]!.state = "unmigrated";
+    expect(() => authenticateNumberPrerequisitePolicy(number)).toThrow("Number prerequisite policy evolution:");
+    expect(() => beforeNumberPrerequisitePolicy(number)).toThrow("Number prerequisite policy evolution:");
+    expect(number.files[1771]!.state).toBe("unmigrated");
+    restore(p, JSON.stringify(p));
+    for (const key of Object.keys(number)) Reflect.deleteProperty(number, key);
+    Object.assign(number, JSON.parse(original));
+    authenticateNumberPrerequisitePolicy(number);
+    expect(replay(number)).toEqual(p);
+  });
 });

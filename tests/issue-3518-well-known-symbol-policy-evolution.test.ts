@@ -6,6 +6,7 @@ import {
   authenticateWellKnownSymbolPolicyEvolution,
   authenticateWellKnownSymbolPolicy,
   beforeWellKnownSymbolPolicy,
+  beforeRuntimePreparationPolicySource,
   beforeNumberPrerequisitePolicySource,
   beforeWellKnownSymbolPolicySource,
   wellKnownSymbolPolicyReceiptPath,
@@ -20,7 +21,8 @@ const read = (path: string): string => readFileSync(new URL(`../${path}`, import
 const sha = (text: string): string => createHash("sha256").update(text).digest("hex");
 const digest = (value: unknown): string => sha(JSON.stringify(value));
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
-const raw = (): string => beforeNumberPrerequisitePolicySource(read("scripts/compiler-boundaries.json"));
+const raw = (): string =>
+  beforeNumberPrerequisitePolicySource(beforeRuntimePreparationPolicySource(read("scripts/compiler-boundaries.json")));
 const actual = (): Policy => JSON.parse(raw()) as Policy;
 const receiptText = (): string => read(wellKnownSymbolPolicyReceiptPath);
 const receipt = () => authenticateWellKnownSymbolPolicyEvolution(receiptText());

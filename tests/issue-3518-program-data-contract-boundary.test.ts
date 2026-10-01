@@ -1,5 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 
+import { beforeRuntimePreparationRelocation } from "./helpers/ir-runtime-preparation-relocation.js";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -23,6 +24,7 @@ import {
 } from "./helpers/ir-runtime-program-relocation.js";
 import { historicalIrValidationPolicyView } from "./helpers/ir-validation-policy-evolution.js";
 import {
+  beforeRuntimePreparationPolicy,
   authenticateNumberPrerequisitePolicy,
   beforeNumberPrerequisitePolicy,
   beforeWellKnownSymbolPolicy,
@@ -131,7 +133,9 @@ const newModules = [
   ...groups["ir-runtime"],
 ];
 const policy = () => {
-  const actual = JSON.parse(readFileSync(resolve(repository, "scripts/compiler-boundaries.json"), "utf8"));
+  const actual = beforeRuntimePreparationPolicy(
+    JSON.parse(readFileSync(resolve(repository, "scripts/compiler-boundaries.json"), "utf8")),
+  );
   // Authenticate the whole current policy before any bounded historical view.
   authenticateNumberPrerequisitePolicy(actual);
   return actual;
@@ -174,7 +178,7 @@ function fixture(includeOwnership = false) {
   // Fresh complete live inputs are authenticated once for this initial copy.
   // The maps are never used by run/append/put or after mutant injection.
   const rawRead = liveSourceReader(repository);
-  const initialRuntimeSources = reconstructRuntimeContractReceiptSources(rawRead);
+  const initialRuntimeSources = reconstructRuntimeContractReceiptSources(beforeRuntimePreparationRelocation(rawRead));
   const historicalRuntimeRead = (path: string): string => {
     if (!runtimeContractCurrentPaths.includes(path)) return rawRead(path);
     const source = initialRuntimeSources.get(path);

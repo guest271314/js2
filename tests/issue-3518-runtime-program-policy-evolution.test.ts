@@ -7,7 +7,9 @@ import {
   authenticateIrRuntimeProgramPolicyEvolution,
   beforeIrRuntimeProgramPolicy,
   beforeWellKnownSymbolPolicy,
+  beforeRuntimePreparationPolicy,
   beforeNumberPrerequisitePolicy,
+  beforeRuntimePreparationPolicySource,
   beforeNumberPrerequisitePolicySource,
   beforeWellKnownSymbolPolicySource,
   irRuntimeProgramPolicyReceiptPath,
@@ -26,7 +28,9 @@ const receiptText = read(irRuntimeProgramPolicyReceiptPath);
 const receipt = authenticateIrRuntimeProgramPolicyEvolution(receiptText);
 function actual(): Policy {
   const policy = beforeWellKnownSymbolPolicy(
-    beforeNumberPrerequisitePolicy(JSON.parse(read("scripts/compiler-boundaries.json"))),
+    beforeNumberPrerequisitePolicy(
+      beforeRuntimePreparationPolicy(JSON.parse(read("scripts/compiler-boundaries.json"))),
+    ),
   ) as Policy;
   authenticateIrRuntimeProgramPolicy(policy);
   return policy;
@@ -76,7 +80,9 @@ function replay(before: Policy): Policy {
 describe("C1 exact policy inverse and reciprocal B proof", () => {
   it("authenticates WKS-derived C1 raw and complete ordered data with independently fixed populations", () => {
     const raw = beforeWellKnownSymbolPolicySource(
-        beforeNumberPrerequisitePolicySource(read("scripts/compiler-boundaries.json")),
+        beforeNumberPrerequisitePolicySource(
+          beforeRuntimePreparationPolicySource(read("scripts/compiler-boundaries.json")),
+        ),
       ),
       p = actual();
     expect(Buffer.byteLength(raw)).toBe(565188);
