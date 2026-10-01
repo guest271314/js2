@@ -36,6 +36,7 @@ import { expectedArgumentCountOfParams } from "../function-expected-argument-cou
 import { reshapeFunctionCtorReflectiveCall } from "../function-ctor-reflective-call.js"; // (#4483) Function.call/apply → Function(…)
 import { tryEmitApplyArgArrayTypeError } from "../apply-arglist-typeerror.js"; // (#4483) §20.2.3.1 step 4 primitive argArray
 import { tryEmitClassConstructorCallWithoutNew } from "../class-call-without-new.js"; // (#4483) §10.2.1 step 2
+import { tryEmitClassCtorCallApply } from "../class-ctor-call-apply.js"; // (#6772 S3)
 import { buildClosureResultBoxing } from "../closures/result-boxing.js"; // (#4082) the single closure-result→externref decision
 import { emitCollectionIteratorVec, ensureMapGroupBy } from "../map-runtime.js"; // (#42) native Set/Map → vec, shared with spread / Array.from; (#3149) native Map.groupBy
 import { isCollectionReflectiveCallShape, tryCompileCollectionReflectiveCall } from "../collections-brand.js"; // (#2604/#3171) {Map,Set,WeakMap,WeakSet}.prototype.METHOD.call brand-check
@@ -8378,6 +8379,8 @@ function compileCallExpression(
       // (`Promise.prototype.then.call(Promise.prototype, …)`).
       const brandThis = tryBorrowedPrototypeBrandThisThrow(ctx, fctx, expr, innerExpr, compileOneArg, expectedType);
       if (brandThis !== undefined) return brandThis;
+      const classCtorCall = tryEmitClassCtorCallApply(ctx, fctx, expr, propAccess); // (#6772 S3) §10.2.1 step 2
+      if (classCtorCall !== undefined) return classCtorCall;
 
       // (#4483) `Function.call(thisArg, …body)` / `Function.apply(thisArg, [body])`
       // are reflective spellings of the Function CONSTRUCTOR, whose [[Call]]

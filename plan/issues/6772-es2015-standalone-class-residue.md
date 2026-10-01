@@ -803,7 +803,8 @@ shared lock.
 | --- | --- | --- | --- |
 | S1a | `23c6b10634` | p5e 0 -> 2121 (2121); p5d 21 guard | `arguments/access.js` |
 | S1b | `db43fed38d` | p1 0 -> 3 (3), p2 0 -> 63 (63), p3 14 -> 15 (15), nested 133 -> 3333, g1 880 -> 1023 | `definition/this-access-restriction.js`, `definition/this-check-ordering.js` |
-| S2 | (this step) | p4 8 -> 63, t2 4608 -> 8191, g6 4 -> 7, g11 10 -> 7, g8 7 -> 31, g2 63 -> 255, g5 63 -> 255; guards g13 63, g16 31, p15 15 | `subclass/class-definition-null-proto-contains-return-override.js`, `subclass/derived-class-return-override-with-object.js`, `subclass/default-constructor-2.js`, `definition/this-access-restriction-2.js` |
+| S2 | `760fc7205c` | p4 8 -> 63, t2 4608 -> 8191, g6 4 -> 7, g11 10 -> 7, g8 7 -> 31, g2 63 -> 255, g5 63 -> 255; guards g13 63, g16 31, p15 15 | `subclass/class-definition-null-proto-contains-return-override.js`, `subclass/derived-class-return-override-with-object.js`, `subclass/default-constructor-2.js`, `definition/this-access-restriction-2.js` |
+| S3 | (this step) | p5c 0 -> 15 (15); s3a COMPILE-FAIL -> 2 (2); guards s3b 31 (31), p5d 21 | `arguments/default-constructor.js` |
 
 S2 design note (deviates from the plan's "set only on an object return"):
 `$__ctor_override` is a RETURN REGISTER written on EVERY exit of a marked
@@ -820,3 +821,13 @@ frame after an overriding `super()`, `this.m()` throws from the nominal
 receiver guard and `this.x = v` writes the discarded struct (g12b 10011,
 node 15); dynamic construct sites (`Reflect.construct`, class values) do not
 read the register; a child collected before its parent is not retro-marked.
+
+S3 note: the arm sits in `compileCallExpression`'s `call`/`apply` block right
+after the two #4076/#5143 brand-throw arms, standalone-only, and declines when
+the class chain (source classes only) declares a STATIC member of that name
+(`static call() {}` wins — guard s3b) or the callee may be replaced by runtime
+eval. `Function.prototype.call.call(C, {})` (s3a) is reshaped to `C.call({})`
+before reaching it, so it now throws instead of crashing in `eval-source.ts`.
+Residuals (pinned): `Reflect.apply(C, …)` does not throw (s3c 100, node 1 —
+the dynamic closure-apply terminal has no class identity arm); `apply`'s
+CreateListFromArrayLike on the argument array is not performed.

@@ -465,3 +465,61 @@ describe("#6772 S2 \u2014 constructor return-override channel", () => {
     ).toBe(10011);
   });
 });
+
+describe("#6772 S3 — class constructors invoked through call / apply throw", () => {
+  it("RED on base (0): C.apply / C.call on a base and a derived class throw TypeError (node 15)", async () => {
+    expect(
+      await runProbe(`
+        class Base { constructor(){ } }
+        class Derived extends Base {}
+        var r = 0;
+        var obj = {};
+        try { Derived.apply(obj, new Array(100)); } catch (e) { r += (e instanceof TypeError) ? 1 : 0; }
+        try { Derived.call(obj, 1, 2); } catch (e) { r += (e instanceof TypeError) ? 2 : 0; }
+        try { Base.call(new Object(), 1, 2); } catch (e) { r += (e instanceof TypeError) ? 4 : 0; }
+        try { Base.apply(obj, []); } catch (e) { r += (e instanceof TypeError) ? 8 : 0; }
+        __r = r;
+      `),
+    ).toBe(15);
+  });
+
+  it("RED on base (internal compile error): Function.prototype.call.call(C, …) throws TypeError (node 2)", async () => {
+    expect(
+      await runProbe(`
+        class Base { constructor(){ } }
+        var r = 0;
+        try { Function.prototype.call.call(Base, {}); r += 100; } catch (e) { r += (e instanceof TypeError) ? 2 : 1000; }
+        __r = r;
+      `),
+    ).toBe(2);
+  });
+
+  it("guard (base 31): a static call / apply member wins; plain functions keep call / apply", async () => {
+    expect(
+      await runProbe(`
+        class A { static call(x) { return x + 1; } }
+        class B extends A {}
+        class C { static apply(t, a) { return a.length; } }
+        function f(a, b) { return this.k + a + b; }
+        var r = 0;
+        r += (A.call(1) === 2) ? 1 : 0;
+        r += (B.call(2) === 3) ? 2 : 0;
+        r += (C.apply(null, [1, 2, 3]) === 3) ? 4 : 0;
+        r += (f.call({ k: 1 }, 2, 3) === 6) ? 8 : 0;
+        r += (f.apply({ k: 1 }, [2, 3]) === 6) ? 16 : 0;
+        __r = r;
+      `),
+    ).toBe(31);
+  });
+
+  it("RESIDUAL (base 100, node 1): Reflect.apply(C, …) does not throw", async () => {
+    expect(
+      await runProbe(`
+        class Base { constructor(){ } }
+        var r = 0;
+        try { Reflect.apply(Base, {}, []); r += 100; } catch (e) { r += (e instanceof TypeError) ? 1 : 1000; }
+        __r = r;
+      `),
+    ).toBe(100);
+  });
+});
