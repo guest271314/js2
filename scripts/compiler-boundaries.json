@@ -12528,6 +12528,11 @@
       "layer": "legacy-host"
     },
     {
+      "path": "src/runtime/dynamic-code-policy.ts",
+      "state": "unmigrated",
+      "layer": "legacy-host"
+    },
+    {
       "path": "src/runtime/dynamic-function-import.ts",
       "state": "unmigrated",
       "layer": "legacy-host"
