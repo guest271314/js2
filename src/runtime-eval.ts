@@ -411,13 +411,7 @@ export function createEvalShim(options: EvalShimOptions = {}): (src: any, isDire
         throw new SyntaxError(`eval: ${msg}`);
       }
     }
-    // (#6779) Refused up front, and remembered like a parse failure.
-    const refused = options.hostFallback === true ? unboundNamesError(result.stringPool, parseProbe) : undefined;
-    if (refused !== undefined) {
-      if (evalNegCache.size >= NEG_CACHE_MAX) evalNegCache.delete(evalNegCache.keys().next().value!);
-      evalNegCache.set(src, refused);
-      throw refused;
-    }
+    if (options.hostFallback === true) refuseUnboundNames(evalNegCache, NEG_CACHE_MAX, src, result, parseProbe);
 
     if (onCompiled) {
       onCompiled({ src, binarySize: result.binary.byteLength, isDirect: isDirect === 1 });
@@ -572,24 +566,53 @@ export function createEvalShim(options: EvalShimOptions = {}): (src: any, isDire
     evalCache.set(src, built);
     return built;
   }
-  // (#6779) The entry call is the stage boundary: a failure before it ran none
-  // of `src` and is marked as a BUILD failure (a `hostEval` host may run the
-  // string elsewhere); a throw from the entry call propagates once, unchanged.
   function __extern_eval(src: any, isDirect: number): any {
     // Spec: PerformEval step 2 — if x is not a String, return x unchanged.
-    if (typeof src !== "string") return src;
-    let built: EvalModule | undefined;
-    try {
-      built = buildEvalModule(src, isDirect);
-    } catch (e) {
-      throw markDynamicCodeBuildFailure(e);
-    }
-    return built === undefined ? undefined : callChildExport(built.entry, undefined, [], built.instance.exports);
+    return typeof src === "string" ? runEvalModule(buildEvalModule, src, isDirect) : src;
   }
   return __extern_eval;
 }
 
 type EvalModule = { instance: WebAssembly.Instance; entry: () => unknown };
+
+/**
+ * (#6779) The entry call is the stage boundary: a failure while building the
+ * child module ran none of `src` and is marked as a BUILD failure (a `hostEval`
+ * host may run the string elsewhere); a throw from the entry call is the
+ * string's own and propagates once, unchanged.
+ */
+function runEvalModule(
+  build: (src: string, isDirect: number) => EvalModule | undefined,
+  src: string,
+  isDirect: number,
+): unknown {
+  let built: EvalModule | undefined;
+  try {
+    built = build(src, isDirect);
+  } catch (e) {
+    throw markDynamicCodeBuildFailure(e);
+  }
+  return built === undefined ? undefined : callChildExport(built.entry, undefined, [], built.instance.exports);
+}
+
+/**
+ * (#6779) The `hostFallback` pre-check: refuse a source naming a binding the
+ * child module cannot see (see {@link unboundNamesError}) before any of it runs,
+ * and remember the refusal in the negative cache like a parse failure.
+ */
+function refuseUnboundNames(
+  negCache: Map<string, Error>,
+  max: number,
+  src: string,
+  result: { stringPool?: readonly string[] },
+  source: ts.SourceFile,
+): void {
+  const refused = unboundNamesError(result.stringPool, source);
+  if (refused === undefined) return;
+  if (negCache.size >= max) negCache.delete(negCache.keys().next().value!);
+  negCache.set(src, refused);
+  throw refused;
+}
 
 /**
  * (#6779) Refuse — as a BUILD failure, before any of the source runs — a child

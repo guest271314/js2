@@ -220,7 +220,10 @@ coercion budgets (merge-base and `LOC_GATE_BASE=origin/main`),
 `check:host-import-policy`, `check:ir-only`, `check:ir-adoption`,
 `check:issues`, `check:done-status-integrity`, `check:issue-spec-coverage`,
 `check:harness-compile-budget`, `check:verdict-oracle`. No budget allowances
-were needed (`createEvalShim` sits at exactly 300 lines).
+were needed: after #6776 added six lines to `createEvalShim` on main, the
+stage-boundary wrapper and the unbound-name pre-check moved into top-level
+helpers (`runEvalModule`, `refuseUnboundNames`), leaving `createEvalShim` at
+290 lines against main b4ac0b7a.
 
 Left out, deliberately:
 
