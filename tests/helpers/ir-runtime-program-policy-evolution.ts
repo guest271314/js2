@@ -1291,3 +1291,330 @@ export function beforeRuntimePreparationPolicySource(raw: string): string {
     preparationFail("raw and semantic reciprocal proof disagree");
   return before;
 }
+
+// Exact external-main inventory successor; all preceding policy proofs stay unchanged.
+export const dynamicCodePolicyReceiptPath = "tests/helpers/ir-runtime-program-policy-dynamic-code.json";
+const dynamicReceiptSha256 = "785ef0a740ac17ba636bb75b15cf4eed2266ac4ca0ec588e1eb4cff3642a708f";
+const dynamicBeforeProfile = { ...preparationCurrentProfile, allowedEdgesSha256: edges };
+const dynamicCurrentProfile = {
+  source: {
+    bytes: 567908,
+    sha256: "5c1c4a16928b421c112eb81180a315d31e116ff442a40375e8c6efb4f220c685",
+    gitBlob: "59bdd78821afa174b9273c100a03ec79713249b4",
+  },
+  dataSha256: "65b382b173594abd15ffdef1a51f96daf017f4d91bd60e47f6308da434ab97b3",
+  fileCount: 1778,
+  filesSha256: "c306548d8e3f44695a102d10ef8a9503860e39ef6168719f88f874f616563f54",
+  activationCount: 101,
+  activationHistorySha256: "9629c457a160096e70c35fc3a986abbd8eca145ac4eb688995194d6c29c83650",
+  layersSha256: "3f66bbff64c157092a04740c644ae17d476d7d168faa1bd23629f97492e0c4f7",
+  allowedEdgesSha256: edges,
+};
+const dynamicPrefix = {
+  path: "tests/helpers/ir-runtime-program-policy-evolution.ts",
+  bytes: 53693,
+  sha256: "dd8399e266770753fca08984c4ba33cba9e1486d3243571d988416569cbc981a",
+};
+const dynamicC2aReceipt = {
+  path: runtimePreparationPolicyReceiptPath,
+  bytes: 6239,
+  sha256: "3ebfca62d268ca5bcc8b1c461ef6e71b55bd513a5649bf6bce3fe6ee689032ca",
+};
+interface DynamicInventoryAddition {
+  fileIndex: number;
+  beforeIndex: number;
+  row: Record<string, string>;
+  previous: Record<string, string>;
+  next: Record<string, string>;
+  sourcePin: { path: string; bytes: number; sha256: string };
+  // All offsets explicitly use UTF-16 code units, as in the unchanged C2a raw proof.
+  rawSpan: {
+    beforeOffset: number;
+    afterOffset: number;
+    before: string;
+    after: string;
+    beforeSha256: string;
+    afterSha256: string;
+  };
+}
+// Literal reviewed authority, never selected or populated from a supplied receipt.
+const dynamicAdditions: DynamicInventoryAddition[] = [
+  {
+    fileIndex: 202,
+    beforeIndex: 202,
+    row: {
+      path: "src/codegen/array-method-arg-order.ts",
+      state: "unmigrated",
+      layer: "mixed-needs-split",
+      destination: "backend-wasmgc",
+      owner: "3518-coordinator",
+      nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+    },
+    previous: {
+      path: "src/codegen/array-literal-any-carrier.ts",
+      state: "unmigrated",
+      layer: "mixed-needs-split",
+      destination: "backend-wasmgc",
+      owner: "3518-coordinator",
+      nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+    },
+    next: {
+      path: "src/codegen/array-method-host.ts",
+      state: "unmigrated",
+      layer: "mixed-needs-split",
+      destination: "backend-wasmgc",
+      owner: "3518-coordinator",
+      nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+    },
+    sourcePin: {
+      path: "src/codegen/array-method-arg-order.ts",
+      bytes: 6032,
+      sha256: "9a4527970fd0fd12f7f0fc7210e92a63f64872b143c4d5bc5931ea0f8be03f0b",
+    },
+    rawSpan: {
+      beforeOffset: 109891,
+      afterOffset: 109891,
+      before:
+        '    {\n      "path": "src/codegen/array-method-host.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n',
+      after:
+        '    {\n      "path": "src/codegen/array-method-arg-order.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n    {\n      "path": "src/codegen/array-method-host.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n',
+      beforeSha256: "4cf17df2ddb36ff6c0a270a0c0f4542cccca6806d155c1f8720027ed04030a22",
+      afterSha256: "c1c44f40e1731fe2ae2adef0e0ee5d357fcdf8388d9f311bf2ca20982ccf2cb1",
+    },
+  },
+  {
+    fileIndex: 1404,
+    beforeIndex: 1403,
+    row: {
+      path: "src/runtime/dynamic-code-policy.ts",
+      state: "unmigrated",
+      layer: "legacy-host",
+    },
+    previous: {
+      path: "src/runtime/dom-capability-adapter.ts",
+      state: "unmigrated",
+      layer: "legacy-host",
+    },
+    next: {
+      path: "src/runtime/dynamic-function-import.ts",
+      state: "unmigrated",
+      layer: "legacy-host",
+    },
+    sourcePin: {
+      path: "src/runtime/dynamic-code-policy.ts",
+      bytes: 3863,
+      sha256: "afad7fbda3469347671a99f6564de57d45e135c0dee989da5b6f0c1d249ad5af",
+    },
+    rawSpan: {
+      beforeOffset: 488814,
+      afterOffset: 489134,
+      before:
+        '    {\n      "path": "src/runtime/dynamic-function-import.ts",\n      "state": "unmigrated",\n      "layer": "legacy-host"\n    },\n',
+      after:
+        '    {\n      "path": "src/runtime/dynamic-code-policy.ts",\n      "state": "unmigrated",\n      "layer": "legacy-host"\n    },\n    {\n      "path": "src/runtime/dynamic-function-import.ts",\n      "state": "unmigrated",\n      "layer": "legacy-host"\n    },\n',
+      beforeSha256: "8705064bdfb67310ae65cb3203cc2d97840244bcf27f229d71e2f3707e5ed240",
+      afterSha256: "254eeb01645faa832948ed42ca47120523a67c845ac23da752f1d129971fced1",
+    },
+  },
+];
+interface DynamicCodePolicyReceipt {
+  schema: string;
+  kind: string;
+  checkpoint: string;
+  incomingMain: string;
+  before: Profile & { allowedEdgesSha256: string };
+  current: Profile & { allowedEdgesSha256: string };
+  helperPrefix: typeof dynamicPrefix;
+  c2aReceipt: typeof dynamicC2aReceipt;
+  additions: DynamicInventoryAddition[];
+}
+function dynamicFail(detail: string): never {
+  throw new Error("dynamic code inventory policy evolution: " + detail);
+}
+/** Authenticate immutable successor authority on every action, never from a cached success. */
+export function authenticateDynamicCodePolicyEvolution(
+  text = readFileSync(new URL(`../../${dynamicCodePolicyReceiptPath}`, import.meta.url), "utf8"),
+): DynamicCodePolicyReceipt {
+  if (typeof text !== "string" || Buffer.byteLength(text) !== 6159 || sha(text) !== dynamicReceiptSha256)
+    dynamicFail("receipt digest mismatch");
+  const receipt = JSON.parse(text) as DynamicCodePolicyReceipt;
+  if (
+    !same(Object.keys(receipt), [
+      "schema",
+      "kind",
+      "checkpoint",
+      "incomingMain",
+      "before",
+      "current",
+      "helperPrefix",
+      "c2aReceipt",
+      "additions",
+    ]) ||
+    receipt.schema !== "ir-runtime-program-policy-dynamic-code-v1" ||
+    receipt.kind !== "external-main-inventory-successor" ||
+    receipt.checkpoint !== "b7699b35670290296b43cd83f8bb0146873e2b36" ||
+    receipt.incomingMain !== "9ba8f119a715a4fac719d82014f48baa43f4433d" ||
+    !same(receipt.before, dynamicBeforeProfile) ||
+    !same(receipt.current, dynamicCurrentProfile) ||
+    !same(receipt.helperPrefix, dynamicPrefix) ||
+    !same(receipt.c2aReceipt, dynamicC2aReceipt) ||
+    !same(receipt.additions, dynamicAdditions) ||
+    receipt.additions.length !== 2
+  )
+    dynamicFail("fixed receipt population mismatch");
+  let beforeEnd = -1,
+    afterEnd = -1,
+    displacement = 0;
+  for (const [index, addition] of receipt.additions.entries()) {
+    const span = addition.rawSpan;
+    if (
+      !same(Object.keys(addition), ["fileIndex", "beforeIndex", "row", "previous", "next", "sourcePin", "rawSpan"]) ||
+      addition.fileIndex !== addition.beforeIndex + index ||
+      !span.before ||
+      !span.after ||
+      sha(span.before) !== span.beforeSha256 ||
+      sha(span.after) !== span.afterSha256 ||
+      span.beforeOffset <= beforeEnd ||
+      span.afterOffset <= afterEnd ||
+      span.afterOffset !== span.beforeOffset + displacement ||
+      span.after.length - span.before.length !== (index === 0 ? 320 : 123)
+    )
+      dynamicFail("fixed addition membership, raw anchors or order mismatch");
+    beforeEnd = span.beforeOffset + span.before.length;
+    afterEnd = span.afterOffset + span.after.length;
+    displacement += span.after.length - span.before.length;
+  }
+  const helper = readFileSync(new URL("./ir-runtime-program-policy-evolution.ts", import.meta.url));
+  if (
+    helper.length < dynamicPrefix.bytes ||
+    createHash("sha256").update(helper.subarray(0, dynamicPrefix.bytes)).digest("hex") !== dynamicPrefix.sha256
+  )
+    dynamicFail("original helper prefix changed");
+  for (const pin of [dynamicC2aReceipt, ...dynamicAdditions.map((addition) => addition.sourcePin)]) {
+    const bytes = readFileSync(new URL(`../../${pin.path}`, import.meta.url));
+    if (bytes.length !== pin.bytes || createHash("sha256").update(bytes).digest("hex") !== pin.sha256)
+      dynamicFail("full-file input changed: " + pin.path);
+  }
+  const c2a = authenticateRuntimePreparationPolicyEvolution();
+  if (!same(c2a.current, preparationCurrentProfile)) dynamicFail("C2a predecessor authority mismatch");
+  return freeze(receipt);
+}
+function dynamicSemanticProfile(
+  policy: MutableIrRuntimeProgramPolicy,
+  profile: DynamicCodePolicyReceipt["current"],
+): void {
+  if (
+    digest(policy) !== profile.dataSha256 ||
+    policy.files.length !== profile.fileCount ||
+    policy.activationHistory.length !== profile.activationCount ||
+    digest(policy.files) !== profile.filesSha256 ||
+    digest(policy.activationHistory) !== profile.activationHistorySha256 ||
+    digest(policy.layers) !== profile.layersSha256 ||
+    digest(policy.allowedEdges) !== profile.allowedEdgesSha256
+  )
+    dynamicFail("complete policy profile mismatch");
+}
+function proveDynamicCodeInventoryPolicy(
+  value: unknown,
+  freshlyVerifiedReceipt?: DynamicCodePolicyReceipt,
+): { current: MutableIrRuntimeProgramPolicy; predecessor: MutableIrRuntimeProgramPolicy } {
+  // Descriptor capture must precede authority I/O and any caller property read.
+  const current = capture(value) as MutableIrRuntimeProgramPolicy;
+  const receipt = freshlyVerifiedReceipt ?? authenticateDynamicCodePolicyEvolution();
+  dynamicSemanticProfile(current, receipt.current);
+  if (
+    !same(Object.keys(current), wksTopKeys) ||
+    current.layers.length !== 20 ||
+    current.files.filter((row) => row.layer === "legacy-host").length !== 55
+  )
+    dynamicFail("fixed inventory population mismatch");
+  // Validate both rows against the untouched current array before removing either.
+  for (const addition of receipt.additions) {
+    if (
+      !same(Object.keys(current.files[addition.fileIndex]!), Object.keys(addition.row)) ||
+      !same(current.files[addition.fileIndex - 1], addition.previous) ||
+      !same(current.files[addition.fileIndex], addition.row) ||
+      !same(current.files[addition.fileIndex + 1], addition.next) ||
+      current.files.filter((row) => row.path === addition.row.path).length !== 1
+    )
+      dynamicFail("fixed file row schema/order or neighbors mismatch");
+  }
+  const predecessor = capture(current) as MutableIrRuntimeProgramPolicy;
+  for (const addition of [...receipt.additions].reverse()) predecessor.files.splice(addition.fileIndex, 1);
+  dynamicSemanticProfile(predecessor, receipt.before);
+  // Unchanged C2a proves the entire Number -> WKS -> C1 -> B authority chain.
+  const verifiedC2a = authenticateRuntimePreparationPolicy(predecessor);
+  const replay = capture(verifiedC2a) as MutableIrRuntimeProgramPolicy;
+  // Validate all predecessor neighbors before replay inserts either fixed row.
+  for (const addition of receipt.additions)
+    if (
+      !same(replay.files[addition.beforeIndex - 1], addition.previous) ||
+      !same(replay.files[addition.beforeIndex], addition.next)
+    )
+      dynamicFail("predecessor replay neighbors mismatch");
+  for (const [index, addition] of receipt.additions.entries())
+    replay.files.splice(
+      addition.beforeIndex + index,
+      0,
+      capture(addition.row) as MutableIrRuntimeProgramPolicy["files"][number],
+    );
+  dynamicSemanticProfile(replay, receipt.current);
+  if (!same(replay, current)) dynamicFail("complete independent reciprocal replay mismatch");
+  return { current, predecessor };
+}
+export function authenticateDynamicCodeInventoryPolicy(value: unknown): IrValidationPolicy {
+  return freeze(proveDynamicCodeInventoryPolicy(value).current) as IrValidationPolicy;
+}
+export function beforeDynamicCodeInventoryPolicy(value: unknown): MutableIrRuntimeProgramPolicy {
+  return proveDynamicCodeInventoryPolicy(value).predecessor;
+}
+function dynamicRawProfile(raw: string, profile: Profile): void {
+  const bytes = Buffer.byteLength(raw);
+  if (
+    bytes !== profile.source.bytes ||
+    sha(raw) !== profile.source.sha256 ||
+    createHash("sha1").update(`blob ${bytes}\0`).update(raw).digest("hex") !== profile.source.gitBlob
+  )
+    dynamicFail("complete raw source profile mismatch");
+}
+function applyDynamicCodeInventoryRaw(raw: string, receipt: DynamicCodePolicyReceipt, forward: boolean): string {
+  dynamicRawProfile(raw, forward ? receipt.before : receipt.current);
+  let end = 0;
+  const pieces: string[] = [];
+  // Slice the unchanged input in ascending offsets; never apply stale offsets to an edited string.
+  for (const addition of receipt.additions) {
+    const span = addition.rawSpan,
+      at = forward ? span.beforeOffset : span.afterOffset;
+    const from = forward ? span.before : span.after,
+      to = forward ? span.after : span.before;
+    if (
+      !from ||
+      !to ||
+      at < end ||
+      Buffer.byteLength(raw.slice(0, at)) !== at ||
+      raw.slice(at, at + from.length) !== from ||
+      raw.indexOf(from) !== at ||
+      raw.lastIndexOf(from) !== at
+    )
+      dynamicFail("raw fragment missing, duplicated or reordered");
+    pieces.push(raw.slice(end, at), to);
+    end = at + from.length;
+  }
+  pieces.push(raw.slice(end));
+  const output = pieces.join("");
+  dynamicRawProfile(output, forward ? receipt.current : receipt.before);
+  return output;
+}
+/** Exact raw insertion inverse, semantic agreement and unchanged full C2a raw chain. */
+export function beforeDynamicCodeInventoryPolicySource(raw: string): string {
+  if (typeof raw !== "string") dynamicFail("raw input must be a primitive string");
+  const receipt = authenticateDynamicCodePolicyEvolution();
+  const predecessor = applyDynamicCodeInventoryRaw(raw, receipt, false);
+  const semantic = proveDynamicCodeInventoryPolicy(JSON.parse(raw), receipt);
+  const parsed = JSON.parse(predecessor) as MutableIrRuntimeProgramPolicy;
+  dynamicSemanticProfile(parsed, receipt.before);
+  beforeRuntimePreparationPolicySource(predecessor);
+  if (!same(parsed, semantic.predecessor) || applyDynamicCodeInventoryRaw(predecessor, receipt, true) !== raw)
+    dynamicFail("raw and semantic reciprocal proof disagree");
+  return predecessor;
+}

@@ -47,7 +47,7 @@ import { readTest262ExactManifest } from "../scripts/test262-exact-manifest.mjs"
 // injects into EVERY test contains a direct `eval`, so any test keeping it
 // reachable carries the module-level import. Measured on one 162-file ES5 lever:
 // 82 files masked, 18 of them actually passing.
-import { instantiateTest262Module } from "../scripts/test262-import-object.mjs";
+import { instantiateTest262Module, TEST262_DYNAMIC_CODE_POLICY } from "../scripts/test262-import-object.mjs";
 import {
   ITERATOR_BINDING_PREAMBLE,
   needsIteratorBinding as sourceNeedsIteratorBinding,
@@ -3924,7 +3924,10 @@ export async function handleNegativeTest(
       // Try instantiating: if wasm validation rejects it, that also counts.
       try {
         const sandbox = getTestSandbox();
-        const imports = buildImports(result.imports, undefined, result.stringPool, { globalSandbox: sandbox });
+        const imports = buildImports(result.imports, undefined, result.stringPool, {
+          globalSandbox: sandbox,
+          dynamicCode: TEST262_DYNAMIC_CODE_POLICY,
+        });
         // (#4162) Shared seam: without it a standalone module linking
         // `js2wasm:runtime-eval` throws a LINK error here, which this catch
         // would score as "wasm validation rejected it" — a second way for the
@@ -4619,6 +4622,7 @@ async function runOriginalHarnessVariant(
       markCoherentBuiltinRealm(sandbox);
       const imports = buildImports(result.imports, { console: consoleProxy }, result.stringPool, {
         globalSandbox: sandbox,
+        dynamicCode: TEST262_DYNAMIC_CODE_POLICY,
       }) as any;
       const instantiateStarted = performance.now();
       instance = await instantiateTest262Module(result.binary, imports, {
@@ -5138,7 +5142,10 @@ export async function runSyntheticTest262File(
   let instance: any = null;
   try {
     const sandbox = getTestSandbox();
-    const importResult = buildImports(result.imports, undefined, result.stringPool, { globalSandbox: sandbox });
+    const importResult = buildImports(result.imports, undefined, result.stringPool, {
+      globalSandbox: sandbox,
+      dynamicCode: TEST262_DYNAMIC_CODE_POLICY,
+    });
     const imports = importResult as any;
     const instantiateStart = performance.now();
     // (#4162) Same shared seam as the original-harness lane — this legacy

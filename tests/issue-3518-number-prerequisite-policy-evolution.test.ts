@@ -4,6 +4,11 @@ import { readFileSync } from "node:fs";
 import { setImmediate } from "node:timers/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  authenticateDynamicCodePolicyEvolution,
+  authenticateDynamicCodeInventoryPolicy,
+  beforeDynamicCodeInventoryPolicy,
+  beforeDynamicCodeInventoryPolicySource,
+  dynamicCodePolicyReceiptPath,
   authenticateRuntimePreparationPolicyEvolution,
   authenticateRuntimePreparationPolicy,
   beforeRuntimePreparationPolicy,
@@ -54,7 +59,10 @@ const sha = (text: string): string => createHash("sha256").update(text).digest("
 const digest = (value: unknown): string => sha(JSON.stringify(value));
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 // The original Number historical input is derived from the outer actual C2a policy.
-const raw = (): string => beforeRuntimePreparationPolicySource(read("scripts/compiler-boundaries.json"));
+const raw = (): string =>
+  beforeRuntimePreparationPolicySource(
+    beforeDynamicCodeInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+  );
 const actual = (): Policy => JSON.parse(raw()) as Policy;
 const receiptText = (): string => read(numberPrerequisitePolicyReceiptPath);
 const receipt = () => authenticateNumberPrerequisitePolicyEvolution(receiptText());
@@ -857,10 +865,10 @@ describe("Number prerequisite exact successor of genuine WKS, C1 and B", () => {
     }));
 });
 
-// C2a current controls read disk directly; the original Number rows above keep their derived historical input.
+// C2a controls receive authenticated predecessor bytes; the original Number rows keep their historical input.
 describe("C2a exact runtime preparation policy successor", () => {
   const path = "src/ir/runtime/intrinsic-preparation.ts";
-  const currentRaw = (): string => read("scripts/compiler-boundaries.json");
+  const currentRaw = (): string => beforeDynamicCodeInventoryPolicySource(read("scripts/compiler-boundaries.json"));
   const current = (): Policy => JSON.parse(currentRaw()) as Policy;
   const authority = () => authenticateRuntimePreparationPolicyEvolution();
   const accept = (p: Policy): void => {
@@ -1239,5 +1247,515 @@ describe("C2a exact runtime preparation policy successor", () => {
     Object.assign(number, JSON.parse(original));
     authenticateNumberPrerequisitePolicy(number);
     expect(replay(number)).toEqual(p);
+  });
+});
+
+// Exact external-main inventory input; these controls never reuse the historical raw readers.
+describe("dynamic-code inventory successor preserves the C2a policy proof", () => {
+  const latestRaw = (): string => read("scripts/compiler-boundaries.json");
+  const latest = (): Policy => JSON.parse(latestRaw()) as Policy;
+  const added = { path: "src/runtime/dynamic-code-policy.ts", state: "unmigrated", layer: "legacy-host" };
+  const arrayRow: Record<string, string> = {
+    path: "src/codegen/array-method-arg-order.ts",
+    state: "unmigrated",
+    layer: "mixed-needs-split",
+    destination: "backend-wasmgc",
+    owner: "3518-coordinator",
+    nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+  };
+  const arrayInsertion =
+    '    {\n      "path": "src/codegen/array-method-arg-order.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n';
+  const insertion =
+    '    {\n      "path": "src/runtime/dynamic-code-policy.ts",\n      "state": "unmigrated",\n      "layer": "legacy-host"\n    },\n';
+  const accept = (p: unknown): void => {
+    expect(authenticateDynamicCodeInventoryPolicy(p).files).toHaveLength(1778);
+  };
+  const refuse = (p: unknown): void => {
+    expect(() => authenticateDynamicCodeInventoryPolicy(p)).toThrow();
+    expect(() => beforeDynamicCodeInventoryPolicy(p)).toThrow();
+  };
+  const restore = (p: Policy, original: string): void => {
+    for (const key of Reflect.ownKeys(p)) expect(Reflect.deleteProperty(p, key)).toBe(true);
+    Object.assign(p, JSON.parse(original));
+    expect(JSON.stringify(p)).toBe(original);
+    accept(p);
+  };
+  const reject = (edit: (p: Policy) => void): void => {
+    const p = latest(),
+      original = JSON.stringify(p);
+    accept(p);
+    edit(p);
+    expect(JSON.stringify(p)).not.toBe(original);
+    refuse(p);
+    restore(p, original);
+  };
+  it("independently pins the current inventory, fixed authority and reciprocal insertion", () => {
+    const text = latestRaw(),
+      p = latest();
+    expect(Buffer.byteLength(text)).toBe(567908);
+    expect(sha(text)).toBe("5c1c4a16928b421c112eb81180a315d31e116ff442a40375e8c6efb4f220c685");
+    expect(
+      createHash("sha1")
+        .update(`blob ${Buffer.byteLength(text)}\0`)
+        .update(text)
+        .digest("hex"),
+    ).toBe("59bdd78821afa174b9273c100a03ec79713249b4");
+    expect(digest(p)).toBe("65b382b173594abd15ffdef1a51f96daf017f4d91bd60e47f6308da434ab97b3");
+    expect(p.files).toHaveLength(1778);
+    expect(p.files[202]).toEqual(arrayRow);
+    expect(Object.keys(p.files[202]!)).toEqual(["path", "state", "layer", "destination", "owner", "nextBoundary"]);
+    expect(p.files[1404]).toEqual(added);
+    expect(Object.keys(p.files[1404]!)).toEqual(["path", "state", "layer"]);
+    expect(p.files.filter((row) => row.layer === "legacy-host")).toHaveLength(55);
+    expect(p.activationHistory).toHaveLength(101);
+    expect(p.layers).toHaveLength(20);
+    expect(digest(p.files)).toBe("c306548d8e3f44695a102d10ef8a9503860e39ef6168719f88f874f616563f54");
+    expect(digest(p.layers)).toBe("3f66bbff64c157092a04740c644ae17d476d7d168faa1bd23629f97492e0c4f7");
+    expect(digest(p.activationHistory)).toBe("9629c457a160096e70c35fc3a986abbd8eca145ac4eb688995194d6c29c83650");
+    expect(digest(p.allowedEdges)).toBe("efe7e7ed8dee1a009d2bef3ff36dba80df1a805cd3f5b7b472e62ec6dcff64c7");
+    const pins = [
+      [dynamicCodePolicyReceiptPath, 6159, "785ef0a740ac17ba636bb75b15cf4eed2266ac4ca0ec588e1eb4cff3642a708f"],
+      [runtimePreparationPolicyReceiptPath, 6239, "3ebfca62d268ca5bcc8b1c461ef6e71b55bd513a5649bf6bce3fe6ee689032ca"],
+      [
+        "src/codegen/array-method-arg-order.ts",
+        6032,
+        "9a4527970fd0fd12f7f0fc7210e92a63f64872b143c4d5bc5931ea0f8be03f0b",
+      ],
+      ["src/runtime/dynamic-code-policy.ts", 3863, "afad7fbda3469347671a99f6564de57d45e135c0dee989da5b6f0c1d249ad5af"],
+    ] as const;
+    for (const [path, bytes, hash] of pins) {
+      const source = read(path);
+      expect(Buffer.byteLength(source)).toBe(bytes);
+      expect(sha(source)).toBe(hash);
+    }
+    const prefix = Buffer.from(read("tests/helpers/ir-runtime-program-policy-evolution.ts")).subarray(0, 53693);
+    expect(prefix.length).toBe(53693);
+    expect(createHash("sha256").update(prefix).digest("hex")).toBe(
+      "dd8399e266770753fca08984c4ba33cba9e1486d3243571d988416569cbc981a",
+    );
+    accept(p);
+    const c2aRaw = beforeDynamicCodeInventoryPolicySource(text),
+      c2a = beforeDynamicCodeInventoryPolicy(p);
+    expect(Buffer.byteLength(c2aRaw)).toBe(567465);
+    expect(sha(c2aRaw)).toBe("92d653aff02d823339071f24721b803d88da4f31bdbd721859b0ac48b6c9c7f7");
+    expect(
+      createHash("sha1")
+        .update(`blob ${Buffer.byteLength(c2aRaw)}\0`)
+        .update(c2aRaw)
+        .digest("hex"),
+    ).toBe("70b280c7cf2a56cbd5cbfa88b484b57414d2ef7c");
+    expect(digest(c2a.files)).toBe("ca4d9d7d5c999a4e742abd7773d847f1652ca8fe995a491a594fca1e5cf37a1a");
+    expect(digest(c2a)).toBe("28ae111b7b9f0f6eda144d5d57beaf76fd5c7617b474846d39409a56cc196e08");
+    expect(c2a.files).toHaveLength(1776);
+    expect(c2a.files.filter((row) => row.layer === "legacy-host")).toHaveLength(54);
+    expect(JSON.parse(c2aRaw)).toEqual(c2a);
+    expect(Buffer.byteLength(insertion)).toBe(123);
+    expect(c2aRaw.slice(488814).startsWith('    {\n      "path": "src/runtime/dynamic-function-import.ts",')).toBe(
+      true,
+    );
+    expect(Buffer.byteLength(arrayInsertion)).toBe(320);
+    expect(c2aRaw.slice(109891).startsWith('    {\n      "path": "src/codegen/array-method-host.ts",')).toBe(true);
+    expect(
+      c2aRaw.slice(0, 109891) + arrayInsertion + c2aRaw.slice(109891, 488814) + insertion + c2aRaw.slice(488814),
+    ).toBe(text);
+    const replay = clone(c2a);
+    replay.files.splice(202, 0, { ...arrayRow });
+    replay.files.splice(1404, 0, { ...added });
+    expect(replay).toEqual(p);
+    expect(authenticateRuntimePreparationPolicy(c2a).files).toHaveLength(1776);
+    const number = beforeRuntimePreparationPolicy(c2a);
+    authenticateNumberPrerequisitePolicy(number);
+    const wks = beforeNumberPrerequisitePolicy(number);
+    authenticateWellKnownSymbolPolicy(wks);
+    const c1 = beforeWellKnownSymbolPolicy(wks);
+    authenticateIrRuntimeProgramPolicy(c1);
+    authenticateIrValidationPolicy(beforeIrRuntimeProgramPolicy(c1));
+    expect(beforeRuntimePreparationPolicySource(c2aRaw)).toBe(raw());
+  });
+
+  const mutations: readonly [string, (p: Policy) => void][] = [
+    [
+      "missing row",
+      (p) => {
+        p.files.splice(1404, 1);
+      },
+    ],
+    [
+      "duplicate row",
+      (p) => {
+        p.files.splice(1404, 0, { ...added });
+      },
+    ],
+    [
+      "moved row",
+      (p) => {
+        const row = p.files.splice(1404, 1)[0]!;
+        p.files.splice(1405, 0, row);
+      },
+    ],
+    [
+      "path",
+      (p) => {
+        p.files[1404]!.path = "src/runtime/wrong.ts";
+      },
+    ],
+    [
+      "state",
+      (p) => {
+        p.files[1404]!.state = "clean";
+      },
+    ],
+    [
+      "layer",
+      (p) => {
+        p.files[1404]!.layer = "ir-runtime";
+      },
+    ],
+    [
+      "extra field",
+      (p) => {
+        p.files[1404]!.extra = "changed";
+      },
+    ],
+    [
+      "previous neighbor",
+      (p) => {
+        p.files[1403]!.path += ".changed";
+      },
+    ],
+    [
+      "next neighbor",
+      (p) => {
+        p.files[1405]!.state = "clean";
+      },
+    ],
+    [
+      "retained prefix",
+      (p) => {
+        p.files[0]!.state = "changed";
+      },
+    ],
+    [
+      "unrelated layer",
+      (p) => {
+        p.layers[0]!.roots.push("src/unreviewed");
+      },
+    ],
+    [
+      "activation",
+      (p) => {
+        p.activationHistory[0]!.minModules++;
+      },
+    ],
+    [
+      "allowed edge",
+      (p) => {
+        p.allowedEdges.unreviewed = ["legacy-host"];
+      },
+    ],
+    [
+      "top level",
+      (p) => {
+        p.description = "changed";
+      },
+    ],
+  ];
+  it.each(mutations)("rejects changed inventory %s after success and restores the same object", (_name, edit) =>
+    reject(edit),
+  );
+  const arrayMutations: readonly [string, (p: Policy) => void][] = [
+    [
+      "missing",
+      (p) => {
+        p.files.splice(202, 1);
+      },
+    ],
+    [
+      "duplicate",
+      (p) => {
+        p.files.splice(202, 0, { ...arrayRow });
+      },
+    ],
+    [
+      "moved",
+      (p) => {
+        const row = p.files.splice(202, 1)[0]!;
+        p.files.splice(203, 0, row);
+      },
+    ],
+    ...["path", "state", "layer", "destination", "owner", "nextBoundary"].map(
+      (field): [string, (p: Policy) => void] => [
+        field,
+        (p) => {
+          p.files[202]![field] += ".changed";
+        },
+      ],
+    ),
+    [
+      "extra field",
+      (p) => {
+        p.files[202]!.extra = "changed";
+      },
+    ],
+    [
+      "schema order",
+      (p) => {
+        p.files[202] = Object.fromEntries(Object.entries(p.files[202]!).reverse());
+      },
+    ],
+    [
+      "previous neighbor",
+      (p) => {
+        p.files[201]!.path += ".changed";
+      },
+    ],
+    [
+      "next neighbor",
+      (p) => {
+        p.files[203]!.state = "clean";
+      },
+    ],
+    [
+      "swapped additions",
+      (p) => {
+        [p.files[202], p.files[1404]] = [p.files[1404]!, p.files[202]!];
+      },
+    ],
+    [
+      "wrong replay position",
+      (p) => {
+        const row = p.files.splice(1404, 1)[0]!;
+        p.files.splice(1403, 0, row);
+      },
+    ],
+  ];
+  it.each(arrayMutations)("rejects array successor %s with both old-space neighbors retained", (_name, edit) =>
+    reject(edit),
+  );
+
+  for (const shape of [
+    "accessor",
+    "hidden",
+    "symbol",
+    "prototype",
+    "sparse",
+    "array-extra",
+    "cycle",
+    "literal-proto",
+    "toJSON",
+  ] as const)
+    it(`captures successor ${shape} without caller execution before corrupted authority reads`, () => {
+      const p = latest(),
+        original = JSON.stringify(p);
+      accept(p);
+      let calls = 0;
+      if (shape === "accessor")
+        Object.defineProperty(p, "description", {
+          configurable: true,
+          enumerable: true,
+          get() {
+            calls++;
+            return "changed";
+          },
+        });
+      if (shape === "hidden") Object.defineProperty(p.files[1404]!, "path", { enumerable: false });
+      if (shape === "symbol")
+        Object.defineProperty(p, Symbol("extra"), { configurable: true, enumerable: true, value: 1 });
+      if (shape === "prototype") Object.setPrototypeOf(p.files[1404]!, { inherited: true });
+      if (shape === "sparse") Reflect.deleteProperty(p.files, "1404");
+      if (shape === "array-extra")
+        Object.defineProperty(p.files, "extra", { configurable: true, enumerable: true, value: 1 });
+      if (shape === "cycle") p.extra = p;
+      if (shape === "literal-proto")
+        Object.defineProperty(p, "__proto__", { configurable: true, enumerable: true, value: { data: true } });
+      if (shape === "toJSON")
+        p.toJSON = () => {
+          calls++;
+          return latest();
+        };
+      if (shape === "literal-proto") refuse(p);
+      const exact = new URL(`../${dynamicCodePolicyReceiptPath}`, import.meta.url).pathname;
+      try {
+        intercepted.set(exact, 0);
+        interceptedReads.set(exact, 0);
+        refuse(p);
+        // Descriptor-invalid values stop before I/O; literal data reaches profile authentication.
+        if (shape !== "literal-proto") expect(interceptedReads.get(exact)).toBe(0);
+        expect(calls).toBe(0);
+      } finally {
+        intercepted.delete(exact);
+        interceptedReads.delete(exact);
+      }
+      restore(p, original);
+    });
+
+  it("returns detached frozen current and fresh mutable predecessor without a successful-object cache", () => {
+    const p = latest();
+    accept(p);
+    const frozen = authenticateDynamicCodeInventoryPolicy(p),
+      first = beforeDynamicCodeInventoryPolicy(p),
+      second = beforeDynamicCodeInventoryPolicy(p);
+    expect(Object.isFrozen(frozen)).toBe(true);
+    expect(Object.isFrozen(frozen.files)).toBe(true);
+    expect(Object.isFrozen(frozen.files[1404])).toBe(true);
+    expect(first).not.toBe(second);
+    expect(first.files).not.toBe(second.files);
+    p.files[1404]!.state = "clean";
+    expect(frozen.files[1404]!.state).toBe("unmigrated");
+    refuse(p);
+    p.files[1404]!.state = "unmigrated";
+    accept(p);
+  });
+  it("keeps predecessor mutants in the unchanged C2a guard and refuses either cross-domain input", () => {
+    const p = latest();
+    accept(p);
+    expect(() => authenticateRuntimePreparationPolicy(p)).toThrow("runtime preparation policy evolution:");
+    const c2a = beforeDynamicCodeInventoryPolicy(p),
+      original = JSON.stringify(c2a);
+    authenticateRuntimePreparationPolicy(c2a);
+    refuse(c2a);
+    expect(() => beforeDynamicCodeInventoryPolicySource(JSON.stringify(c2a))).toThrow();
+    c2a.files[1775]!.state = "unmigrated";
+    expect(() => authenticateRuntimePreparationPolicy(c2a)).toThrow("runtime preparation policy evolution:");
+    expect(() => beforeRuntimePreparationPolicy(c2a)).toThrow("runtime preparation policy evolution:");
+    expect(c2a.files[1775]!.state).toBe("unmigrated");
+    Object.assign(c2a, JSON.parse(original));
+    authenticateRuntimePreparationPolicy(c2a);
+  });
+  it.each(["whitespace", "offset", "missing", "duplicate", "fragment"] as const)(
+    "refuses exact raw %s drift",
+    (change) => {
+      const text = latestRaw();
+      beforeDynamicCodeInventoryPolicySource(text);
+      const at = 489134;
+      const mutant =
+        change === "whitespace"
+          ? text + "\n"
+          : change === "offset"
+            ? " " + text
+            : change === "missing"
+              ? text.slice(0, at) + text.slice(at + insertion.length)
+              : change === "duplicate"
+                ? text.slice(0, at) + insertion + text.slice(at)
+                : text.slice(0, at) + "X" + text.slice(at + 1);
+      expect(mutant).not.toBe(text);
+      expect(() => beforeDynamicCodeInventoryPolicySource(mutant)).toThrow();
+      beforeDynamicCodeInventoryPolicySource(text);
+    },
+  );
+  it.each(["missing", "duplicate", "fragment", "swapped spans", "stale offset"] as const)(
+    "refuses two-span array/raw %s confusion",
+    (change) => {
+      const text = latestRaw();
+      beforeDynamicCodeInventoryPolicySource(text);
+      const at = 109891;
+      const mutant =
+        change === "missing"
+          ? text.slice(0, at) + text.slice(at + arrayInsertion.length)
+          : change === "duplicate"
+            ? text.slice(0, at) + arrayInsertion + text.slice(at)
+            : change === "fragment"
+              ? text.slice(0, at) + "X" + text.slice(at + 1)
+              : change === "stale offset"
+                ? text.slice(0, 488814) + insertion + text.slice(488814 + insertion.length)
+                : text.slice(0, at) +
+                  insertion +
+                  text.slice(at + arrayInsertion.length, 489134) +
+                  arrayInsertion +
+                  text.slice(489134 + insertion.length);
+      expect(mutant).not.toBe(text);
+      expect(() => beforeDynamicCodeInventoryPolicySource(mutant)).toThrow();
+      beforeDynamicCodeInventoryPolicySource(text);
+    },
+  );
+  it("refuses the exact former one-row successor instead of selecting a historical domain", () => {
+    const text = latestRaw();
+    beforeDynamicCodeInventoryPolicySource(text);
+    const staleRaw = text.slice(0, 109891) + text.slice(109891 + arrayInsertion.length);
+    expect(Buffer.byteLength(staleRaw)).toBe(567588);
+    expect(sha(staleRaw)).toBe("070df5fc6f40a164643ea8f9474de5264adee2d588a81afd3b6010620a398c0d");
+    const stale = JSON.parse(staleRaw) as Policy;
+    expect(stale.files).toHaveLength(1777);
+    refuse(stale);
+    expect(() => beforeDynamicCodeInventoryPolicySource(staleRaw)).toThrow();
+    accept(latest());
+  });
+  it("refuses wrapped strings without invoking conversion", () => {
+    accept(latest());
+    let calls = 0;
+    const wrapped = Object(latestRaw());
+    wrapped.toString = () => {
+      calls++;
+      return latestRaw();
+    };
+    expect(() => beforeDynamicCodeInventoryPolicySource(wrapped)).toThrow("raw input must be a primitive string");
+    expect(() => authenticateDynamicCodePolicyEvolution(wrapped)).toThrow("receipt digest mismatch");
+    expect(calls).toBe(0);
+  });
+  it.each(["whitespace", "schema", "profile", "span-offset", "span-fragment"] as const)(
+    "refuses immutable dynamic receipt %s",
+    (change) => {
+      accept(latest());
+      const text = read(dynamicCodePolicyReceiptPath),
+        authority = clone(authenticateDynamicCodePolicyEvolution());
+      if (change === "schema") authority.schema += "changed";
+      if (change === "profile") authority.current.fileCount++;
+      if (change === "span-offset") authority.additions[1]!.rawSpan.afterOffset++;
+      if (change === "span-fragment") authority.additions[1]!.rawSpan.after += "changed";
+      const mutant = change === "whitespace" ? text + "\n" : JSON.stringify(authority);
+      expect(mutant).not.toBe(text);
+      expect(() => authenticateDynamicCodePolicyEvolution(mutant)).toThrow("receipt digest mismatch");
+    },
+  );
+  it.each(["membership", "record order", "source pin", "array schema", "span offset", "span swap"] as const)(
+    "refuses changed fixed two-addition receipt %s",
+    (change) => {
+      accept(latest());
+      const receipt = clone(authenticateDynamicCodePolicyEvolution());
+      if (change === "membership") receipt.additions.pop();
+      if (change === "record order") receipt.additions.reverse();
+      if (change === "source pin") receipt.additions[0]!.sourcePin.sha256 = "0".repeat(64);
+      if (change === "array schema") receipt.additions[0]!.row.owner = "changed";
+      if (change === "span offset") receipt.additions[1]!.rawSpan.afterOffset = 488814;
+      if (change === "span swap")
+        [receipt.additions[0]!.rawSpan, receipt.additions[1]!.rawSpan] = [
+          receipt.additions[1]!.rawSpan,
+          receipt.additions[0]!.rawSpan,
+        ];
+      expect(() => authenticateDynamicCodePolicyEvolution(JSON.stringify(receipt))).toThrow("receipt digest mismatch");
+    },
+  );
+  it.each([
+    dynamicCodePolicyReceiptPath,
+    runtimePreparationPolicyReceiptPath,
+    "tests/helpers/ir-runtime-program-policy-evolution.ts",
+    "src/runtime/dynamic-code-policy.ts",
+    "src/codegen/array-method-arg-order.ts",
+  ])("recaptures changed successor authority %s after success and restores", (path) => {
+    const p = latest(),
+      text = latestRaw(),
+      original = read(path),
+      exact = new URL(`../${path}`, import.meta.url).pathname;
+    accept(p);
+    authenticateDynamicCodePolicyEvolution();
+    beforeDynamicCodeInventoryPolicy(p);
+    beforeDynamicCodeInventoryPolicySource(text);
+    try {
+      intercepted.set(exact, 0);
+      interceptedReads.set(exact, 0);
+      expect(read(path)).not.toBe(original);
+      expect(() => authenticateDynamicCodePolicyEvolution()).toThrow();
+      refuse(p);
+      expect(() => beforeDynamicCodeInventoryPolicySource(text)).toThrow();
+      expect(interceptedReads.get(exact)).toBeGreaterThanOrEqual(5);
+    } finally {
+      intercepted.delete(exact);
+      interceptedReads.delete(exact);
+    }
+    expect(read(path)).toBe(original);
+    accept(p);
+    authenticateDynamicCodePolicyEvolution();
+    beforeDynamicCodeInventoryPolicy(p);
+    beforeDynamicCodeInventoryPolicySource(text);
   });
 });

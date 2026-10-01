@@ -6,6 +6,7 @@ import {
   authenticateWellKnownSymbolPolicyEvolution,
   authenticateWellKnownSymbolPolicy,
   beforeWellKnownSymbolPolicy,
+  beforeDynamicCodeInventoryPolicySource,
   beforeRuntimePreparationPolicySource,
   beforeNumberPrerequisitePolicySource,
   beforeWellKnownSymbolPolicySource,
@@ -22,7 +23,11 @@ const sha = (text: string): string => createHash("sha256").update(text).digest("
 const digest = (value: unknown): string => sha(JSON.stringify(value));
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 const raw = (): string =>
-  beforeNumberPrerequisitePolicySource(beforeRuntimePreparationPolicySource(read("scripts/compiler-boundaries.json")));
+  beforeNumberPrerequisitePolicySource(
+    beforeRuntimePreparationPolicySource(
+      beforeDynamicCodeInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+    ),
+  );
 const actual = (): Policy => JSON.parse(raw()) as Policy;
 const receiptText = (): string => read(wellKnownSymbolPolicyReceiptPath);
 const receipt = () => authenticateWellKnownSymbolPolicyEvolution(receiptText());

@@ -13,6 +13,7 @@ import {
 import {
   beforeIrRuntimeProgramPolicy,
   beforeWellKnownSymbolPolicy,
+  beforeDynamicCodeInventoryPolicy,
   beforeRuntimePreparationPolicy,
   beforeNumberPrerequisitePolicy,
 } from "./helpers/ir-runtime-program-policy-evolution.js";
@@ -32,7 +33,9 @@ function actual(): MutablePolicy {
   const policy = beforeIrRuntimeProgramPolicy(
     beforeWellKnownSymbolPolicy(
       beforeNumberPrerequisitePolicy(
-        beforeRuntimePreparationPolicy(JSON.parse(read("scripts/compiler-boundaries.json"))),
+        beforeRuntimePreparationPolicy(
+          beforeDynamicCodeInventoryPolicy(JSON.parse(read("scripts/compiler-boundaries.json"))),
+        ),
       ),
     ),
   ) as MutablePolicy;

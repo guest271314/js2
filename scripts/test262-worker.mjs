@@ -46,7 +46,7 @@ import {
 // `js2wasm:runtime-eval` imports). This worker used to own that logic alone;
 // the in-process lanes did not have it, so their standalone runs died at
 // instantiate and MASKED the tests' real error signatures.
-import { instantiateTest262Module } from "./test262-import-object.mjs";
+import { instantiateTest262Module, TEST262_DYNAMIC_CODE_POLICY } from "./test262-import-object.mjs";
 // (#5353) ONE gate + ONE pre-warm contract for the compiled `Temporal` global,
 // shared with tests/test262-runner.ts and tests/test262-shared.ts.
 import {
@@ -2011,7 +2011,9 @@ function extractWatFunctionSnippet(wat, funcName) {
 async function buildInvalidBinaryError(source, sourceMapUrl, result, target) {
   let detailErr;
   try {
-    const imports = buildImports(result.imports, undefined, result.stringPool);
+    const imports = buildImports(result.imports, undefined, result.stringPool, {
+      dynamicCode: TEST262_DYNAMIC_CODE_POLICY,
+    });
     // (#4162) Same shared seam. This path exists to name WHY a binary is
     // invalid; without the provider a standalone module would report the
     // unresolved `js2wasm:runtime-eval` import as the reason and bury the
@@ -2419,7 +2421,9 @@ process.on("message", async (msg) => {
       result.imports,
       originalHarness ? { console: consoleProxy } : undefined,
       result.stringPool,
-      originalHarness ? { globalSandbox: harnessSandbox } : undefined,
+      originalHarness
+        ? { globalSandbox: harnessSandbox, dynamicCode: TEST262_DYNAMIC_CODE_POLICY }
+        : { dynamicCode: TEST262_DYNAMIC_CODE_POLICY },
     );
     if (REALM_CANARY_MODE) {
       runtimeIntrinsicCanarySnapshot = snapshotRuntimeIntrinsicSurface(importObj);

@@ -24,6 +24,7 @@ import {
 } from "./helpers/ir-runtime-program-relocation.js";
 import { historicalIrValidationPolicyView } from "./helpers/ir-validation-policy-evolution.js";
 import {
+  beforeDynamicCodeInventoryPolicy,
   beforeRuntimePreparationPolicy,
   authenticateNumberPrerequisitePolicy,
   beforeNumberPrerequisitePolicy,
@@ -134,7 +135,9 @@ const newModules = [
 ];
 const policy = () => {
   const actual = beforeRuntimePreparationPolicy(
-    JSON.parse(readFileSync(resolve(repository, "scripts/compiler-boundaries.json"), "utf8")),
+    beforeDynamicCodeInventoryPolicy(
+      JSON.parse(readFileSync(resolve(repository, "scripts/compiler-boundaries.json"), "utf8")),
+    ),
   );
   // Authenticate the whole current policy before any bounded historical view.
   authenticateNumberPrerequisitePolicy(actual);
