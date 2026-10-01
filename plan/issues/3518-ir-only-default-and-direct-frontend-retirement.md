@@ -6,7 +6,7 @@ created: 2026-07-21
 updated: 2026-10-01
 priority: critical
 feasibility: hard
-reasoning_effort: max
+reasoning_effort: high
 task_type: refactor
 area: ir, codegen, codegen-linear, compiler
 language_feature: compiler-internals
@@ -17,7 +17,7 @@ horizon: xl
 complexity: XL
 es_edition: n/a
 lane: ir-retirement
-model: gpt-6-astra
+model: gpt-6.1-sol
 related: [1373b, 2855, 2950, 3090, 3142, 3143, 3341, 3517, 3529, 3520, 3521, 3522, 3523, 3525, 3526, 3527, 3528, 3678, 3681, 4382, 4576, 4577]
 origin: "2026-07-21 explicit user directive: enable IR-only by default and retire the old direct codegen path"
 oracle-ratchet-allow:
@@ -18907,3 +18907,13 @@ Additional pre-B boundary baseline: 353/457, 104 existing failures, zero skipped
 ## 2026-10-01 — final Phase B stand-down and publication repair
 
 The user requested wrap-up and handoff publication. Phase B is frozen as 14 pinned paths (13 changed), 133 preserved declaration transfers and 39 drafted controls; no candidate compile, tests or actual boundary gate were run. Production files in the integration remain at the phase-A dependency. The original 212/219 and 353/457 failing baselines remain immutable; the partial initial-reader probe is 0/2, exposing missing historical source projections rather than healthy positives. The complete frozen writer, root patches, original rows, policy review and read-only graph findings are archived as inert raw files in [the continuation handoff](../log/3518-validation-lowering-b-2026-10-01/HANDOFF.md). Only the Phase B claim is released (40138-k7ulq2nc, 2026-10-01T05:53:19Z); verify and reclaim before resuming. PR6378 remains the ready phase-A implementation. Its first quality run found three evidence citations still targeting the old string facade. Their paths now target the exact canonical live declarations, with every quote, verdict, count and ratchet unchanged; the real kind-neutrality gate and all five original evidence controls pass. Fresh canonical main88cdb141 is integrated for the normal signed publication. Only verified main ancestry/content counts delivery. Full IR parity and legacy retirement remain open.
+
+## 2026-10-01 — PR6378 quality blocker: fresh capture inside one historical proof
+
+Exact prerequisite head0e4638af fails quality job110246367505 in run36824281778: historical-runtime suite630/631; the explicit intermediate-view/overload/denominator positive test times out at the existing35000ms limit. Root local full suite631/631 passes (883772ms total), so this is runner-cost sensitivity, not permission to waive the failure. The single positive repeatedly invokes `readRuntimeContractReceiptSource` through global `read`, re-authenticating the entire27-source composition for each census/view.
+
+Bounded Sol6.1 Medium implementation plan: own only tests/issue-3518-historical-runtime-reconstruction.test.ts and only this existing positive test. Take one fresh `currentHistoricalRead()` at the start, pass it to the original positive and all existing read/view/census operands inside this same proof. That existing helper authenticates the full fixed population and falls back to raw current data for out-of-domain paths; retain it unchanged. Preserve every test row/name, expected hash/count/overload/shape and all630 remaining mutation controls. No module/global/cross-operation cache, retries, fallback, source/helper/receipt or timeout change. Root verifies the exact diff, runs selected before/after controls and full631 cohort, commits with normal hooks and updates existing PR6378 through the fork. No duplicate PR or gate bypass.
+
+Scoped canonical ownership verified: `3518:pr6378-historical-capture-20261001`, owner `ttraenkler/codex-pr6378-historical-capture-20261001`, branch `codex/3518-pr6378-historical-capture-20261001`, write_id `18840-to2baw11`. Sol6.1 Medium owns the one existing positive test only; root owns issue evidence, Git, all actual verification and existing-PR update.
+
+Root exact selected comparison on the unchanged Node25/Vitest single-fork harness: original positive passes1/1 in23419ms; Sol Medium repaired positive passes1/1 in859ms. Both intentionally leave630 unselected rows uncredited. All18 assertion expressions/41 literal values and the53251-byte outside-proof residue remain unchanged; existing35000ms timeout and every helper/receipt/mutation function are unchanged. Scoped Biome/Prettier pass. Full631 acceptance awaits the normal signed commit hook. Exact CI failure, original/current patch and selected runs are preserved in `plan/log/3518-pr6378-quality-capture-2026-10-01/`. User routing is now reflected in epic frontmatter: Sol6.1 default, high for this complex epic; Medium for this bounded repair, Astra for hard specs.
