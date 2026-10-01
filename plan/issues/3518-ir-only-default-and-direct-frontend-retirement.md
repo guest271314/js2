@@ -18818,3 +18818,26 @@ Current source branch `codex/3518-source-contracts-main-20261001` at `1265c47d` 
 The three-file core reader is frozen with 132 drafted rows, not integrated or executed. Runtime inverse specs preserve34 bounded spans and27 production inputs; implementation and real runtime tests remain outstanding. All exact source bytes, index/worktree patches, latest raw results, specifications and both static diagnostics are pinned in `plan/log/3518-ir-wrap-up-2026-10-01/final-checkpoint/manifest.json`. The earlier34 raw archives remain immutable. Read the updated handoff before resuming and reclaim through the canonical ledger: this slice was released and read back with write_id `76946-fhh4sf6o`, released_at `2026-10-01T03:42:15Z`; no other claim/reservation changed.
 
 PR6371, “feat(ir): add native realm state and structural object access,” is now verified delivered as1265c47d: exact ancestry/content and all102 actual protected conformance shards plus final regression succeeded. Merge-group issue-tests was cancelled, so no all-CI-green claim. PR6372 remains verified delivered. The migration epic continues; public Number remains5/9, and legacy retirement requires complete tested equality. All worktrees and original failures are preserved; writers stopped and no heavy process remains.
+
+
+## 2026-10-01 resumed core/runtime historical receipt implementation
+
+The active migration goal resumes after the signed handoff publication. Fresh upstream main remains0d94fc71; source worktree/base1265c47d and all41 archived paths were verified. The scoped source-validation-contracts claim is reacquired on the canonical issue-assignments branch, authoritative write_id87615-9npim132. Existing handoff PR6374 remains separate documentation.
+
+Integrate the exact frozen three-file core reader at only the three initial historical receipt reads; restore default parsing to raw current source for current closure/type/runtime checks. The132 new and20 original rows require actual strict execution. Never normalize existing injected mutants twice or refresh old hashes. Runtime inverse writer owns only three new helper/receipt/control files in its isolated worktree, preserving all35 prior frozen paths; root owns existing75/631 suite plumbing and all compilers/gates/Git. No static compatibility proof is credited as executed behavior. Preserve the original core17/20, runtime69/75 and historical2/631 results and the complete final acceptance.
+
+
+Executed resumed core proof: strict single-fork152/152 PASS, zero skipped or worker errors:132 new live-reconstruction controls and all20 original vocabulary rows. The prior17/20 failure remains archived. Four moved/retained original receipts keep every old hash/count; all current runtime39-entry/Boolean-brand/async-authority checks and19 typed negative controls pass on raw current input. Production TS7 exits0. Formatting precheck found only existing test layout; helper/JSON frozen bytes were already clean and stay unchanged. This establishes affected historical controls, not full runtime/native/source/backend equality. Runtime75/631 remains unresolved pending the separately owned live inverse.
+
+
+While the runtime inverse is authored, root remeasures the unchanged original nine-row public Number712 fixture against the current source checkpoint. The source pin c0550b99 and archived test bytes are preserved; a temporary ignored harness only selects that exact original file and keeps the existing timeout/heap/current config. No existing test, fixture, source or competing Number lane is edited. The previous5/9 remains archived; new outcomes require terminal evidence and do not certify both backends or dynamic-code completion.
+
+
+Current public Number measurement preserves all9 rows:5 PASS/4 FAIL, zero skipped. All4 actual public IR cases still fail at preparation with js.number.from-value lacking a provider; the oracle and4 legacy cases pass. This re-executed native-realm/source-contract checkpoint does not meet the public fixture requirement. Durable raw evidence and core152/152 proof are pinned in plan/log/3518-source-contract-core-progress-2026-10-01/manifest.json. Complete migration and retirement remain unproved.
+
+
+## 2026-10-01 user-requested final resumed stand-down
+
+Refresh existing ready PR6374, “docs(ir): preserve migration handoff and extraction baseline,” with the executed core152/152 and unchanged public Number5/9 failures. Source remains uncommitted at1265c47d; all46 source/test/metadata/issue paths retain separate index/worktree bytes. Runtime writer froze three files with331 drafted, zero executed rows. Existing75/631 initial-read plumbing is also unexecuted; prior69/75 and2/631 failures remain. Full source/provider/backend equality and legacy retirement remain open.
+
+The immutable resumed-checkpoint manifest and updated handoff pin raw executions, all source bytes/patches, runtime draft/static audit and release. Scoped claim read back released at2026-10-01T04:15:43Z, write_id 89776-u29luamo; no other claim/reservation changed. Writers stopped, no heavy process remains, all other worktrees preserved. Normal signed commit/fork push hooks and protected exact-head delivery remain required; the documentation PR is not migration completion.

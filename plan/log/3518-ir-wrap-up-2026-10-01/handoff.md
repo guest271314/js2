@@ -1,5 +1,36 @@
 # IR migration handoff — 2026-10-01
 
+## Latest user-requested wrap-up: executed core and preserved runtime draft
+
+This section supersedes the stand-down state below; all earlier checkpoints remain immutable. Continue the existing ready [PR6374, “docs(ir): preserve migration handoff and extraction baseline”](https://github.com/loopdive/js2/pull/6374), rather than create a duplicate. The fresh upstream main read remains `0d94fc71681fd4988ae0ca32dda3a12f614e4b47`. This is a documentation/evidence PR; the incomplete source implementation remains uncommitted.
+
+The source worktree `/private/tmp/js2-ir-source-contracts-main-20261001`, branch `codex/3518-source-contracts-main-20261001`, HEAD/base `1265c47d6fc41300a380ef7e4abc45fdfcfd2c61`, now has **46 source/test/metadata/issue paths** preserved with separate index and worktree bytes. [The resumed manifest](resumed-checkpoint/manifest.json) pins complete file bytes, both patches, original terminal evidence, static donor audit, and the frozen runtime draft. No worktree was reset, stashed, pruned, deleted or overwritten; the dirty canonical Deno lane remains untouched. Archived executable text is preservation evidence only and must never become a reconstruction fallback.
+
+Scoped claim `3518:source-validation-contracts-20261001`, owner `ttraenkler/codex-source-validation-contracts-20261001`, was released on stand-down and its actual canonical record read back: `status=released`, `released_at=2026-10-01T04:15:43Z`, `write_id=89776-u29luamo`. [The release record](resumed-checkpoint/execution-claim-wrapup-release-record.json.raw.txt) is authoritative; no other claim or reservation changed.
+
+Runtime writer stopped at unique freeze `/private/tmp/js2-ir-source-contracts-writer-20261001/.tmp/source-contracts-writer/runtime-evolution-freeze-yN0bkE`, manifest SHA256 `33aa7477d4c73995d205622a6b9a47e5f0e6ad4ba1f9bb95fa56866ba0309e8b`. [Its handoff](resumed-checkpoint/runtime-draft-HANDOFF.md.raw.txt) and all three exact file bytes are archived. **331 rows are drafted; zero were executed.** Formatting and syntax/source arithmetic checks reported27 inverse/forward source pins,34 spans and84 live slices, with35 earlier writer files unchanged. These static checks are not compiler or test evidence. Root checked frozen bytes and every27 current source pin before archival. Writer attribution is Codex GPT-6 Astra Max; root integration/docs attribution is Codex GPT-6 Default.
+
+### Latest executed measurements
+
+- Core: **152/152** (132 new reader controls plus all20 original rows), zero skipped or worker errors. After formatting only the existing seam, its20 original rows passed again. The three frozen helper/receipt/control files remain byte-identical. All old hashes/populations and current raw runtime/type checks remain intact.
+- Production TS7: terminal exit0. No test-source typecheck claim.
+- Original public Number fixture: **5/9**, zero skipped. The oracle and four explicit legacy cases pass; all four genuine public IR direct/decoded × UTF16/UTF8 cases fail preparation with `runtime feature js.number.from-value has no provider`. Exact original fixture/source bytes, rows, configuration, heap and timeout were preserved.
+- Runtime historical checks: latest executed results remain **69/75** and **2/631**. The drafted runtime inverse and new75/631 plumbing have **not been compiled or executed**. The earlier629 failures stop at a shared positive source check, not629 independently attributed production defects.
+- Prior scoped component/boundary/program/preservation measurements below remain evidence on their pinned bytes; none certifies full migration or legacy retirement.
+
+[The core/public progress record](../3518-source-contract-core-progress-2026-10-01/progress.md) and its raw archives retain exact execution evidence. Its active claim statement describes execution time; the newer stand-down release record in this checkpoint is authoritative.
+
+### Resume without overlapping work
+
+1. Read the fresh upstream `issue-assignments` ledger, verify all source/draft/archive pins, and reacquire only `3518:source-validation-contracts-20261001` after checking overlaps. Preserve the46-path index/worktree split and all earlier immutable snapshots.
+2. The core reader is already integrated and executed: do not redo its initial-read normalization or replace current raw compiler/type reads. Its original unique writer freeze is `.tmp/source-contracts-writer/core-vocabulary-freeze-gOZASp/` in `/private/tmp/js2-ir-source-contracts-writer-20261001`, manifest SHA256 `994f00785c72338a22b2e3080ce4b71a4c0ba793f9b236f8e2deba7cf19c557d`.
+3. Review the separately frozen runtime draft and independent static donor audit before copying its three new files. Root owns only initial historical-read plumbing in existing75/631 suites, already preserved but unexecuted. Keep current checks raw; inject old historical mutants after normalization and never normalize mutants twice. The helper must authenticate all27 raw production inputs per operation and use live slices/token roles for all34 inverse spans; no cross-operation cache, historical executable fallback, fake donor or receipt reseed.
+4. Run the new runtime controls and original75 first, then every631 original row with strict worker errors and unchanged timeouts/fixtures. Review individual failure rows. Only then rerun affected preservation gates, integrate freshly verified main and produce a normal signed source commit/ready implementation PR. The documentation PR is not implementation delivery.
+5. Continue the full A–E extraction specification and original full acceptance. All45 intrinsic identities,44 Call algorithms/lifted entries,2 Construct entries, complete source modes/this/Get/Call/Construct/newTarget/bound behavior, dynamic Function/eval/with, original public Number nine-row fixture, actual fresh-process replay and both-backend equality remain required. **Legacy stays until everything in the IR path is implemented, tested and equal.**
+
+No compiler or test process remains running at stand-down. Native writers finish only their frozen handoff and stop new scope. No polling automation or GitHub issue is created. Protected queue and verified exact main ancestry/content are still required before counting this documentation PR delivered; no full migration completion is claimed.
+
+
 ## Final stand-down: fresh-main continuation preserved
 
 The ready existing [PR6374, “docs(ir): preserve migration handoff and extraction baseline”](https://github.com/loopdive/js2/pull/6374) is being refreshed against freshly verified upstream main `0d94fc71681fd4988ae0ca32dda3a12f614e4b47`. Its one issue-file conflict preserves both the upstream native-realm repair and this lane's source-contract notes. This PR delivers documentation and immutable evidence; the incomplete source implementation is not included as active source. Check the final exact published head, required checks and main content before counting this PR as delivered.
