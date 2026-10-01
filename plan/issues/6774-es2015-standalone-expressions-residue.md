@@ -36,6 +36,7 @@ loc-budget-allow:
   - src/codegen/string-ops.ts
   - src/codegen/expressions/identifiers.ts
   - src/codegen/object-runtime.ts
+  - src/codegen/index.ts
   # 2026-09-30 (#6774 impl, Opus): S2's own-"__proto__" read arm lives in
   # tryOpenObjectDynamicGet (+10); S4 adds two FunctionContext fields (+4).
   - src/codegen/property-access.ts
@@ -92,6 +93,9 @@ func-budget-allow:
   # 2026-10-01 (#6774 S18, Opus): a spread EXTRA argument of a folded eval is
   # stepped (emitDiscardedSpreadArgument in the new leaf eval-spread-args.ts).
   - src/codegen/expressions/eval-inline.ts::tryStaticEvalInline
+  # 2026-10-01 (#6774 S21, Opus): accessor object-literal types lower to
+  # externref (they are always open `$Object`s at run time).
+  - src/codegen/index.ts::resolveWasmType
 ---
 
 ## Problem
