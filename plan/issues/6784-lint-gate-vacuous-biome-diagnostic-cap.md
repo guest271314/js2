@@ -130,7 +130,15 @@ Second hole: `.github/workflows/test262-sharded.yml:301` in the
    per-rule rows also show `useArrowFunction 4` for 3 sites). The 20 were
    `performance/noDelete` (18, test files) and `security/noGlobalEval` (2,
    `src/runtime/dynamic-function-import.ts`) — neither rule fires in Biome 1.9
-   on that code. Each became a plain comment that keeps its rationale.
+   on that code. 17 became plain comments that keep their rationale. The
+   other **3** (`tests/issue-743-derivation-defaults.test.ts:44,56`,
+   `tests/issue-743-dts-entrypoint-seeds.test.ts:44`) are deliberately left:
+   both files are **red on main** for unrelated reasons (3 failing #743
+   flag-default assertions — "\"\" must disable: expected true to be false",
+   "expected 'externref' to be 'f64'"), and the required changed-root step in
+   `quality` runs every root test file a PR touches, so a comment-only edit
+   would park this PR on someone else's regression. They are warning-level
+   (`suppressions/unused`), so they do not affect the gate.
 4. **Cheap gate.** `.github/workflows/test262-sharded.yml`
    `cheap gate (main-ancestor + lint)`: the `::warning::… not blocking` branch is
    now `::error::lint failed` + `exit "$lint_rc"`. #3677 had made lint advisory
@@ -172,7 +180,7 @@ After (this branch, merged with main):
 |---|---|---|
 | `pnpm run lint` (tree) | exit 0, 11 errors hidden | exit 0, 0 errors |
 | `biome lint … --diagnostic-level=error --max-diagnostics=none --reporter=summary` | 11 errors | 0 errors |
-| `biome lint … --max-diagnostics=none --reporter=summary` | 11 errors, 22 unused-suppression rows | 0 errors, 0 unused suppressions, 4649 `noExplicitAny` warnings |
+| `biome lint … --max-diagnostics=none --reporter=summary` | 11 errors, 22 unused-suppression rows | 0 errors; 3 unused suppressions (warnings, kept on purpose — step 3); 4649 `noExplicitAny` warnings |
 | `pnpm run lint` on the fixture (40 `any` warnings, then `debugger;`) | exit 0 | exit 1 |
 | cheap gate on a lint error | `::warning` + pass | `::error` + fail |
 
@@ -184,7 +192,27 @@ fixture reproduces the hole. The pre-#6784 control is pinned to Biome 1.9's
 behaviour; if an upgrade stops charging hidden warnings to the cap it flips,
 and that case can be dropped.
 
+Gates run on the final tree (merged with main `43abb4e1`+), each exit 0 unless
+noted: `pnpm run lint`, `typecheck`, `format:check`, `check-loc-budget` and
+`check-func-budget` (fork-point and `LOC_GATE_BASE=origin/main`),
+`check-coercion-sites`, `check:oracle-ratchet`, `check:dead-exports`,
+`check-compiler-boundaries --mode inventory`, `check:ir-dialect`,
+`check:ir-kind-neutrality`, `check:jstag-seam`, `check:ir-layering`,
+`check:codegen-fallbacks`, `check:any-box-sites`, `check:speculative-rollback`,
+`check:stack-balance`, `check:pushraw`, `check:host-import-policy` (first run
+exit 1: `ownedAdapterLines 953 > 952` from the added biome-ignore — fixed by
+joining a wrapped comment in the same file, no baseline edit), `check:ir-only`,
+`check:ir-adoption`, `check:issues`, `check:done-status-integrity`,
+`check:issue-spec-coverage`, `check:harness-compile-budget`,
+`check:verdict-oracle`, `check:ir-fallbacks`, `test:guard` (20 files / 255
+tests). Tests: every changed root test file run singly (14 suppression-edited
+files + `lint-gate-can-fail`, all green); `tests/runtime-*.test.ts` (3 files)
+and `tests/issue-4628-temporal-global.test.ts` (covers the TZ-annotation regex)
+green.
+
 Budget: `func-budget-allow` for `src/runtime.ts::_safeSet` (+1) and
 `src/runtime.ts::resolveImport` (+1), rationale in the frontmatter.
 
-Not done: `noExplicitAny` stays `warn` (deliberate, see step 1).
+Not done: `noExplicitAny` stays `warn` (deliberate, see step 1); the 3
+stale suppressions in the two red #743 test files (step 3) — remove them when
+those files are fixed.
