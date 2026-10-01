@@ -71,7 +71,6 @@ import {
   STANDALONE_TIMER_CALLBACK_MANIFEST_MAGIC,
   planStandaloneTimerCallbackExports,
 } from "../runtime/contracts/timer-capability.js";
-import { readEnv } from "../env.js";
 
 const CLOSURE_HOST_BRIDGE_ROLE = "closure-host-bridge";
 const CLOSURE_HOST_BRIDGE_MANIFEST_NAME = "__\0js2_closure_host_bridge";
@@ -1221,7 +1220,7 @@ function hostCallableFallbackTerminal(
   // (`__boundary_callback_call_N`, see planHostCallFallback); an implicit
   // `__call_function_N` there trips the host-import-policy ratchet (#4397).
   // Keep the legacy null terminal for that profile.
-  const legacyArrayAbi = readEnv("JS2WASM_FIXED_ARITY_HOST_CALLS") === "0";
+  const legacyArrayAbi = process.env.JS2WASM_FIXED_ARITY_HOST_CALLS === "0";
   if (
     ctx.standalone ||
     ctx.wasi ||

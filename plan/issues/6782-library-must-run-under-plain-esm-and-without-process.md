@@ -23,19 +23,17 @@ branch: "claude/issue-6782-esm-process"
 # themselves are a same-length token swap); src/compiler.ts also gains one hoisted
 # `const` so the env-provided path keeps its narrowed `string` type.
 loc-budget-allow:
-  - src/codegen/any-helpers.ts
   - src/codegen/binary-ops.ts
   - src/codegen/class-bodies.ts
   - src/codegen/closed-method-dispatch.ts
-  - src/codegen/closure-exports.ts
   - src/codegen/closures.ts
   - src/codegen/declarations.ts
   - src/codegen/declarations/object-shape-widening.ts
   - src/codegen/dyn-read.ts
   - src/codegen/expressions/call-identifier.ts
   - src/codegen/expressions/call-receiver-method.ts
-  - src/codegen/expressions/calls.ts
   - src/codegen/fnctor-escape-gate.ts
+  - src/codegen/index.ts
   - src/codegen/ir-inline.ts
   - src/codegen/literals.ts
   - src/codegen/multi-prepared-program.ts
@@ -46,7 +44,11 @@ loc-budget-allow:
   - src/codegen/string-ops.ts
   - src/codegen/typed-this.ts
   - src/compiler.ts
+  - src/ir/backend/linear-integration.ts
+  - src/ir/from-ast.ts
+  - src/ir/integration.ts
   - src/ir/propagate.ts
+  - src/ir/verify.ts
   - src/runtime.ts
 ---
 

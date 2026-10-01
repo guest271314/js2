@@ -58,7 +58,6 @@ import {
   numberFormatSignatures,
 } from "../runtime/wasmgc/values/number-format-bodies.js";
 import type { NumberFormatStringTypes } from "../runtime/wasmgc/values/number-format-radix-bodies.js";
-import { readEnv } from "../env.js";
 
 function numberFormatTypes(ctx: CodegenContext): NumberFormatStringTypes {
   return {
@@ -385,7 +384,7 @@ function emitToString(
     finalize: finalizeIdx,
     radix: radixIdx,
     ryuToBuffer: ryuToBufIdx,
-    integerBeforeScratch: readEnv("JS2WASM_NUMBER_TO_STRING_INTEGER_FASTPATH") !== "0",
+    integerBeforeScratch: process.env.JS2WASM_NUMBER_TO_STRING_INTEGER_FASTPATH !== "0",
   });
   const typeIdx = addFuncType(ctx, signature.params, signature.results);
   const funcIdx = nextFuncIdx(ctx);

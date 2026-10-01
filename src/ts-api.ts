@@ -57,7 +57,6 @@ import { createRequire } from "node:module";
 // ships an `export = ts` declaration. Re-export its exact binding here to retain
 // both value and namespace access for existing callers.
 import { ts } from "./frontend/typescript.js";
-import { readEnv } from "./env.js";
 export { ts };
 
 type CjsRequire = (id: string) => unknown;
@@ -138,7 +137,8 @@ export function currentTsFrontendLane(): TsFrontendLane {
 // NOTE: this is the *opt-in flag*, resolved once. It already excludes the
 // browser (which is decided at load time), but it CANNOT see the
 // runtime-eval scope — query `isTs7Active()` at the point of use instead.
-export const isTs7: boolean = !isBrowserLikeRuntime() && readEnv("JS2WASM_TS7") === "1";
+export const isTs7: boolean =
+  !isBrowserLikeRuntime() && typeof process !== "undefined" && !!process.env && process.env.JS2WASM_TS7 === "1";
 
 /**
  * Is the TS7 frontend active for THIS call? The opt-in flag AND the lane

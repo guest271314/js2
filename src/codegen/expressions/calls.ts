@@ -566,7 +566,6 @@ import { BUILTIN_CLASS_NAMES } from "./builtin-class-names.js";
 import { objectOwnPredicateCallKeepsFold } from "../object-proto-has-own-property.js";
 import { maybeEmitLayoutHint } from "../fnctor-layout-emit.js"; // (#3927) per-type layouts
 import { matchClosureInfoBySignature, tsSignatureHasRest } from "./closure-sig-match.js"; // (#4394) exact-first closure pick
-import { readEnv } from "../../env.js";
 export { BUILTIN_CLASS_NAMES };
 
 /**
@@ -1465,7 +1464,7 @@ export function emitReflectiveNativeProtoClosureCall(
   // corrected the recovery validates and `m.call(a,1,3) === a.slice(1,3)`.
   // `JS2WASM_DISABLE_PRB_REFLECTIVE_CALL` is an escape hatch (falls back to the
   // legacy drop-thisArg path → returns 0, valid Wasm, no worse than pre-PR-B).
-  if (readEnv("JS2WASM_DISABLE_PRB_REFLECTIVE_CALL")) return undefined;
+  if (process.env.JS2WASM_DISABLE_PRB_REFLECTIVE_CALL) return undefined;
 
   // Reshape args to the closure's positional ABI: [thisArg, ...userArgs].
   let userArgs: readonly ts.Expression[] | undefined;
