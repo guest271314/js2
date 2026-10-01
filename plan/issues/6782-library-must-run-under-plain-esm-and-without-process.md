@@ -49,7 +49,6 @@ loc-budget-allow:
   - src/ir/from-ast.ts
   - src/ir/integration.ts
   - src/ir/propagate.ts
-  - src/ir/verify.ts
   - src/runtime.ts
 ---
 
