@@ -65,4 +65,23 @@ describe("#6798 misc probe-backed semantic divergences", () => {
       [{ fn: "test", args: [] }],
     );
   });
+
+  it("typeof-tdz: typeof of a let/const in its TDZ throws a ReferenceError, also through a folded comparison", async () => {
+    await assertEquivalent(
+      `
+      function probe(f: () => string): string {
+        try { return "ok:" + f(); } catch (e) { return e instanceof ReferenceError ? "RE" : "other"; }
+      }
+      export function test(): string {
+        const a = probe(() => { const t = typeof y; let y = 1; return t + y; });
+        const b = probe(() => { const r = typeof z === "number"; const z = 1; return String(r) + z; });
+        const c = probe(() => { let w = 1; return typeof w; });
+        const d = probe(() => { const f = () => typeof q; const r1 = probe(f); let q = "s"; return r1 + "/" + f(); });
+        const e = probe(() => { let out = ""; for (let i = 0; i < 2; i++) { let v = i; out += typeof v; } return out; });
+        return [a, b, c, d, e].join("|");
+      }
+      `,
+      [{ fn: "test", args: [] }],
+    );
+  });
 });

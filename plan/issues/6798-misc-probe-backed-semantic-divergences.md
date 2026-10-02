@@ -23,9 +23,14 @@ loc-budget-allow:
   - src/codegen/index.ts
   # 2026-10-02 typeof-class: host typeof / typeof_check recognise a registered class object (+2)
   - src/runtime.ts
+  # 2026-10-02 typeof-tdz: one TDZ-guard call before each static typeof fold (+2)
+  - src/codegen/typeof-delete.ts
 func-budget-allow:
   # 2026-10-02 typeof-class: the two typeof arms live inside resolveImport (+2)
   - src/runtime.ts::resolveImport
+  # 2026-10-02 typeof-tdz: the TDZ guard before the fold (+1 each)
+  - src/codegen/typeof-delete.ts::compileTypeofExpression
+  - src/codegen/typeof-delete.ts::compileTypeofComparison
 ---
 
 # #6798 — six smaller divergences, each reproduced on the JS-host lane (2026-09-30)
