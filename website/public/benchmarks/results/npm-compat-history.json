@@ -23793,6 +23793,32 @@
           }
         }
       }
+    },
+    {
+      "generatedAt": "2026-10-02T17:39:48.119Z",
+      "sourceRevision": "7c9efa08ebda48d74e2075160ce32ab33191e99f",
+      "optimizationLevels": {
+        "js-host": 4,
+        "js-host-native": 4,
+        "standalone": 4
+      },
+      "packages": {
+        "react-dom": {
+          "jsHostNative": {},
+          "jsHost": {},
+          "standalone": {
+            "static": 0.3791472596545697,
+            "dynamic": 0.008169291795915965
+          }
+        },
+        "lit": {
+          "jsHostNative": {},
+          "jsHost": {
+            "dynamic": 0.008011448805386337
+          },
+          "standalone": {}
+        }
+      }
     }
   ]
 }
