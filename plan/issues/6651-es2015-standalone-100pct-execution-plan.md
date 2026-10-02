@@ -3001,7 +3001,8 @@ measurement, not conformance success. No historical index was published.
 The typed-HOF source audit is now complete and #6832 has been atomically claimed.
 Its isolated worktree is `/Users/thomas/.codex/worktrees/typedarray-some-internal-length/js2`,
 branch `codex/6832-typedarray-some-internal-length`, at `3c6fcfc6`. Its required
-plan is `plan/issues/6832-typedarray-some-internal-length.md`. Ownership is
+plan is the [published #6832 record](https://github.com/ttraenkler/js2/blob/94d8361a6b2ab0a2ea769ce8c3971367048c9b03/plan/issues/6832-typedarray-some-internal-length.md)
+in PR #6447, not a file already landed on this branch. Ownership is
 `hof-native.ts`, the narrowly necessary typed-array finalizer, and a pure
 instruction leaf if needed. The correct existing primitive is
 `pushTaDynViewInBoundsLen`, not the byteLength-oriented effective-length emitter.
