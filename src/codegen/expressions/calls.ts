@@ -3,11 +3,11 @@
  * Call expression compilation: direct calls, optional calls, closure calls,
  * property method calls, IIFEs, and conditional callees.
  */
-import { hoistParameterEvalVars } from "../eval-param-scope-hoist.js"; // (#6774 S7)
-import { referencesOwnNewTarget } from "../new-target-value.js"; // (#6774 S4)
-import { tryCompileStandaloneEvalSpread } from "../eval-spread-args.js"; // (#6774 S18)
+import { hoistParameterEvalVars } from "./eval-param-scope-hoist.js"; // (#6774 S7)
+import { referencesOwnNewTarget } from "./new-target-value.js"; // (#6774 S4)
+import { tryCompileStandaloneEvalSpread } from "./eval-spread-args.js"; // (#6774 S18)
 import { emitThrowReferenceError } from "../js-errors.js"; // (#6774 S8)
-import { tryCompileWithRoutedCall } from "../with-call-binding.js"; // (#6774 S15)
+import { tryCompileWithRoutedCall } from "./with-call-binding.js"; // (#6774 S15)
 import { ts, forEachChild } from "../../ts-api.js";
 import { widenJsDefaultGuessSlot, widenJsDefaultGuessSymbolSlot } from "../js-default-param-type-guess.js";
 import { profilePhase } from "../../compile-profile.js";

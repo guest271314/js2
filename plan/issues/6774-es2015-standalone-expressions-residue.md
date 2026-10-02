@@ -53,13 +53,22 @@ loc-budget-allow:
   # object-literal method pre-registration (rest pattern → rest vec slot).
   - src/codegen/index.ts
   # NEW leaves (register each in scripts/compiler-boundaries.json, see Lane protocol)
-  - src/codegen/new-target-value.ts
-  - src/codegen/eval-param-scope-hoist.ts
+  # 2026-10-02 (#6774 cycle cut, Opus): the five leaves moved into
+  # src/codegen/expressions/ (flat-dir budget, #6797) and import their SCC-side
+  # helpers through the new late-bound sink registry/expression-helper-delegates.ts;
+  # each owning module (late-imports, eval-inline, object-runtime, with-scope,
+  # iterator-native) grows by one import + one module-scope registration.
+  - src/codegen/expressions/new-target-value.ts
+  - src/codegen/expressions/eval-param-scope-hoist.ts
   - src/codegen/dyn-call-tail.ts
-  - src/codegen/with-call-binding.ts
-  - src/codegen/tagged-template-standalone.ts
+  - src/codegen/expressions/with-call-binding.ts
+  - src/codegen/expressions/tagged-template-standalone.ts
   - src/codegen/computed-key-members.ts
-  - src/codegen/eval-spread-args.ts
+  - src/codegen/expressions/eval-spread-args.ts
+  - src/codegen/registry/expression-helper-delegates.ts
+  - src/codegen/expressions/late-imports.ts
+  - src/codegen/with-scope.ts
+  - src/codegen/iterator-native.ts
   - scripts/compiler-boundaries.json
 func-budget-allow:
   # 2026-09-30 (#6774 plan): one-to-six-line call sites inside functions already
@@ -1286,3 +1295,29 @@ Landed partially at the project lead's request; the issue stays
   all 79 pass after it.)
 - Branch head after merging the parallel fixes and `origin/main`:
   `d7a29bf8`; gates green bare, pins 21/21.
+
+#### 2026-10-02 — import-cycle cut after the #6797 park (Opus)
+
+- **Park cause:** the new required gate `check-import-cycles` (#6797) failed
+  on the merged state, `largestSccSize 697 → 702`: the five new leaves
+  (`new-target-value`, `eval-param-scope-hoist`, `eval-spread-args`,
+  `tagged-template-standalone`, `with-call-binding`) are value-imported by
+  SCC modules (`calls.ts`, `closures.ts`, `string-ops.ts`, …) and each
+  value-imported an SCC module back (`late-imports` for `emitUndefined`,
+  `object-runtime`, `eval-inline`, `iterator-native`, `with-scope`,
+  `type-coercion`). The new `check-flat-dir-budget` gate also failed
+  (`src/codegen/*.ts 829 → 834`).
+- **Cut (no baseline edit, behaviour unchanged):** the leaves no longer
+  value-import any SCC module. `coerceType` / `ensureLateImport` /
+  `flushLateImportShifts` come from the existing `shared.ts` delegates; the
+  other nine helpers come from a new type-only sink,
+  `src/codegen/registry/expression-helper-delegates.ts`, which each owning
+  module fills at module scope (`registerExpressionHelpers({...})`, the
+  `shared.ts` pattern). The sink imports types only, so it cannot join a
+  cycle; the owners are SCC members, so they are always loaded before any
+  leaf runs. The five leaves moved into `src/codegen/expressions/`.
+- **Measured on the tree merged with `origin/main` @ `9c6d0b1e`:**
+  `check-import-cycles` OK (largest SCC 697, `codegen->ir` 295 — both equal
+  to main); `check-flat-dir-budget` OK (829/829). The 60 expressions rows
+  (`--isolate --standalone`): before 40 pass, after 40 pass, identical
+  non-pass set (20). Pins 21/21.

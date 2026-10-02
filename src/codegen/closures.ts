@@ -1,5 +1,5 @@
 import { initializeNativeGeneratorFunctionValue } from "./generators-factory-prototype.js";
-import { snapshotArrowNewTarget } from "./new-target-value.js";
+import { snapshotArrowNewTarget } from "./expressions/new-target-value.js";
 import { widenJsDefaultGuessSlot } from "./js-default-param-type-guess.js";
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
@@ -24,7 +24,7 @@ import { isStandalonePromiseActive } from "./async-scheduler.js"; // (#2867 Gap 
 import { emitEagerAsyncPromiseWrap, parkedAsyncClosureWrapsPromise } from "./async-eager-promise.js"; // (#4630)
 import { widenAsyncThenableResult } from "./async-thenable-return.js"; // (#5371)
 import { restPatternParamSlot } from "./resolved-rest-param.js"; // (#6774 S7)
-import { hoistParameterEvalVars } from "./eval-param-scope-hoist.js"; // (#6774 S7)
+import { hoistParameterEvalVars } from "./expressions/eval-param-scope-hoist.js"; // (#6774 S7)
 import { applyNullableElemParamOverride } from "./array-hof-nullable-elem-param.js"; // (#6602) nullable vec element at the HOF callback boundary
 import { definedFuncAt, funcSignatureOf, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2 read chokepoint / S3b stable-regime minting)
 import { pushProgramAbiNestedCallable, pushProgramAbiTypedThisTwin } from "./program-abi-source-callable-planning.js";

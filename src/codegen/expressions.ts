@@ -86,7 +86,7 @@ import { isForeignEvalNode } from "./expressions/eval-source.js";
 
 import { compileClassExpression, compileNewExpression } from "./expressions/new-super.js";
 import { emitNewTargetClassId } from "./new-target.js"; // (#2023)
-import { compileNewTargetValue } from "./new-target-value.js"; // (#6774 S4)
+import { compileNewTargetValue } from "./expressions/new-target-value.js"; // (#6774 S4)
 import { boxNullRefAsUndefined } from "./null-ref-undefined-box.js"; // (#1058)
 
 import { compileConditionalExpression, compileYieldExpression } from "./expressions/misc.js";

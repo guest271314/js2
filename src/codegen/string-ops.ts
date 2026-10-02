@@ -1,5 +1,5 @@
 import { isBigIntType, isBooleanType, isStringType, isSymbolType, isVoidType } from "../checker/type-mapper.js";
-import { emitStandaloneDynamicTagCall } from "./tagged-template-standalone.js"; // (#6774 S17)
+import { emitStandaloneDynamicTagCall } from "./expressions/tagged-template-standalone.js"; // (#6774 S17)
 import { widenJsDefaultGuessSymbolSlot } from "./js-default-param-type-guess.js";
 import type { Instr, ValType } from "../ir/types.js";
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.

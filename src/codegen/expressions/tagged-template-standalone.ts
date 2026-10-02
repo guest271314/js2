@@ -6,13 +6,13 @@
 // standalone module cannot import. Call it through the host-free
 // `__apply_closure(fn, undefined, argv)` bridge instead, with argv the
 // `$ObjVec` `[templateObject, ...substitutions]` (§13.3.11.1 step 4).
-import type { ts } from "../ts-api.js";
-import type { ValType } from "../ir/types.js";
-import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { allocLocal } from "./context/locals.js";
-import { ensureObjVecBuilders, reserveApplyClosure } from "./object-runtime.js";
-import { coerceType, compileExpression } from "./shared.js";
-import { emitUndefined } from "./expressions/late-imports.js";
+import type { ts } from "../../ts-api.js";
+import type { ValType } from "../../ir/types.js";
+import type { CodegenContext, FunctionContext } from "../context/types.js";
+import { allocLocal } from "../context/locals.js";
+import { coerceType, compileExpression } from "../shared.js";
+// Late-bound: direct imports of these owners would close an import cycle (#6797).
+import { emitUndefined, ensureObjVecBuilders, reserveApplyClosure } from "../registry/expression-helper-delegates.js";
 
 /** Emits the call; the tag value is on the stack as externref. Returns the externref result type. */
 export function emitStandaloneDynamicTagCall(

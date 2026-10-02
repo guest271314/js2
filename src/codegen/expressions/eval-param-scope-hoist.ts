@@ -10,13 +10,17 @@
 // frame local before the first initializer compiles; the splice then assigns
 // the existing cell, and the earlier closure captures that cell.
 
-import { ts } from "../ts-api.js";
-import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { allocLocal } from "./context/locals.js";
-import { getOrRegisterRefCellType } from "./registry/types.js";
-import { emitUndefined } from "./expressions/late-imports.js";
-import { isStrictContext } from "./helpers/is-strict-function.js";
-import { foldedEvalDeclarationNames, resolveConstantString } from "./expressions/eval-inline.js";
+import { ts } from "../../ts-api.js";
+import type { CodegenContext, FunctionContext } from "../context/types.js";
+import { allocLocal } from "../context/locals.js";
+import { getOrRegisterRefCellType } from "../registry/types.js";
+import { isStrictContext } from "../helpers/is-strict-function.js";
+// Late-bound: a direct import of late-imports/eval-inline would close an import cycle (#6797).
+import {
+  emitUndefined,
+  foldedEvalDeclarationNames,
+  resolveConstantString,
+} from "../registry/expression-helper-delegates.js";
 
 function nearestFunction(node: ts.Node): ts.Node | undefined {
   let current = node.parent;

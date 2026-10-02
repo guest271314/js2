@@ -5,14 +5,19 @@
 // the call lowering never did: `with (obj) { method(); }` threw
 // "method is not defined". §13.3.6.1 + §9.1.1.2.10 WithBaseObject: when the
 // binding lives on the with-object, that object is the call's `this`.
-import { ts } from "../ts-api.js";
-import type { ValType } from "../ir/types.js";
-import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { allocLocal } from "./context/locals.js";
-import { coerceType, compileExpression } from "./shared.js";
-import { emitUndefined } from "./expressions/late-imports.js";
-import { ensureObjVecBuilders, reserveApplyClosure } from "./object-runtime.js";
-import { emitCaptureWithHasBinding, resolveWithBinding } from "./with-scope.js";
+import { ts } from "../../ts-api.js";
+import type { ValType } from "../../ir/types.js";
+import type { CodegenContext, FunctionContext } from "../context/types.js";
+import { allocLocal } from "../context/locals.js";
+import { coerceType, compileExpression } from "../shared.js";
+// Late-bound: direct imports of these owners would close an import cycle (#6797).
+import {
+  emitCaptureWithHasBinding,
+  emitUndefined,
+  ensureObjVecBuilders,
+  reserveApplyClosure,
+  resolveWithBinding,
+} from "../registry/expression-helper-delegates.js";
 
 export function tryCompileWithRoutedCall(
   ctx: CodegenContext,

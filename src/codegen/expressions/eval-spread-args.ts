@@ -7,15 +7,18 @@
 // itself) and never stepped it. A non-constant source has no caller-scope
 // splice, so a non-empty list evaluates the first element through the runtime
 // eval route (the caller-environment half is #4238 / #5271).
-import { ts } from "../ts-api.js";
-import type { ValType } from "../ir/types.js";
-import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { allocLocal } from "./context/locals.js";
-import { coerceType, compileExpression } from "./shared.js";
-import { ensureLateImport, emitUndefined, flushLateImportShifts } from "./expressions/late-imports.js";
-import { ensureNativeArrayFromIterN } from "./iterator-native.js";
-import { ensureObjVecBuilders } from "./object-runtime.js";
-import { emitStandaloneIndirectEvalRuntime } from "./expressions/eval-inline.js";
+import { ts } from "../../ts-api.js";
+import type { ValType } from "../../ir/types.js";
+import type { CodegenContext, FunctionContext } from "../context/types.js";
+import { allocLocal } from "../context/locals.js";
+import { coerceType, compileExpression, ensureLateImport, flushLateImportShifts } from "../shared.js";
+// Late-bound: direct imports of these owners would close an import cycle (#6797).
+import {
+  emitStandaloneIndirectEvalRuntime,
+  emitUndefined,
+  ensureNativeArrayFromIterN,
+  ensureObjVecBuilders,
+} from "../registry/expression-helper-delegates.js";
 
 export function tryCompileStandaloneEvalSpread(
   ctx: CodegenContext,

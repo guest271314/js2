@@ -13,7 +13,7 @@
  * every cross-module binding is used only inside function bodies, which run long
  * after module initialization.
  */
-import { NEW_TARGET_LEXICAL_LOCAL, arrowCapturesNewTarget } from "../new-target-value.js";
+import { NEW_TARGET_LEXICAL_LOCAL, arrowCapturesNewTarget } from "../expressions/new-target-value.js";
 import { ts, forEachChild } from "../../ts-api.js";
 import type { ClosureInfo, CodegenContext, FunctionContext } from "../context/types.js";
 import type { Instr, ValType } from "../../ir/types.js";

@@ -15,14 +15,14 @@
 //     body of the same function never sets it, so it answers `undefined`;
 //   * an arrow has no own `new.target`: its creator snapshots the value into
 //     `NEW_TARGET_LEXICAL_LOCAL`, which the closure captures like any binding.
-import { ts, forEachChild } from "../ts-api.js";
-import type { ValType, Instr } from "../ir/types.js";
-import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
-import { compileExpression, resolveEnclosingClassName } from "./shared.js";
-import { coerceType } from "./type-coercion.js";
-import { emitUndefined } from "./expressions/late-imports.js";
-import { emitNewTargetClassId, getOrAssignClassNewTargetId } from "./new-target.js";
+import { ts, forEachChild } from "../../ts-api.js";
+import type { ValType, Instr } from "../../ir/types.js";
+import type { CodegenContext, FunctionContext } from "../context/types.js";
+import { allocLocal, allocTempLocal, releaseTempLocal } from "../context/locals.js";
+import { coerceType, compileExpression, resolveEnclosingClassName } from "../shared.js";
+// Late-bound: a direct import of late-imports.ts would close an import cycle (#6797).
+import { emitUndefined } from "../registry/expression-helper-delegates.js";
+import { emitNewTargetClassId, getOrAssignClassNewTargetId } from "../new-target.js";
 
 /** Closure-captured local holding an arrow's lexical `new.target`. */
 export const NEW_TARGET_LEXICAL_LOCAL = "__new_target_lex";

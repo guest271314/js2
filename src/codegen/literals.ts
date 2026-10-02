@@ -9,7 +9,7 @@
  */
 
 import { restPatternParamSlot } from "./resolved-rest-param.js"; // (#6774 S7)
-import { hoistParameterEvalVars } from "./eval-param-scope-hoist.js"; // (#6774 S7)
+import { hoistParameterEvalVars } from "./expressions/eval-param-scope-hoist.js"; // (#6774 S7)
 import ts from "typescript";
 import { hoistFunctionDeclarations } from "./statements/nested-declarations.js";
 import { isStringType, isVoidType, unwrapPromiseType } from "../checker/type-mapper.js";

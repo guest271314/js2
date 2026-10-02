@@ -4,7 +4,7 @@
  *
  * Extracted from codegen/index.ts (#1013).
  */
-import { hoistParameterEvalVars } from "./eval-param-scope-hoist.js"; // (#6774 S7)
+import { hoistParameterEvalVars } from "./expressions/eval-param-scope-hoist.js"; // (#6774 S7)
 import { ts, forEachChild } from "../ts-api.js";
 import { widenJsDefaultGuessSlot } from "./js-default-param-type-guess.js";
 import { isVoidType, unwrapPromiseType } from "../checker/type-mapper.js";

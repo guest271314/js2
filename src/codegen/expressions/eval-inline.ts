@@ -16,7 +16,8 @@
  * Non-literal arguments and parse failures fall through to the existing
  * dynamic-eval path.
  */
-import { emitDiscardedSpreadArgument } from "../eval-spread-args.js"; // (#6774 S18)
+import { emitDiscardedSpreadArgument } from "./eval-spread-args.js"; // (#6774 S18)
+import { registerExpressionHelpers } from "../registry/expression-helper-delegates.js";
 import { ts } from "../../ts-api.js";
 import type { TypeOracle } from "../../checker/oracle.js";
 import type { Instr, ValType } from "../../ir/types.js";
@@ -2538,3 +2539,6 @@ function synthesizeThrowingFunctionStub(
   if (funcIdx === undefined) return undefined;
   return { fnName, funcIdx };
 }
+
+// (#6797) late-bound for the expressions/ leaves (eval-param-scope-hoist, eval-spread-args).
+registerExpressionHelpers({ emitStandaloneIndirectEvalRuntime, foldedEvalDeclarationNames, resolveConstantString });

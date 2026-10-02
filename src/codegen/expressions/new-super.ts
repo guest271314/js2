@@ -70,7 +70,7 @@ import { COLLECTION_KIND } from "../collection-kind.js"; // (#6419) import-free 
 import { ensureMapHelpers, coerceMapKeyToAnyref } from "../map-runtime.js";
 import { ensureDisposableStackNew } from "../disposable-runtime.js";
 import { emitSetNewTargetBeforeCall, ensureNewTargetGlobal } from "../new-target.js"; // (#2023)
-import { fnctorBindingName } from "../new-target-value.js"; // (#6774 S4)
+import { fnctorBindingName } from "./new-target-value.js"; // (#6774 S4)
 import {
   ensureNativeProxyRuntime,
   ensureObjectRuntime,
