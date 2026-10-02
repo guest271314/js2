@@ -832,7 +832,8 @@ shared lock.
 | S6 | `a086bbecc4` | p11 COMPILE-FAIL -> 15 (15); p11b COMPILE-FAIL -> 1015 (1015); p11d 448 -> 1023 (1023); p11g 2 -> 15 (15); p11c (plain `extends C`) 11 -> 15; guard p11e 0 -> 0 (declines; node 7) | `definition/side-effects-in-extends.js` |
 | S7 | `8a6544f974` | p7d 0 -> 3 (3); p7 1 -> 1 (bits 2/4 are a separate `get [false]` gap, unchanged); guards s7/b 15, s7/c 7, s7/d 3, s7/e 3 (base = branch = node); s7/f 102 both (RESIDUAL, node 3) | `expressions/class/accessor-name-inst-computed-in.js` |
 | S8 | (none) | p8c already 3 on origin/main `ce6631272c` (p8a 1, p8b 15, p8d 3 = node) — fixed on main by another lane | `name-binding/const.js` passes on main and branch (no change here; guard pinned) |
-| S9 | (this step) | p10 3 -> 7 (7), p10c illegal cast -> 7 (7), p10e illegal cast -> 1 (1), s9/a 0 -> 5 (5), s9/c illegal cast -> 3 (3), s9/d illegal cast -> 1 (1), s9/e 0 -> 1 (1); guards p10d 3, s9/b 1 | both `grammar-static-ctor-accessor-meth-valid.js` |
+| S9 | `bb9e1bb060` | p10 3 -> 7 (7), p10c illegal cast -> 7 (7), p10e illegal cast -> 1 (1), s9/a 0 -> 5 (5), s9/c illegal cast -> 3 (3), s9/d illegal cast -> 1 (1), s9/e 0 -> 1 (1); guards p10d 3, s9/b 1 | both `grammar-static-ctor-accessor-meth-valid.js` |
+| S10 | (this step) | p13d 8 -> 15 (15); s10/a 0 -> 15 (15); s10/b throw -> 63 (63) | `subclass/builtin-objects/RegExp/lastIndex.js` |
 
 S2 design note (deviates from the plan's "set only on an object return"):
 `$__ctor_override` is a RETURN REGISTER written on EVERY exit of a marked
@@ -965,3 +966,20 @@ hide a real one). The plan's second site (`:4450` class-instance
 require a class with a static accessor named `constructor`, which no ES5
 program has. Neighbour pins issue-5195-r3-restricted-properties /
 issue-6767 21/21.
+
+S10 note: three parts. (1) `installRegExpLastIndexCarrierArms`
+(regexp-lastindex-carrier.ts) splices a `__getOwnPropertyDescriptor` arm —
+`(read(o), writable = !$lastIndexNonWritable)` through `__create_descriptor`,
+§22.2.3.3 non-enumerable / non-configurable — and (2) a `__delete_property`
+arm answering `false` (§10.1.10 step 4; the strict operator turns it into the
+TypeError). #6770 had not published a native-carrier gOPD ladder, so the arms
+sit with the other lastIndex MOP arms. (3) The typed gOPD fold in
+`compileBuiltinStaticCall` declined the vestigial struct of an Array subclass
+(#2917) but not of a new-site builtin subclass (`class RE extends RegExp {}`,
+whose instance IS the `$RegExp` carrier): `newSiteBuiltinParent` now declines
+it too, so a literal key reaches the dynamic native. ES5 control: every ES5
+`built-ins/RegExp/**` + `built-ins/Object/getOwnPropertyDescriptor/**` row
+that passes in the standalone baseline (805) still passes (non-isolated run;
+the 9 rows that first reported "quickjs provider is not built" re-run
+`--isolate` after building it: 9/9). Neighbour pins issue-4098 / issue-4491*:
+the same 6 failures on main `ce6631272c` and the branch.

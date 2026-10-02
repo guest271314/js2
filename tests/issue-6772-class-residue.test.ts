@@ -825,3 +825,43 @@ describe("#6772 S9 — a static accessor named `constructor` wins over the class
     ).toBe(3);
   });
 });
+
+describe("#6772 S10 — RegExp `lastIndex` is an own non-configurable data property", () => {
+  it("RED on base (8): gOPD on a plain RegExp and on a RegExp-subclass instance (node 15)", async () => {
+    expect(
+      await runProbe(`
+        var re1 = new RegExp('39?'); re1.exec('TC39');
+        var d1 = Object.getOwnPropertyDescriptor(re1, 'lastIndex');
+        var r = (d1 !== undefined && d1.value === 0) ? 1 : 0;
+        r += (d1 !== undefined && d1.writable === true && d1.enumerable === false && d1.configurable === false) ? 2 : 0;
+        class RE extends RegExp {}
+        var re2 = new RE('39?'); re2.exec('TC39');
+        var d2 = Object.getOwnPropertyDescriptor(re2, 'lastIndex');
+        r += (d2 !== undefined && d2.value === 0) ? 4 : 0;
+        r += (re2.hasOwnProperty('lastIndex')) ? 8 : 0;
+        __r = r;
+      `),
+    ).toBe(15);
+  });
+
+  it("RED on base (throws): runtime key — value, attributes, delete refused, writable:false reflected (node 63)", async () => {
+    expect(
+      await runProbe(`
+        function gopd(o, k) { return Object.getOwnPropertyDescriptor(o, k); }
+        function del(o, k) { try { return delete o[k]; } catch (e) { return (e instanceof TypeError) ? false : 'other'; } }
+        var re = /a/g;
+        re.lastIndex = 3;
+        var d = gopd(re, 'lastIndex');
+        var r = (d.value === 3) ? 1 : 0;
+        r += (d.writable === true && d.enumerable === false && d.configurable === false) ? 2 : 0;
+        r += (del(re, 'lastIndex') === false) ? 4 : 0;
+        r += (re.hasOwnProperty('lastIndex')) ? 8 : 0;
+        Object.defineProperty(re, 'lastIndex', { writable: false });
+        var d4 = gopd(re, 'lastIndex');
+        r += (d4.writable === false && d4.value === 3) ? 16 : 0;
+        r += (gopd(re, 'source') === undefined) ? 32 : 0;
+        __r = r;
+      `),
+    ).toBe(63);
+  });
+});
