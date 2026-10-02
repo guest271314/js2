@@ -1,7 +1,7 @@
 ---
 id: 6797
 title: "arch: codegen, ir and frontend form one 693-file strongly-connected component (40 % of src, 3,083 circular chains) — add an import-cycle ratchet and cut the 74 ir→codegen edges first"
-status: in-progress
+status: suspended
 sprint: Backlog
 created: 2026-09-30
 updated: 2026-10-02
@@ -30,7 +30,7 @@ origin: "2026-09-30 codebase review (plan/agent-context/claude-codebase-review-2
   the largest is **693 files** (681 codegen + 11 ir + 1 frontend); 105 mutual
   A↔B pairs. `madge --circular src/index.ts`: **3,083** circular chains over
   1,569 files. Example: `codegen/stdlib-selfhost.ts → frontend/builtins/build-ir.ts
-  → ir/from-ast.ts → … → codegen/function-body.ts`.
+→ ir/from-ast.ts → … → codegen/function-body.ts`.
 - Directory-level two-way edges: codegen↔ir **310 / 74**, backend↔ir 97/20,
   frontend↔ir 17/7, codegen-linear↔ir 9/4, checker↔ir 1/8, ir↔runtime 7/1.
 - Fan-out leaders: `codegen/index.ts` 279 imports, `expressions/calls.ts` 139,
@@ -146,18 +146,18 @@ banks it; missing baseline refuses) and `tests/check-flat-dir-budget.test.ts`.
 
 ### Numbers (measured 2026-10-02)
 
-| metric | issue (review, e303c5c7) | this script at e303c5c7 | baseline, 39cc565790 |
-|---|---|---|---|
-| largest SCC | 693 | 691 | 697 (685 codegen, 11 ir, 1 frontend) |
-| SCCs with > 1 file | 5 | 5 | 5 |
-| type-only excluded | 3,345 imports | 3,338 statements (3,517 refs incl. `import("x").T`) | 3,596 refs |
-| codegen → ir / ir → codegen | 310 / 74 | 295 / 74 | 295 / 74 |
-| backend ↔ ir | 97 / 20 | 97 / 20 | 115 / 22 |
-| frontend ↔ ir | 17 / 7 | 17 / 7 | 17 / 7 |
-| codegen-linear ↔ ir | 9 / 4 | 9 / 4 | 9 / 4 |
-| checker ↔ ir | 1 / 8 | 1 / 8 | 1 / 8 |
-| ir ↔ runtime | 7 / 1 | 7 / 1 | 9 / 1 |
-| `src/codegen/*.ts` | 824 | 824 | 829 |
+| metric                      | issue (review, e303c5c7) | this script at e303c5c7                             | baseline, 39cc565790                 |
+| --------------------------- | ------------------------ | --------------------------------------------------- | ------------------------------------ |
+| largest SCC                 | 693                      | 691                                                 | 697 (685 codegen, 11 ir, 1 frontend) |
+| SCCs with > 1 file          | 5                        | 5                                                   | 5                                    |
+| type-only excluded          | 3,345 imports            | 3,338 statements (3,517 refs incl. `import("x").T`) | 3,596 refs                           |
+| codegen → ir / ir → codegen | 310 / 74                 | 295 / 74                                            | 295 / 74                             |
+| backend ↔ ir                | 97 / 20                  | 97 / 20                                             | 115 / 22                             |
+| frontend ↔ ir               | 17 / 7                   | 17 / 7                                              | 17 / 7                               |
+| codegen-linear ↔ ir         | 9 / 4                    | 9 / 4                                               | 9 / 4                                |
+| checker ↔ ir                | 1 / 8                    | 1 / 8                                               | 1 / 8                                |
+| ir ↔ runtime                | 7 / 1                    | 7 / 1                                               | 9 / 1                                |
+| `src/codegen/*.ts`          | 824                      | 824                                                 | 829                                  |
 
 The remaining pairs in the baseline are root-file pairs the review did not
 list (`compiler ↔ deadcode-elide.ts`, `frontend ↔ ts-api.ts`,
@@ -222,3 +222,45 @@ decrease); this PR touches no `src/` file.
 - `baseline-summary-sync.yml` installs no `node_modules`, so it banks only
   the flat-dir budget; its existing `check-func-budget --update-on-decrease`
   call already fails there (non-fatally) for the same reason.
+
+## Suspended Work — follow-up PR (2026-10-02, lead handoff)
+
+PR 6430 landed the ratchets **baseline-scoped**, and within four hours that
+scoping parked two unrelated PRs for growth other PRs had landed (6431 for
+5883, 6419 for 6422 — see #6823 item 5). dev-6797 had the change-scoped
+version ready when the shared repository went bare (#6822); the agent cannot
+be resumed until `core.bare` is repaired
+(`plan/agent-context/claude-review-wave-handoff-2026-10-02.md`).
+
+- **Worktree**: `/home/user/js2/.claude/worktrees/agent-adc6ee3039d92814a`,
+  branch `claude/issue-6797-import-cycle-ratchet` at `c60ee5f34d` (17 local
+  commits past its origin ref; 6430 merged from an older head, so this branch
+  can no longer carry the work — create a NEW branch from the current HEAD,
+  e.g. `claude/issue-6797-change-scoped-allowances`, then
+  `git merge origin/main`).
+- **Staged (10 files, 4 also modified unstaged; +530/−132)**:
+  `scripts/check-import-cycles.mjs` and `scripts/check-flat-dir-budget.mjs`
+  become CHANGE-SCOPED like `check:loc-budget` (fail when the metric is
+  higher at HEAD than at the change-set's own base — HEAD^1 of the synthetic
+  merge, merge-base fallback; growth granted by `import-cycles-allow:` /
+  `flat-dir-budget-allow:` entries in the PR's own `plan/issues/*.md`, format
+  `- largestSccSize: 699 # <date> (#N): <why>` / `- src/codegen/foo.ts # <date>
+(#N): <why>`; the committed baselines stay the post-merge low-water mark and
+  no-git fallback), plus GIT*\* hardening (`CLEAN_ENV` for every spawned git);
+  `tests/check-import-cycles.test.ts` and `tests/check-flat-dir-budget.test.ts`
+  (allowance, malformed-entry and GIT*_-stripping cases, their `git init`
+  runs with GIT\__ removed); `.github/workflows/ci.yml` (both steps gain
+  `git fetch --no-tags --depth=200 origin main` for the merge-base fallback,
+  comments rewritten); `baseline-summary-sync.yml` and `test262-sharded.yml`
+  (banking comments: the import-cycle twin needs `typescript`, which only
+  promote-baseline installs); `docs/architecture/codegen-axes.md` (how to
+  verify the layering, allowance syntax); this issue file (plan + Resolution
+  §"Intended growth" updated) and `6808-…md` (+4).
+- **Remaining**: new branch; merge `origin/main` (6430 already contains the
+  baseline-scoped originals — take main's side only where the staged change
+  does not supersede it); gates per the common brief incl.
+  `check:import-cycles` / `check:flat-dir-budget` themselves and both test
+  files; commit `feat(#6797): change-scoped allowances … ✓` with
+  `Model: Claude Opus 5.5 Medium` trailers; push; PR (base main, not draft).
+  Then set `status: done` here; items 2 (#6808) and 4 (godfiles, #6826) stay
+  separate.
