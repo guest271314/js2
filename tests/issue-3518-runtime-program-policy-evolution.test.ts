@@ -4,6 +4,8 @@ import { readFileSync } from "node:fs";
 import { setImmediate } from "node:timers/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  beforeCanonical3c6InventoryPolicy,
+  beforeCanonical3c6InventoryPolicySource,
   authenticateIrRuntimeProgramPolicy,
   authenticateIrRuntimeProgramPolicyEvolution,
   beforeIrRuntimeProgramPolicy,
@@ -60,7 +62,9 @@ function actual(): Policy {
         beforeDynamicCodeInventoryPolicy(
           beforeHostCarrierInventoryPolicy(
             beforeGeneratorInventoryPolicy(
-              beforeCurrentMainInventoryPolicy(JSON.parse(read("scripts/compiler-boundaries.json"))),
+              beforeCurrentMainInventoryPolicy(
+                beforeCanonical3c6InventoryPolicy(JSON.parse(read("scripts/compiler-boundaries.json"))),
+              ),
             ),
           ),
         ),
@@ -120,7 +124,9 @@ describe("C1 exact policy inverse and reciprocal B proof", () => {
             beforeDynamicCodeInventoryPolicySource(
               beforeHostCarrierInventoryPolicySource(
                 beforeGeneratorInventoryPolicySource(
-                  beforeCurrentMainInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+                  beforeCurrentMainInventoryPolicySource(
+                    beforeCanonical3c6InventoryPolicySource(read("scripts/compiler-boundaries.json")),
+                  ),
                 ),
               ),
             ),

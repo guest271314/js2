@@ -13,6 +13,7 @@ import {
   irValidationPolicyActivations,
 } from "./helpers/ir-validation-policy-evolution.js";
 import {
+  beforeCanonical3c6InventoryPolicy,
   beforeGeneratorInventoryPolicy,
   beforeHostCarrierInventoryPolicy,
   beforeDynamicCodeInventoryPolicy,
@@ -407,7 +408,9 @@ const policy = () => {
       beforeHostCarrierInventoryPolicy(
         beforeGeneratorInventoryPolicy(
           beforeCurrentMainInventoryPolicy(
-            JSON.parse(readFileSync(resolve(repository, "scripts/compiler-boundaries.json"), "utf8")),
+            beforeCanonical3c6InventoryPolicy(
+              JSON.parse(readFileSync(resolve(repository, "scripts/compiler-boundaries.json"), "utf8")),
+            ),
           ),
         ),
       ),

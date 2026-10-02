@@ -16,6 +16,7 @@ import { dirname, relative, resolve, sep } from "node:path";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import {
+  beforeCanonicalInstructionsSource,
   captureC1CurrentPopulation,
   reconstructC1CurrentSources,
   type C1ResolverObservationIO,
@@ -32,7 +33,7 @@ import {
 // Root replaces this ONE external assertion root after final instrument formatting/manifest assembly.
 // A missing freeze is a hard failure, never an alternate accepted manifest.
 const independentFreeze: string =
-  '{"manifestSha256":"c2cdd38109dbc10514be6cab9779e59de4d755ba682bf203ec43092a3545a708","anchorSource":"// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.\\n\\nexport const c1AuthorityManifestSha256 = \\"c2cdd38109dbc10514be6cab9779e59de4d755ba682bf203ec43092a3545a708\\";\\n","anchorPin":{"bytes":194,"sha256":"3c66fa1e979342b0d12b36f4c672d6ce86f5bf92fba66853e140050a7f83c87e","gitBlob":"4d835637126f46afa1545709214e824428ec8f87"},"declarationPin":{"bytes":1633,"sha256":"5294c0fce2be6c6974b61a3686c05e60aa66d5bb4599fc97cb315ee53cab71be","gitBlob":"8c594e598e0d946ed92fd658cbe2efe3063ca2c4"}}';
+  '{"manifestSha256":"033357bb89a6f61362da3f9b62c0ceb845c0207ead3ef659afb7fbd5759f9eb8","anchorSource":"// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.\\n\\nexport const c1AuthorityManifestSha256 = \\"033357bb89a6f61362da3f9b62c0ceb845c0207ead3ef659afb7fbd5759f9eb8\\";\\n","anchorPin":{"bytes":194,"sha256":"9a621e68b0549eb9474023cd98e698824c31cc755b58f4b1df83fb9885daa6b5","gitBlob":"5c7aa72e882baeac5010ceaf30c1c6011a6c3f65"},"declarationPin":{"bytes":1633,"sha256":"5294c0fce2be6c6974b61a3686c05e60aa66d5bb4599fc97cb315ee53cab71be","gitBlob":"8c594e598e0d946ed92fd658cbe2efe3063ca2c4"}}';
 const root = resolve(import.meta.dirname, "..");
 const manifestPath = "tests/helpers/ir-c1-authority.json";
 const anchorPath = "tests/helpers/ir-c1-authority-root.ts";
@@ -825,6 +826,360 @@ describe("C1 fresh live source contract bridge", () => {
   });
 });
 
+// These fixed test literals are independent of the production inverse and manifest.
+function assertCanonicalTestPin(source: string, expected: ReturnType<typeof pin>, label: string): void {
+  if (typeof source !== "string" || JSON.stringify(pin(source)) !== JSON.stringify(expected))
+    throw new Error("canonical test full pin mismatch: " + label);
+}
+function canonicalTestFail(detail: string): never {
+  throw new Error("canonical test: " + detail);
+}
+const canonicalInputEpochs = [
+  {
+    path: "src/wasm/model/instructions.ts",
+    beforePin: {
+      bytes: 14904,
+      sha256: "b305b96583e473272f26032cd1e4ad4653a32d4f56db74df50dac7f1c2461b6d",
+      gitBlob: "699c7b386f529b6017659a2f4b0f3c5671235969",
+    },
+    currentPin: {
+      bytes: 15135,
+      sha256: "8c4c9a27c00e57caafe29e64f465b49b6ab13d77744d9d071b80609bb65d4360",
+      gitBlob: "d3c10d8a8e4c1ecd45d2a7c13e372daa8ae378d0",
+    },
+    spans: [
+      {
+        beforeOffset: 2703,
+        afterOffset: 2703,
+        before: '  | { kind: "i32"; boolean?: true; symbol?: true }\n',
+        after:
+          '  // (#6798) `int32` marks a `type i32 = number` destination: an f64 entering it\n  // converts with ToInt32 (wrap, like `x | 0`), not the saturating truncation\n  // the generic f64 → i32 coercion keeps for indices.\n  | { kind: "i32"; boolean?: true; symbol?: true; int32?: true }\n',
+      },
+    ],
+  },
+  {
+    path: "package.json",
+    beforePin: {
+      bytes: 29631,
+      sha256: "6dcd7ca0c6895e71d3bc3373c05b49b6d6b0a07df8732131386e557d82dc6434",
+      gitBlob: "57ab56f8f065cf84e366bc0f61269336444b0b7b",
+    },
+    currentPin: {
+      bytes: 29828,
+      sha256: "bc084f6c2a17667e42d0c985330cbe064715984a7007201a5635c1622b10c395",
+      gitBlob: "e25ea8aa13863815c93d511ba78f5e629b4b4121",
+    },
+    spans: [
+      {
+        beforeOffset: 1789,
+        afterOffset: 1789,
+        before: '    "binaryen": "^132.0.0",\n    "bun": ">=1.3.14",\n    "deno": ">=2.8.1"\n',
+        after: '    "binaryen": "^132.0.0"\n',
+      },
+      {
+        beforeOffset: 1913,
+        afterOffset: 1867,
+        before: '      "optional": true\n    },\n    "bun": {\n      "optional": true\n    },\n    "deno": {\n',
+        after: "",
+      },
+      {
+        beforeOffset: 2282,
+        afterOffset: 2149,
+        before: '    "build": "vite build --config vite.config.lib.ts && node scripts/build-test262-cli.mjs",\n',
+        after:
+          '    "build": "vite build --config vite.config.lib.ts && node scripts/prune-dist-declarations.mjs && node scripts/build-test262-cli.mjs",\n',
+      },
+      {
+        beforeOffset: 4780,
+        afterOffset: 4691,
+        before: "",
+        after:
+          '    "check:import-cycles": "node scripts/check-import-cycles.mjs",\n    "check:flat-dir-budget": "node scripts/check-flat-dir-budget.mjs",\n',
+      },
+      {
+        beforeOffset: 7427,
+        afterOffset: 7476,
+        before: "",
+        after: '    "check:orphaned-scripts": "node scripts/check-orphaned-scripts.mjs",\n',
+      },
+      {
+        beforeOffset: 8284,
+        afterOffset: 8406,
+        before: "",
+        after: '    "check:tracked-ignored": "node scripts/check-tracked-ignored.mjs",\n',
+      },
+      {
+        beforeOffset: 29143,
+        afterOffset: 29336,
+        before: '    "vitest": "^3",\n',
+        after: '    "vitest": "^3.2.6",\n',
+      },
+    ],
+  },
+  {
+    path: "pnpm-lock.yaml",
+    beforePin: {
+      bytes: 292598,
+      sha256: "cd18b2b644544c06017f91c790c44156d6ad178e568b5ae2b3746b0740728273",
+      gitBlob: "70f62186954477b320c5af66514303e024d8e9c1",
+    },
+    currentPin: {
+      bytes: 292602,
+      sha256: "6a8b59fd4430c6600dc16ac33a749d0f5fed4ef0c100425de8490e43d916f2ac",
+      gitBlob: "03fbaf3f914c0dcd1ebbda6a1d2bce86491d0e3a",
+    },
+    spans: [
+      {
+        beforeOffset: 3290,
+        afterOffset: 3290,
+        before:
+          "        specifier: ^3\n        version: 3.2.4(@types/node@22.19.13)(jsdom@30.0.1)(terser@5.46.1)(tsx@4.23.1)(yaml@2.8.3)\n",
+        after:
+          "        specifier: ^3.2.6\n        version: 3.2.7(@types/node@22.19.13)(jsdom@30.0.1)(terser@5.46.1)(tsx@4.23.1)(yaml@2.8.3)\n",
+      },
+      {
+        beforeOffset: 77978,
+        afterOffset: 77982,
+        before:
+          "  '@vitest/expect@3.2.4':\n    resolution: {integrity: sha512-Io0yyORnB6sikFlt8QW5K7slY4OjqNX9jmJQ02QDda8lyM6B5oNgVWoSoKPac8/kgnCUzuHQKrSLtu/uOqqrig==}\n",
+        after:
+          "  '@vitest/expect@3.2.7':\n    resolution: {integrity: sha512-E8eBXaKibuvH2pSZErOjdVb5vF4PbKYcrnluBTYxEk1l/VhhwZg1kZQsdtjq+CsF5CFydf2Rdkz7jDHKSisi3w==}\n",
+      },
+      {
+        beforeOffset: 78130,
+        afterOffset: 78134,
+        before:
+          "  '@vitest/mocker@3.2.4':\n    resolution: {integrity: sha512-46ryTE9RZO/rfDd7pEqFl7etuyzekzEhUbTW3BvmeO/BcCMEgq59BKhek3dXDWgAj4oMK6OZi+vRr1wPW6qjEQ==}\n",
+        after:
+          "  '@vitest/mocker@3.2.7':\n    resolution: {integrity: sha512-Trr0hYO9CM3Wj6ksWHRhK9IZpIY6wTMO5u/MqXurMxT57sWBaOPEtP3Oq60ihZuh5JsiagKfz95OcxdEP6dBrA==}\n",
+      },
+      {
+        beforeOffset: 78458,
+        afterOffset: 78462,
+        before:
+          "  '@vitest/pretty-format@3.2.4':\n    resolution: {integrity: sha512-IVNZik8IVRJRTr9fxlitMKeJeXFFFN0JaB9PHPGQ8NKQbGpfjlTx9zO4RefN8gp7eqjNy8nyK3NZmBzOPeIxtA==}\n",
+        after:
+          "  '@vitest/pretty-format@3.2.7':\n    resolution: {integrity: sha512-KUHlwqVu0sRlhCdyPdQ/wBoTfRahjUky1MubOmYw9fWfIZy1gNoHpuaaQBPAaMaVYdQYHJLurzj8ECCj5OwTqA==}\n",
+      },
+      {
+        beforeOffset: 78617,
+        afterOffset: 78621,
+        before:
+          "  '@vitest/runner@3.2.4':\n    resolution: {integrity: sha512-oukfKT9Mk41LreEW09vt45f8wx7DordoWUZMYdY/cyAk7w5TWkTRCNZYF7sX7n2wB7jyGAl74OxgwhPgKaqDMQ==}\n",
+        after:
+          "  '@vitest/runner@3.2.7':\n    resolution: {integrity: sha512-sB9y4ovltoQP+WaUPwmSxO9WIg9Ig694Di5PalVPsYHklAdE027mehpWF2SQSVq+k6sFgaivbTjTJwZLSHbedA==}\n",
+      },
+      {
+        beforeOffset: 78769,
+        afterOffset: 78773,
+        before:
+          "  '@vitest/snapshot@3.2.4':\n    resolution: {integrity: sha512-dEYtS7qQP2CjU27QBC5oUOxLE/v5eLkGqPE0ZKEIDGMs4vKWe7IjgLOeauHsR0D5YuuycGRO5oSRXnwnmA78fQ==}\n",
+        after:
+          "  '@vitest/snapshot@3.2.7':\n    resolution: {integrity: sha512-7C+MwShwtBSI5Buwoyg3s/iY1eHL9PKAf+O1wVh/TdnjXUtkoL/9YQtre90i4MtNXM6edP1wJ2zOBpfCyhIS7g==}\n",
+      },
+      {
+        beforeOffset: 78923,
+        afterOffset: 78927,
+        before:
+          "  '@vitest/spy@3.2.4':\n    resolution: {integrity: sha512-vAfasCOe6AIK70iP5UD11Ac4siNUNJ9i/9PZ3NKx07sG6sUxeag1LWdNrMWeKKYBLlzuK+Gn65Yd5nyL6ds+nw==}\n",
+        after:
+          "  '@vitest/spy@3.2.7':\n    resolution: {integrity: sha512-Q2eQGI6d2L/hBtZ0qNuKcAGid68XK6cv1xsoaIma6PaJhHPoqcEJhYpXZ/5myCMqkNgtP6UKuBhbc0nHKnrkuQ==}\n",
+      },
+      {
+        beforeOffset: 79072,
+        afterOffset: 79076,
+        before:
+          "  '@vitest/utils@3.2.4':\n    resolution: {integrity: sha512-fB2V0JFrQSMsCo9HiSq3Ezpdv4iYaXRG1Sx8edX3MwxfyNn83mKiGzOcH+Fkxt4MHxr3y42fQi1oeAInqgX2QA==}\n",
+        after:
+          "  '@vitest/utils@3.2.7':\n    resolution: {integrity: sha512-x6BDOd7dyo3PFLY3I9/HJ25X/6OurhGXk2/B9gOZNPF7XDVjeBK4k01lQE5uvDpbuheErh91qYuE1E2OEjK3Rw==}\n",
+      },
+      {
+        beforeOffset: 185798,
+        afterOffset: 185802,
+        before:
+          "  vitest@3.2.4:\n    resolution: {integrity: sha512-LUCP5ev3GURDysTWiP47wRRUpLKMOfPh+yKTx3kVIEiu5KOMeqzpnYNsKyOoVrULivR8tLcks4+lga33Whn90A==}\n",
+        after:
+          "  vitest@3.2.7:\n    resolution: {integrity: sha512-KrxIJ62Fd89gfysR4WotlgZABiz2dqFPgqGzX7s+CwsqLFomRH7777ZcrOD6+WVAh7khPQP41A+BKbpcJFrdEg==}\n",
+      },
+      {
+        beforeOffset: 186142,
+        afterOffset: 186146,
+        before: "      '@vitest/browser': 3.2.4\n      '@vitest/ui': 3.2.4\n",
+        after: "      '@vitest/browser': 3.2.7\n      '@vitest/ui': 3.2.7\n",
+      },
+      {
+        beforeOffset: 229045,
+        afterOffset: 229049,
+        before: "  '@vitest/expect@3.2.4':\n",
+        after: "  '@vitest/expect@3.2.7':\n",
+      },
+      {
+        beforeOffset: 229116,
+        afterOffset: 229120,
+        before: "      '@vitest/spy': 3.2.4\n      '@vitest/utils': 3.2.4\n",
+        after: "      '@vitest/spy': 3.2.7\n      '@vitest/utils': 3.2.7\n",
+      },
+      {
+        beforeOffset: 229216,
+        afterOffset: 229220,
+        before: "  '@vitest/mocker@3.2.4(vite@6.4.1(@types/node@22.19.13)(terser@5.46.1)(tsx@4.23.1)(yaml@2.8.3))':\n",
+        after: "  '@vitest/mocker@3.2.7(vite@6.4.1(@types/node@22.19.13)(terser@5.46.1)(tsx@4.23.1)(yaml@2.8.3))':\n",
+      },
+      {
+        beforeOffset: 229333,
+        afterOffset: 229337,
+        before: "      '@vitest/spy': 3.2.4\n",
+        after: "      '@vitest/spy': 3.2.7\n",
+      },
+      {
+        beforeOffset: 229521,
+        afterOffset: 229525,
+        before: "  '@vitest/pretty-format@3.2.4':\n",
+        after: "  '@vitest/pretty-format@3.2.7':\n",
+      },
+      {
+        beforeOffset: 229598,
+        afterOffset: 229602,
+        before: "  '@vitest/runner@3.2.4':\n",
+        after: "  '@vitest/runner@3.2.7':\n",
+      },
+      {
+        beforeOffset: 229642,
+        afterOffset: 229646,
+        before: "      '@vitest/utils': 3.2.4\n",
+        after: "      '@vitest/utils': 3.2.7\n",
+      },
+      {
+        beforeOffset: 229718,
+        afterOffset: 229722,
+        before: "  '@vitest/snapshot@3.2.4':\n",
+        after: "  '@vitest/snapshot@3.2.7':\n",
+      },
+      {
+        beforeOffset: 229764,
+        afterOffset: 229768,
+        before: "      '@vitest/pretty-format': 3.2.4\n",
+        after: "      '@vitest/pretty-format': 3.2.7\n",
+      },
+      {
+        beforeOffset: 229849,
+        afterOffset: 229853,
+        before: "  '@vitest/spy@3.2.4':\n",
+        after: "  '@vitest/spy@3.2.7':\n",
+      },
+      {
+        beforeOffset: 229912,
+        afterOffset: 229916,
+        before: "  '@vitest/utils@3.2.4':\n",
+        after: "  '@vitest/utils@3.2.7':\n",
+      },
+      {
+        beforeOffset: 229955,
+        afterOffset: 229959,
+        before: "      '@vitest/pretty-format': 3.2.4\n",
+        after: "      '@vitest/pretty-format': 3.2.7\n",
+      },
+      {
+        beforeOffset: 288211,
+        afterOffset: 288215,
+        before: "  vitest@3.2.4(@types/node@22.19.13)(jsdom@30.0.1)(terser@5.46.1)(tsx@4.23.1)(yaml@2.8.3):\n",
+        after: "  vitest@3.2.7(@types/node@22.19.13)(jsdom@30.0.1)(terser@5.46.1)(tsx@4.23.1)(yaml@2.8.3):\n",
+      },
+      {
+        beforeOffset: 288347,
+        afterOffset: 288351,
+        before:
+          "      '@vitest/expect': 3.2.4\n      '@vitest/mocker': 3.2.4(vite@6.4.1(@types/node@22.19.13)(terser@5.46.1)(tsx@4.23.1)(yaml@2.8.3))\n      '@vitest/pretty-format': 3.2.4\n      '@vitest/runner': 3.2.4\n      '@vitest/snapshot': 3.2.4\n      '@vitest/spy': 3.2.4\n      '@vitest/utils': 3.2.4\n",
+        after:
+          "      '@vitest/expect': 3.2.7\n      '@vitest/mocker': 3.2.7(vite@6.4.1(@types/node@22.19.13)(terser@5.46.1)(tsx@4.23.1)(yaml@2.8.3))\n      '@vitest/pretty-format': 3.2.7\n      '@vitest/runner': 3.2.7\n      '@vitest/snapshot': 3.2.7\n      '@vitest/spy': 3.2.7\n      '@vitest/utils': 3.2.7\n",
+      },
+    ],
+  },
+] as const;
+function canonicalPreviousInput(path: string, source: string): string {
+  const record = canonicalInputEpochs.find((entry) => entry.path === path);
+  if (!record) canonicalTestFail("unknown canonical input epoch: " + path);
+  assertCanonicalTestPin(source, record.currentPin, path);
+  const current = Buffer.from(source, "utf8");
+  const pieces: Buffer[] = [];
+  let cursor = 0;
+  let previousBeforeEnd = 0;
+  let delta = 0;
+  for (const span of record.spans) {
+    const before = Buffer.from(span.before, "utf8");
+    const after = Buffer.from(span.after, "utf8");
+    if (
+      span.beforeOffset < previousBeforeEnd ||
+      span.afterOffset < cursor ||
+      span.afterOffset !== span.beforeOffset + delta ||
+      !current.subarray(span.afterOffset, span.afterOffset + after.length).equals(after)
+    )
+      canonicalTestFail("canonical input epoch span membership: " + path);
+    pieces.push(current.subarray(cursor, span.afterOffset), before);
+    cursor = span.afterOffset + after.length;
+    previousBeforeEnd = span.beforeOffset + before.length;
+    delta += after.length - before.length;
+  }
+  pieces.push(current.subarray(cursor));
+  const predecessor = Buffer.concat(pieces);
+  assertCanonicalTestPin(predecessor.toString("utf8"), record.beforePin, "canonical input epoch predecessor: " + path);
+  const replayPieces: Buffer[] = [];
+  cursor = 0;
+  for (const span of record.spans) {
+    const before = Buffer.from(span.before, "utf8");
+    const after = Buffer.from(span.after, "utf8");
+    if (!predecessor.subarray(span.beforeOffset, span.beforeOffset + before.length).equals(before))
+      canonicalTestFail("canonical input epoch predecessor membership: " + path);
+    replayPieces.push(predecessor.subarray(cursor, span.beforeOffset), after);
+    cursor = span.beforeOffset + before.length;
+  }
+  replayPieces.push(predecessor.subarray(cursor));
+  const replay = Buffer.concat(replayPieces);
+  if (!replay.equals(current)) canonicalTestFail("canonical input epoch reciprocal bytes: " + path);
+  assertCanonicalTestPin(replay.toString("utf8"), record.currentPin, "canonical input epoch replay: " + path);
+  return predecessor.toString("utf8");
+}
+
+function canonicalPreviousPackage(source: string): string {
+  return canonicalPreviousInput("package.json", source);
+}
+// Only the old package positive receives this independently authenticated predecessor view.
+function canonicalPreviousPackageContractView(data: ReturnType<typeof JSON.parse>) {
+  const record = canonicalInputEpochs[1];
+  expect(data.currentBase).toBe("3c6fcfc6e4c8bd06fd7528d30593eb988387f0e8");
+  canonicalPreviousPackage(read("package.json"));
+  const inputs = data.linearOptions.resolver.configInputs;
+  const packageInputs = inputs.filter((input: { path: string }) => input.path === "package.json");
+  expect(packageInputs).toHaveLength(1);
+  expect(packageInputs[0].pin).toEqual(record.currentPin);
+  const observations = data.linearOptions.resolver.observations;
+  const packageObservations = observations.filter(
+    (item: { operation: string; location: { scope: string; path: string } }) =>
+      item.operation === "readFile" && item.location.scope === "repository" && item.location.path === "package.json",
+  );
+  expect(packageObservations).toEqual([
+    { operation: "readFile", location: { scope: "repository", path: "package.json" }, pin: record.currentPin },
+  ]);
+  return {
+    ...data,
+    currentBase: "fcf4b188d0bd19f23665a318316af766e641f737",
+    linearOptions: {
+      ...data.linearOptions,
+      resolver: {
+        ...data.linearOptions.resolver,
+        configInputs: inputs.map((item: { path: string }) =>
+          item.path === "package.json" ? { ...item, pin: record.beforePin } : item,
+        ),
+        observations: observations.map((item: { operation: string; location: { scope: string; path: string } }) =>
+          item.operation === "readFile" && item.location.scope === "repository" && item.location.path === "package.json"
+            ? { ...item, pin: record.beforePin }
+            : item,
+        ),
+      },
+    },
+  };
+}
+
 // These controls independently fix the package-only epoch; the original 149 rows stay above unchanged.
 describe("C1 current-main package script epoch", () => {
   const scriptLine = '    "check:claude-md-paths": "node scripts/check-claude-md-paths.mjs",\n';
@@ -844,7 +1199,7 @@ describe("C1 current-main package script epoch", () => {
     return Buffer.concat([bytes.subarray(0, offset), bytes.subarray(offset + 71)]).toString("utf8");
   };
   it("independently proves the exact current script insertion and full inverse/replay", () => {
-    const current = read("package.json");
+    const current = canonicalPreviousPackage(read("package.json"));
     expect(pin(current)).toEqual(currentPin);
     const bytes = Buffer.from(current),
       insertion = Buffer.from(scriptLine);
@@ -866,7 +1221,7 @@ describe("C1 current-main package script epoch", () => {
     expect(Object.keys(currentScripts)).toHaveLength(Object.keys(oldScripts).length + 1);
   });
   it("pins the audited current base and measured package read without changing request topology or read counts", () => {
-    const { data } = manifest();
+    const data = canonicalPreviousPackageContractView(manifest().data);
     expect(data.currentBase).toBe("fcf4b188d0bd19f23665a318316af766e641f737");
     expect(data.historicalBase).toBe("bfcf326c9426988e66fa6cc446132ed9ad9c1965");
     expect(
@@ -945,9 +1300,13 @@ describe("C1 current-main package script epoch", () => {
         return actual.realpath(path);
       },
     };
-    expect(() => captureC1CurrentPopulation(read, replaced("package.json", mutate(read("package.json"))), io)).toThrow(
-      /full pin mismatch: package.json/,
-    );
+    expect(() =>
+      captureC1CurrentPopulation(
+        read,
+        replaced("package.json", mutate(canonicalPreviousPackage(read("package.json")))),
+        io,
+      ),
+    ).toThrow(/full pin mismatch: package.json/);
     expect(calls).toBe(0);
   });
   it.each(["tsconfig.json", "pnpm-lock.yaml"])("retains full current config refusal for %s", (path) => {
@@ -957,11 +1316,409 @@ describe("C1 current-main package script epoch", () => {
     let packageSource = read("package.json");
     const authority = (path: string): string => (path === "package.json" ? packageSource : read(path));
     const first = captureC1CurrentPopulation(read, authority);
-    packageSource = predecessor(packageSource);
+    packageSource = predecessor(canonicalPreviousPackage(packageSource));
     expect(() => captureC1CurrentPopulation(read, authority)).toThrow(/full pin mismatch: package.json/);
     packageSource = read("package.json");
     const restored = captureC1CurrentPopulation(read, authority);
     expect([...restored.originals]).toEqual([...first.originals]);
     expect(restored.originals).not.toBe(first.originals);
+  });
+});
+
+// Canonical-input epoch controls use actual current bytes; no predecessor view reaches the bridge.
+const canonicalPaths = ["src/wasm/model/instructions.ts", "package.json", "pnpm-lock.yaml"] as const;
+const canonicalSpanRows = [
+  {
+    path: "src/wasm/model/instructions.ts",
+    index: 0,
+  },
+  {
+    path: "package.json",
+    index: 0,
+  },
+  {
+    path: "package.json",
+    index: 1,
+  },
+  {
+    path: "package.json",
+    index: 2,
+  },
+  {
+    path: "package.json",
+    index: 3,
+  },
+  {
+    path: "package.json",
+    index: 4,
+  },
+  {
+    path: "package.json",
+    index: 5,
+  },
+  {
+    path: "package.json",
+    index: 6,
+  },
+  {
+    path: "pnpm-lock.yaml",
+    index: 0,
+  },
+  {
+    path: "pnpm-lock.yaml",
+    index: 1,
+  },
+  {
+    path: "pnpm-lock.yaml",
+    index: 2,
+  },
+  {
+    path: "pnpm-lock.yaml",
+    index: 3,
+  },
+  {
+    path: "pnpm-lock.yaml",
+    index: 4,
+  },
+  {
+    path: "pnpm-lock.yaml",
+    index: 5,
+  },
+  {
+    path: "pnpm-lock.yaml",
+    index: 6,
+  },
+  {
+    path: "pnpm-lock.yaml",
+    index: 7,
+  },
+  {
+    path: "pnpm-lock.yaml",
+    index: 8,
+  },
+  {
+    path: "pnpm-lock.yaml",
+    index: 9,
+  },
+  {
+    path: "pnpm-lock.yaml",
+    index: 10,
+  },
+  {
+    path: "pnpm-lock.yaml",
+    index: 11,
+  },
+  {
+    path: "pnpm-lock.yaml",
+    index: 12,
+  },
+  {
+    path: "pnpm-lock.yaml",
+    index: 13,
+  },
+  {
+    path: "pnpm-lock.yaml",
+    index: 14,
+  },
+  {
+    path: "pnpm-lock.yaml",
+    index: 15,
+  },
+  {
+    path: "pnpm-lock.yaml",
+    index: 16,
+  },
+  {
+    path: "pnpm-lock.yaml",
+    index: 17,
+  },
+  {
+    path: "pnpm-lock.yaml",
+    index: 18,
+  },
+  {
+    path: "pnpm-lock.yaml",
+    index: 19,
+  },
+  {
+    path: "pnpm-lock.yaml",
+    index: 20,
+  },
+  {
+    path: "pnpm-lock.yaml",
+    index: 21,
+  },
+  {
+    path: "pnpm-lock.yaml",
+    index: 22,
+  },
+  {
+    path: "pnpm-lock.yaml",
+    index: 23,
+  },
+] as const;
+describe("C1 named canonical input epoch", () => {
+  it("authenticates the actual current base, closure/config pins and package observation", () => {
+    const { data } = manifest();
+    expect(data.currentBase).toBe("3c6fcfc6e4c8bd06fd7528d30593eb988387f0e8");
+    expect(data.historicalBase).toBe("bfcf326c9426988e66fa6cc446132ed9ad9c1965");
+    const capture = captureC1CurrentPopulation(read, read);
+    expect(capture.originals.size).toBe(4);
+    for (const record of canonicalInputEpochs) {
+      expect(pin(read(record.path))).toEqual(record.currentPin);
+      const inputs =
+        record.path === "src/wasm/model/instructions.ts"
+          ? data.linearOptions.closureInputs
+          : data.linearOptions.resolver.configInputs;
+      expect(inputs.filter((entry: { path: string }) => entry.path === record.path)).toEqual([
+        { path: record.path, pin: record.currentPin },
+      ]);
+    }
+    expect(
+      data.linearOptions.resolver.observations.filter(
+        (item: { operation: string; location: { scope: string; path: string } }) =>
+          item.operation === "readFile" &&
+          item.location.scope === "repository" &&
+          item.location.path === "package.json",
+      ),
+    ).toEqual([
+      {
+        operation: "readFile",
+        location: { scope: "repository", path: "package.json" },
+        pin: canonicalInputEpochs[1].currentPin,
+      },
+    ]);
+  });
+  it.each(canonicalPaths)("independently reconstructs and replays the exact predecessor for %s", (path) => {
+    const record = canonicalInputEpochs.find((entry) => entry.path === path)!;
+    const current = read(path);
+    expect(pin(current)).toEqual(record.currentPin);
+    expect(pin(canonicalPreviousInput(path, current))).toEqual(record.beforePin);
+  });
+  it.each(canonicalPaths)("refuses stale predecessor bytes before resolver IO for %s", (path) => {
+    let calls = 0;
+    const io: C1ResolverObservationIO = {
+      fileExists: () => {
+        calls++;
+        return false;
+      },
+      directoryExists: () => {
+        calls++;
+        return false;
+      },
+      realpath: (value) => {
+        calls++;
+        return value;
+      },
+    };
+    expect(() =>
+      captureC1CurrentPopulation(read, replaced(path, canonicalPreviousInput(path, read(path))), io),
+    ).toThrow(/full pin mismatch/);
+    expect(calls).toBe(0);
+  });
+  for (const mode of ["omission", "duplicate", "content"] as const) {
+    it.each(canonicalSpanRows)(`refuses canonical ${mode} span $path/$index`, ({ path, index }) => {
+      const record = canonicalInputEpochs.find((entry) => entry.path === path)!;
+      const span = record.spans[index]!;
+      const actual = read(path),
+        bytes = Buffer.from(actual),
+        before = Buffer.from(span.before),
+        after = Buffer.from(span.after);
+      const replacement =
+        mode === "omission"
+          ? before
+          : mode === "duplicate"
+            ? after.length
+              ? Buffer.concat([after, after])
+              : Buffer.concat([before, before])
+            : after.length
+              ? Buffer.from(after)
+              : Buffer.from("\n");
+      if (mode === "content" && after.length) replacement[0] = replacement[0]! ^ 1;
+      const mutant = Buffer.concat([
+        bytes.subarray(0, span.afterOffset),
+        replacement,
+        bytes.subarray(span.afterOffset + after.length),
+      ]).toString("utf8");
+      expect(mutant).not.toBe(actual);
+      let calls = 0;
+      const io: C1ResolverObservationIO = {
+        fileExists: () => {
+          calls++;
+          return false;
+        },
+        directoryExists: () => {
+          calls++;
+          return false;
+        },
+        realpath: (value) => {
+          calls++;
+          return value;
+        },
+      };
+      expect(() => captureC1CurrentPopulation(read, replaced(path, mutant), io)).toThrow(/full pin mismatch/);
+      expect(calls).toBe(0);
+    });
+  }
+  it.each(["package.json", "pnpm-lock.yaml"] as const)("refuses reordered canonical fragments in %s", (path) => {
+    const record = canonicalInputEpochs.find((entry) => entry.path === path)!;
+    const first = record.spans[0],
+      second = record.spans[path === "package.json" ? 2 : 1]!;
+    const actual = read(path),
+      bytes = Buffer.from(actual);
+    const firstAfter = Buffer.from(first.after),
+      secondAfter = Buffer.from(second.after);
+    expect(firstAfter.equals(secondAfter)).toBe(false);
+    const mutant = Buffer.concat([
+      bytes.subarray(0, first.afterOffset),
+      secondAfter,
+      bytes.subarray(first.afterOffset + firstAfter.length, second.afterOffset),
+      firstAfter,
+      bytes.subarray(second.afterOffset + secondAfter.length),
+    ]).toString("utf8");
+    expect(mutant).not.toBe(actual);
+    expect(() => captureC1CurrentPopulation(read, replaced(path, mutant))).toThrow(/full pin mismatch/);
+  });
+  it.each(canonicalPaths)("refuses a fresh second-operation mutation and accepts actual restoration for %s", (path) => {
+    let source = read(path);
+    const reader = (input: string): string => (input === path ? source : read(input));
+    const first = captureC1CurrentPopulation(read, reader);
+    source += "\n";
+    expect(() => captureC1CurrentPopulation(read, reader)).toThrow(/full pin mismatch/);
+    source = read(path);
+    const restored = captureC1CurrentPopulation(read, reader);
+    expect([...restored.originals]).toEqual([...first.originals]);
+    expect(restored.originals).not.toBe(first.originals);
+  });
+  it("retains required i32 members and the actual new int32 brand without restoring old source", () => {
+    const source = read("src/wasm/model/instructions.ts");
+    expect(pin(source)).toEqual(canonicalInputEpochs[0].currentPin);
+    expect(source).toContain('  | { kind: "i32"; boolean?: true; symbol?: true; int32?: true }');
+    const historical = canonicalPreviousInput("src/wasm/model/instructions.ts", source);
+    expect(historical).toContain('  | { kind: "i32"; boolean?: true; symbol?: true }');
+    expect(historical).not.toContain("int32?: true");
+  });
+  it.each(["src/ir/identity.ts", "tsconfig.json"])("does not admit unrelated current input changes in %s", (path) => {
+    let calls = 0;
+    const mutant = read(path) + "\n";
+    const inject = (input: string): string => {
+      if (input === path) {
+        calls++;
+        return mutant;
+      }
+      return read(input);
+    };
+    const populationPath = path === "src/ir/identity.ts";
+    expect(() => captureC1CurrentPopulation(populationPath ? inject : read, populationPath ? read : inject)).toThrow(
+      populationPath ? /length\/SHA256: src\/ir\/identity\.ts/ : /full pin mismatch: tsconfig\.json/,
+    );
+    expect(calls).toBe(1);
+  });
+});
+
+describe("C1 canonical instructions historical operand", () => {
+  const record = canonicalInputEpochs[0];
+  const span = record.spans[0];
+  const actualInstructions = (): string => read(record.path);
+  const alterSpan = (replacement: string): string => {
+    const current = Buffer.from(actualInstructions());
+    const after = Buffer.from(span.after);
+    expect(current.subarray(span.afterOffset, span.afterOffset + after.length).toString("utf8")).toBe(span.after);
+    return Buffer.concat([
+      current.subarray(0, span.afterOffset),
+      Buffer.from(replacement),
+      current.subarray(span.afterOffset + after.length),
+    ]).toString("utf8");
+  };
+  it("independently inverts and replays the exact current instructions operand", () => {
+    const current = actualInstructions();
+    expect(pin(current)).toEqual(record.currentPin);
+    const bytes = Buffer.from(current);
+    const predecessor = Buffer.concat([
+      bytes.subarray(0, span.afterOffset),
+      Buffer.from(span.before),
+      bytes.subarray(span.afterOffset + Buffer.byteLength(span.after)),
+    ]).toString("utf8");
+    expect(pin(predecessor)).toEqual(record.beforePin);
+    expect(predecessor).toBe(canonicalPreviousInput(record.path, current));
+    expect(beforeCanonicalInstructionsSource(current)).toBe(predecessor);
+    const old = Buffer.from(predecessor);
+    expect(old.subarray(span.beforeOffset, span.beforeOffset + Buffer.byteLength(span.before)).toString("utf8")).toBe(
+      span.before,
+    );
+    const replay = Buffer.concat([
+      old.subarray(0, span.beforeOffset),
+      Buffer.from(span.after),
+      old.subarray(span.beforeOffset + Buffer.byteLength(span.before)),
+    ]).toString("utf8");
+    expect(replay).toBe(current);
+    expect(pin(replay)).toEqual(record.currentPin);
+  });
+  it("refuses a nonprimitive instructions operand without conversion", () => {
+    let conversions = 0;
+    const operand = {
+      toString: () => {
+        conversions++;
+        return actualInstructions();
+      },
+    };
+    expect(() => beforeCanonicalInstructionsSource(operand)).toThrow(
+      /primitive source required: src\/wasm\/model\/instructions\.ts/,
+    );
+    expect(conversions).toBe(0);
+  });
+  it("refuses the stale predecessor instructions operand", () => {
+    const current = actualInstructions();
+    const stale = canonicalPreviousInput(record.path, current);
+    expect(pin(stale)).toEqual(record.beforePin);
+    expect(stale).not.toBe(current);
+    expect(() => beforeCanonicalInstructionsSource(stale)).toThrow(/full pin mismatch/);
+  });
+  it("refuses omission of the current instructions span", () => {
+    const mutant = alterSpan("");
+    expect(mutant).not.toBe(actualInstructions());
+    expect(mutant).not.toContain(span.after);
+    expect(() => beforeCanonicalInstructionsSource(mutant)).toThrow(/full pin mismatch/);
+  });
+  it("refuses duplication of the current instructions span", () => {
+    const mutant = alterSpan(span.after + span.after);
+    expect(mutant).not.toBe(actualInstructions());
+    expect(mutant).toContain(span.after + span.after);
+    expect(() => beforeCanonicalInstructionsSource(mutant)).toThrow(/full pin mismatch/);
+  });
+  it("refuses a same-length instructions content mutation", () => {
+    const bytes = Buffer.from(actualInstructions());
+    bytes[span.afterOffset] = bytes[span.afterOffset]! ^ 1;
+    const mutant = bytes.toString("utf8");
+    expect(Buffer.byteLength(mutant)).toBe(record.currentPin.bytes);
+    expect(mutant).not.toBe(actualInstructions());
+    expect(() => beforeCanonicalInstructionsSource(mutant)).toThrow(/full pin mismatch/);
+  });
+  it("refuses a shifted current instructions span", () => {
+    const current = actualInstructions();
+    const bytes = Buffer.from(current);
+    expect(bytes[bytes.length - 1]).toBe(10);
+    const mutant = Buffer.concat([
+      bytes.subarray(0, span.afterOffset),
+      Buffer.from("\n"),
+      bytes.subarray(span.afterOffset, bytes.length - 1),
+    ]).toString("utf8");
+    expect(Buffer.byteLength(mutant)).toBe(record.currentPin.bytes);
+    expect(mutant).not.toBe(current);
+    expect(
+      Buffer.from(mutant)
+        .subarray(span.afterOffset + 1, span.afterOffset + 1 + Buffer.byteLength(span.after))
+        .toString("utf8"),
+    ).toBe(span.after);
+    expect(() => beforeCanonicalInstructionsSource(mutant)).toThrow(/full pin mismatch/);
+  });
+  it("authenticates each fresh instructions argument and accepts restoration", () => {
+    const current = actualInstructions();
+    const expected = canonicalPreviousInput(record.path, current);
+    expect(beforeCanonicalInstructionsSource(current)).toBe(expected);
+    const mutant = current + "\n";
+    expect(mutant).not.toBe(current);
+    expect(() => beforeCanonicalInstructionsSource(mutant)).toThrow(/full pin mismatch/);
+    expect(beforeCanonicalInstructionsSource(actualInstructions())).toBe(expected);
   });
 });

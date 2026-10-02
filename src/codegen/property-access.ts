@@ -227,6 +227,7 @@ import { classMethodCandidatesForProp, reserveMemberGetDispatch } from "./member
 import { resolveReceiverStruct } from "./fnctor-escape-gate.js"; // (#2681/#2686 A3) pinned-struct read dispatch
 import { emitGuardedNativeStringElementGet } from "./string-element-read.js"; // (#3973) any-typed native-string element read
 import { emitStringExoticIndexGet } from "./string-exotic-index.js"; // (#4232) §10.4.3.5 bounds for a statically-string receiver
+import { isObjectAssignPrimitiveResultBinding } from "./object-model/object-assign-primitive-operands.js"; // (#6770 S1)
 import { reserveAccessorGetDriver } from "./accessor-driver.js";
 import { S5C_STRUCT_ACCESSOR_CLOSURE } from "./struct-accessor-closure.js";
 import { tryCompileTemporalPropertyAccess } from "./temporal-native.js";
@@ -3528,6 +3529,13 @@ export function taViewReceiverTypeIdx(
   return undefined;
 }
 
+function receiverHasOwnComputedProto(ctx: CodegenContext, expr: ts.PropertyAccessExpression): boolean {
+  // The member resolves to a `["__proto__"]: v` definition of an object literal.
+  return ctx.oracle
+    .declarationsOf(expr.name)
+    .some((d) => ts.isPropertyAssignment(d) && ts.isComputedPropertyName(d.name));
+}
+
 /**
  * Dynamic member READ off an open-object carrier. The established standalone
  * growable-object case keeps its reserved-accessor/callable exclusions. The
@@ -3543,7 +3551,10 @@ function tryOpenObjectDynamicGet(
   expr: ts.PropertyAccessExpression,
   propName: string,
 ): ValType | null | undefined {
-  const irWithTarget = isIrWithOpenObjectTargetReceiver(ctx, expr.expression);
+  // (#6774 S2) `{ ["__proto__"]: v }` holds an OWN "__proto__" data property:
+  // read it raw, never through the reserved proto-walk / typed-unbox lowerings.
+  const ownProto = ctx.standalone && propName === "__proto__" && receiverHasOwnComputedProto(ctx, expr);
+  const irWithTarget = ownProto || isIrWithOpenObjectTargetReceiver(ctx, expr.expression);
   if (!irWithTarget && !ctx.standalone) return undefined;
   if (!irWithTarget && !chainRootIsGrowable(ctx, expr.expression)) return undefined;
   if (
@@ -3987,6 +3998,14 @@ export function compilePropertyAccess(
   // file; their identifiers are compiled as externrefs, but the checker cannot
   // answer property-access queries for those unbound declarations. Keep this
   // lane dynamic so expressions such as `a1.length` and `this.shifted` remain evaluable.
+  // (#6774 S5) A spliced `eval("super.x")` resolves against the CALLER frame's home object.
+  if (
+    isForeignEvalNode(expr) &&
+    expr.expression.kind === ts.SyntaxKind.SuperKeyword &&
+    !ts.isPrivateIdentifier(expr.name)
+  ) {
+    return compileSuperPropertyAccess(ctx, fctx, expr, expr.name.text);
+  }
   if (isForeignEvalNode(expr)) {
     const foreignPoison = tryCompileFunctionPoisonRead(ctx, fctx, expr);
     if (foreignPoison !== undefined) return foreignPoison;
@@ -5326,7 +5345,8 @@ export function compileElementAccess(
     const recvWrapTsType = ctx.checker.getTypeAtLocation(expr.expression);
     if (
       (isStringWrapperType(recvWrapTsType) || ctx.oracle.staticJsTypeOf(expr.expression) === "string") &&
-      isNumericIndexExpression(ctx, expr.argumentExpression, fctx)
+      isNumericIndexExpression(ctx, expr.argumentExpression, fctx) &&
+      !isObjectAssignPrimitiveResultBinding(ctx, expr.expression) // (#6770 S1) checker type is `T & U`, runtime is ToObject(T)
     ) {
       // (#4232) …with §10.4.3.5 bounds, not §22.1.3.1 charAt bounds: an index
       // outside `[0, len)` — or a non-canonical one like `NaN` / `1.5` — is

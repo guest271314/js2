@@ -1,7 +1,8 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { ts, forEachChild } from "../ts-api.js";
+import { restPatternParamSlot } from "./resolved-rest-param.js"; // (#6774 S7)
 import { widenJsDefaultGuessSlot } from "./js-default-param-type-guess.js";
-import { propertyValueIsAccessorObjectLiteral } from "./accessor-value-field.js";
+import { isAccessorObjectLiteralType, propertyValueIsAccessorObjectLiteral } from "./accessor-value-field.js";
 import { registerAnnexBGlobalLiveBindings } from "./annexb-global-live-binding.js";
 import { exactClassExpressionTypeName } from "./class-expression-identity.js";
 import { emitToBoolean } from "./coercion-engine.js";
@@ -441,6 +442,8 @@ import { fillHoleyArrayHasIdxArm } from "./holey-array-presence.js"; // (#4222) 
 import { fillSparseHoleHasIdxArms } from "./vec-externref-hole-presence.js"; // (#4491/#2001) sparse absence markers
 import { finalizeFunctionPoisonPillCalls } from "./function-poison-pill.js";
 import { fillDataViewConstructProtoArm, fillTaDynViewMopArms } from "./ta-dyn-mop.js"; // (#3177/#3371) native view prototype arms
+import { fillArrayLikeExoticArms } from "./array/array-like-exotic-arms.js"; // (#6771 S2)
+import { fillVecElemGetIdxArms } from "./array/vec-elem-fidelity.js"; // (#6771 S8/S9)
 import { fillTaStaticViewMopArms } from "./ta-static-view-mop.js"; // (#6651 E7) static view in a generic slot
 import { fillTaDynViewOwnKeyArms } from "./ta-dyn-own-keys.js"; // (#6651 E2) §10.4.5.6 own-key surface
 import { fillObjVecReflectionHelpers } from "./objvec-array-proto.js"; // (#3666) RegExp indices Array reflection
@@ -451,6 +454,7 @@ import {
 } from "./reflect-construct-native.js";
 import { fillArrayToPrimitive } from "./array-to-primitive.js";
 import { fillNumberToLocaleString, fillTaToLocaleString } from "./to-locale-string-element.js"; // (#6651 TA1)
+import { fillBoolToLocaleString } from "./expressions/bool-to-locale-string.js"; // (#6771 S6)
 import { fillVecOwnToPrimitive } from "./vec-own-to-primitive.js"; // (#6651 E3)
 import { brandedI32ResultBoxIdx, fillClassToPrimitive } from "./class-to-primitive.js";
 import {
@@ -736,6 +740,41 @@ import { buildLibDeclIndex } from "./lib-decl-index.js"; // (#4218) syntactic li
 import { typeIsForeignReturnFnctorInstance } from "./fnctor-foreign-return.js"; // (#2071)
 import { typeTakesToPrimitiveOpenPath } from "./to-primitive-open-object.js"; // (#5269 R3-2) the consumer-side twin of the literal gate
 import { readEnv } from "../env.js";
+// (#6770/#6797) The object-model leaves reach these core helpers through
+// object-model/ports.ts, installed here at the composition root, so the leaves
+// never value-import the core and stay out of its import cycle.
+import * as omTryTable from "../ir/try-table.js";
+import * as omAnyHelpers from "./any-helpers.js";
+import * as omArraySubclass from "./array-subclass-receiver.js";
+import * as omProtoOverride from "./builtin-proto-member-override.js";
+import * as omBuiltinValueRead from "./builtin-value-read.js";
+import * as omCalls from "./expressions/calls.js";
+import * as omLiterals from "./literals.js";
+import * as omNativeProto from "./native-proto.js";
+import * as omNativeStrings from "./native-strings.js";
+import * as omObjectRuntime from "./object-runtime.js";
+import * as omRegistryImports from "./registry/imports.js";
+import { installObjectModelPorts } from "./object-model/ports.js";
+
+installObjectModelPorts(() => ({
+  addStringConstantGlobal: omRegistryImports.addStringConstantGlobal,
+  nextModuleGlobalIdx: omRegistryImports.nextModuleGlobalIdx,
+  stringConstantExternrefInstrs: omNativeStrings.stringConstantExternrefInstrs,
+  undefinedExternInstrs: omAnyHelpers.undefinedExternInstrs,
+  ensureExternStrictEqHelper: omAnyHelpers.ensureExternStrictEqHelper,
+  ensureObjVecBuilders: omObjectRuntime.ensureObjVecBuilders,
+  ensureObjectRuntime: omObjectRuntime.ensureObjectRuntime,
+  reserveApplyClosure: omObjectRuntime.reserveApplyClosure,
+  withArraySubclassReceiverAsVec: omArraySubclass.withArraySubclassReceiverAsVec,
+  sourceOverridesBuiltinPrototypeMember: omProtoOverride.sourceOverridesBuiltinPrototypeMember,
+  tryEnsureNativeProtoBrand: omBuiltinValueRead.tryEnsureNativeProtoBrand,
+  emitFnctorSubclassDynamicMethodCall: omCalls.emitFnctorSubclassDynamicMethodCall,
+  emitLazyNativeProtoGet: omNativeProto.emitLazyNativeProtoGet,
+  compileObjectLiteral: omLiterals.compileObjectLiteral,
+  compileObjectLiteralAsExternref: omLiterals.compileObjectLiteralAsExternref,
+  objectLiteralForcesHostPath: omLiterals.objectLiteralForcesHostPath,
+  buildStandardTryTable: omTryTable.buildStandardTryTable,
+}));
 
 // ── Re-exports for public API compatibility ─────────────────────────────────
 export {
@@ -1217,6 +1256,12 @@ function nestedVecElementValType(elemIr: IrType, ctx: CodegenContext): ValType |
   return { kind: "ref_null", typeIdx: getOrRegisterVecType(ctx, inner.kind, inner) };
 }
 
+// (#6798) Every throw in `resolvePositionType` is a DESIGNED demote (the #1921
+// contract): typed, so the resolve-stage catch can tell it from a real bug.
+function unresolvablePosition(detail: string): never {
+  throw new IrUnsupportedError("type-resolution-unsupported", "resolve", detail);
+}
+
 function resolvePositionType(
   node: ts.TypeNode | undefined,
   mapped: LatticeType | undefined,
@@ -1272,7 +1317,7 @@ function resolvePositionType(
             : // (#5166) `number[][]` — carry the inner array as a concrete ref.
               nestedVecElementValType(elemIr, ctx);
       if (!elemVal) {
-        throw new Error(
+        unresolvablePosition(
           `array element TypeNode ${ts.SyntaxKind[node.elementType.kind]} could not be lowered to a primitive ValType`,
         );
       }
@@ -1328,7 +1373,7 @@ function resolvePositionType(
                 : // (#5166) `Array<Array<number>>` — same concrete-ref carrier.
                   nestedVecElementValType(elemIr, ctx);
           if (!elemVal) {
-            throw new Error(
+            unresolvablePosition(
               `Array<T> element TypeNode ${ts.SyntaxKind[typeArgs[0]!.kind]} could not be lowered to a primitive ValType`,
             );
           }
@@ -1393,7 +1438,7 @@ function resolvePositionType(
       }
       const ir = objectIrTypeFromTsType(ctx, tsType);
       if (ir) return ir;
-      throw new Error(`object TypeNode ${ts.SyntaxKind[node.kind]} could not be lowered to IrType.object`);
+      unresolvablePosition(`object TypeNode ${ts.SyntaxKind[node.kind]} could not be lowered to IrType.object`);
     }
     // #2859 / #3214 B0+B3 — function-typed source boundary
     // (`fn: () => number` or `(): () => number`). Mirrors the selector's
@@ -1407,9 +1452,9 @@ function resolvePositionType(
     if (ts.isFunctionTypeNode(node)) {
       const signature = irClosureSignatureFromFunctionTypeNode(node);
       if (signature) return { kind: "callable", signature };
-      throw new Error(`function TypeNode not expressible as an IR callable signature`);
+      unresolvablePosition(`function TypeNode not expressible as an IR callable signature`);
     }
-    throw new Error(`unsupported TypeNode kind ${ts.SyntaxKind[node.kind]}`);
+    unresolvablePosition(`unsupported TypeNode kind ${ts.SyntaxKind[node.kind]}`);
   }
   if (isConcreteLattice(mapped)) return latticeToIr(mapped);
   if (mapped?.kind === "object") {
@@ -1420,7 +1465,7 @@ function resolvePositionType(
     // unannotated functions like `function createPoint(x, y) { return {x, y}; }`.
     const ir = objectIrTypeFromLattice(mapped);
     if (ir) return ir;
-    throw new Error(`object position type — lattice shape not lowerable to IrType.object`);
+    unresolvablePosition(`object position type — lattice shape not lowerable to IrType.object`);
   }
   // #2949 slice 2 — UNANNOTATED position whose lattice converged to `unknown`
   // (no evidence) or `dynamic` (top): the position is honestly dynamic. MUST
@@ -1438,7 +1483,7 @@ function resolvePositionType(
   if (mapped && (mapped.kind === "unknown" || mapped.kind === "dynamic")) {
     return irDynamic();
   }
-  throw new Error(`no concrete type (mapped=${mapped?.kind ?? "missing"})`);
+  unresolvablePosition(`no concrete type (mapped=${mapped?.kind ?? "missing"})`);
 }
 
 /**
@@ -3376,20 +3421,18 @@ function planIrOverlay(
       // (#2138) NOTE: a resolve-time drop is exactly why `safeSelection`
       // — not the raw `selection` — feeds `computeIrFirstSkipSet`: this
       // function keeps its legacy body under IR-first.
-      const resolveMsg = e instanceof Error ? e.message : String(e);
-      recordPreparationFailure(name, {
-        kind: "unsupported",
-        code: "type-resolution-unsupported",
-        stage: "resolve",
-        detail: resolveMsg,
-        cause: e,
-      });
-      (ctx.irPostClaimErrors ??= []).push({
-        kind: "resolve",
-        func: name,
-        message: resolveMsg,
-      });
-      reportErrorNoNode(ctx, `IR path: could not resolve types for ${name}: ${resolveMsg}`, "warning");
+      //
+      // (#6798) Only a TYPED `IrUnsupportedError` is that designed demote. Any
+      // other throw (a `TypeError` from a real bug) classifies as the
+      // `unexpected-internal-throw` invariant and hard-errors, as the
+      // build/verify/lower stages already do.
+      const failure = classifyIrFailure(e, "resolve");
+      const resolveMsg = failure.detail;
+      recordPreparationFailure(name, failure);
+      (ctx.irPostClaimErrors ??= []).push({ kind: "resolve", func: name, message: resolveMsg });
+      const hard = failure.kind === "invariant";
+      const resolveDiag = `IR path: could not resolve types for ${name}: ${resolveMsg}`;
+      reportErrorNoNode(ctx, hard ? `Codegen error: ${resolveDiag}` : resolveDiag, hard ? "error" : "warning");
     }
   }
   // Only request IR compilation for functions we successfully built
@@ -6664,6 +6707,7 @@ export function generateModule(
     // `.length` fix, so `(arr as any)[i]` through the externref boundary reads
     // the element instead of null/0. Standalone only (no-op otherwise).
     fillExternGetIdxVecArms(ctx);
+    fillVecElemGetIdxArms(ctx); // (#6771 S8/S9) stored-`undefined` f64 and boolean vec elements
 
     // (#3190) Write-side sibling of the fill above: splice `$__vec_base` STORE
     // arms into `__extern_set` so `(arr as any)[i] = v` on an any-typed array
@@ -6710,6 +6754,7 @@ export function generateModule(
     // `fillTaDynViewMopArms` below so the TypedArray dyn-view arm keeps the
     // front slot (TA receivers must exit before the overlay consult). Standalone only.
     fillObjVecReflectionHelpers(ctx);
+    fillArrayLikeExoticArms(ctx); // (#6771 S2) closure / String-wrapper array-like arms
 
     // (#3177) `$__ta_dyn_view` §10.4.5 MOP arms — AFTER every vec fill above
     // (each fill prepends at body[0]; last fill wins the front slot, and the
@@ -6877,6 +6922,7 @@ export function generateModule(
     // hit is only known to be a USER value once the native-proto seeder registry
     // is final — see num-to-locale-string.ts.
     fillNumberToLocaleString(ctx);
+    fillBoolToLocaleString(ctx); // (#6771 S6)
     fillTaToLocaleString(ctx);
 
     // #1504: emit __is_closure(externref) -> i32 so the JS-side wrapExports
@@ -8250,9 +8296,9 @@ function emitIteratorMethodExport(ctx: CodegenContext): void {
       appendResultBoxing(testAndCall, entry.resultType);
       // externref: no conversion needed
 
-      const tagCond = classMember
-        ? classArmTagCondition(ctx, entry.structName, entry.typeIdx, receiverAnyLocal)
-        : undefined;
+      // (#6773 S1) Iterator dispatchers take the nominal guard too: same-layout classes are one
+      // runtime type, so `__call_next` on one ran the other's `next` (then failed its brand check).
+      const tagCond = classArmTagCondition(ctx, entry.structName, entry.typeIdx, receiverAnyLocal);
       current = [
         { op: "local.get", index: receiverAnyLocal },
         { op: "ref.test", typeIdx: entry.typeIdx },
@@ -8313,6 +8359,7 @@ function emitIteratorMethodExport(ctx: CodegenContext): void {
     emitMethodDispatch("@@iterator", "__call_@@iterator");
     emitMethodDispatch("next", "__call_next");
     emitMethodDispatch("return", "__call_return"); // (#3100 S5) IteratorClose §7.4.9 USER-arm dispatcher
+    if (ctx.standalone || ctx.wasi) emitMethodDispatch("get_return", "__call_get_return"); // (#6773 S3) GetMethod getter
   }
 
   // (#3123) Host-side class-member resolution surface for fnctor-subclass
@@ -11352,6 +11399,7 @@ export function generateMultiModule(multiAst: MultiTypedAST, options?: CodegenOp
     // fill, the backing vec contains the right values but every indexed read
     // silently returns the undefined sentinel.
     profilePhase("fill-extern-get-idx-vec-arms", () => fillExternGetIdxVecArms(ctx));
+    profilePhase("fill-vec-elem-get-idx-arms", () => fillVecElemGetIdxArms(ctx)); // (#6771 S8/S9)
 
     // (#3190/#3169) Complete the write-side vec arm and the closed-struct
     // array-like reader trio over the graph-wide carrier/type tables.
@@ -11376,6 +11424,7 @@ export function generateMultiModule(multiAst: MultiTypedAST, options?: CodegenOp
     // classifier and native-view prototype overrides in project compilation as
     // in the single-source pipeline. Keep native views after generic vec fills
     // so they retain front precedence.
+    profilePhase("fill-array-like-exotic-arms", () => fillArrayLikeExoticArms(ctx)); // (#6771 S2)
     profilePhase("fill-ta-dyn-view-mop-arms", () => fillTaDynViewMopArms(ctx));
     // (#6651 E2) Multi-source parity with the single-source call above.
     profilePhase("fill-ta-dyn-view-own-key-arms", () => fillTaDynViewOwnKeyArms(ctx));
@@ -11635,6 +11684,7 @@ export function generateMultiModule(multiAst: MultiTypedAST, options?: CodegenOp
     profilePhase("fill-class-to-primitive", () => fillClassToPrimitive(ctx));
     // (#6651 TA1) Same reserve/fill reason as the three above.
     profilePhase("fill-num-to-locale-string", () => fillNumberToLocaleString(ctx));
+    profilePhase("fill-bool-to-locale-string", () => fillBoolToLocaleString(ctx)); // (#6771 S6)
     profilePhase("fill-ta-to-locale-string", () => fillTaToLocaleString(ctx));
 
     // (#3981) Same class of multi-file gap as the two fills immediately above.
@@ -12590,6 +12640,9 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
   }
   const jsBodyArrayReturnOverride = ctx.jsBodyArrayReturnOverrides?.get(tsType);
   if (jsBodyArrayReturnOverride) return jsBodyArrayReturnOverride;
+  // (#6774 S21) An accessor object literal is ALWAYS an open `$Object` at run
+  // time; a struct-ref view of its type casts it away at every boundary.
+  if (ctx.standalone && isAccessorObjectLiteralType(tsType)) return { kind: "externref" };
 
   // Fast mode: string → ref $AnyString (not externref).
   // The String WRAPPER object (`new String(x)`) is excluded here — `isStringType`
@@ -13658,7 +13711,7 @@ export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void 
         if (hasBindingPattern && !paramDecl.type && !paramDecl.dotDotDotToken && wasmType.kind !== "externref") {
           wasmType = { kind: "externref" };
         }
-        methodParams.push(wasmType);
+        methodParams.push(restPatternParamSlot(ctx, paramDecl, wasmType)); // (#6774 S7)
       } else if (paramDecl) {
         const pt = ctx.checker.getTypeAtLocation(paramDecl);
         methodParams.push(resolveWasmType(ctx, pt));

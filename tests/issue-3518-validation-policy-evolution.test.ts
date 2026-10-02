@@ -12,6 +12,7 @@ import {
   irValidationPolicyReceiptPath,
 } from "./helpers/ir-validation-policy-evolution.js";
 import {
+  beforeCanonical3c6InventoryPolicy,
   beforeIrRuntimeProgramPolicy,
   beforeWellKnownSymbolPolicy,
   beforeGeneratorInventoryPolicy,
@@ -46,7 +47,9 @@ function actual(): MutablePolicy {
           beforeDynamicCodeInventoryPolicy(
             beforeHostCarrierInventoryPolicy(
               beforeGeneratorInventoryPolicy(
-                beforeCurrentMainInventoryPolicy(JSON.parse(read("scripts/compiler-boundaries.json"))),
+                beforeCurrentMainInventoryPolicy(
+                  beforeCanonical3c6InventoryPolicy(JSON.parse(read("scripts/compiler-boundaries.json"))),
+                ),
               ),
             ),
           ),

@@ -105,7 +105,7 @@ type Data = Record<string, unknown>;
 const manifestPath = "tests/helpers/ir-c1-authority.json";
 const anchorPath = "tests/helpers/ir-c1-authority-root.ts";
 const historicalBase = "bfcf326c9426988e66fa6cc446132ed9ad9c1965";
-const currentBase = "fcf4b188d0bd19f23665a318316af766e641f737";
+const currentBase = "3c6fcfc6e4c8bd06fd7528d30593eb988387f0e8";
 const artifacts = [
   {
     logicalPath: "src/codegen-linear/index.ts",
@@ -413,7 +413,7 @@ const population = {
   movedCount: 12,
   retainedCount: 79,
 } as const;
-const closureInputs = [
+const predecessorClosureInputs = [
   {
     path: "src/ir/identity.ts",
     pin: {
@@ -511,6 +511,19 @@ const closureInputs = [
     },
   },
 ] as const;
+// Fixed current epoch differs only at the audited instructions input.
+const closureInputs = predecessorClosureInputs.map((entry) =>
+  entry.path === "src/wasm/model/instructions.ts"
+    ? {
+        path: entry.path,
+        pin: {
+          bytes: 15135,
+          sha256: "8c4c9a27c00e57caafe29e64f465b49b6ab13d77744d9d071b80609bb65d4360",
+          gitBlob: "d3c10d8a8e4c1ecd45d2a7c13e372daa8ae378d0",
+        },
+      }
+    : entry,
+);
 const linearDeclarationPin = {
   bytes: 1633,
   sha256: "5294c0fce2be6c6974b61a3686c05e60aa66d5bb4599fc97cb315ee53cab71be",

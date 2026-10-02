@@ -25,7 +25,7 @@ import {
   runtimeProgramRelocationPopulationPaths,
   runtimeProgramRelocationReceiptPath,
 } from "./helpers/ir-runtime-program-relocation.js";
-import { reconstructC1CurrentSources } from "./helpers/ir-c1-current-source.js";
+import { beforeCanonicalInstructionsSource, reconstructC1CurrentSources } from "./helpers/ir-c1-current-source.js";
 
 function beforeC1(readLive: (path: string) => string = actual, captureCalls?: string[]): (path: string) => string {
   const sources = reconstructC1CurrentSources((path) => {
@@ -38,7 +38,8 @@ function beforeC1(readLive: (path: string) => string = actual, captureCalls?: st
       if (source === undefined) throw new Error(`missing checked C1 output: ${path}`);
       return source;
     }
-    return readLive(path);
+    const source = readLive(path);
+    return path === "src/wasm/model/instructions.ts" ? beforeCanonicalInstructionsSource(source) : source;
   };
 }
 

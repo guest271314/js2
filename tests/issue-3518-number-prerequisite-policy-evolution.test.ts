@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { setImmediate } from "node:timers/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  beforeCanonical3c6InventoryPolicySource,
   authenticateGeneratorInventoryPolicyEvolution,
   authenticateGeneratorInventoryPolicy,
   beforeGeneratorInventoryPolicy,
@@ -89,7 +90,9 @@ const raw = (): string =>
     beforeDynamicCodeInventoryPolicySource(
       beforeHostCarrierInventoryPolicySource(
         beforeGeneratorInventoryPolicySource(
-          beforeCurrentMainInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+          beforeCurrentMainInventoryPolicySource(
+            beforeCanonical3c6InventoryPolicySource(read("scripts/compiler-boundaries.json")),
+          ),
         ),
       ),
     ),
@@ -905,7 +908,9 @@ describe("C2a exact runtime preparation policy successor", () => {
     beforeDynamicCodeInventoryPolicySource(
       beforeHostCarrierInventoryPolicySource(
         beforeGeneratorInventoryPolicySource(
-          beforeCurrentMainInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+          beforeCurrentMainInventoryPolicySource(
+            beforeCanonical3c6InventoryPolicySource(read("scripts/compiler-boundaries.json")),
+          ),
         ),
       ),
     );
@@ -1297,7 +1302,9 @@ describe("dynamic-code inventory successor preserves the C2a policy proof", () =
   const latestRaw = (): string =>
     beforeHostCarrierInventoryPolicySource(
       beforeGeneratorInventoryPolicySource(
-        beforeCurrentMainInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+        beforeCurrentMainInventoryPolicySource(
+          beforeCanonical3c6InventoryPolicySource(read("scripts/compiler-boundaries.json")),
+        ),
       ),
     );
   const latest = (): Policy => JSON.parse(latestRaw()) as Policy;
@@ -1813,7 +1820,9 @@ describe("dynamic-code inventory successor preserves the C2a policy proof", () =
 describe("host-carrier current-main inventory successor", () => {
   const hostRaw = (): string =>
     beforeGeneratorInventoryPolicySource(
-      beforeCurrentMainInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+      beforeCurrentMainInventoryPolicySource(
+        beforeCanonical3c6InventoryPolicySource(read("scripts/compiler-boundaries.json")),
+      ),
     );
   const hostPolicy = (): Policy => JSON.parse(hostRaw()) as Policy;
   const row: Record<string, string> = {
@@ -2157,7 +2166,10 @@ describe("host-carrier current-main inventory successor", () => {
 
 // Direct generator-current input; all prior control blocks retain their exact captured domains.
 describe("generator eager-refusal current-main inventory successor", () => {
-  const generatorRaw = (): string => beforeCurrentMainInventoryPolicySource(read("scripts/compiler-boundaries.json"));
+  const generatorRaw = (): string =>
+    beforeCurrentMainInventoryPolicySource(
+      beforeCanonical3c6InventoryPolicySource(read("scripts/compiler-boundaries.json")),
+    );
   const generatorPolicy = (): Policy => JSON.parse(generatorRaw()) as Policy;
   const row: Record<string, string> = {
     path: "src/codegen/generator-eager-refusal.ts",
