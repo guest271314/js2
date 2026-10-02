@@ -5,7 +5,7 @@ status: in-progress
 assignee: ttraenkler/opus-6772
 sprint: current
 created: 2026-09-30
-updated: 2026-09-30
+updated: 2026-10-02
 priority: high
 horizon: xl
 feasibility: hard
@@ -835,7 +835,8 @@ shared lock.
 | S9 | `bb9e1bb060` | p10 3 -> 7 (7), p10c illegal cast -> 7 (7), p10e illegal cast -> 1 (1), s9/a 0 -> 5 (5), s9/c illegal cast -> 3 (3), s9/d illegal cast -> 1 (1), s9/e 0 -> 1 (1); guards p10d 3, s9/b 1 | both `grammar-static-ctor-accessor-meth-valid.js` |
 | S10 | `3a35759bae` | p13d 8 -> 15 (15); s10/a 0 -> 15 (15); s10/b throw -> 63 (63) | `subclass/builtin-objects/RegExp/lastIndex.js` |
 | S11 | `b71d3b14b0` | p17 0 -> 7 (7); s11/b 0 -> 15 (15); guards s11/a 27 = base (node 31, bit 4 pre-existing), p11 15, p11e 0 | `definition/prototype-getter.js` |
-| S12 | (this step) | s12/a 3 -> 15 (15); s12/b 34 -> 63 (63); s12/d 3 -> 15 (15); p12 4 -> 39 (63; bits 8/16 are S13); s12/c 390 -> 455 (4095; the static symbol-keyed half is #6767 R3) | `definition/getters-restricted-ids.js`; `fn-name-accessor-{get,set}.js` stay red (first failing assertion: `Object.getOwnPropertyDescriptor(A, 'id').get` is undefined — A also declares symbol-keyed STATIC accessors, #6767 R3; s12/e 0, node 3) |
+| S12 | `f78a4e57ad` | s12/a 3 -> 15 (15); s12/b 34 -> 63 (63); s12/d 3 -> 15 (15); p12 4 -> 39 (63; bits 8/16 are S13); s12/c 390 -> 455 (4095; the static symbol-keyed half is #6767 R3) | `definition/getters-restricted-ids.js`; `fn-name-accessor-{get,set}.js` stay red (first failing assertion: `Object.getOwnPropertyDescriptor(A, 'id').get` is undefined — A also declares symbol-keyed STATIC accessors, #6767 R3; s12/e 0, node 3) |
+| S13 | (not attempted) | optional per the plan; skipped under the lead's token-budget instruction — `methods-restricted-properties.js` stays red (follow-up: per-closure restricted bit + `__extern_get`/`__extern_set` %ThrowTypeError% arm) | — |
 
 S2 design note (deviates from the plan's "set only on an object return"):
 `$__ctor_override` is a RETURN REGISTER written on EVERY exit of a marked
@@ -1041,3 +1042,54 @@ Residual (measured): a subclass's read of an inherited static twin is
 still wrong — s12/f (`class Q extends P {}`, `Q.x`) answers 1 on main and on
 the branch (node 3); the inheritance alias loop does not carry the relocated
 static half.
+
+#### Final measurement (2026-10-02, resume 5)
+
+Base = `origin/main` @ `ce6631272c` (the merged sha; `src` snapshot by
+`git archive`, its own QuickJS adapter built); branch = `f78a4e57ad` + docs.
+All 34 rows, `--isolate --standalone`, shared lock:
+
+| tree | pass | fail | compile_error |
+| --- | --- | --- | --- |
+| main `ce6631272c` | 1 (`name-binding/const.js`) | 32 | 1 |
+| branch | 22 | 12 | 0 |
+
+Every branch non-pass is also non-pass on main. Still red, first failing
+assertion / cause:
+
+| row | cause |
+| --- | --- |
+| `definition/fn-name-accessor-get.js`, `fn-name-accessor-set.js` | `gOPD(A, 'id').get` is undefined: A also declares symbol-keyed STATIC accessors, and the static reflective view then declines for literal keys too (#6767 R3) |
+| `definition/methods-restricted-properties.js` | S13 not attempted: no %ThrowTypeError% `caller`/`arguments` on method values |
+| `strict-mode/arguments-callee.js` | deferred: the heritage function expression is never called by `super()`; plus R2 |
+| `subclass/builtin-objects/GeneratorFunction/{regular-subclassing,instance-length,instance-name,instance-prototype,super-must-be-called}.js` | deferred: CreateDynamicFunction through the eval provider with a subclass NewTarget |
+| `subclass/builtin-objects/TypedArray/regular-subclassing.js` | deferred: parameter heritage over TA constructors (#6769 follow-up) |
+| `subclass/builtins.js` | deferred: `super(10)` builds the TA identity carrier (`length` 2, not 10) (#6769) |
+| `subclass/builtin-objects/ArrayBuffer/regular-subclassing.js` | deferred: identity carrier + species-aware `slice` (#6769) |
+
+Controls, rebuilt from the fresh standalone baseline
+(`.test262-cache/test262-standalone-current.jsonl`, fetched 2026-10-02,
+41,999 passing rows) with `generate-editions.ts::classifyEdition`: 2,264
+ES2015 class/super rows + 1,634 ES5 rows (the union of the per-step ES5 pin
+sets). Run once on the branch, non-isolated, in 400-row chunks under the
+lock: 3,894 / 3,898 pass. The 4 non-passes are all negative parse tests
+("This statement should not be evaluated") and fail identically on main
+`ce6631272c` re-run `--isolate`: class `definition/methods-gen-yield-star-
+after-newline.js`, `definition/methods-gen-yield-weak-binding.js`; ES5
+`expressions/call/S11.2.4_A1.3_T1.js`, `statements/function/invalid-
+function-body-2.js`. They are listed `pass` in the baseline — not caused by
+this branch; whether CI's sharded runner reproduces them was not checked
+(ES5 is a completed edition, so they are worth a look on main).
+
+Pins (fork heap 1024, ≤3 files per batch): `tests/issue-6772-class-residue`
+51/51; issue-6767, issue-6644 (both), issue-6640, issue-5195-r3-heritage-
+check, issue-5195-r3-restricted-properties, issue-4770, issue-5383-class-
+value-dynamic-call, issue-4455, issue-5151, issue-4098, issue-5350 (both) all
+pass; issue-5318-r4 (4), issue-5318-r5 (3), issue-5195-es2015-class-r2 (1)
+and issue-5195-r3-review (1) fail exactly as on main `ce6631272c`.
+
+Gates (bare, exit codes read directly): check-loc-budget and
+check-func-budget (bare and `LOC_GATE_BASE=ce6631272c`), check-coercion-
+sites, check:oracle-ratchet, check:dead-exports, check-compiler-boundaries
+`--mode inventory`, check-import-cycles (SCC 697), check-flat-dir-budget
+(829/829), check:ir-fallbacks, typecheck — all exit 0.
