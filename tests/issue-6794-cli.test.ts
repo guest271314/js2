@@ -17,6 +17,7 @@ import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const CLI = path.resolve("src/cli.ts");
+const TSX = path.resolve("node_modules/tsx/dist/cli.mjs");
 const PKG_VERSION = (JSON.parse(readFileSync(path.resolve("package.json"), "utf8")) as { version: string }).version;
 const workDir = mkdtempSync(path.join(tmpdir(), "issue-6794-cli-"));
 afterAll(() => rmSync(workDir, { recursive: true, force: true }));
@@ -25,9 +26,17 @@ type CliRun = { status: number | null; stdout: string; stderr: string };
 
 // Asynchronous on purpose: a blocking spawnSync of a multi-second compile
 // starves the vitest worker's RPC heartbeat ("Timeout calling onTaskUpdate").
+// Runs tsx with this Node directly rather than through `npx`: under `pnpm run`
+// on CI (Node 25 / npm 11), npx prints `npm warn Unknown env config …` lines to
+// the child's stderr, and NODE_NO_WARNINGS silences Node's own runtime warnings
+// — neither is CLI output, and the assertions below are about CLI output.
 function runCli(args: string[]): Promise<CliRun> {
   return new Promise((resolve, reject) => {
-    const child = spawn("npx", ["-y", "tsx", CLI, ...args], { cwd: workDir, timeout: 120_000 });
+    const child = spawn(process.execPath, [TSX, CLI, ...args], {
+      cwd: workDir,
+      timeout: 120_000,
+      env: { ...process.env, NODE_NO_WARNINGS: "1" },
+    });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d) => (stdout += d));
@@ -80,8 +89,12 @@ describe("#6794 — usage errors and diagnostics", () => {
   it("a missing input prints one line and exits 1 (no stack trace)", async () => {
     const r = await runCli([path.join(workDir, "does-not-exist.ts")]);
     expect(r.status).toBe(1);
-    const lines = r.stderr.trim().split("\n");
-    expect(lines).toHaveLength(1);
+    // Belt and braces for runtime noise the env above does not reach.
+    const lines = r.stderr
+      .trim()
+      .split("\n")
+      .filter((l) => !/^(?:\(node:\d+\) |\(Use `node --trace|npm warn )/.test(l));
+    expect(lines, `stderr was:\n${r.stderr}`).toHaveLength(1);
     expect(lines[0]).toMatch(/^Error: cannot read input file .*does-not-exist\.ts: no such file$/);
     expect(r.stderr).not.toMatch(/node:fs|readFileUtf8|\sat\s/);
   }, 120_000);
