@@ -1,10 +1,12 @@
 ---
 id: 6778
 title: "linear backend: `string + number` emits `f64.add` on an i32 string pointer — invalid binary with `success: true`, zero diagnostics"
-status: ready
+status: in-progress
+assignee: "ttraenkler/claude-dev-6778"
+branch: "claude/issue-6778-linear-mixed-plus"
 sprint: Backlog
 created: 2026-09-30
-updated: 2026-09-30
+updated: 2026-10-02
 priority: high
 horizon: s
 feasibility: easy
