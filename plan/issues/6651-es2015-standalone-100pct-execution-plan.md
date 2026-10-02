@@ -3001,7 +3001,7 @@ measurement, not conformance success. No historical index was published.
 The typed-HOF source audit is now complete and #6832 has been atomically claimed.
 Its isolated worktree is `/Users/thomas/.codex/worktrees/typedarray-some-internal-length/js2`,
 branch `codex/6832-typedarray-some-internal-length`, at `3c6fcfc6`. Its required
-plan is the [published #6832 record](https://github.com/ttraenkler/js2/blob/94d8361a6b2ab0a2ea769ce8c3971367048c9b03/plan/issues/6832-typedarray-some-internal-length.md)
+plan is the [published #6832 record carried by PR #6447](https://github.com/loopdive/js2/pull/6447)
 in PR #6447, not a file already landed on this branch. Ownership is
 `hof-native.ts`, the narrowly necessary typed-array finalizer, and a pure
 instruction leaf if needed. The correct existing primitive is
@@ -3192,3 +3192,27 @@ tag order, Proxy `[[OwnPropertyKeys]]` surfaces, and per-operation trap lookup
 (Symbol carrier consult, symbol-keyed writes on wrapper prototypes,
 `%GeneratorFunction%` tag) and the two #3371 `Reflect.construct` CEs —
 mechanisms in #6770's record.
+
+### Remaining Proxy realm control — constructor admission, not list validation
+
+Read-only audit at `ff310447` (relevant source unchanged since `3c6fcfc6`)
+attributes `Proxy/ownKeys/return-not-list-object-throws-realm.js` to direct
+`new other.Proxy(...)` admission. The original uses
+`other = $262.createRealm().global`, an undefined-returning ownKeys trap, and
+expects the current realm's TypeError from `Object.keys(p)`. Existing
+`tracesToProxyConstructorValue` already recognizes this direct member shape,
+but `expressions/new-super.ts` restricts the proven constructor-value path to
+identifier callees. No actual Proxy reaches the correct list validator.
+
+Future implementation plan: reuse the existing proven Proxy-constructor
+predicate for member callees in both outer construction admission and inner
+`tryCompileNativeConstructFromValue` flag/admission logic, retaining the
+existing target/handler open-literal conversion and native driver. Do not
+widen arbitrary member constructors or alter the validator, realm harness,
+native driver, provenance storage, IR, or public key filters. Add host-free
+direct-member construction/trap controls and the exact original realm-error
+case; measure matched baseline/candidate original rows before claiming gains.
+The older #5196 repair covers identifier aliases only; completed #4685
+explicitly excludes this cross-realm constructor row. No fix or new pass is
+claimed. Source-owner clearance and explicit registry-allocation approval
+remain pending before assigning a new issue and implementing this slice.
