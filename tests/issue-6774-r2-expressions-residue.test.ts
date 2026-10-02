@@ -54,6 +54,15 @@ function isConfigurable(obj, name) { try { delete obj[name]; } catch (e) { if (!
 if (isConfigurable({ method() {} }, "method")) bits |= 1; if (isConfigurable({ data: 1 }, "data")) bits |= 2;
 if (isConfigurable({ f: function () {} }, "f")) bits |= 4; if (isConfigurable({ *g() {} }, "g")) bits |= 8;`,
   },
+  {
+    name: "k1_instanceof_native_array_chain",
+    step: "S20",
+    expected: 3,
+    base: "2",
+    body: `var calls = 0;
+Object.defineProperty(Function.prototype, "prototype", { get: function () { calls++; return Array.prototype; } });
+if ([] instanceof Function.prototype) bits |= 1; if (calls === 1) bits |= 2;`,
+  },
 ];
 
 describe("#6774 r2 — ES2015 standalone expressions residue", () => {
