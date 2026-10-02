@@ -1,6 +1,6 @@
 {
   "description": "Top-level scripts/ files referenced by nothing that runs or documents them (#6799). Maintained by scripts/check-orphaned-scripts.mjs; the gate fails on any orphan not listed here.",
-  "count": 48,
+  "count": 49,
   "orphans": [
     "scripts/analyze-wat-patterns.ts",
     "scripts/assign-issue-goals.mjs",
@@ -20,6 +20,7 @@
     "scripts/gen-case-tables.mjs",
     "scripts/gen-normalize-tables.mjs",
     "scripts/generate-feature-compatibility.ts",
+    "scripts/generate-intl-locale-data.mjs",
     "scripts/generate-readme-tables.ts",
     "scripts/generate-regexp-string-properties.mjs",
     "scripts/ir-first-sweep.mts",
