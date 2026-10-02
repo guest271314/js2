@@ -49,6 +49,7 @@ import { addFuncType } from "./registry/types.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { buildThrowJsErrorInstrs } from "./js-errors.js";
+import { proxyTrapAbsentTail } from "./proxy-trap-read.js"; // (#6770 S8)
 
 const EXTERNREF: ValType = { kind: "externref" };
 const I32: ValType = { kind: "i32" };
@@ -335,10 +336,7 @@ function ensureProxySetIntegrity(
         { op: "local.get", index: P },
         { op: "any.convert_extern" },
         { op: "ref.cast", typeIdx: proxyTypeIdx },
-        { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTRAPS },
-        { op: "ref.as_non_null" },
-        { op: "struct.get", typeIdx: proxyTrapsTypeIdx, fieldIdx: TRAP_DEFINE },
-        { op: "ref.is_null" },
+        ...proxyTrapAbsentTail(ctx, TRAP_DEFINE),
         { op: "i32.eqz" },
       ],
     },
@@ -511,10 +509,7 @@ function ensureProxyTestIntegrity(
         { op: "local.get", index: P },
         { op: "any.convert_extern" },
         { op: "ref.cast", typeIdx: proxyTypeIdx },
-        { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTRAPS },
-        { op: "ref.as_non_null" },
-        { op: "struct.get", typeIdx: proxyTrapsTypeIdx, fieldIdx: TRAP_GOPD },
-        { op: "ref.is_null" },
+        ...proxyTrapAbsentTail(ctx, TRAP_GOPD),
       ],
     },
     // (#5268 review R2-2) Stash the answer instead of returning on it. §7.3.17
@@ -538,10 +533,7 @@ function ensureProxyTestIntegrity(
         { op: "local.get", index: P },
         { op: "any.convert_extern" },
         { op: "ref.cast", typeIdx: proxyTypeIdx },
-        { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTRAPS },
-        { op: "ref.as_non_null" },
-        { op: "struct.get", typeIdx: proxyTrapsTypeIdx, fieldIdx: TRAP_DEFINE },
-        { op: "ref.is_null" },
+        ...proxyTrapAbsentTail(ctx, TRAP_DEFINE),
         { op: "i32.eqz" },
       ],
     },

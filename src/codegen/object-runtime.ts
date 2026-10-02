@@ -306,6 +306,7 @@ import {
 import { stringWrapperLengthArm } from "./string-wrapper-dynamic-length.js"; // (#6651 C5)
 import { captureWrapperPrimitiveKey } from "./to-primitive-wrapper-slot.js"; // (#4492 wave-5) __to_primitive's [[PrimitiveValue]] arms
 import { buildToPrimitiveBody } from "../runtime/wasmgc/values/to-primitive-bodies.js";
+import { proxyTrapAbsentTail } from "./proxy-trap-read.js"; // (#6770 S8)
 import type {
   ToPrimitiveCoreBindings,
   ToPrimitiveMethodLiterals,
@@ -4022,10 +4023,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         else: [
           { op: "local.get", index: 2 },
           { op: "ref.cast", typeIdx: proxyTypeIdx },
-          { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: 3 },
-          { op: "ref.as_non_null" },
-          { op: "struct.get", typeIdx: proxyTrapsTypeIdx, fieldIdx: 2 },
-          { op: "ref.is_null" },
+          ...proxyTrapAbsentTail(ctx, 2), // (#6770 S8) has
           {
             op: "if",
             blockType: { kind: "empty" },

@@ -487,3 +487,172 @@ if (Object.getOwnPropertyNames(Object.defineProperties({}, mk2())).length === 1)
     T,
   );
 });
+
+describe("#6770 S8 — trap lookup is per operation (GetMethod), CreateListFromArrayLike for ownKeys", () => {
+  it(
+    "p11a — a Proxy HANDLER answers one `get` per operation, none at construction (RED on base: 7)",
+    async () => {
+      const src = `var __r = 0;
+var hlog = [];
+var h = new Proxy({}, { get: function (t, k) { hlog.push(k); return undefined; } });
+__r |= 1;
+var px = new Proxy({ q: 1 }, h);
+__r |= 2;
+var v = px.q;
+if (v === 1) __r |= 4;
+if (hlog.length === 1 && hlog[0] === "get") __r |= 8;\n${END}`;
+      expect(await probe(src)).toBe(15);
+    },
+    T,
+  );
+
+  it(
+    "p11b — an array-LIKE ownKeys result: one length read, one Get per index (RED on base: illegal cast)",
+    async () => {
+      const src = `var __r = 0;
+var s = Symbol("t"); var glog = [];
+var ownKeys = { get length() { glog.push("length"); return 3; }, get 0() { glog.push(0); return "a"; }, get 1() { glog.push(1); return s; }, get 2() { glog.push(2); return "b"; } };
+var descs = { a: { enumerable: true, configurable: true, value: 1 }, b: { enumerable: false, configurable: true, value: 2 }, [s]: { enumerable: true, configurable: true, value: 3 } };
+var p = new Proxy({ x: true }, { ownKeys: function () { return ownKeys; }, getOwnPropertyDescriptor: function (t, k) { return descs[k]; } });
+__r |= 1;
+var keys = Object.keys(p);
+__r |= 2;
+if (keys.length === 1 && keys[0] === "a") __r |= 4;
+if (glog.length === 4 && glog[0] === "length") __r |= 8;
+var r2 = Reflect.ownKeys(p); if (r2.length === 3 && r2[1] === s) __r |= 16;\n${END}`;
+      expect(await probe(src)).toBe(31);
+    },
+    T,
+  );
+
+  it(
+    "p11c — accessor-defined traps run their getter on every operation (RED on base: 15)",
+    async () => {
+      const src = `var __r = 0;
+var log = [];
+var handler = {
+  get ownKeys() { log.push("get handler.ownKeys"); return function (t) { log.push("call ownKeys"); return ["a"]; }; },
+  get getOwnPropertyDescriptor() { log.push("get handler.gopd"); return function (t, k) { log.push("call gopd " + k); return { enumerable: true, configurable: true, value: 1 }; }; },
+};
+__r |= 1;
+var proxy = new Proxy({ x: true }, handler);
+__r |= 2;
+var keys = Object.keys(proxy);
+__r |= 4;
+if (keys.length === 1 && keys[0] === "a") __r |= 8;
+if (log.length === 4 && log[0] === "get handler.ownKeys" && log[2] === "get handler.gopd") __r |= 16;\n${END}`;
+      expect(await probe(src)).toBe(31);
+    },
+    T,
+  );
+
+  it(
+    "p43 — a trap added or deleted after construction is seen; a revoked handler throws on use (RED on base: 13)",
+    async () => {
+      const src = `var __r = 0;
+var hm = {};
+var t = { x: 5 };
+var p = new Proxy(t, hm);
+if (p.x === 5) __r |= 1;
+hm.get = function () { return 7; };
+if (p.x === 7) __r |= 2;
+delete hm.get;
+if (p.x === 5) __r |= 4;
+var r = Proxy.revocable({}, {});
+r.revoke();
+var p2;
+try { p2 = new Proxy({}, r.proxy); __r |= 8; } catch (e) { __r |= 64; }
+try { var v = p2.x; } catch (e) { if (e instanceof TypeError) __r |= 16; }
+var calls = 0;
+var h3 = { get has() { calls++; return function () { return true; }; } };
+var p3 = new Proxy({}, h3);
+if (calls === 0) __r |= 32;
+if ("a" in p3 && "b" in p3 && calls === 2) __r |= 128;\n${END}`;
+      expect(await probe(src)).toBe(191);
+    },
+    T,
+  );
+
+  it(
+    "p33 — Object.keys(new Proxy([], <proxy handler>)) looks up ownKeys, then gopd for `length` (RED on base: 3328)",
+    async () => {
+      const src = `var __r = 0;
+var log = [];
+Object.keys(new Proxy([], new Proxy({}, { get(t, pk, r) { log.push(pk); } })));
+if (log.length === 2) __r |= 1;
+if (log[0] === "ownKeys") __r |= 2;
+if (log[1] === "getOwnPropertyDescriptor") __r |= 4;
+var log2 = [];
+var k2 = Object.keys(new Proxy([], new Proxy({}, { get(t, pk, r) { log2.push(pk); } })));
+if (log2.length === 2) __r |= 8;
+__r |= log.length << 8;\n${END}`;
+      expect(await probe(src)).toBe(527);
+    },
+    T,
+  );
+
+  it(
+    "p31 — Object.entries over a proxy: ownKeys, then gopd + get per key, receiver = the proxy (RED on base: 63)",
+    async () => {
+      const src = `var __r = 0;
+var log = "";
+var bad = 0;
+var object = { a: 0, b: 0, c: 0 };
+var proxy;
+var handler = {
+  get: function (target, propertyKey, receiver) {
+    if (target !== object) bad |= 1;
+    if (receiver !== proxy) bad |= 2;
+    log += "|get:" + propertyKey;
+    return target[propertyKey];
+  },
+  getOwnPropertyDescriptor: function (target, propertyKey) {
+    if (target !== object) bad |= 4;
+    log += "|getOwnPropertyDescriptor:" + propertyKey;
+    return Object.getOwnPropertyDescriptor(target, propertyKey);
+  },
+  ownKeys: function (target) {
+    if (target !== object) bad |= 8;
+    log += "|ownKeys";
+    return Object.getOwnPropertyNames(target);
+  },
+};
+var check = { get: function (target, propertyKey, receiver) { if (!(propertyKey in target)) bad |= 16; return target[propertyKey]; } };
+proxy = new Proxy(object, new Proxy(handler, check));
+var result = Object.entries(proxy);
+if (log === "|ownKeys|getOwnPropertyDescriptor:a|get:a|getOwnPropertyDescriptor:b|get:b|getOwnPropertyDescriptor:c|get:c") __r |= 1;
+if (result.length === 3) __r |= 2;
+__r |= (bad ^ 31) << 2;\n${END}`;
+      expect(await probe(src)).toBe(127);
+    },
+    T,
+  );
+
+  it(
+    "p37 — a proxy binding passed through a source-declared method keeps its identity (RED on base: 112)",
+    async () => {
+      const src = `var __r = 0;
+function sv(a, b) { return a === b; }
+var A = function () {};
+A.sv = function (a, b) { return a === b; };
+var object = { a: 0, b: 0, c: 0 };
+var res = 0;
+var proxy = new Proxy(object, {
+  get: function (target, propertyKey, receiver) {
+    if (receiver === proxy) res |= 1;
+    if (sv(receiver, proxy)) res |= 2;
+    if (A.sv(receiver, proxy)) res |= 4;
+    if (A.sv(proxy, receiver)) res |= 8;
+    if (A.sv(proxy, proxy)) res |= 16;
+    if (A.sv(receiver, receiver)) res |= 32;
+    return target[propertyKey];
+  },
+});
+var v = proxy.a;
+__r = res;
+if (A.sv(proxy, proxy)) __r |= 64;\n${END}`;
+      expect(await probe(src)).toBe(127);
+    },
+    T,
+  );
+});

@@ -95,6 +95,15 @@ loc-budget-allow:
   # isPrototypeOf natives), and the Proxy-target literal route (new-builtin-globals).
   - src/codegen/proxy-own-keys-surfaces.ts
   - src/codegen/expressions/new-builtin-globals.ts
+  # S8 (2026-10-01, Opus): the new leaf proxy-trap-read.ts (per-operation
+  # GetMethod natives, §7.3.20 CreateListFromArrayLike for the ownKeys result);
+  # one import line each in the dispatch files that swap the slot read for it;
+  # the proxy-binding escape carve-out for source-declared methods
+  # (analysis/proxy-binding-escape.ts); the Proxy ⇒ vec own-keys demand bit
+  # (array-holes.ts).
+  - src/codegen/object-runtime-proxy-chain.ts
+  - src/codegen/analysis/proxy-binding-escape.ts
+  - src/codegen/array-holes.ts
 coercion-sites-allow:
   # 2026-09-30 (#6770 S7, Opus): one by-name lookup of the EXISTING ToBoolean
   # native (`__is_truthy`) for a proxy descriptor's `enumerable` field in the

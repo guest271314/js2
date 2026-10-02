@@ -583,7 +583,91 @@ export function installProxyKeyBagGuards(
   if (definesBody && definesIdx !== undefined) {
     definesBody.unshift(...proxyFrontGuard(proxyTypeIdx, 1, [0, 1], definesIdx));
   }
+  // (#6770 S8) Object.values / Object.entries over a proxy.
+  for (const [name, withKeys] of [
+    ["__object_values", false],
+    ["__object_entries", true],
+  ] as const) {
+    const body = findBody(name);
+    const idx = body ? ensureProxyEnumerableOwnProperties(ctx, withKeys) : undefined;
+    if (body && idx !== undefined) body.unshift(...proxyFrontGuard(proxyTypeIdx, 0, [0], idx));
+  }
   installProxyCandidateIsPrototypeOf(ctx, proxyTypeIdx);
+}
+
+/**
+ * (#6770 S8) `__proxy_enumerable_values(p)` / `__proxy_enumerable_entries(p)` —
+ * §7.3.23 EnumerableOwnProperties(p, value | key+value) over a proxy:
+ * `p.[[OwnPropertyKeys]]()`, then per STRING key, in order,
+ * `p.[[GetOwnProperty]](key)` (the gopd trap) and — only for an enumerable
+ * descriptor — `Get(p, key)` with Receiver = p (the get trap). Interleaved per
+ * key, exactly the trap order `entries|values/observable-operations.js` logs.
+ * The ordinary natives answered a proxy through `__object_keys` (every gopd
+ * first) and then `__extern_get` per key.
+ *
+ * params 0=p ; locals 1=keys 2=out 3=n 4=i 5=k 6=desc 7=pair
+ */
+function ensureProxyEnumerableOwnProperties(ctx: CodegenContext, withKeys: boolean): number | undefined {
+  const name = withKeys ? "__proxy_enumerable_entries" : "__proxy_enumerable_values";
+  const cached = ctx.funcMap.get(name);
+  if (cached !== undefined) return cached;
+  const d = proxyBagDeps(ctx);
+  const l = listDeps(ctx);
+  const typeofString = ctx.funcMap.get("__typeof_string");
+  if (d === undefined || l === undefined || typeofString === undefined) return undefined;
+  addStringConstantGlobal(ctx, "enumerable");
+  const value: Instr[] = [
+    { op: "local.get", index: 0 },
+    { op: "local.get", index: 5 },
+    { op: "local.get", index: 0 },
+    { op: "call", funcIdx: d.get },
+  ];
+  const push: Instr[] = withKeys
+    ? [
+        { op: "call", funcIdx: l.vecNew },
+        { op: "local.tee", index: 7 },
+        { op: "local.get", index: 5 },
+        { op: "call", funcIdx: l.vecPush },
+        { op: "local.get", index: 7 },
+        ...value,
+        { op: "call", funcIdx: l.vecPush },
+        { op: "local.get", index: 2 },
+        { op: "local.get", index: 7 },
+        { op: "call", funcIdx: l.vecPush },
+      ]
+    : [{ op: "local.get", index: 2 }, ...value, { op: "call", funcIdx: l.vecPush }];
+  return mintNative(
+    ctx,
+    name,
+    [EXTERNREF],
+    [
+      { name: "keys", type: EXTERNREF },
+      { name: "out", type: EXTERNREF },
+      { name: "n", type: I32 },
+      { name: "i", type: I32 },
+      { name: "k", type: EXTERNREF },
+      { name: "desc", type: EXTERNREF },
+      { name: "pair", type: EXTERNREF },
+    ],
+    [
+      { op: "local.get", index: 0 },
+      { op: "local.get", index: 0 },
+      { op: "call", funcIdx: d.names },
+      { op: "local.set", index: 1 },
+      { op: "call", funcIdx: l.vecNew },
+      { op: "local.set", index: 2 },
+      ...forEachElement(l.length, l.getIdx, 1, 3, 4, 5, [
+        { op: "local.get", index: 5 },
+        { op: "call", funcIdx: typeofString },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [...ownDescInstrs(ctx, d, 0, 5, 6, true), { op: "if", blockType: { kind: "empty" }, then: push }],
+        },
+      ]),
+      { op: "local.get", index: 2 },
+    ],
+  );
 }
 
 /**
