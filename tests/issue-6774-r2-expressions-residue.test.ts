@@ -41,6 +41,19 @@ if (sv(viaMember, C.prototype)) bits |= 1; if (sv(viaCall, C.prototype)) bits |=
 if (sv(viaArg[0], C.prototype) && viaArg[1] === 1 && viaArg[2] === 2) bits |= 8;
 var c = new C(); c.method(); if (sv(viaCall, c) && sv(viaMember, c) && sv(viaElem, c) && sv(viaArg[0], c)) bits |= 16;`,
   },
+  {
+    // propertyHelper.js's isConfigurable, verbatim shape: a dynamic delete then
+    // hasOwnProperty, on closed object-literal structs (method / data / function
+    // data / generator method).
+    name: "j_literal_member_is_configurable",
+    step: "S10",
+    expected: 15,
+    base: "0",
+    body: `var __hasOwnProperty = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
+function isConfigurable(obj, name) { try { delete obj[name]; } catch (e) { if (!(e instanceof TypeError)) throw e; } return !__hasOwnProperty(obj, name); }
+if (isConfigurable({ method() {} }, "method")) bits |= 1; if (isConfigurable({ data: 1 }, "data")) bits |= 2;
+if (isConfigurable({ f: function () {} }, "f")) bits |= 4; if (isConfigurable({ *g() {} }, "g")) bits |= 8;`,
+  },
 ];
 
 describe("#6774 r2 — ES2015 standalone expressions residue", () => {
