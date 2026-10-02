@@ -191,6 +191,16 @@ single-file path unless the entry has a relative import; the project API
 (`compileProject()`) defaults to automatic linking with a compatibility
 fallback.
 
+### `--cache-dir <dir>`
+
+Where `--package-linking` caches the compiled provider module of each npm
+package (content-addressed, safe to delete). `--cache-dir=<dir>` also works.
+By default the cache goes to the nearest ancestor's
+`node_modules/.cache/js2wasm/npm-modules`, or — when no `node_modules` exists —
+to the OS user cache directory (`$XDG_CACHE_HOME` or `~/.cache` on Linux,
+`~/Library/Caches` on macOS, `%LOCALAPPDATA%` on Windows) under
+`js2wasm/npm-modules`. It is never written next to your source files.
+
 ### `--host-bridge <auto|always|off>`
 
 Controls whether the module exports the **host bridge** — the interop surface a

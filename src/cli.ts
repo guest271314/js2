@@ -136,6 +136,9 @@ Options:
                     off retains monolithic source compilation. Project API
                     calls default to automatic linking with compatibility
                     fallback.
+  --cache-dir <dir> Where --package-linking caches compiled npm provider
+                    modules. Default: the nearest node_modules/.cache/js2wasm,
+                    else the OS user cache directory (never the source tree).
   --emulate <env>   Emulate a host runtime's globals so they type-check without
                     @types/node. 'node' = ambient process/etc.; 'none' = off.
                     Auto-enabled (type-level only) when the source imports a
@@ -220,6 +223,8 @@ let strictNoHostImports: boolean | undefined;
 // self-contained inline path for every namespace.
 const linkedNamespaces = new Set<string>();
 let packageLinking: false | "separate" | "merge" | undefined;
+// #6794 — explicit provider cache directory (`CompileOptions.packageCacheDir`).
+let packageCacheDir: string | undefined;
 // #2603 — `--emulate node`: opt into Node API emulation (ambient `process` typing).
 // `emulateExplicit` records that the user passed `--emulate`/`--no-emulate`, so a
 // `node:` import won't auto-enable over an explicit choice.
@@ -327,6 +332,13 @@ for (let i = 0; i < args.length; i++) {
       console.error(`Unknown --package-linking mode: ${mode ?? "(missing)"} (expected separate, merge, or off)`);
       process.exit(1);
     }
+  } else if (arg === "--cache-dir" || arg.startsWith("--cache-dir=")) {
+    const dir = arg.startsWith("--cache-dir=") ? arg.slice("--cache-dir=".length) : args[++i];
+    if (!dir) {
+      console.error("--cache-dir requires a directory argument");
+      process.exit(1);
+    }
+    packageCacheDir = resolve(dir);
   } else if (arg === "--emulate" || arg.startsWith("--emulate=")) {
     // #2603 — opt into (or out of) Node API emulation. `--emulate node` gives the
     // checker an ambient `process` typing so Node globals type-check without
@@ -485,6 +497,7 @@ const compileOptions = {
   ...(semanticProviders !== "auto" ? { semanticProviders } : {}),
   ...(linkedNamespaces.size ? { link: [...linkedNamespaces] } : {}),
   ...(packageLinking !== undefined ? { packageLinking } : {}),
+  ...(packageCacheDir ? { packageCacheDir } : {}),
   ...(emulateNode ? { emulateNode: true } : {}),
   ...(skipSemanticDiagnostics ? { skipSemanticDiagnostics: true } : {}),
   ...(platform ? { platform } : {}),

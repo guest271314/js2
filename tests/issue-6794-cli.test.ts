@@ -6,23 +6,35 @@
 //   - a missing input file dumped Node's `node:fs` stack trace.
 //   - error-severity diagnostics on a SUCCESSFUL compile were never printed.
 //   - `--out=<dir>` was rejected although `--target=` etc. accept `=`.
+//   - `compileProject` cached provider binaries in `<entry dir>/.js2wasm-cache`.
 //   - docs/cli.md had drifted from `--help` (missing flags, a `--nativeStrings`
 //     flag that does not exist). The last block diffs the two.
 
-import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const CLI = path.resolve("src/cli.ts");
 const PKG_VERSION = (JSON.parse(readFileSync(path.resolve("package.json"), "utf8")) as { version: string }).version;
 const workDir = mkdtempSync(path.join(tmpdir(), "issue-6794-cli-"));
 afterAll(() => rmSync(workDir, { recursive: true, force: true }));
 
-function runCli(args: string[]): { status: number | null; stdout: string; stderr: string } {
-  const child = spawnSync("npx", ["-y", "tsx", CLI, ...args], { cwd: workDir, encoding: "utf8", timeout: 120_000 });
-  return { status: child.status, stdout: child.stdout, stderr: child.stderr };
+type CliRun = { status: number | null; stdout: string; stderr: string };
+
+// Asynchronous on purpose: a blocking spawnSync of a multi-second compile
+// starves the vitest worker's RPC heartbeat ("Timeout calling onTaskUpdate").
+function runCli(args: string[]): Promise<CliRun> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("npx", ["-y", "tsx", CLI, ...args], { cwd: workDir, timeout: 120_000 });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d) => (stdout += d));
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("error", reject);
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
+  });
 }
 
 function writeInput(name: string, source: string): string {
@@ -32,15 +44,15 @@ function writeInput(name: string, source: string): string {
 }
 
 describe("#6794 — -v is --verbose, -V is --version", () => {
-  it("-V and --version print the package version", () => {
+  it("-V and --version print the package version", async () => {
     for (const flag of ["-V", "--version"]) {
-      const r = runCli([flag]);
+      const r = await runCli([flag]);
       expect(r.status).toBe(0);
       expect(r.stdout.trim()).toBe(PKG_VERSION);
     }
   }, 120_000);
 
-  it("`<input> -v` compiles and lists every dropped host import", () => {
+  it("`<input> -v` compiles and lists every dropped host import", async () => {
     // `Proxy` and `WeakRef` have no Wasm-native lowering under --target wasi,
     // so each trips one host-import allowlist warning (#2520): collapsed into a
     // summary by default, listed individually under --verbose.
@@ -49,7 +61,7 @@ describe("#6794 — -v is --verbose, -V is --version", () => {
       `export function f(x: any): any { return [new Proxy(x, {}), new WeakRef(x)]; }`,
     );
     const outDir = mkdtempSync(path.join(workDir, "verbose-out-"));
-    const r = runCli([input, "-v", "--target", "wasi", "--no-dts", "-q", "-o", outDir]);
+    const r = await runCli([input, "-v", "--target", "wasi", "--no-dts", "-q", "-o", outDir]);
     expect(r.status).toBe(0);
     expect(r.stdout).not.toContain(PKG_VERSION + "\n");
     expect(existsSync(path.join(outDir, "verbose.wasm"))).toBe(true);
@@ -57,16 +69,16 @@ describe("#6794 — -v is --verbose, -V is --version", () => {
     expect(r.stderr).not.toMatch(/Re-run with --verbose/);
   }, 120_000);
 
-  it("a bare `-v` with no input points at -V", () => {
-    const r = runCli(["-v"]);
+  it("a bare `-v` with no input points at -V", async () => {
+    const r = await runCli(["-v"]);
     expect(r.status).toBe(1);
     expect(r.stderr).toMatch(/no input file specified .*-V or --version/);
   }, 120_000);
 });
 
 describe("#6794 — usage errors and diagnostics", () => {
-  it("a missing input prints one line and exits 1 (no stack trace)", () => {
-    const r = runCli([path.join(workDir, "does-not-exist.ts")]);
+  it("a missing input prints one line and exits 1 (no stack trace)", async () => {
+    const r = await runCli([path.join(workDir, "does-not-exist.ts")]);
     expect(r.status).toBe(1);
     const lines = r.stderr.trim().split("\n");
     expect(lines).toHaveLength(1);
@@ -74,7 +86,7 @@ describe("#6794 — usage errors and diagnostics", () => {
     expect(r.stderr).not.toMatch(/node:fs|readFileUtf8|\sat\s/);
   }, 120_000);
 
-  it("prints error-severity diagnostics on a successful compile, exit 0", () => {
+  it("prints error-severity diagnostics on a successful compile, exit 0", async () => {
     // TS2678 ("Type '2' is not comparable to type '1'") is tolerated: codegen
     // does not depend on it, so the compile succeeds with it in result.errors.
     const input = writeInput(
@@ -82,12 +94,59 @@ describe("#6794 — usage errors and diagnostics", () => {
       `export function f(x: 1): number {\n  switch (x) { case 2: return 2; }\n  return 0;\n}\n`,
     );
     const outDir = mkdtempSync(path.join(workDir, "tolerated-out-"));
-    const r = runCli([input, "-q", "--no-optimize", `--out=${outDir}`]);
+    const r = await runCli([input, "-q", "--no-optimize", `--out=${outDir}`]);
     expect(r.status).toBe(0);
     expect(r.stderr).toMatch(/tolerated\.ts:2:\d+ - error: Type '2' is not comparable to type '1'/);
     expect(r.stderr).toMatch(/note: 1 error-severity diagnostic\(s\) above did not block compilation/);
     // `--out=<dir>` was honoured.
     expect(existsSync(path.join(outDir, "tolerated.wasm"))).toBe(true);
+  }, 120_000);
+});
+
+describe("#6794 — the provider cache stays out of the source tree", () => {
+  /** A project whose entry imports a bare npm package (compiled as a provider). */
+  function makeProject(): { root: string; entry: string } {
+    const root = mkdtempSync(path.join(workDir, "proj-"));
+    const pkg = path.join(root, "node_modules", "tiny");
+    mkdirSync(pkg, { recursive: true });
+    mkdirSync(path.join(root, "src"));
+    writeFileSync(
+      path.join(pkg, "package.json"),
+      `{"name":"tiny","version":"1.0.0","type":"module","main":"index.js"}`,
+    );
+    writeFileSync(path.join(pkg, "index.js"), `export function twice(x) { return x * 2; }\n`);
+    const entry = path.join(root, "src", "main.ts");
+    writeFileSync(entry, `import { twice } from "tiny";\nexport function f(x: number): number { return twice(x); }\n`);
+    return { root, entry };
+  }
+  const wasmFiles = (dir: string): string[] =>
+    existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(".wasm")) : [];
+
+  it("defaults to node_modules/.cache/js2wasm, not the entry's directory", async () => {
+    const { root, entry } = makeProject();
+    const r = await runCli([entry, "-q", "--no-optimize", "--package-linking", "separate", "-o", root]);
+    expect(r.status, r.stderr).toBe(0);
+    expect(existsSync(path.join(root, "src", ".js2wasm-cache"))).toBe(false);
+    expect(wasmFiles(path.join(root, "node_modules", ".cache", "js2wasm", "npm-modules")).length).toBeGreaterThan(0);
+  }, 120_000);
+
+  it("--cache-dir overrides the default", async () => {
+    const { root, entry } = makeProject();
+    const cacheDir = path.join(root, "my-cache");
+    const r = await runCli([
+      entry,
+      "-q",
+      "--no-optimize",
+      "--package-linking",
+      "separate",
+      "-o",
+      root,
+      `--cache-dir=${cacheDir}`,
+    ]);
+    expect(r.status, r.stderr).toBe(0);
+    expect(wasmFiles(cacheDir).length).toBeGreaterThan(0);
+    expect(existsSync(path.join(root, "node_modules", ".cache"))).toBe(false);
+    expect(existsSync(path.join(root, "src", ".js2wasm-cache"))).toBe(false);
   }, 120_000);
 });
 
@@ -111,8 +170,12 @@ function mentions(text: string, flag: string): boolean {
 }
 
 describe("#6794 — docs match `--help`", () => {
-  const help = runCli(["--help"]);
-  const flags = helpFlags(help.stdout);
+  let help: CliRun;
+  let flags: Set<string>;
+  beforeAll(async () => {
+    help = await runCli(["--help"]);
+    flags = helpFlags(help.stdout);
+  }, 120_000);
   const cliDoc = readFileSync(path.resolve("docs/cli.md"), "utf8");
   const startDoc = readFileSync(path.resolve("docs/getting-started.md"), "utf8");
   const cliSource = readFileSync(CLI, "utf8");
