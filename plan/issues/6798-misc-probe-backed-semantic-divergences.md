@@ -184,3 +184,12 @@ Pre-existing failures seen while running neighbouring suites, identical on
 `native-i32-type` (8) and `i32-loop-inference` (10) (both: the test harness
 passes no `string_constants`), `issue-2173-yieldstar-generic-iterable` (9) and
 `issue-2864-standalone-generator-carrier` (2).
+
+Gates (after merging `origin/main` fcf4b188d0, all exit 0): `check-loc-budget`
+and `check-func-budget` (default base and `LOC_GATE_BASE=origin/main`),
+`check-coercion-sites`, `check:oracle-ratchet`, `check:dead-exports`,
+`typecheck`, `format:check`, `check-compiler-boundaries --mode inventory` (no
+unclassified module), the 18-gate quality loop (`check:ir-dialect` …
+`check:verdict-oracle`, `lint`), `check:ir-fallbacks` (no increase),
+`test:guard` (21 files / 261 tests), and the slice test file with the typeof,
+logical, yield-star, native-i32 and #3519 outcome suites (14 files / 127 tests).
