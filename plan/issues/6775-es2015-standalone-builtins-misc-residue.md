@@ -1,10 +1,10 @@
 ---
 id: 6775
 title: "ES2015 standalone: built-ins misc residue (70 rows) — Error.prototype.stack accessor pair, bound-fn new.target, Reflect.construct NewTarget on builtin carriers, ArrayBuffer/DataView reflective surface, JSON/Symbol/Map/Date/RegExp protocol gaps"
-status: ready
+status: in-progress
 sprint: current
 created: 2026-09-30
-updated: 2026-09-30
+updated: 2026-10-02
 priority: high
 horizon: l
 feasibility: hard
@@ -603,6 +603,74 @@ Rows: `Function/prototype/toString/proxy-class`, `…/proxy-non-callable-throws`
   table, the probe table's `branch` column, the pins' base verdict, the ES5/control diffs, and the
   residuals; then a one-paragraph pointer in
   `plan/issues/6651-es2015-standalone-100pct-execution-plan.md`.
+
+## Implementation record (2026-10-01/02, Opus)
+
+Branch `issue-6775-es2015-builtins-misc-residue`, merged with `origin/main` @ `a8955988`.
+Measured with `npx tsx scripts/run-test262-paths.mts <list> --isolate --standalone`, QuickJS
+eval provider rebuilt after every `src/` change (`scripts/build-quickjs-eval-provider.mjs`).
+
+**Rows: base 0/70 → branch 38/70** (run `.tmp/6775/chunk-fin-00.log`, 2026-10-01). The plan's ≥42
+target is not met; every remaining row is listed below with its mechanism.
+
+| step | commit | rows gained | what changed |
+| --- | --- | ---: | --- |
+| S1–S3 | `cff5c1df` | 6 | Error.prototype.stack getter/setter pair (earlier session) |
+| S4–S5 | `55b41e31` | 9 | JSON.parse ToString / replacer classification / Proxy carrier; Symbol.for, `sym()`, `new <wrapper>()`, Object(sym) proto, `[@@toPrimitive]()` call (earlier session) |
+| S6 | `f3239487` | 7 | `ArrayBuffer.prototype.slice` reflective body; `__getPrototypeOf` ArrayBuffer arm filled in every byte-vec module; byte-vec `.constructor` walks [[Prototype]]; `Reflect.construct(ArrayBuffer,[n],NT)` reads `NT.prototype` before allocating |
+| S7 | `f3239487` | 6 | DataView window `.constructor` walks %DataView.prototype%; detached-after-proto-read TypeError |
+| S8 | `f3239487` | 2 | `Date.prototype.toJSON` native generic body (new leaf `date-proto-to-json.ts`) |
+| S10 | `f3239487` | 1 | Error-family arms in the identity construct helper; `new C(msg)` for a ctor held in a value |
+| S11 | `f3239487` | 1 | `<target> = yield` statement arm in the native generator planner (works inside try/finally) |
+| S14 | `1b0d2e35` | 1 | `C[Symbol.species]` for `class C extends <species owner>` (new leaf `class-builtin-species-read.ts`) |
+| S16 | `1b0d2e35` | 4 | %Function.prototype% own `name`/`length`; seeder resolves `@@<name>` keys; `@@hasInstance` {c:F}; own-`prototype` getter honoured by @@hasInstance |
+| S18 | `1b0d2e35` | 1 | direct `Function.prototype.toString.call(x)` → native §20.2.3.5 body |
+
+Pins: `tests/issue-6775-builtins-misc-residue.test.ts`, 23 cases, all pass on the branch
+(`VITEST_FORK_MAX_OLD_SPACE_SIZE=1024 npx vitest run …`); every case added this session was run on
+`.tmp/6775/base` sources first and was red there (probe outputs in the session log).
+
+Gates (chained, `LOC_GATE_BASE=$(git rev-parse origin/main)`): loc-budget, func-budget,
+coercion-sites, oracle-ratchet, dead-exports, compiler-boundaries inventory, typecheck — all green
+on `1b0d2e35`. Grants restated in this file's frontmatter with dated rationale.
+
+### Controls
+
+Control set: 2,044 rows that PASS in the 2026-10-01 standalone baseline — every ES≤2015 row under
+the touched built-in directories (Error, NativeErrors, Function, ArrayBuffer, DataView, JSON, Map,
+WeakMap, Symbol, Date/prototype/toJSON, GeneratorPrototype, GeneratorFunction, AsyncFunction,
+AsyncGeneratorFunction, Reflect/construct, Object/getPrototypeOf, SharedArrayBuffer,
+TypedArray/prototype/slice, TypedArrayConstructors/ctors/buffer-arg) plus every passing
+`language/**`/`built-ins/**` row mentioning `= yield`, `Symbol.species`, `Symbol.hasInstance`,
+`Function.prototype.toString`, `toJSON` or `nativeErrors`, plus the 66 passing rows using the
+`nativeFunctionMatcher` harness. Run `--isolate` in 4 chunks on the frozen branch tree.
+
+- Chunks 00 + 03 (924 rows incl. the 70 targets): 57 control rows non-pass on the branch — 56
+  `Temporal/*/prototype/toJSON/*` ("Temporal is not defined": no Temporal provider in this local
+  environment) and `arrow-function/.../arrowparameters-bindingidentifier-no-yield.js`. All 57 fail
+  identically on base sources (`.tmp/6775/runbase.sh`, `base-0003.log`) → **0 regressions**.
+- Chunks 01 + 02 (1,190 rows): lost to a container restart, re-running (result appended when done).
+
+### Residuals (32 rows) — first failing assertion and mechanism
+
+| rows | mechanism / owner |
+| --- | --- |
+| `Error/prototype/stack/getter-subclass` | dynamic heritage `class extends nativeErrors[i]` — instance is not `$Error_struct` (#6772) |
+| `Error/prototype/stack/getter-foreign-new-target`, `Date/subclassing`, `ArrayBuffer/prototype-from-newtarget` | constructed carrier has no prototype slot (`$Error_struct`, `$__Date`, byte vec); needs a `constructProto` field per carrier — follow-up |
+| `Function/prototype/bind/instance-construct-newtarget-{boundtarget,boundtarget-bound,self-new,self-reflect}` | S15 not done: `new.target` is an i32 class-id, not a value; bound [[Construct]] does not thread NewTarget (design in S15, L-sized) |
+| `Function/prototype/toString/not-a-constructor` | `isConstructor(Function.prototype.toString)` first materialises %Function.prototype%; the later `new` resolves the companion-seeded closure, which `__typeof_function` does not classify (S3 second half) |
+| `Function/prototype/toString/proxy-class` | `"" + new Proxy(class{}, {})` → `[object Function]`: the ToString of a callable Proxy does not reach the target's inherited `Function.prototype.toString` |
+| `Function/is-a-constructor`, `{Generator,Async,AsyncGenerator}Function/is-a-constructor`, `GeneratorFunction/has-instance` | CreateDynamicFunction through the eval provider (#6640, #4238) |
+| `AsyncFunction/AsyncFunctionPrototype-to-string` | S17 not done: no `%AsyncFunction%` intrinsic (`(async function(){}).constructor.prototype` exists as an identity but has no own `@@toStringTag`) |
+| `Function/internals/Construct/{derived-return-val,base-ctor-revoked-proxy}` | S19 — #6772 / #6770 lanes |
+| `ArrayBuffer/isView/arg-is-{typedarray,dataview}-subclass-instance` | S19 — #6772 `class extends` built-ins |
+| `DataView/instance-extensibility` | S7(c) not done: `$__dv_window` has no own-property bag (carrier-bag subsystem splice) |
+| `{Map,WeakMap}/iterator-item-{first,second}-entry-returns-abrupt` (4) | S13: a module-scope array stored in an object-literal field loses identity (`({value: item}).value === item` is false, `.tmp/6775/p2f.js`), so the overlay accessor on `item[0]` is not seen and the drive throws "Iterable did not terminate"; value-rep (#2773/#3037 class) |
+| `Map/prototype/set/append-new-values` | S12: the checker types the callback's `value` as `number` from `new Map([[4,4],…])`; even inside the callback `value === 'valid'` is constant-folded false. A param-ABI override alone did not change it (tried and reverted); needs the oracle to widen V by the file's `set` calls |
+| `Symbol/prototype/Symbol.toPrimitive/{removed,redefined}-symbol-wrapper-ordinary-toprimitive` | intrinsic `@@toPrimitive` is not a deletable/redefinable own property (plan's stretch item) |
+| `RegExp/prototype/exec/{success,failure}-lastindex-access` | function-membered literal loses identity across externref (#2773/#3037) |
+| `RegExp/prototype/Symbol.split/coerce-flags-err` | S9: the probe passes (`.tmp/6775/p6b.js`); the row reassigns `uncoercibleFlags` to a second literal shape, which is coerced into the first literal's struct so `flags` is no longer a Symbol — literal-shape widening, not the split protocol |
+| `ArrayIteratorPrototype/next/detach-typedarray-in-progress` | eager `keys()` snapshot (#6484) |
 
 ## Acceptance criteria
 
