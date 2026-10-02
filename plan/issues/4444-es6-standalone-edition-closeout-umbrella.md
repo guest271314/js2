@@ -7489,3 +7489,62 @@ The retained metadata covers 766 available locales, 7,788 likely-subtag rows,
 and 29 Unicode extension keys, not a runtime Intl implementation. Narrow
 formatter exclusions protect the byte-pinned input and generator-owned output;
 the post-hook generator check must still establish that those bytes survived.
+
+### 2026-10-02 post-publication integration and instrument handoff
+
+PR 6420 is now merged at `a93d489420fac74aaba490a249f51251f90584c2`.
+The merge queue regenerated its history: the original submitted head need not
+be an ancestor of main. Root inspected the landed umbrella content rather than
+using the submitted-head ancestry as the completion test. Subsequent local
+handoffs remain a separate follow-up, not a mutation of the merged PR.
+
+Root merged verified upstream main `1f1b0ad61cbc74d0bde3a326e8b7e2e02b7add99`
+into its own branch as `9999a547e155eab815e3dbf777b9b14bbc591e06`, with no
+conflicts. The heavily modified shared primary checkout was not changed;
+the two untracked issue-6724 diagnostics were preserved without staging.
+The handoff-only branch is now `codex/4444-post-6420-handoff`. This merge
+does not establish a current-source Test262 pass rate.
+
+The data foundation PR 6427 is ready at
+`a7bace6c7d227b9ca612b3d6dc0453b5c9c9de14`. A fresh one-shot shepherd audit
+found all listed checks green, both CLA checks passed, zero review threads
+and comments, and an active merge-queue entry at position 5. No push or
+enqueue mutation was performed. The seven focused controls, generator
+byte-integrity checks, and normal publication gates passed. This supersedes
+the earlier outstanding-format/publication note; it remains data-only,
+not a measured original-suite gain or a completed Intl API.
+
+The eval fixture checkpoint `49e6fe1479` explicitly requires an executable
+QuickJS/full-interpreter provider only when the successfully compiled module
+actually imports runtime eval. A fresh canary-verified QuickJS adapter gives
+**11 pass / 4 fail / 15 registered**, preserving all four semantic reds.
+The REFUSAL negative control gives **0 pass / 15 infrastructure failures**,
+and every failure explicitly identifies the absent executable provider.
+Neither denominator is original Test262 credit. TypeScript and normal fast
+commit gates pass. The checkpoint is now published in existing upstream
+draft PR 6246 at `49e6fe14795de20020c2c68901cf184ef308a325`; root verified
+both the fork ref and actual PR head after normal push session 55951 exited
+zero. Typecheck, lint, format, oracle/coercion ratchets, numeric-local controls
+**18/18**, and issue integrity passed without bypassing hooks. The PR body
+now records the executable-provider and negative-control evidence. PR 6246
+remains unfinished, and its CI provider contract still
+requires resolution. Do not remove diagnostics or substitute refusal verdicts
+for semantic measurements to make that PR green.
+
+The iterator owner holds the serialized heavy-validation lease for its
+budget-preserving structural extraction, followed by current upstream
+integration and the new frozen 32-original call/new spread cohort. The prior
+**27/29** focused receipt retains two ordinary numeric-array failures and is
+not a completed fix. Generic tuple acquisition also owns the two inline
+literal eval reds; avoid a conflicting static-eval shortcut in that lane.
+The remaining first-Intl-API integration dependencies are recorded in issue
+6717. Full current-source verification of all **11,778** originals remains
+required; the objective is not achieved.
+
+The next Intl implementation slice is issue 6809 on the separate branch
+`codex/6809-intl-locale-canonicalization`, based on the same verified upstream
+main. Its owner is restricted to generic locale grammar/canonicalization,
+focused controls, and its implementation-plan MD. The completed data PR and
+other owners' namespace, closure, object-runtime, and IR files stay untouched.
+Compiler-consumable data emission and public runtime integration remain
+explicit dependencies, not parser-only completion claims.
