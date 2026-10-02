@@ -1512,7 +1512,10 @@ function compileObjectLiteralWithAccessors(
       // Native targets retain their existing native key representation.
       // (#6774 S15) A well-known-symbol key (`get [Symbol.unscopables]()`) is
       // the interned symbol carrier, not the "@@name" spelling.
-      const wkSymId = ctx.standalone && propName.startsWith("@@") ? getWellKnownSymbolId(propName.slice(2)) : undefined;
+      // Only @@unscopables: the iterator-protocol readers still look the other
+      // well-known accessors up under their "@@name" key.
+      const wkSymId =
+        ctx.standalone && propName === "@@unscopables" ? getWellKnownSymbolId(propName.slice(2)) : undefined;
       const boxSymIdx =
         wkSymId !== undefined
           ? ensureLateImport(ctx, "__box_symbol", [{ kind: "i32" }], [{ kind: "externref" }])
