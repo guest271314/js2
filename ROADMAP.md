@@ -42,7 +42,7 @@ Across 69 development sprints and **2,700+ merged pull requests**, js2wasm has g
 |------|-------------|
 | **JS host** | Uses host imports for RegExp, JSON, Promises — maximum compatibility |
 | **Standalone (WASI)** | Pure Wasm output, no JS runtime required — `--target wasi` |
-| **Native strings** | WasmGC i16 arrays instead of `wasm:js-string` — `--nativeStrings` |
+| **Native strings** | WasmGC i16 arrays instead of `wasm:js-string` — `nativeStrings` compile option; automatic for `--target wasi` / `--standalone` |
 | **Component Model** | WIT interface generation for interop — `--wit` |
 | **Optimized** | Binaryen wasm-opt integration — `--optimize` |
 

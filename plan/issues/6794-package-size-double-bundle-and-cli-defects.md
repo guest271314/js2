@@ -1,10 +1,12 @@
 ---
 id: 6794
 title: "packaging/cli: 48.8 MB unpacked package (compiler bundled twice), `-v` means both --version and --verbose, error-severity diagnostics hidden on success, compile cache written into the user's source tree, raw stack on missing input, docs/flag drift"
-status: ready
+status: in-progress
 sprint: Backlog
 created: 2026-09-30
-updated: 2026-09-30
+updated: 2026-10-02
+assignee: "ttraenkler/claude-dev-6794"
+branch: "claude/issue-6794-packaging-cli"
 priority: high
 horizon: m
 feasibility: easy
