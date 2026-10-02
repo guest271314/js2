@@ -6501,3 +6501,842 @@ All 77 receipt pairs and exact-scope identities revalidate: **7,085 unique =
 construction, JSON replacer-array abrupt access, super distinct NewTarget,
 computed Symbol method, global lexical declaration, and Intl DateTimeFormat.
 These are not current-source attribution or candidate regression counts.
+
+### 2026-09-28 frozen census index 77 accepted
+
+Session 9188 terminated with exit 1 after 130.81s: **85 pass, 6 fail,
+1 compile error of 92**, no skips. Maintained completeness verifies 92
+registered verdicts and zero exclusions. JSONL SHA256:
+`c08992a3c7c6b2947b8f3304a4e15acb4119808f883c1d106149d33728856080`;
+completion SHA256:
+`56ab97ddb7f04a3df1383874d436738c98e792db313714f4e3766b9ed33ada60`.
+All 78 accepted receipt pairs and exact-scope identities revalidate: **7,177
+unique = 6,711 pass + 409 fail + 57 compile errors**, 4,601 unmeasured.
+Next index is 78. Frozen residuals cover TypedArray subclassing, superclass
+binding, Map iteration, generator restricted properties/instance checks,
+Promise allSettled host-import leakage, and Intl ListFormat. These are not
+current-source attribution.
+
+The #6739 candidate is not validation-ready: source review identified a
+missing-error-dependency fallback to vec storage and a closed-result reader
+that replaced a non-extern done getter with false. The owner confirmed both
+and is correcting them before testing. No candidate pass gains are claimed.
+
+### 2026-09-28 frozen census index 78 accepted
+
+Session 88176 terminated with exit 1 after 122.18s: **85 pass, 7 fail of 92**,
+zero compile errors/skips. Maintained completeness verifies 92 registered
+verdicts and zero exclusions. JSONL SHA256:
+`407875a12a9ee4204bf1e6005355ff4926f6597a06c9ea4a4a581eadf719840e`;
+completion SHA256:
+`9e31c0c5b30aca9452fdaedbdb553ebe7be37598419f4dcfb1f0c6b3a75a18c1`.
+All 79 accepted receipt pairs and exact-scope identities revalidate: **7,269
+unique = 6,796 pass + 416 fail + 57 compile errors**, 4,509 unmeasured.
+Next index is 79; no census process remains live. Frozen residuals include
+poisoned Promise then access, for-of abrupt completion/result typing, revoked
+Proxy map species, Proxy descriptor realm, AsyncFunction constructibility,
+and Intl DateTimeFormat tag access. No current-source attribution is claimed.
+
+### 2026-09-28 frozen census index 79 accepted
+
+Session 83982 terminated with exit 1 after 148.42s: **84 pass, 6 fail,
+2 compile errors of 92**, no skips. Maintained completeness verifies 92
+registered verdicts with zero exclusions. JSONL SHA256:
+`ad89c4217c2d69aaf5baeecf45081798c4eaaa0a4574c260bbff3e712621bec6`;
+completion SHA256:
+`c0b14cc7866391985295def9e6195764b670596c5b8484701d92b6fa4989431d`.
+All 80 receipt pairs and exact-scope identities revalidate: **7,361 unique =
+6,880 pass + 422 fail + 59 compile errors**, 4,417 unmeasured. Next index is
+80; no census process remains live. Frozen residuals concern generator strict
+receiver/computed accessor/module binding, splice realm prototype, nested
+Proxy preventExtensions, poisoned hasInstance prototype, primitive
+toLocaleString receiver, and Intl DateTimeFormat. No current-source or
+candidate attribution is claimed.
+
+### 2026-09-28 frozen census index 80 accepted
+
+Session 18636 terminated with exit 1 after 158.40s: **86 pass, 5 fail,
+1 compile error of 92**, no skips. Maintained completeness verifies 92
+registered verdicts and zero exclusions. JSONL SHA256:
+`94c64952c4faea6db43e41646585a5b637aca78378ed44d6db94c03b733d8f97`;
+completion SHA256:
+`c0a70eda1d73052f37fe0f939ac5a147edebadc7753468267b21e1cc88641a74`.
+All 81 receipt pairs and exact-scope identities revalidate: **7,453 unique =
+6,966 pass + 427 fail + 60 compile errors**, 4,325 unmeasured. Next index is
+81; no census process remains live. Frozen residuals concern computed yield
+method names, Proxy set receiver, concat length limits, class static Symbol
+order, Number realm prototype, and Intl DateTimeFormat. No integrated-current
+source conformance claim follows from this frozen run.
+
+### 2026-10-01 frozen census index 81 accepted
+
+Session 87674 terminated with exit 1 after 90.88s: **89 pass, 3 fail of 92**,
+zero compile errors/skips. Maintained completeness verifies 92 registered
+verdicts and zero exclusions. JSONL SHA256:
+`b9603e517607380a9d723451dda2ec124e2923258e8f1e7e0a0a4e4b530b54bc`;
+completion SHA256:
+`2be7890bf92bab602c5e6045ee4079aabe52b96456402994bcf7a5e383bd7c24`.
+All 82 receipt pairs and exact-scope identities revalidate: **7,545 unique =
+7,055 pass + 430 fail + 60 compile errors**, 4,233 unmeasured. Next index is
+82; no census process remains live. Frozen residuals concern GeneratorFunction
+tag identity, Proxy revocation during tag access, and Intl DateTimeFormat.
+The #6739 Terra agent is stopped at a usage limit, not running. Its partial
+candidate fails root's unchanged typecheck with nine diagnostics; the exact
+handoff is in its issue. No candidate runtime validation is claimed.
+
+### 2026-10-01 upstream merge hold and census index 82
+
+Fetched `loopdive/js2` main at `b4ac0b7a0672f9d66e91829438b0e373ac44a290`.
+The requested fast-forward of `codex/6739-strict-vec-iterator-override` safely
+aborted because upstream and the unfinished candidate both change
+`iterator-native.ts`. No stash, overwrite, or merge was performed. Awaiting
+the user's answer about checkpointing unfinished work before resolving the
+merge; goal continuation is not that answer. The frozen census was not synced.
+
+Already-running session 80821 completed after 107.63s with **89 pass, 3 fail
+of 92**, no compile errors/skips. Maintained completeness verifies all 92
+registered verdicts and zero exclusions. JSONL SHA256:
+`4105b320e27616981f0efaecfa1b620c112a7800ce233dfb39819b239ba1116f`;
+completion SHA256:
+`fd897aa0d4a84bf0d18f5f5840c86d2cf54aeeb55d3e39f08cc04ee86ee660d8`.
+All 83 receipt pairs and exact-scope identities revalidate: **7,637 unique =
+7,144 pass + 433 fail + 60 compile errors**, 4,141 unmeasured. Next index is
+83; no census process remains live. Frozen failures cover destructuring key
+coercion, boxed-Symbol indexOf coercion, and Intl DateTimeFormat. None is a
+current-source attribution or candidate validation result.
+
+### 2026-10-01 frozen census index 83 accepted
+
+Session 4454 terminated with exit 1 after 102.66s: **87 pass, 6 fail of 93**,
+zero compile errors/skips. Maintained completeness verifies 93 registered
+verdicts and zero exclusions. JSONL SHA256:
+`6fc28dfd450e6d60b4c4ad03e01f306e4f8bed0eeb133628614b9fccb6ce305d`;
+completion SHA256:
+`96f8a5d9c1e7018276b76454afdf0028941252d323363f41e50c52a68e13e802`.
+All 84 receipt pairs and exact-scope identities revalidate: **7,730 unique =
+7,231 pass + 439 fail + 60 compile errors**, 4,048 unmeasured. Next index is
+84; no census process remains live. Frozen failures concern TypedArray sort
+comparison coercion, indexOf position Symbol coercion, eval super-property
+lookup, static-generator array spreading, GeneratorFunction instance length,
+and nested Proxy has fallback. These observations are not current-main
+attributions. The upstream merge remains blocked on preserving the unfinished
+iterator candidate; #6739 now records the upstream A9 result-decoding behavior
+that integration must retain. No checkpoint authorization was inferred from
+automatic goal continuation.
+
+### 2026-10-01 frozen census index 84 accepted
+
+Session 86773 terminated with exit 1 after 94.20s: **84 pass, 7 fail,
+1 compile error of 92**, zero skips. Maintained completeness verifies 92
+registered verdicts and zero exclusions. JSONL SHA256:
+`6017d8297f084be5de2c58ee0a63c9e14198b4ed33c0901844504cf8a516b718`;
+completion SHA256:
+`45d62c0b32f58e77d7746e0737fc583a1115ff7d5efdfe935b05675c8274817c`.
+All 85 receipt pairs and exact-scope identities revalidate: **7,822 unique =
+7,315 pass + 446 fail + 61 compile errors**, 3,956 unmeasured. Next index is
+85; no census process remains live. Frozen residuals concern ArrayBuffer
+newTarget prototypes, indexOf ToPrimitive errors, instanceof prototype
+getters, destructuring assignment targets, non-eval tail calls, concise
+generator host imports, Proxy construct realms, and WeakSet toString tags.
+No current-source conformance claim follows.
+
+Duplicate-work check for the preceding index 83: existing #5317 lists the
+TypedArray `sort-tonumber.js` row; #5152 cluster D explicitly lists indexOf
+`position-tointeger-errors.js`; #5196 records Proxy
+`has/trap-is-undefined-target-is-proxy.js`. Revalidate their current claims
+and implementation before dispatching repairs. Historical issue attribution
+does not itself prove the frozen row has the same present-day cause.
+
+### 2026-10-01 frozen census index 85 accepted
+
+Session 68724 terminated with exit 1 after 85.34s: **86 pass, 5 fail,
+1 compile error of 92**, zero skips. Maintained completeness verifies 92
+registered verdicts and zero exclusions. JSONL SHA256:
+`fb851e3bc1375fa15325792afc27245847d46f0f08210efc01c10e78bffb1766`;
+completion SHA256:
+`867f806a85428b13d0590f9d7bf08a2d5b22cb34eef7d892c8455c41ee0f05c6`.
+All 86 receipt pairs and exact-scope identities revalidate: **7,914 unique =
+7,401 pass + 451 fail + 62 compile errors**, 3,864 unmeasured. Next index is
+86; no census process remains live. Frozen residuals concern TypedArray
+constructor iteration/coercion, AsyncFunction tags, reassigned named generator
+host imports, ArrayBuffer subclassing, and GeneratorFunction prototype/realm
+behavior. Keep these as frozen observations, not current-main diagnoses.
+The unfinished iterator branch remains unchanged pending the checkpoint
+decision required before its upstream merge.
+
+### 2026-10-01 frozen census index 86 accepted
+
+Session 31493 terminated with exit 1 after 96.05s: **86 pass, 6 fail of 92**,
+zero compile errors/skips. Maintained completeness verifies 92 registered
+verdicts and zero exclusions. JSONL SHA256:
+`937189c917cfa6bca368aa1d6428256ec9cde05bb31fd15c9211cd054004be8f`;
+completion SHA256:
+`3740556eed5eedad14d13ed57bf60b1dca18b24b1b72f4ea0877df38d40d08fe`.
+All 87 receipt pairs and exact-scope identities revalidate: **8,006 unique =
+7,487 pass + 457 fail + 62 compile errors**, 3,772 unmeasured. Next index is
+87; no census process remains live. Frozen residuals concern TypedArray buffer
+species, class prototype setters, Promise subclassing, nested Proxy
+setPrototypeOf fallback, Boolean yield values, and splice species length
+validation. These are frozen baseline results, not evidence that the current
+upstream or the unfinished candidate has the same failures.
+
+### 2026-10-01 frozen census index 87 accepted
+
+Session 97182 terminated with exit 1 after 85.28s: **90 pass, 1 fail,
+1 compile error of 92**, zero skips. Maintained completeness verifies 92
+registered verdicts and zero exclusions. JSONL SHA256:
+`579c86ca17081b2ae1a5c3dc5a18045d76504296c6607e363a35a6febc130b7b`;
+completion SHA256:
+`2759ca709e84eaf51a88636c30b81471ce8d48dd22eb12570427cd459cdcd12f`.
+All 88 receipt pairs and exact-scope identities revalidate: **8,098 unique =
+7,577 pass + 458 fail + 63 compile errors**, 3,680 unmeasured. Next index is
+88; no census process remains live. The two frozen residuals are class
+computed property names containing yield and String valueOf cross-realm
+non-generic behavior. No current-source diagnosis or candidate validation is
+claimed by this measurement.
+
+### 2026-10-01 frozen census index 88 accepted
+
+Session 96729 terminated with exit 1 after 86.48s: **86 pass, 5 fail,
+1 compile error of 92**, zero skips. Maintained completeness verifies 92
+registered verdicts and zero exclusions. JSONL SHA256:
+`19f91358c7329ec736c6a167e0e87669592bf931b3a8c43ee81084bb1196f974`;
+completion SHA256:
+`29b5be0fb22f2144e05a3a9a70c732f00f57d9b0a99d3148ba09f80b001f5204`.
+All 89 receipt pairs and exact-scope identities revalidate: **8,190 unique =
+7,663 pass + 463 fail + 64 compile errors**, 3,588 unmeasured. Next index is
+89; no census process remains live. Frozen residuals concern static-generator
+array spreading, named-generator reassignment through arrows, Map iterator
+entry abrupt completion, Proxy descriptor omission and set receiver fallback,
+and Symbol wrapper ordinary coercion after deleting Symbol.toPrimitive.
+No integrated-current conformance improvement is claimed.
+
+### 2026-10-01 frozen census index 89 accepted
+
+Session 87903 terminated with exit 1 after 88.04s: **87 pass, 5 fail of 92**,
+zero compile errors/skips. Maintained completeness verifies 92 registered
+verdicts and zero exclusions. JSONL SHA256:
+`39866442d6e59522378ee0ef88e7957abf04ea19e69122fa85e95d5fd7dc95aa`;
+completion SHA256:
+`f3dc3ee1897bd48d61ea3ed7d58c69862a8753c8400d05b250ffa863ec339f18`.
+All 90 receipt pairs and exact-scope identities revalidate: **8,282 unique =
+7,750 pass + 468 fail + 64 compile errors**, 3,496 unmeasured. Next index is
+90; no census process remains live. Frozen residuals concern tagged-template
+realm caching, Promise constructor access and post-resolution exceptions,
+non-string Symbol tags, and cross-realm Proxy descriptor-result validation.
+These are separate observations from the completed narrow Promise #5197 fix;
+do not count that fix as closing these rows without matched current evidence.
+
+### 2026-10-01 frozen census index 90 accepted
+
+Session 34572 terminated with exit 1 after 93.36s: **86 pass, 5 fail,
+1 compile error of 92**, zero skips. Maintained completeness verifies 92
+registered verdicts and zero exclusions. JSONL SHA256:
+`ff30a17b0514f0385c69eddf620d1a261b0a22711241d06791c6435ed755c94f`;
+completion SHA256:
+`e12fe63e7e8053c7d394091e8800a607c4d30e011d691842784889bc15366ae6`.
+All 91 receipt pairs and exact-scope identities revalidate: **8,374 unique =
+7,836 pass + 473 fail + 65 compile errors**, 3,404 unmeasured. Next index is
+91; no census process remains live. Frozen residuals concern subarray detached
+buffer coercion order, generator rest-parameter closure lowering, computed
+class accessor/assignment keys, generator yield identifiers, and concat realm
+species prototypes. The frozen subarray failure does not contradict the later
+merged subarray fix without a matched run on that integrated source.
+
+### 2026-10-01 frozen census index 91 accepted
+
+Session 12364 terminated with exit 1 after 90.02s: **85 pass, 4 fail,
+3 compile errors of 92**, zero skips. Maintained completeness verifies 92
+registered verdicts and zero exclusions. JSONL SHA256:
+`3123acb55dd500d063b28e6923b9e26819a910f0683530d6d4dd09b21835f7f6`;
+completion SHA256:
+`14b4ab717104c4c79b113aac23153a4611649b12b1e111d9f037e6c710c74126`.
+All 92 receipt pairs and exact-scope identities revalidate: **8,466 unique =
+7,921 pass + 477 fail + 68 compile errors**, 3,312 unmeasured. Next index is
+92; no census process remains live. Frozen residuals concern TypedArray slice
+overlapping species buffers, generator try delegation/module identity,
+restricted global lexical declarations, Proxy prototype identity, and the
+testTypedArray harness self-test. The harness self-test is an exact-manifest
+member and remains counted, not excluded because of its directory name.
+No current-main or candidate conformance claim follows from this run.
+
+### 2026-10-01 frozen census index 92 accepted
+
+Session 27300 terminated with exit 1 after 99.72s: **87 pass, 5 fail of 92**,
+zero compile errors/skips. Maintained completeness verifies 92 registered
+verdicts and zero exclusions. JSONL SHA256:
+`f0444e0ba57c3e588444695e6815247b8f643676accb8e21fc8bce79a1d54c56`;
+completion SHA256:
+`943bd6bccd3187252ea84214ac3fc8a5903b38de3314a55cb6c67bf97ebd8be6`.
+All 93 receipt pairs and exact-scope identities revalidate: **8,558 unique =
+8,008 pass + 482 fail + 68 compile errors**, 3,220 unmeasured. Next index is
+93; no census process remains live. Frozen residuals concern named generator
+yield identifiers, nested Proxy delete fallback, GeneratorFunction instance
+constructibility, class-call realm errors, and Intl Locale removed tags.
+No source changes, fixes, or integrated-source validation occurred in this run.
+
+### 2026-10-01 frozen census index 93 accepted
+
+Session 18914 terminated with exit 1 after 87.97s: **87 pass, 5 fail of 92**,
+zero compile errors/skips. Maintained completeness verifies 92 registered
+verdicts and zero exclusions. JSONL SHA256:
+`cea36246416cfc42d4f94b17cee286dc30764249e17ce61285b8f9c8e1e68a68`;
+completion SHA256:
+`c24e4063cc0cfd23afda3006255d73152c5a16770c19762c2c58931583494edf`.
+All 94 receipt pairs and exact-scope identities revalidate: **8,650 unique =
+8,095 pass + 487 fail + 68 compile errors**, 3,128 unmeasured. Next index is
+94; no census process remains live. Frozen residuals concern TypedArray
+iterator exceptions, class-generator multi-element spreading, non-callable
+Proxy Function.toString rejection, JSON Proxy replacer arrays, and Intl Locale
+week information. All remain counted within the unchanged exact manifest.
+This is baseline evidence only; no current-source improvement is established.
+
+### 2026-10-01 frozen census index 94 accepted
+
+Session 84766 terminated with exit 1 after 84.72s: **89 pass, 1 fail,
+2 compile errors of 92**, zero skips. Maintained completeness verifies 92
+registered verdicts and zero exclusions. JSONL SHA256:
+`21d893d0970b2408aff321ffcabb5e129b69d0ec62e5b6602c086ee405bf9bbe`;
+completion SHA256:
+`3018633fc040e0842ecf8acbfac6747fa0ecb56497d020c6fe7b794e65badcb2`.
+All 95 receipt pairs and exact-scope identities revalidate: **8,742 unique =
+8,184 pass + 488 fail + 70 compile errors**, 3,036 unmeasured. Next index is
+95; no census process remains live. Frozen residuals concern named generator
+reassignment through strict eval, Array.slice revoked-Proxy handling, and
+Intl NumberFormat host imports. All rows remain in the unchanged scope.
+No implementation changes or merged-source validation occurred.
+
+### 2026-10-01 frozen census index 95 accepted
+
+Session 12498 terminated with exit 1 after 89.98s: **86 pass, 5 fail,
+1 compile error of 92**, zero skips. Maintained completeness verifies 92
+registered verdicts and zero exclusions. JSONL SHA256:
+`a9d1fa30801af12a44a927afdb9bacfe6abffd5e829c14565dffa33eba78b61c`;
+completion SHA256:
+`87416216e602b578972f6346540707bdb41b68c606f378f0627c472cb3be8a68`.
+All 96 receipt pairs and exact-scope identities revalidate: **8,834 unique =
+8,270 pass + 493 fail + 71 compile errors**, 2,944 unmeasured. Next index is
+96; no census process remains live. Frozen residuals concern TypedArray zero
+sorting, GeneratorFunction stringification, generator parameter closure
+imports, empty eval spreading, shadowed prototype-cycle handling, and concat
+revoked Proxies. The eval-spread row belongs to the historical baseline;
+do not overwrite #5157's separately measured candidate receipts with it.
+
+### 2026-10-01 frozen census index 96 accepted
+
+Session 36750 terminated with exit 1 after 87.27s: **87 pass, 4 fail,
+1 compile error of 92**, zero skips. Maintained completeness verifies 92
+registered verdicts and zero exclusions. JSONL SHA256:
+`c1ac646e3f5cbef8188c8d9be89cda5d70a572942cf3c656ddc7ac1a29d0482d`;
+completion SHA256:
+`2ebc2f689ecc08344af6a1cbdb2f70fdb7ed0dbf922ac305a07cc4e42a2accd2`.
+All 97 receipt pairs and exact-scope identities revalidate: **8,926 unique =
+8,357 pass + 497 fail + 72 compile errors**, 2,852 unmeasured. Next index is
+97; no census process remains live. Frozen residuals concern with/unscopables
+increment/decrement, custom Promise.then constructors, WeakMap realm
+prototypes, Proxy has through a prototype, and Intl Segmenter option coercion.
+No current-source diagnosis or implementation improvement is claimed.
+
+### 2026-10-01 frozen census index 97 accepted
+
+Session 80753 terminated with exit 1 after 98.56s: **83 pass, 8 fail,
+1 compile error of 92**, zero skips. Maintained completeness verifies 92
+registered verdicts and zero exclusions. JSONL SHA256:
+`7bdfc18734778dacfc1007c2156a391a72dd97e56edbe05c3ad80169e7d33d49`;
+completion SHA256:
+`654c48c4bf913bfe0354af2a029399fd98145b7a3c4303dfe0d51c8a064fe1b7`.
+All 98 receipt pairs and exact-scope identities revalidate: **9,018 unique =
+8,440 pass + 505 fail + 73 compile errors**, 2,760 unmeasured. Next index is
+98; no census process remains live. Frozen residuals concern Proxy prototype
+set/has behavior, generator method prototypes and spreading, arrow rest-array
+identity, Promise constructor identity, generator return through try/finally,
+WeakMap tags, and Intl DateTimeFormat. These are baseline observations only.
+
+### 2026-10-01 frozen census index 98 accepted
+
+Session 95108 terminated with exit 1 after 99.88s: **85 pass, 5 fail,
+2 compile errors of 92**, zero skips. Maintained completeness verifies 92
+registered verdicts and zero exclusions. JSONL SHA256:
+`2e926631ccd72ec4356ff2b138a159e40cd463723b36ea9590f2b3157af88649`;
+completion SHA256:
+`73bd0990476b961486c59faea87e9f76e2828ca13765d14c3f0a4f01f8d662f7`.
+All 99 receipt pairs and exact-scope identities revalidate: **9,110 unique =
+8,525 pass + 510 fail + 75 compile errors**, 2,668 unmeasured. Next index is
+99; no census process remains live. Frozen residuals concern Array.from
+boundary values, static-generator spreading, lexical super-call errors,
+computed yield names, function property enumeration order, and Intl
+DateTimeFormat. No integrated-source improvement is established by this run.
+
+### 2026-10-01 frozen census index 99 accepted
+
+Session 26759 terminated with exit 1 after 91.17s: **83 pass, 8 fail,
+1 compile error of 92**, zero skips. Maintained completeness verifies 92
+registered verdicts and zero exclusions. JSONL SHA256:
+`b5e30795baac6e82ffb6c8ea065325fee738fd8b09e622078bfe8697dd5e3294`;
+completion SHA256:
+`3b0b12a8d5b93e15c47118b031be7fbd6b1c0f16e857957ea5348970d715091c`.
+All 100 receipt pairs and exact-scope identities revalidate: **9,202 unique =
+8,608 pass + 518 fail + 76 compile errors**, 2,576 unmeasured. Next index is
+100; no census process remains live. Frozen residuals concern TypedArray join,
+Function subclass name/length, generator rest scopes and spreading, indexOf
+coercion precedence, DataView subclass brands, splice revoked Proxies, and
+Intl DateTimeFormat. No source changes or current-main validation occurred.
+
+### 2026-10-01 frozen census index 100 accepted
+
+Session 11376 terminated with exit 1 after 92.92s: **89 pass, 3 fail of 92**,
+zero compile errors/skips. Maintained completeness verifies 92 registered
+verdicts and zero exclusions. JSONL SHA256:
+`7607191bcb3cb14f246da7840ccb3c8dbcd42c3aa478ee8ac6e85977a2b58206`;
+completion SHA256:
+`8d9fcb9dd780fd9a3b6a42b6be00f469ae12ad6be7dea02853261aa69aea15b9`.
+All 101 receipt pairs and exact-scope identities revalidate: **9,294 unique =
+8,697 pass + 521 fail + 76 compile errors**, 2,484 unmeasured. Next index is
+101; no census process remains live. Frozen residuals concern Proxy has on
+Object.create descendants and mixed string/Symbol own-key invariants in
+Object.getOwnPropertySymbols/getOwnPropertyNames. No current-source fix is
+implied by this baseline measurement.
+
+### 2026-10-01 frozen census index 101 accepted
+
+Session 59830 terminated with exit 1 after 95.84s: **89 pass, 2 fail,
+1 compile error of 92**, zero skips. Maintained completeness verifies 92
+registered verdicts and zero exclusions. JSONL SHA256:
+`72a0982a2245119b683f5f288f88ee3bc731e69f9544390628904a387bae3523`;
+completion SHA256:
+`6a931337d0e87d4008d6b6b9aaf0005f7572ff4c1ec007877d7d5db12bd1753e`.
+All 102 receipt pairs and exact-scope identities revalidate: **9,386 unique =
+8,786 pass + 523 fail + 77 compile errors**, 2,392 unmeasured. Next index is
+102; no census process remains live. Frozen residuals concern Proxy indexed
+set receiver hooks, strict named-generator reassignment, and Date.toJSON
+Symbol coercion. No current-main validation or source changes occurred.
+
+### 2026-10-01 frozen census index 102 accepted
+
+Session 43959 terminated with exit 1 after 89.86s: **86 pass, 5 fail,
+1 compile error of 92**, zero skips. Maintained completeness verifies 92
+registered verdicts and zero exclusions. JSONL SHA256:
+`f5b45b42f50810c6c3b56369616f07db83bdbda8cb36a8619597fad73ef0a243`;
+completion SHA256:
+`b614296cf545787e03b4e1b1b332b8bee422ec567e3891ae26019aa1525a52ea`.
+All 103 receipt pairs and exact-scope identities revalidate: **9,478 unique =
+8,872 pass + 528 fail + 78 compile errors**, 2,300 unmeasured. Next index is
+103; no census process remains live. Frozen residuals concern subarray species
+return brands, Proxy subclass heritage, Object.assign Number wrappers,
+Object.values observable operations, generator module binding, and WeakSet
+realm prototypes. The runner reported one built-in poison-error retry; the
+Object.values stack-overflow row remains failed, not excluded or relabeled.
+No current-source implementation improvement is claimed.
+
+### 2026-10-01 frozen census index 103 accepted
+
+Session 19145 terminated with exit 1 after 104.13s: **86 pass, 4 fail,
+2 compile errors of 92**, zero skips. Maintained completeness verifies 92
+registered verdicts and zero exclusions. JSONL SHA256:
+`965040ff976306c209818cf21d696bc73c3182628ba11b032cca6de50ce48018`;
+completion SHA256:
+`7c23bebefbf71b97e076138ceb7a480c00c7228eaf3dc38ca7afce96b235c704`.
+All 104 receipt pairs and exact-scope identities revalidate: **9,570 unique =
+8,958 pass + 532 fail + 80 compile errors**, 2,208 unmeasured. Next index is
+104; no census process remains live. Frozen residuals concern RegExp split
+flags coercion, named generator scopes, escaped class-method construction,
+DataView subclassing, copyWithin Proxy deletion exceptions, and Intl locale
+list length exceptions. No current-main validation or source changes occurred.
+
+### 2026-10-01 frozen census index 104 accepted
+
+Session 15845 terminated with exit 1 after 92.17s: **86 pass, 6 fail of 92**,
+zero compile errors/skips. Maintained completeness verifies 92 registered
+verdicts and zero exclusions. JSONL SHA256:
+`8575aebbe0ddf92156eb3f9bec406f7987a9017f8e39ec7fa3e9645cafd7784c`;
+completion SHA256:
+`514ce78f8ac6cc1014441a7e3ceb781c823ac7964d0bc4bb9b77c62e8a406141`.
+All 105 receipt pairs and exact-scope identities revalidate: **9,662 unique =
+9,044 pass + 538 fail + 80 compile errors**, 2,116 unmeasured. Next index is
+105; no census process remains live. Frozen residuals concern generator
+parameter scopes, String/Boolean realm prototypes, nested Proxy apply,
+zero-argument GeneratorFunction construction, and Intl DurationFormat tags.
+No integrated-source improvement is established.
+
+### 2026-10-01 frozen census index 105 accepted
+
+Session 68886 terminated with exit 1 after 88.39s: **88 pass, 3 fail,
+1 compile error of 92**, zero skips. Maintained completeness verifies 92
+registered verdicts and zero exclusions. JSONL SHA256:
+`3489774594e0d5943a3a73111a978860122b5876c0c84486ecd0c31fb34ff60e`;
+completion SHA256:
+`be21fdfdd34535d6a741b79705b5ee6570039c2bea051bd0ef58aded80dbeb4d`.
+All 106 receipt pairs and exact-scope identities revalidate: **9,754 unique =
+9,132 pass + 541 fail + 81 compile errors**, 2,024 unmeasured. Next index is
+106; no census process remains live. Frozen residuals concern TypedArray
+filter callback identity, tagged-template call evaluation imports, Reflect
+own-key order, and Intl supportedValuesOf. No source change or integrated
+candidate validation occurred.
+
+### 2026-10-01 frozen census index 106 accepted
+
+Session 82777 terminated with exit 1 after 88.80s: **88 pass, 4 fail of 92**,
+zero compile errors/skips. Maintained completeness verifies 92 registered
+verdicts and zero exclusions. JSONL SHA256:
+`44d80d91064ed0436216e754f3ed26e20d0443e03c9818e15a212adf42ba1373`;
+completion SHA256:
+`73e87cbbe7bc1d368277917b9421c5febbd67fc8c5ef51389d0c7ba25f411086`.
+All 107 receipt pairs and exact-scope identities revalidate: **9,846 unique =
+9,220 pass + 545 fail + 81 compile errors**, 1,932 unmeasured. Next index is
+107; no census process remains live. Frozen residuals concern generator
+default prototypes, Array.of realm construction, uninitialized module
+namespace descriptors, and Intl tags. No integrated-source improvement is
+established by these baseline results.
+
+### 2026-10-01 frozen census index 107 accepted
+
+Session 28318 terminated with exit 1 after 84.60s: **87 pass, 5 fail of 92**,
+zero compile errors/skips. Maintained completeness verifies 92 registered
+verdicts and zero exclusions. JSONL SHA256:
+`c79e18d65f612659f275bed17002d8cb093bf0fda543c3631950ac25ce21b593`;
+completion SHA256:
+`cedcf969ce9607f0eb1b3d867de758f0ba38b97fd4b553e7ab222878b3d6037d`.
+All 108 receipt pairs and exact-scope identities revalidate: **9,938 unique =
+9,307 pass + 550 fail + 81 compile errors**, 1,840 unmeasured. Next index is
+108; no census process remains live. Frozen residuals concern generator method
+descriptors, destructuring arguments bindings, strict Proxy deletion, mutable
+global class bindings, and Intl Locale tags. No source changes or integrated
+candidate validation occurred.
+
+### 2026-10-01 frozen census index 108 accepted
+
+Session 94647 terminated with exit 1 after 94.24s: **85 pass, 6 fail,
+1 compile error of 92**, zero skips. Maintained completeness verifies 92
+registered verdicts and zero exclusions. JSONL SHA256:
+`ff3269fe9774878e8a01d06d053062670a83fe302684cf269ac01121bf10785c`;
+completion SHA256:
+`090ace67d127cf099e6ff961130f17ec05ddee7434505f429025df266813b4a4`.
+All 109 receipt pairs and exact-scope identities revalidate: **10,030 unique =
+9,392 pass + 556 fail + 82 compile errors**, 1,748 unmeasured. Next index is
+109; no census process remains live. Frozen residuals concern class getter
+names and inner bindings, decorator yield identifiers, arguments iterator
+descriptors, generator/DataView prototypes, and Intl Locale tags. The proposal
+row remains within the frozen exact scope; it was not excluded.
+No integrated-source improvement is established.
+
+### 2026-10-01 frozen census index 109 accepted
+
+Session 67331 terminated with exit 1 after 93.56s: **86 pass, 6 fail of 92**,
+zero compile errors/skips. Maintained completeness verifies 92 registered
+verdicts and zero exclusions. JSONL SHA256:
+`a8759f993c385e5074a5e4044b3bceef1e89d0be9f114c8937baa6272b048fa9`;
+completion SHA256:
+`956ba0f8ba3dbe764d8de5ed9052c029d9238ecc1b812b9ae9481bac74fc6a92`.
+All 110 receipt pairs and exact-scope identities revalidate: **10,122 unique =
+9,478 pass + 562 fail + 82 compile errors**, 1,656 unmeasured. Next index is
+110; no census process remains live. Frozen residuals concern Function names,
+class heritage without a prototype, nested Proxy descriptors, builtin search
+dispatch, Reflect.setPrototypeOf return values, and Intl Locale week info.
+No source changes or integrated-source validation occurred.
+
+### 2026-10-01 frozen census index 110 accepted
+
+Session 7512 terminated with exit 1 after 92.21s: **84 pass, 7 fail,
+1 compile error of 92**, zero skips. Maintained completeness verifies 92
+registered verdicts and zero exclusions. JSONL SHA256:
+`1007a524677bd6da6f74051ce362b238e2ed06efb8d08f822c6c37ff02573c20`;
+completion SHA256:
+`90778e83fd4c268b0775a108a2f604108bba0f8d3c58aaebf45b53689eaee195`.
+All 111 receipt pairs and exact-scope identities revalidate: **10,214 unique =
+9,562 pass + 569 fail + 83 compile errors**, 1,564 unmeasured. Next index is
+111; no census process remains live. Frozen residuals concern concat typed
+arrays, Number subclassing, uninitialized namespace deletion, Promise.all
+string iteration, RegExp realm accessors, nested Proxy apply, Reflect own
+property lookup, and Intl NumberFormat. No integrated-source improvement is
+claimed.
+
+### 2026-10-01 frozen census index 111 accepted
+
+Session 41799 terminated with exit 1 after 92.61s: **88 pass, 4 fail of 92**,
+zero compile errors/skips. Maintained completeness verifies 92 registered
+verdicts and zero exclusions. JSONL SHA256:
+`f72eb385b743ae08c6e2a13625f7beb875193143735e72a50849bc66a86659bd`;
+completion SHA256:
+`e7902b6a9c1b4458b84c6351ab066120ee8236eac657712035740cedc8067f4d`.
+All 112 receipt pairs and exact-scope identities revalidate: **10,306 unique =
+9,650 pass + 573 fail + 83 compile errors**, 1,472 unmeasured. Next index is
+112; no census process remains live. Frozen residuals concern class generator
+spreading, invalid class heritage, derived-constructor realm errors, and Intl
+NumberFormat range parts. No source changes or current-main validation occurred.
+
+### 2026-10-01 frozen census index 112 accepted
+
+Session 31801 terminated with exit 1 after 90.01s: **85 pass, 7 fail of 92**,
+zero compile errors/skips. Maintained completeness verifies 92 registered
+verdicts and zero exclusions. JSONL SHA256:
+`2f589c9c3fd09cebf3358ff4535ae75658722c584e978ebfa31bd2ea212c672a`;
+completion SHA256:
+`a317b281f781058229264c15bb9946e95ae44247961f8a5c4888eaa501111734`.
+All 113 receipt pairs and exact-scope identities revalidate: **10,398 unique =
+9,735 pass + 580 fail + 83 compile errors**, 1,380 unmeasured. Next index is
+113; no census process remains live. Frozen residuals concern TypedArray map
+callback identity and constructor length coercion, Array.map species lengths,
+EvalError realm prototypes, mapped arguments iterator descriptors, template
+freezing, and Intl tags. No integrated-source improvement is claimed.
+
+### 2026-10-01 frozen census index 113 accepted
+
+Session 72071 terminated with exit 1 after 89.57s: **86 pass, 5 fail,
+1 compile error of 92**, zero skips. Maintained completeness verifies 92
+registered verdicts and zero exclusions. JSONL SHA256:
+`a07a2272386a5252b254771d9e19d002a55750a79efdb6eb1415d46c59b669a3`;
+completion SHA256:
+`7f51ea9f8039ef85d54c5aa7b48d469525fee4b3c565c0d6df4fea2ad7cc77df`.
+All 114 receipt pairs and exact-scope identities revalidate: **10,490 unique =
+9,821 pass + 585 fail + 84 compile errors**, 1,288 unmeasured. Next index is
+114; no census process remains live. Frozen residuals concern TypeError realm
+prototypes, super property writes and direct eval, Promise.all iterator-close
+admission, and Intl Locale Symbol rejection. No current-source fix is implied.
+
+### 2026-10-01 frozen census index 114 accepted
+
+Session 99942 terminated with exit 1 after 94.54s: **87 pass, 5 fail of 92**,
+zero compile errors/skips. Maintained completeness verifies 92 registered
+verdicts and zero exclusions. JSONL SHA256:
+`3d3409f5a78ef183086d198ad090b3e36c88298c053f8a7e7fd062f60b6206b1`;
+completion SHA256:
+`c53a83f84df630c36739ec7ac18aefa7f4321a776bb5c16ddf70a22190e01220`.
+All 115 receipt pairs and exact-scope identities revalidate: **10,582 unique =
+9,908 pass + 590 fail + 84 compile errors**, 1,196 unmeasured. Next index is
+115; no census process remains live. Frozen residuals concern super setters,
+unspecified yield values, Array.map Proxy species, and SyntaxError/Intl Locale
+realm prototypes. No integrated-source validation or source edits occurred.
+
+### 2026-10-01 frozen census index 115 accepted
+
+Session 29147 terminated with exit 1 after 90.11s: **87 pass, 5 fail of 92**,
+zero compile errors/skips. Maintained completeness verifies 92 registered
+verdicts and zero exclusions. JSONL SHA256:
+`28a60403fd6f705837bb7c99ccbfa80cbdac58dc1fe279f2f600b6d2e423583c`;
+completion SHA256:
+`4aae2451b0f7fed260f1401fb4615dd13a6dec64514c77883fd2062d3ea063a0`.
+All 116 receipt pairs and exact-scope identities revalidate: **10,674 unique =
+9,995 pass + 595 fail + 84 compile errors**, 1,104 unmeasured. Next index is
+116; no census process remains live. Frozen residuals concern TypedArray
+byteLength guards and generator inputs, nested yield operands, nested Proxy
+set fallback, and Intl canonical locale errors. No current-source improvement
+is established.
+
+### 2026-10-02 frozen census index 116 accepted
+
+Session 49524 terminated with exit 1 after 105.60s: **85 pass, 7 fail of 92**,
+zero compile errors/skips. Maintained completeness verifies 92 registered
+verdicts and zero exclusions. JSONL SHA256:
+`a8be8f4acf06ed8f4f9067fff737e69c6ce9b196204909fc617c50c8ae693a17`;
+completion SHA256:
+`f7770f9c6f79864482c63e88b1b1722bd5dc304500f0228df4a8e69bc84dffaa`.
+All 117 receipt pairs and exact-scope identities revalidate: **10,766 unique =
+10,080 pass + 602 fail + 84 compile errors**, 1,012 unmeasured. Next index is
+117; no census process remains live. Frozen residuals concern TypedArray sort,
+generator spreading, Proxy enumerability, DataView detachment, Promise
+post-resolution exceptions, ArrayBuffer slice guards, and Intl DisplayNames.
+No source changes or integrated-source validation occurred.
+
+### 2026-10-02 frozen census index 117 accepted
+
+Session 99168 terminated with exit 1 after 101.51s: **87 pass, 5 fail of 92**,
+zero compile errors/skips. Maintained completeness confirms 92 registered
+verdicts and zero exclusions. JSONL SHA256:
+`212ef6c179b8d4db81aa8477f5d5c4afad8a5979b1f7cdfaed9c817075076789`;
+completion SHA256:
+`b7adea5d7e9050996059a566cc5158c539dfad972c1bf95005b42bcb661f52d2`.
+All 118 receipt pairs and exact-scope identities revalidate: **10,858 unique =
+10,167 pass + 607 fail + 84 compile errors**, 920 unmeasured. Next index is
+118; no census process remains live. Failures concern Proxy function realms,
+Object.prototype.__proto__ descriptors, destructuring assignment, and Function
+toString constructibility. These are frozen baseline results, not new regressions.
+
+Upstream fetch now resolves main to `9228bb1120042ad5a8a2ed60e0e0c60dc620d070`.
+The strict-vec implementation branch remains at `1915b7597f`: safe merge
+aborted because unfinished iterator-native.ts edits overlap. No stash or
+overwrite occurred; checkpoint approval remains unanswered. No source changes,
+publication, or integrated-source validation occurred in this acceptance step.
+
+### 2026-10-02 frozen census index 118 accepted
+
+Session 57490 terminated with exit 1 after 102.28s: **88 pass, 4 fail of 92**,
+zero compile errors/skips. Maintained completeness confirms 92 registered
+verdicts and zero exclusions. JSONL SHA256:
+`a578c7026f5fb058324a56c5fcc6aff1735e2bee3dd467d69d6b35f8092466c3`;
+completion SHA256:
+`91bcf1f9cffdfc881cf05dfa9731c2a6ad01e2f1f828313d5f0dcb5a3d629f35`.
+All 119 receipt pairs and exact-scope identities revalidate: **10,950 unique =
+10,255 pass + 611 fail + 84 compile errors**, 828 unmeasured. Next index is
+119; no census process remains live. Failures concern generator yield/spread,
+Array filter cross-realm species, primitive-base property writes, and
+GeneratorFunction cross-realm prototypes. Existing generator and constructor
+ownership still applies; these frozen failures do not prove current-main defects.
+No implementation, merge, or publication occurred; checkpoint approval is pending.
+
+### 2026-10-02 frozen census index 119 accepted
+
+Session 47797 terminated with exit 1 after 97.08s: **85 pass, 7 fail of 92**,
+zero compile errors/skips. Maintained completeness confirms 92 registered
+verdicts and zero exclusions. JSONL SHA256:
+`a8cb10933dbf25a3715fb55aa49a36a3d781d92cf59ea2582d8c4f752c5e293b`;
+completion SHA256:
+`6beffef5bd8857792d8e74e7c26498ddd268024c7ec50cb1567af524d5c29737`.
+All 120 receipt pairs and exact-scope identities revalidate: **11,042 unique =
+10,340 pass + 618 fail + 84 compile errors**, 736 unmeasured. Next index is
+120; no census process remains live. Residuals cover TypedArray species,
+sparse concat, computed setter super, and cross-realm RegExp/Date/Intl
+constructors. Existing ownership and IR exclusions remain unchanged; frozen
+failures require current-source reproduction before implementation attribution.
+No source changes or integrated-source validation occurred. Merge remains held
+pending permission to checkpoint the unfinished iterator work.
+
+### 2026-10-02 frozen census index 120 accepted
+
+Session 2858 terminated with exit 1 after 95.75s: **87 pass, 3 fail, 2 compile
+errors of 92**, zero skips. Maintained completeness confirms 92 registered
+verdicts and zero exclusions. JSONL SHA256:
+`cf7406dba68e015b236ff00d8f0506bb88635f2fa1fc4ed4754b51f08630ec9c`;
+completion SHA256:
+`124afd7d93dc10217caa32c396d3582dd5c6151bb054baea21af9c40e57d9696`.
+All 121 receipt pairs and exact-scope identities revalidate: **11,134 unique =
+10,427 pass + 621 fail + 86 compile errors**, 644 unmeasured. Next index is
+121; no census process remains live. Failures concern computed class generator
+keys, Promise.any host imports, ArrayBuffer allocation ordering, cross-realm
+Set construction, and Intl Segmenter. Promise.any and Intl remain in the frozen
+exact manifest and are not excluded despite later-edition naming.
+No source changes, merge, publication, or integrated-source validation occurred.
+
+### 2026-10-02 frozen census index 121 accepted
+
+Session 44784 terminated with exit 1 after 100.15s: **88 pass, 3 fail, 1 compile
+error of 92**, zero skips. Maintained completeness confirms 92 registered
+verdicts and zero exclusions. JSONL SHA256:
+`26763f604a6bbd7b1ef6499b7dc994acfdba8c32783559fcbdaf8f5ccfb9df2a`;
+completion SHA256:
+`9de26a713ab37385ccb8921275f4f082f310db445298cb87e873ae29a0794221`.
+All 122 receipt pairs and exact-scope identities revalidate: **11,226 unique =
+10,515 pass + 624 fail + 87 compile errors**, 552 unmeasured. Next index is
+122; no census process remains live. Residuals concern Promise.race host
+imports, Proxy has under with, Function.apply cross-realm errors, and Intl
+ListFormat cross-realm construction. These remain frozen-source observations,
+not proof of current-main regressions. The unfinished iterator merge remains
+held for checkpoint approval; no source changes or publication occurred.
+
+### 2026-10-02 frozen census index 122 accepted
+
+Session 40601 terminated with exit 1 after 91.35s: **86 pass, 5 fail, 1 compile
+error of 92**, zero skips. Maintained completeness confirms 92 registered
+verdicts and zero exclusions. JSONL SHA256:
+`2d02c8737466ffe996481b5525d0d93601a561f99a3e922f6b4406664a55b9ee`;
+completion SHA256:
+`c49ae32436f0fd439b82c5f405176a1aca3a94e9a9d4d4a97315f90be83e1be8`.
+All 123 receipt pairs and exact-scope identities revalidate: **11,318 unique =
+10,601 pass + 629 fail + 88 compile errors**, 460 unmeasured. Next index is
+123; no census process remains live. Residuals concern TypedArray map mutation,
+Proxy concat species, Reflect.construct/super new.target, JSON array abrupt
+completion, and cross-realm Intl DateTimeFormat construction. Frozen failures
+are not attributed to current main without fresh reproduction. No compiler
+changes, merge, publication, or integrated-source verification occurred.
+
+### 2026-10-02 frozen census index 123 accepted
+
+Session 16756 terminated with exit 1 after 90.54s: **86 pass, 5 fail, 1 compile
+error of 92**, zero skips. Maintained completeness confirms 92 registered
+verdicts and zero exclusions. JSONL SHA256:
+`f142b5c4e52e0f6738a54f8a3b99b6da1de79ab35b3aac200b661d467e31cb8a`;
+completion SHA256:
+`da239d04ef1ef3718dee6714687bb2a0b04eecaa16d8f8219a67857cf5cccf8f`.
+All 124 receipt pairs and exact-scope identities revalidate: **11,410 unique =
+10,687 pass + 634 fail + 89 compile errors**, 368 unmeasured. Next index is
+124; no census process remains live. Residuals concern method-name descriptors,
+generator eval realms, NativeError messages, nested Proxy set, Promise capability
+executor Wasm typing, and Intl Collator tagging. These are frozen observations,
+not validated current-source regressions. Merge approval remains pending.
+
+### 2026-10-02 frozen census index 124 accepted
+
+Session 68034 terminated with exit 1 after 88.34s: **85 pass, 7 fail of 92**,
+zero compile errors/skips. Maintained completeness confirms 92 registered
+verdicts and zero exclusions. JSONL SHA256:
+`78e73ded7987ae5bda89fe73212d90211b55321488bcd12bf8bd7ffd0ac9a040`;
+completion SHA256:
+`b4055c345d406d89ecc1fa56bf7fe4bdb118d91d2c4c220c827a0dbf77213951`.
+All 125 receipt pairs and exact-scope identities revalidate: **11,502 unique =
+10,772 pass + 641 fail + 89 compile errors**, 276 unmeasured. Next index is
+125; no census process remains live. Residuals concern toStringTag abrupt
+completion, class/generator methods, nested Proxy ownKeys symbols, cross-realm
+Date, destructuring evaluation order, and Intl locale property checks.
+Frozen results do not establish current-main defects. No implementation,
+merge, publication, or integrated-source verification occurred.
+
+### 2026-10-02 frozen census index 125 accepted
+
+Session 96529 terminated with exit 1 after 92.23s: **84 pass, 8 fail of 92**,
+zero compile errors/skips. Maintained completeness confirms 92 registered
+verdicts and zero exclusions. JSONL SHA256:
+`9e5e77572df726f78256628086a9b02765b2242bf6c24de9d971d5a426a50b2f`;
+completion SHA256:
+`a0ff605417e5a5b4ce1ecfc63c1d8fe133e31eb5e399f1da0ff94a1170187649`.
+All 126 receipt pairs and exact-scope identities revalidate: **11,594 unique =
+10,856 pass + 649 fail + 89 compile errors**, 184 unmeasured. Next index is
+126; no census process remains live. Residuals concern TypedArray.from coercion,
+bound new.target, Symbol constructor/toPrimitive, Proxy seal, GeneratorFunction
+instance identity, ArrayBuffer species, and Intl locale inputs. Existing
+ownership applies; these frozen observations require current-source reproduction.
+No compiler changes, merge, publication, or integrated-source validation occurred.
+
+### 2026-10-02 frozen census index 126 accepted
+
+Session 55776 terminated with exit 1 after 87.26s: **87 pass, 4 fail, 1 compile
+error of 92**, zero skips. Maintained completeness confirms 92 registered
+verdicts and zero exclusions. JSONL SHA256:
+`b56e9d8d867108ddecb28a5905e98fa831e215dba5b85b0f3d207ef85ae84fa6`;
+completion SHA256:
+`371ef45434fb7fd64a3149e0eedb1b55c88b83c8550a4bb6b2110c4a6a6dfb22`.
+All 127 receipt pairs and exact-scope identities revalidate: **11,686 unique =
+10,943 pass + 653 fail + 90 compile errors**, 92 unmeasured. Next index is
+127; no census process remains live. Residuals concern arrow capture under
+with, cached iterator.next, with/unscopables deletion, ArrayBuffer null species,
+and Intl DisplayNames coercion. Iterator.next overlaps existing iterator work;
+do not dispatch a duplicate from this frozen result. No source integration or
+publication occurred; checkpoint approval remains pending.
+
+### 2026-10-02 frozen baseline complete — objective NOT achieved
+
+Final index 127, session 29386, terminated exit 1 after 89.86s: **87 pass,
+5 fail of 92**, zero compile errors/skips. JSONL SHA256:
+`ee8f325c766e602fe5e8dcb4c420da08430a46cb490d819e2e9e40dab7504acd`;
+completion SHA256:
+`490dea37fecc4aa75ef2629abed6e38e9c9f88d431a484554708592794b9fce6`.
+
+All 128 shard indices are present exactly once. All 128 maintained per-shard
+completeness checks pass; every receipt-pair hash revalidates. The union has
+**11,778 unique exact-manifest members, no duplicates or out-of-scope rows,
+zero remaining unmeasured: 11,030 pass + 658 fail + 90 compile errors**.
+Frozen baseline pass rate is **93.6492%**, with **748 non-passing tests**.
+This is compiler commit `f924650c6c26237f62b08a362d7003d4d2b1e12d`, NOT
+current upstream or an integrated candidate. No improvement is claimed from
+finishing measurement, and the 100% objective remains unachieved.
+
+Final-batch residuals concern lexical new.target, Proxy set/enumeration,
+Symbol wrapper toPrimitive, and Intl DisplayNames. Next: integrate upstream
+after checkpoint approval, reproduce residuals on current source under existing
+issue ownership, finish/validate fixes, then rerun the entire unchanged exact
+manifest on integrated source. Preserve all frozen receipts for matched
+comparisons; do not rerun or overwrite them. No census process remains live.
+
+### 2026-10-02 upstream integration and parallel implementation resumed
+
+Existing user checkpoint/merge requests authorize preserving unfinished work
+locally before integration. Iterator checkpoint `acc602a` and merge
+`288ca372d9d4a4c8b9f26283b1ef02d7d1e9da48` now preserve upstream main
+`2bfe3eddf84d4d27f471eddb91e441709b7f6eff` in the strict-vec branch history.
+Full TypeScript 7 validation passes; focused runtime controls are **4/14 pass**.
+This removes the previously recorded local checkpoint/merge hold. Remaining
+runtime work is in issue 6739, whose existing Terra owner has resumed, with
+sole heavy-test lease. No scope reduction or IR ownership change occurred.
+
+Parallel Terra lanes inspect whether Promise commit `65764586be` is superseded
+upstream and shepherd open upstream PRs 6246/6255 from fresh state. Avoid
+duplicate Promise publication until source reconciliation finishes. The frozen
+93.6492% result remains historical; current integrated conformance is unmeasured.
