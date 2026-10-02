@@ -1,10 +1,12 @@
 ---
 id: 6790
 title: "runtime: three process-lifetime registries leak or collide across instances — eval Worker handle maps (never released), name-keyed class-parent map, linked-provider registry that needs a manual reset the public API never calls"
-status: ready
+status: in-progress
 sprint: Backlog
+assignee: "ttraenkler/claude-dev-6790"
+branch: "claude/issue-6790-runtime-registries"
 created: 2026-09-30
-updated: 2026-09-30
+updated: 2026-10-02
 priority: high
 horizon: m
 feasibility: medium
