@@ -377,7 +377,7 @@
     "uuid": "14.0.1",
     "vite": "^6",
     "vite-plugin-dts": "^4",
-    "vitest": "^3",
+    "vitest": "^3.2.6",
     "wabt": "^1.0.39",
     "web-streams-polyfill": "4.3.0",
     "webpack": "5.109.2"
