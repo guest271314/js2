@@ -25,7 +25,12 @@ import { emitWasiErrorConstructor } from "../registry/error-types.js";
 import { allocTempLocal } from "../context/locals.js";
 import { ensureExnTag } from "../index.js";
 import { coercionInstrs } from "../type-coercion.js";
-import { bodyReadsReceiver, generatorMethodReadsReceiver, methodValueWrapperResults } from "../method-receiver-this.js"; // (#6651 A11, #6789)
+import {
+  bodyReadsReceiver,
+  classGeneratorMethodReadsReceiver,
+  methodValueWrapperResults,
+  objectLiteralMethodDefersReceiver,
+} from "../method-receiver-this.js"; // (#6651 A11, #6789)
 import { ensureCurrentThisGlobal } from "../statements/nested-declarations.js";
 import {
   ensureLateImport as ensureLateImportShared,
@@ -138,7 +143,7 @@ function buildNullThisTypeErrorThrow(ctx: CodegenContext): Instr[] | null {
 function methodBodyReadsThis(ctx: CodegenContext, methodFuncIdx: number, guardedReadsAreSafe = true): boolean {
   const fn = definedFuncAt(ctx, methodFuncIdx);
   if (!fn || !Array.isArray(fn.body)) return true;
-  const generatorBody = generatorMethodReadsReceiver(ctx, fn.name); // (#6651 A11, #6789)
+  const generatorBody = classGeneratorMethodReadsReceiver(ctx, fn.name); // (#6651 A11)
   if (generatorBody !== undefined) return generatorBody;
   return bodyReadsReceiver(fn.body, guardedReadsAreSafe);
 }
@@ -448,14 +453,17 @@ export function emitObjectMethodAsClosure(
   // it is still empty here, and an empty body reads as "never touches `this`".
   // Record the answer only once the body is compiled (`undefined` ⇒ finalize
   // rescans): the stale `false` dropped the TypeError arm, so `const m = obj.m;
-  // m()` trapped inside the method. The emit-time body keeps the old answer.
+  // m()` trapped inside the method. The emit-time body keeps the old answer. An
+  // async/generator method's body only stores the receiver: always `false`.
   // (#2025) Capture this-usage, then register the TypeError throw helpers. The
   // registration may add a late import that shifts every DEFINED function index
   // up by `ntShift`; the forwarding `call methodFuncIdx` we emit just below is in
   // a body not yet attached to `ctx.mod.functions`, so the import-shift walker
   // can't reach it — bump the captured index by the delta ourselves (import
   // targets, < the pre-shift import count, are never shifted).
-  const methodUsesThisKnown = compiledBodyReadsThis(ctx, methodFuncIdx, true);
+  const methodUsesThisKnown = objectLiteralMethodDefersReceiver(memberDecl)
+    ? false
+    : compiledBodyReadsThis(ctx, methodFuncIdx, true);
   const methodUsesThis = methodUsesThisKnown ?? methodBodyReadsThis(ctx, methodFuncIdx);
   const importsBeforeNT = ctx.numImportFuncs;
   ensureNullThisTypeError(ctx, fctx);

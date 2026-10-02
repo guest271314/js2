@@ -53,6 +53,7 @@
 import { ts } from "../ts-api.js";
 import type { Instr, ValType } from "../ir/types.js";
 import { bodyReferencesOwnThis } from "./helpers/body-references-own-this.js";
+import { hasAsyncModifier } from "./ast-modifiers.js";
 import { popBody, pushBody } from "./context/bodies.js";
 import { allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
@@ -65,20 +66,29 @@ import { methodBodyUsesSuper } from "./generators-native-ast-scan.js";
 import { emitUnboundThis } from "./helpers/sloppy-this-global.js";
 
 /**
- * For the factory of a native generator METHOD (`funcName` keys
+ * For the factory of a native class generator METHOD (`funcName` keys
  * `ctx.nativeGenerators`, synthesized receiver param): does the generator body
- * use its receiver? A class method answers from its body (`this`, `super`, or a
- * direct eval). (#6789) An object-literal method answers `false`: its factory
- * only stores the receiver, and the resume function reads a bare `this` from
- * the strictness alone (the object-literal half above). `undefined` for every
+ * use its receiver (`this`, `super`, or a direct eval)? `undefined` for every
  * other function — the caller keeps its compiled-body scan.
  */
-export function generatorMethodReadsReceiver(ctx: CodegenContext, funcName: string): boolean | undefined {
+export function classGeneratorMethodReadsReceiver(ctx: CodegenContext, funcName: string): boolean | undefined {
   const info = ctx.nativeGenerators.get(funcName);
-  if (!info?.synthesizedThis || !info.decl.body) return undefined;
-  if (ts.isObjectLiteralExpression(info.decl.parent)) return false;
-  if (!ts.isClassLike(info.decl.parent)) return undefined;
+  if (!info?.synthesizedThis || !ts.isClassLike(info.decl.parent) || !info.decl.body) return undefined;
   return bodyReferencesOwnThis(info.decl.body) || methodBodyUsesSuper(info.decl.body);
+}
+
+/**
+ * (#6789) An object-literal generator or async method: its compiled body only
+ * stores the receiver into the frame its resume reads it from (a bare `this`
+ * answered from the strictness alone, as above), so the method-as-closure
+ * trampoline must pass an absent receiver through rather than throw at the
+ * call — the frame store is not a dereference.
+ */
+export function objectLiteralMethodDefersReceiver(memberDecl: ts.Node | undefined): boolean {
+  if (!memberDecl || !ts.isMethodDeclaration(memberDecl) || !ts.isObjectLiteralExpression(memberDecl.parent)) {
+    return false;
+  }
+  return memberDecl.asteriskToken !== undefined || hasAsyncModifier(memberDecl);
 }
 
 /**
@@ -88,11 +98,13 @@ export function generatorMethodReadsReceiver(ctx: CodegenContext, funcName: stri
  * runs with a receiver present, so a null one cannot trap there. The value read
  * {@link tryEmitObjectLiteralMethodReceiverValue} emits is that shape, so the
  * method-as-closure trampoline hands it the null receiver instead of throwing.
+ * A receiver read straight into `return` is not a deref either.
  */
 export function bodyReadsReceiver(instrs: readonly Instr[], guardedReadsAreSafe: boolean): boolean {
   for (let i = 0; i < instrs.length; i++) {
     const instr = instrs[i]!;
     if (instr.op === "local.get" && (instr as { index?: number }).index === 0) {
+      if (guardedReadsAreSafe && instrs[i + 1]?.op === "return") continue; // `return this`: no deref
       if (!guardedReadsAreSafe || instrs[i + 1]?.op !== "ref.is_null") return true;
       const guard = instrs[i + 2] as { op: string; then?: Instr[] } | undefined;
       if (guard?.op !== "if") continue;

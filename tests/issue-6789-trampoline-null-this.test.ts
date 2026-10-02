@@ -61,6 +61,23 @@ describe("#6789 extracted method with absent receiver throws a catchable TypeErr
     expect(ex.run!()).toBe("7,undefined");
   });
 
+  it("a method (or generator method) that only reads `this` as a value sees undefined, no throw", async () => {
+    const ex = await exportsOf(`
+      export function run(): string {
+        let seen: any = 1;
+        const obj = { m() { seen = this; return 2; } };
+        const m = obj.m;
+        const r = m();
+        const gobj = { *g() { seen = this; yield 3; } };
+        const g = gobj.g;
+        let y: any = 0;
+        try { y = g().next().value; } catch (e) { y = "threw"; }
+        return String(r) + "," + String(seen === undefined) + "," + String(y);
+      }
+    `);
+    expect(ex.run!()).toBe("2,true,3");
+  });
+
   it("a present receiver still reaches the method", async () => {
     const ex = await exportsOf(`
       export function run(): string {
