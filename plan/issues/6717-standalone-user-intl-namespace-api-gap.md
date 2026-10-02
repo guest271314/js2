@@ -482,3 +482,76 @@ separate reproducible toolchain, Wasm linking/ABI, import-policy, and data-size
 proof. The current recommendation favors generated tables because the repo
 has none of that integration today. Keep this choice revisitable from measured
 evidence; full Intl semantics and all frozen originals remain the target.
+
+### 2026-10-02 foundation publication and full first-API integration handoff
+
+The bounded data foundation is now published as ready upstream
+[PR 6427](https://github.com/loopdive/js2/pull/6427), head
+`a7bace6c7d227b9ca612b3d6dc0453b5c9c9de14`. Root verified its immutable
+plan link, non-draft/mergeable state, and corrected Description/Validation/CLA
+body. Seven focused checks and normal commit/pre-push gates passed; the
+generated 510,335-byte table and pinned source bytes survived hooks. The
+earlier statement that no data had been ingested is superseded by this bounded
+publication. It remains a data-only prerequisite, not an Intl namespace/API
+or a Test262 improvement. Do not mutate that completed PR into the next slice.
+
+The existing owner's subsequent read-only architecture audit finds four
+integration dependencies for a complete `Intl.getCanonicalLocales`, rather
+than a useful-looking but unreachable new parser module:
+
+1. **One public ordinary-object identity.** Register the supported static
+   namespace in `builtin-static-globals.ts`; prove the existing early generic
+   namespace branch in `expressions/identifiers.ts` works before touching that
+   held file. Coordinate `standalone-global-object-carriers.ts` and the
+   `array-object-proto.ts` namespace guard so bare `Intl` and `globalThis.Intl`
+   are the same object. Preserve its noncallable ordinary-object shape and
+   `Symbol.toStringTag` descriptor rather than treating Intl as a constructor.
+2. **One real callable closure.** Coordinate `builtin-value-read.ts`,
+   `builtin-fn-meta.ts`, and `property-access-dispatch.ts` so direct, extracted,
+   computed, and global-object reads reach the same cached method closure with
+   correct name/length/descriptors. The proposed ABI is
+   `(self, locales: externref) -> externref`. Do not add a duplicate direct-call
+   fast path in held `calls.ts`; first prove the existing static/namespace
+   delegation. The method must implement semantics, not an unknown-method
+   TypeError placeholder.
+3. **Observable generic list semantics.** Implement the actual ECMA-402
+   `CanonicalizeLocaleList` algorithm, including undefined/string handling,
+   native ToObject, one length Get and ToLength, each index HasProperty before
+   Get, type checking/ToString, structural validation, canonicalization, and
+   post-canonicalization deduplication. Use normal string-key property helpers;
+   intrinsic length/index shortcuts would miss Proxy and inherited-property
+   observations. `src/runtime/wasmgc/values/to-object-body.ts` contains a
+   semantic builder but is not wired into the generic standalone path;
+   `expressions/calls-guards.ts` still retains the no-host identity fallback.
+   Primitive-wrapper/prototype factories and object-runtime ownership need
+   explicit coordination. Prove the returned carrier has real Array behavior,
+   not merely private list layout.
+4. **Compiler-consumable data and generic grammar.** Wasm cannot load the
+   checked-in assets from the filesystem. An approved generator extension
+   must emit deterministic compiler-consumable static source or a formal
+   source resource, retaining pin/hash/schema/notice checks. Implement generic
+   Unicode BCP47 locale identifier grammar and alias/extension canonicalization,
+   not a whitelist of current test locales. Available-locale inventory is not
+   a validity filter. The absent native InitializedLocale discriminator must
+   be explicitly handled or proved unrepresentable until Intl.Locale exists;
+   do not silently replace its required behavior with ordinary ToString.
+
+The standards references are
+[CanonicalizeLocaleList](https://tc39.es/ecma402/#sec-canonicalizelocalelist),
+[IsStructurallyValidLanguageTag](https://tc39.es/ecma402/#sec-isstructurallyvalidlanguagetag),
+and [Unicode locale identifiers](https://unicode.org/reports/tr35/tr35.html#Unicode_locale_identifier).
+These are implementation dependencies, not claims that any runtime boundary
+has been cleared or implemented. A new source module alone is not an
+acceptable Node-only substitute for a runnable standalone API.
+
+Before implementation in a separate branch/worktree, coordinate the exact
+namespace/object-runtime hunks with existing owners and the other-machine IR
+migration. Then verify all four frozen originals (`error-cases.js`,
+`has-property.js`, `locales-is-not-a-string.js`, `overriden-arg-length.js`)
+with maintained manifest completeness, plus standalone generic controls for:
+public identity and descriptors; Proxy Has/Get and abrupt-completion order;
+holes and inherited Number-prototype properties; observable length conversion;
+generic valid/invalid tags and aliases outside fixture examples; deduplication;
+and true Array results. No host Intl, private Temporal shim, hidden fallback,
+or denominator reduction is permitted. The full 74-row Intl diagnostic and
+11,778-row goal remain outstanding.
