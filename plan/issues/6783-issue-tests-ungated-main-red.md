@@ -30,7 +30,7 @@ files / 9 tests:
 
 - `tests/native-i32-type.test.ts` — 8/8 fail:
   `WebAssembly.instantiate(): Import #0 module="string_constants": module is
-not an object or function`. The test instantiates with `{ env: {} }` (line
+  not an object or function`. The test instantiates with `{ env: {} }` (line
   11); the compiler now emits a `string_constants` import. Never re-run in CI.
 - `tests/issue-3526-string-boundary-schema.test.ts` — 1/32:
   `expected '// Copyright…' to contain 'asCallableRuntimeHostCapabilityRecord('`
@@ -39,15 +39,15 @@ not an object or function`. The test instantiates with `{ env: {} }` (line
 Nobody noticed because nothing required runs them. What a PR must actually
 pass before it can enter the merge queue:
 
-| what runs                        | how                                                                                                                                          | gated?              |
-| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- |
-| 16 pinned files                  | `scripts/select-changed-issue-tests.mjs --pinned`                                                                                            | yes                 |
-| 20-file guard suite              | `tests/guard-suite.json`                                                                                                                     | yes                 |
-| `tests/equivalence/` (223 files) | `scripts/equivalence-gate.mjs`, ratcheted, 22 known failures                                                                                 | yes (but see #6785) |
-| tests the PR touched             | `scripts/hooks/changed-root-tests.sh` — PR event only, root dir only, **>20 changed files → `exit 0`**, `--dangerouslyIgnoreUnhandledErrors` | partially           |
-| "issue tests this PR touched"    | `ci.yml:805` `continue-on-error: true`                                                                                                       | **no**              |
-| `issue-tests` job                | not in the required-checks ruleset                                                                                                           | **no**              |
-| 25 linear/simd files             | `linear-tests`                                                                                                                               | no                  |
+| what runs | how | gated? |
+|---|---|---|
+| 16 pinned files | `scripts/select-changed-issue-tests.mjs --pinned` | yes |
+| 20-file guard suite | `tests/guard-suite.json` | yes |
+| `tests/equivalence/` (223 files) | `scripts/equivalence-gate.mjs`, ratcheted, 22 known failures | yes (but see #6785) |
+| tests the PR touched | `scripts/hooks/changed-root-tests.sh` — PR event only, root dir only, **>20 changed files → `exit 0`**, `--dangerouslyIgnoreUnhandledErrors` | partially |
+| "issue tests this PR touched" | `ci.yml:805` `continue-on-error: true` | **no** |
+| `issue-tests` job | not in the required-checks ruleset | **no** |
+| 25 linear/simd files | `linear-tests` | no |
 
 `docs/ci-policy.md:63` states the suite "is not clean on main today". 3,872
 `tests/issue-*.test.ts` + 21 `tests/ir/` files are therefore advisory. #3008
@@ -66,7 +66,7 @@ pass before it can enter the merge queue:
    or `ci.yml` alongside `equivalence-gate`, and add the check to the
    `main` ruleset (`scripts/enable-branch-protection.sh`, `docs/ci-policy.md` §7).
 3. Remove `continue-on-error: true` from `ci.yml:805` and the `>20 files →
-exit 0` skip in `changed-root-tests.sh` (replace with "run the first 20 +
+   exit 0` skip in `changed-root-tests.sh` (replace with "run the first 20 +
    warn").
 4. Post-merge job runs the same gate with `--update-on-decrease` so newly
    fixed files leave the baseline automatically (mirrors `check:ir-fallbacks`).

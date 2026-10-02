@@ -29,17 +29,15 @@
 **Sprint 47 closed.** 3-day sprint (2026-05-01 → 2026-05-03). 631 commits, 50+ issues completed.
 
 **Key results:**
-
 - 26,247 / 43,088 = 60.9% pass (test suite trimmed from 46,632; ~2% net conformance gain)
 - **IR migration complete**: Slices 11–14 landed — switch/operators, element access/array literals, String+Array prototype methods, legacy codegen (`expressions.ts`/`statements.ts`) retired
 - **Performance**: escape-analysis scalarization, bounds-check elimination, i32 element specialization, pre-size dense arrays, struct field type inference Phase 2, eval/RegExp LRU cache
 - **npm library support**: CJS module.exports + require(), optional chaining, ESLint Tier 1/2/3 stress tests, Hono Tier 2/3 stress tests, WeakMap fix, extern round-trip identity fix
 - **TypeScript 7**: forEachChild compat helper + TS7 feature flag (#1288, #1290) — 132× cold parse speedup in test262 runner
 - **CI quality**: wasm-hash noise filter (#1222), differential test262 (#1246), baseline drift prevention (#1235), runner pool timeout fix (#1227) — 156 false compile_timeouts eliminated
-- **Conformance**: class/dstr defaults (408 failures), private fields, logical assignment, WeakMap dispatch, SameValue f64, OrdinaryToPrimitive TypeError, \_\_any_eq i31ref vs HeapNumber
+- **Conformance**: class/dstr defaults (408 failures), private fields, logical assignment, WeakMap dispatch, SameValue f64, OrdinaryToPrimitive TypeError, __any_eq i31ref vs HeapNumber
 
 **Carries to Sprint 48:**
-
 - #1223 TDZ async/gen writer+reader (blocked on #1177 Stage 1)
 - #1126 int32/uint32 inference (needs architect spec)
 - #1177 Stage 1 (needs senior-dev Opus)
@@ -54,28 +52,27 @@ Context at 73% / weekly budget at 19% when compacting.
 
 **PRs merged this session (PRs #94–#118):**
 
-| PR   | Issue  | Description                                                  |
-| ---- | ------ | ------------------------------------------------------------ |
-| #94  | #1187  | test-runtime JS-string→native-string coercion helper         |
-| #95  | #1211  | fib-recursive hosted Wasm validator fix                      |
-| #96  | #1210  | string-hash GC pressure (str_copy_tree O(n²) → buffer)       |
-| #99  | #1169j | IR Slice 10 step B: TypedArray                               |
-| #100 | #1169l | IR Slice 10 step D: Date/Error/Map/Set                       |
-| #101 | #1169k | IR Slice 10 step C: ArrayBuffer + DataView                   |
-| #102 | #1169m | IR Slice 10 step E: Promise (best-effort)                    |
-| #103 | #1212  | Promise resolve/reject regression fix                        |
-| #104 | #1201  | Per-path test262 scores + landing page                       |
-| #105 | #1213  | refresh-benchmarks path fix (LFS migration)                  |
-| #106 | #1203  | Differential testing harness vs V8                           |
-| #107 | #1204  | Methodology document                                         |
-| #108 | #1214  | Benchmark CI runner-noise gate (informational only)          |
-| #109 | #1215  | Array .join()/.toString() number_toString registration       |
-| #110 | —      | diff-test CI tsx fix                                         |
-| #113 | #1198  | Pre-size dense arrays at allocation site (+15 tests)         |
-| #118 | #1184  | \_\_str_copy_tree depth-bounded worklist (nativeStrings fix) |
+| PR | Issue | Description |
+|---|---|---|
+| #94 | #1187 | test-runtime JS-string→native-string coercion helper |
+| #95 | #1211 | fib-recursive hosted Wasm validator fix |
+| #96 | #1210 | string-hash GC pressure (str_copy_tree O(n²) → buffer) |
+| #99 | #1169j | IR Slice 10 step B: TypedArray |
+| #100 | #1169l | IR Slice 10 step D: Date/Error/Map/Set |
+| #101 | #1169k | IR Slice 10 step C: ArrayBuffer + DataView |
+| #102 | #1169m | IR Slice 10 step E: Promise (best-effort) |
+| #103 | #1212 | Promise resolve/reject regression fix |
+| #104 | #1201 | Per-path test262 scores + landing page |
+| #105 | #1213 | refresh-benchmarks path fix (LFS migration) |
+| #106 | #1203 | Differential testing harness vs V8 |
+| #107 | #1204 | Methodology document |
+| #108 | #1214 | Benchmark CI runner-noise gate (informational only) |
+| #109 | #1215 | Array .join()/.toString() number_toString registration |
+| #110 | — | diff-test CI tsx fix |
+| #113 | #1198 | Pre-size dense arrays at allocation site (+15 tests) |
+| #118 | #1184 | __str_copy_tree depth-bounded worklist (nativeStrings fix) |
 
 **In CI / in progress at compact time:**
-
 - PR #112 (#1218): baseline validator — awaiting baseline refresh then re-run
 - PR #114 (#1220): Promise snapshot + prototype cleanup (+29 tests)
 - PR #115 (#1221): WasmException outer-catch fix (~256 flaky tests)
@@ -87,16 +84,14 @@ Context at 73% / weekly budget at 19% when compacting.
 - senior-dev-1205 → #1205 PR #98 (TDZ boxing, in-progress)
 
 **Key findings from investigation sprint:**
-
 - `compile_timeout` in test262 is a **runtime** timeout (combined compile+execute), not a compile-only timeout. The 30s timer in compiler-pool.ts covers both. ~26 are genuine runtime hangs (iter-close bug), ~70+ are load-induced flakes.
 - `[object WebAssembly.Exception]` flakiness (256 tests): fork-state poisoning. Outer catches in test262-worker.mjs missed instanceof WebAssembly.Exception → misclassified as compile_error. Fixed in PR #115.
-- `Promise.resolve is not a function` (26 tests): Promise missing from \_STATIC_SNAPSHOTS → fork contamination. Fixed in PR #114.
+- `Promise.resolve is not a function` (26 tests): Promise missing from _STATIC_SNAPSHOTS → fork contamination. Fixed in PR #114.
 - `Cannot redefine property` (23 tests): mixed isolation bugs (3 fixable in PR #114) + real compiler bugs (instanceof TypeError, mapped arguments — deferred to S47).
 
 **Baseline at session compact:** ~27,000 pass (60.2% adjusted for drift); committed baseline shows 25,813 due to runner variance in the latest promoted run. PRs #114/#115/#117 expected to push real rate to ~61%+ once CI confirms.
 
 **Sprint 46 scope expanded mid-sprint:**
-
 - Added credibility track issues (#1201, #1203, #1204) that were originally deferred to S47
 - Added CI health issues (#1213, #1214, #1217, #1218, #1219, #1220, #1221) surfaced by investigation
 - Added perf issues (#1196, #1197, #1198, #1184, #1216) from sprint 47 to keep team loaded
@@ -109,7 +104,6 @@ Context at 73% / weekly budget at 19% when compacting.
 **Sprint 45 closed.** 6-day sprint (2026-04-23 → 2026-04-29).
 
 **Key results:**
-
 - +554 net test262 tests (baseline 25,276 → 25,830 = 59.8%)
 - IR Phase 4 slices 6–10 all landed: generators (#1169f), destructuring (#1169g), try/catch (#1169h), RegExp/extern-class scaffolding (#1169i step A)
 - IrLowerResolver refactor (#1185) cleared the per-feature shortcut debt across the IR system
@@ -129,7 +123,6 @@ IR Phase 1 + 2 (#1131, PRs #231 + #258) and CI merge split (#1076, PR #160).
 Baseline held at 24,483 / 43,172 = 56.7% — all IR work is infrastructure.
 
 Also in this session:
-
 - **LFS migration** for `*.jsonl`, `*.log`, `*.wasm`, benchmark JSON files
 - **GitHub Pages fixed** after LFS migration broke CI checkout (added `lfs: true` to all 6 affected workflows)
 - **All GitHub Actions bumped** to Node.js 24-compatible versions (configure-pages v6, upload-pages-artifact v5, checkout v5, setup-node v6, download-artifact v7)
@@ -144,7 +137,6 @@ Also in this session:
 **Sprint 44 closed.** 2-day sprint (2026-04-22 → 2026-04-24).
 
 **Key results:**
-
 - +793 net test262 tests (baseline 24,483 → 25,276 = 58.6%)
 - IR Phase 3 complete: monomorphize + tagged-unions (#1167c, PR #13)
 - IR infrastructure PRs (#1168, #1167a, #1167b, #1167c) all merged — 0 direct test gain but Phase 4 now unblocked
@@ -173,7 +165,6 @@ Single-day sprint running on ~15% remaining weekly budget. Focus: WebAssembly.Ex
 Sprint 50 ran as a transition sprint: began as "closure/call dispatch wave 2" but pivoted into a large spec-completeness audit. Ended at ~28,140 test262 passes (~58.5%).
 
 **Key work landed**:
-
 - #1311–#1319 wave: await passthrough, closure stack underflow, error message context, Symbol.toPrimitive, import.defer early error
 - #1321 Number.prototype formatting — pure Wasm (eliminated JS host)
 - #1322 Math.random() — WASI random_get in standalone mode
@@ -183,12 +174,10 @@ Sprint 50 ran as a transition sprint: began as "closure/call dispatch wave 2" bu
 - Timeout raised 8s → 30s: eliminates ~36 false compile_timeout regressions per PR
 
 **Infrastructure wins**:
-
 - Per-test compile timeout increased from 8s to 30s (eliminates false CI noise)
 - `sprint/50` tag pushed; `sprint-51/begin` tag pushed
 
 **Carry-overs** (blocked or regressions):
-
 - #1311 (PR #264 -5 net), #1312 (PR #257 38 real regressions — function-index shift bug), #1324, #1325, #1326 (CI failures)
 - Structural issue #1382 filed: Wasm closures not JS-callable from host (blocks #1338, #1339, #1358)
 
@@ -203,7 +192,6 @@ Began at 30,585 / 43,135 test262 passes (70.9%); closed at 31,267 / 43,135
 sprint 62.
 
 **Key work landed**:
-
 - AnyValue host-bridge cluster (#2063 → #2058 → #2059): per-site externref tag
   dispatch (`__host_eq`/`__host_add`/`__host_compare`) — the −788 comparator
   trap structurally avoided.
@@ -218,7 +206,6 @@ sprint 62.
   PR #1394), adversarially reviewed.
 
 **Infrastructure / process**:
-
 - Symphony takeover: claims released, acorn gate #1712 blocker landed.
 - Wrap-up debt flagged: sprints 55–60 lacked formal closure; sprint 61 closed
   retroactively 2026-06-15 with full wrap_checklist, retro, and this entry.
@@ -235,7 +222,6 @@ close (origin/main 5ca4931a7). **Net +98 passes.** 43 issues done (0 wont-fix),
 32 carried to sprint 66.
 
 **Key wins**:
-
 - **#1917 single-coercion-engine series COMPLETED** — the marquee architecture
   deliverable. The four divergent coercion matrices unified into one engine:
   Steps 1–3 emitToString/Number/Boolean (#1960/#1962/#1963) + equality E3
@@ -250,7 +236,6 @@ close (origin/main 5ca4931a7). **Net +98 passes.** 43 issues done (0 wont-fix),
   box-depth.
 
 **Process**:
-
 - **Architect-spec-first mis-fired 3×** on the substrate (#2623-A/-B, #2580 M3
   Stage A) — each handed off with a mis-attributed mechanism; a senior-dev had
   to deep-trace before a regression-free slice landed. Keeper: trace-first,
@@ -271,7 +256,6 @@ close (sprint/66 tag, PR #2146). **Net +305 passes.** 22 issues done + 1 wont-fi
 (#1762 linear-memory string backing deferred), 54 carried to sprint 67.
 
 **Key wins**:
-
 - **merge_group standalone floor caught THREE host-masked regressions** (#2124/#2134
   and one more in the #2140-#2142 range) — each recovered via diagnose→narrow→
   re-validate. The floor has now caught host-masked regressions in every sprint
@@ -282,7 +266,7 @@ close (sprint/66 tag, PR #2146). **Net +305 passes.** 22 issues done + 1 wont-fi
   retro "spec-as-hypothesis" discipline proved out again.
 - **2026-06-26 session landings**: #1551 (SuperCall try-region guard — speculative-
   rollback-eats-side-effects defect); #2671 three sub-areas (JSON.stringify +
-  Date.set\* + RegExp lastIndex); #2692 (closure-capture ref-cell eager
+  Date.set* + RegExp lastIndex); #2692 (closure-capture ref-cell eager
   materialization); #2713 (IR↔legacy parity correctness twins); #2711 (cross-backend
   differential parity advisory CI gate); #2710 slices 0–1 (late-bind module indices
   foundation, byte-identical); #2709 (super[super()] PutValue ReferenceError).
@@ -295,7 +279,6 @@ close (sprint/66 tag, PR #2146). **Net +305 passes.** 22 issues done + 1 wont-fi
   (host-glue size).
 
 **Process**:
-
 - The **standalone floor + diagnose→narrow→re-validate cycle** is the definitive
   broad-impact discipline. Anticipate it; one-shot enqueue only after the floor passes.
 - **Verify-first before the architect spec** — confirmed site first, document mechanism
@@ -394,16 +377,16 @@ resulting `main` before execution pauses.
 - **Frozen late, and the record says so.** No freeze ran at the budget rollover
   (the token-budget source is still unwired, #2751), so `freeze-sprint.mjs` was
   invoked after the fact. It re-tags by current frontmatter, not by date, so the
-  window spans the intended tail _plus_ the following days.
+  window spans the intended tail *plus* the following days.
 - **Host count fell 30,364 → 29,856 and that is the win, not a regression.**
   `ORACLE_VERSION` moved 10 → 12 inside the window (`69493a7`, the declared
-  re-baseline for the #3603 host de-inflation). The oracle bump _is_ the
+  re-baseline for the #3603 host de-inflation). The oracle bump *is* the
   verdict-logic change, so both sides of the comparison classify rows
   differently — the counts are different quantities, not a delta. Standalone
   highwater 22,626 (official 22,394 / 43,106).
 - **#3658 resolved.** The landing-page summary sync had frozen at
   `15:43Z / 30390-43098` while reporting SUCCESS five times; it is committing
-  every few hours again (verified through 2026-07-30 20:44). The _hardening_ —
+  every few hours again (verified through 2026-07-30 20:44). The *hardening* —
   fail loudly when new baseline data yields no commit — is still open.
 - **Incident: `git worktree prune` run from inside the container deleted the
   host session's live worktree registrations.** The repo is shared — the host
@@ -475,8 +458,8 @@ IR-migration lane, coordinated against the parallel codex session via the
 - **Merged (16 PRs)**: #5125, #5126, #5127, #5128, #5130, #5140, #5153, #5154,
   #5156, #5157, #5161, #5164, #5168, #5169, #5171, #5174. Zero regressions
   landed; every code PR carried file-copy A/B + complete-cohort byte-identity
-  - red-on-base pins. Baseline on main at session end: 34,416 / 43,621
-    (`dbdd620789`, scheduled refresh 2026-08-28).
+  + red-on-base pins. Baseline on main at session end: 34,416 / 43,621
+  (`dbdd620789`, scheduled refresh 2026-08-28).
 - **Headline**: #4406 boolean unboxing ABI default-ON (PR #5171) — fixes 4
   shipping miscompiles, −11.7% executed boolean boxes; survived merge_group
   re-validation. #3481 Symbol cluster enumerated (18 rows = 4 root causes),
@@ -533,6 +516,7 @@ reviewer per round) on the ES2015 standalone lane (#4444).
   the only base tree that measures.
 - **Handoff**: `plan/agent-context/es2015-standalone-handover-2026-09-07.md`
   (entry point) + the umbrella's "### Wave-5 close (2026-09-07)".
+
 
 ## 2026-09-07 18:00 — Temporal window: host lane +2,845, re-targeted to STANDALONE ONLY, S1 landed
 
@@ -640,7 +624,7 @@ isolated worktrees) on the Temporal goal. The owner's direction at ~14:00 UTC:
   10 pass→fail: 6 false passes, **4 legitimate**.
 - **The reported error text was hiding the reason, on 352 of 360 rows.** Every
   linked failure said `Object.prototype.toString is not yet implemented in
---target standalone`. That call exists in exactly one place in the test262
+  --target standalone`. That call exists in exactly one place in the test262
   harness — inside the `catch` of `String(value)` in `formatSimpleValue` —
   which the harness reaches only after an assertion has ALREADY failed. The
   method itself works fine for a consumer-owned object.

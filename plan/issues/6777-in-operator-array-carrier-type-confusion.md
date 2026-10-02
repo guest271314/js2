@@ -27,12 +27,12 @@ origin: "2026-09-30 codebase review (plan/agent-context/claude-codebase-review-2
 
 Probe results (JS-host lane, `compile()` + `buildImports`, diffed against Node):
 
-| source                                                   | wasm                                                                                             | JS                   |
-| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | -------------------- |
-| `const arr: any[] = [1,2,3]; arr[5] = 9; [2 in arr]`     | **invalid module** (`struct.get[0] expected (ref null 2), found (ref null 4)`) — `success: true` | `[true]`             |
-| `const arr: number[] = [1,2,3]; delete arr[0]; 1 in arr` | `false`                                                                                          | `true`               |
-| `const arr: any[] = [1,2,3]; delete arr[0]; 0 in arr`    | `true`                                                                                           | `false`              |
-| `[2 in arr]` on a dense `number[]`                       | `[1]` / `[0]` (i32, not boolean)                                                                 | `[true]` / `[false]` |
+| source | wasm | JS |
+|---|---|---|
+| `const arr: any[] = [1,2,3]; arr[5] = 9; [2 in arr]` | **invalid module** (`struct.get[0] expected (ref null 2), found (ref null 4)`) — `success: true` | `[true]` |
+| `const arr: number[] = [1,2,3]; delete arr[0]; 1 in arr` | `false` | `true` |
+| `const arr: any[] = [1,2,3]; delete arr[0]; 0 in arr` | `true` | `false` |
+| `[2 in arr]` on a dense `number[]` | `[1]` / `[0]` (i32, not boolean) | `[true]` / `[false]` |
 
 ## Root cause
 

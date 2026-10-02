@@ -30,7 +30,7 @@ origin: "2026-09-30 codebase review (plan/agent-context/claude-codebase-review-2
   the largest is **693 files** (681 codegen + 11 ir + 1 frontend); 105 mutual
   A↔B pairs. `madge --circular src/index.ts`: **3,083** circular chains over
   1,569 files. Example: `codegen/stdlib-selfhost.ts → frontend/builtins/build-ir.ts
-→ ir/from-ast.ts → … → codegen/function-body.ts`.
+  → ir/from-ast.ts → … → codegen/function-body.ts`.
 - Directory-level two-way edges: codegen↔ir **310 / 74**, backend↔ir 97/20,
   frontend↔ir 17/7, codegen-linear↔ir 9/4, checker↔ir 1/8, ir↔runtime 7/1.
 - Fan-out leaders: `codegen/index.ts` 279 imports, `expressions/calls.ts` 139,
@@ -146,18 +146,18 @@ banks it; missing baseline refuses) and `tests/check-flat-dir-budget.test.ts`.
 
 ### Numbers (measured 2026-10-02)
 
-| metric                      | issue (review, e303c5c7) | this script at e303c5c7                             | baseline, 39cc565790                 |
-| --------------------------- | ------------------------ | --------------------------------------------------- | ------------------------------------ |
-| largest SCC                 | 693                      | 691                                                 | 697 (685 codegen, 11 ir, 1 frontend) |
-| SCCs with > 1 file          | 5                        | 5                                                   | 5                                    |
-| type-only excluded          | 3,345 imports            | 3,338 statements (3,517 refs incl. `import("x").T`) | 3,596 refs                           |
-| codegen → ir / ir → codegen | 310 / 74                 | 295 / 74                                            | 295 / 74                             |
-| backend ↔ ir                | 97 / 20                  | 97 / 20                                             | 115 / 22                             |
-| frontend ↔ ir               | 17 / 7                   | 17 / 7                                              | 17 / 7                               |
-| codegen-linear ↔ ir         | 9 / 4                    | 9 / 4                                               | 9 / 4                                |
-| checker ↔ ir                | 1 / 8                    | 1 / 8                                               | 1 / 8                                |
-| ir ↔ runtime                | 7 / 1                    | 7 / 1                                               | 9 / 1                                |
-| `src/codegen/*.ts`          | 824                      | 824                                                 | 829                                  |
+| metric | issue (review, e303c5c7) | this script at e303c5c7 | baseline, 39cc565790 |
+|---|---|---|---|
+| largest SCC | 693 | 691 | 697 (685 codegen, 11 ir, 1 frontend) |
+| SCCs with > 1 file | 5 | 5 | 5 |
+| type-only excluded | 3,345 imports | 3,338 statements (3,517 refs incl. `import("x").T`) | 3,596 refs |
+| codegen → ir / ir → codegen | 310 / 74 | 295 / 74 | 295 / 74 |
+| backend ↔ ir | 97 / 20 | 97 / 20 | 115 / 22 |
+| frontend ↔ ir | 17 / 7 | 17 / 7 | 17 / 7 |
+| codegen-linear ↔ ir | 9 / 4 | 9 / 4 | 9 / 4 |
+| checker ↔ ir | 1 / 8 | 1 / 8 | 1 / 8 |
+| ir ↔ runtime | 7 / 1 | 7 / 1 | 9 / 1 |
+| `src/codegen/*.ts` | 824 | 824 | 829 |
 
 The remaining pairs in the baseline are root-file pairs the review did not
 list (`compiler ↔ deadcode-elide.ts`, `frontend ↔ ts-api.ts`,
