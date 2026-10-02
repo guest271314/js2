@@ -1,10 +1,10 @@
 ---
 id: 6797
 title: "arch: codegen, ir and frontend form one 693-file strongly-connected component (40 % of src, 3,083 circular chains) — add an import-cycle ratchet and cut the 74 ir→codegen edges first"
-status: ready
+status: in-progress
 sprint: Backlog
 created: 2026-09-30
-updated: 2026-09-30
+updated: 2026-10-02
 priority: high
 horizon: l
 feasibility: hard
@@ -13,7 +13,9 @@ task_type: refactor
 area: compiler
 language_feature: compiler-internals
 goal: compiler-architecture
-related: [912, 1172, 4601, 6793]
+related: [912, 1172, 3113, 4601, 6793, 6808]
+assignee: "ttraenkler/claude-dev-6797"
+branch: "claude/issue-6797-import-cycle-ratchet"
 requested_by: ttraenkler/claude-review
 origin: "2026-09-30 codebase review (plan/agent-context/claude-codebase-review-2026-09-30.md) — arch #1/#2"
 ---

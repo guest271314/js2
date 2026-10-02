@@ -198,6 +198,18 @@ jobs:
         # reachable invariant is "no growth, ratchet toward zero".
         run: pnpm run check:ir-layering
 
+      - name: Import-cycle ratchet (#6797)
+        if: steps.npm_compat.outputs.only != 'true'
+        # codegen, ir and frontend form one ~700-file strongly-connected
+        # component of the value-import graph, so the layers cannot be
+        # retired one at a time. Fails when the largest SCC, the number of
+        # multi-file SCCs, or any two-way directory edge count (e.g. ir->codegen)
+        # grows vs scripts/import-cycles-baseline.json. Decreases are banked
+        # post-merge (--update-on-decrease in the promote/summary-sync jobs).
+        # Intended growth: `node scripts/check-import-cycles.mjs --update` in
+        # the PR, committed, so review sees it.
+        run: pnpm run check:import-cycles
+
       - name: IR fallback gate (#1376)
         if: steps.npm_compat.outputs.only != 'true'
         run: pnpm run check:ir-fallbacks
