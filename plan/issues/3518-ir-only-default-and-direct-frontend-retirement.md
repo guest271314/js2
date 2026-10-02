@@ -20116,3 +20116,39 @@ exact a49f main base. Programmatic Prettier at all three actual destination path
 credit for canonical authority, not a relabeling of old receipt results. Both
 the symbol-cleanup246/247 failure and full-hook247/247 digest refusals remain
 preserved. Full normal hooks and delivery are still pending; no legacy retirement.
+
+
+
+### D1 bounded nested-stackification dispatch (2026-10-02)
+
+The full D1 plan remains open. Defer legality and linear-layout moves: the held symbolic-support-ref R map explicitly covers both old files (formatter-d1-high-contract:68,80,82). Recorded parent composition/PR5797 proves custody of the frozen R checkpoint, not a current rescope of that held claim. Obtain owner acknowledgement or an explicit authoritative new-scope handoff before those edits; see scratch `d1-custody-review.md` for exact records. No claim is released or transferred here.
+
+Root may separately dispatch Sol6.1Medium on only `src/ir/nested-stackification.ts`, new `src/ir/analysis/nested-stackification.ts`, and NEW `tests/issue-3518-nested-stackification-owner.test.ts`. Move all96 lines/interfaces unchanged except imports: effects from `./effects.js`, nodes from `../core/nodes.js`; old path explicitly forwards the same function and public input type. Preserve every region/use/effect/anchor/string-slot refusal and both-set deletion semantics; no new capability or lowering behavior.
+
+Static6fce source is3570B/SHA256 `f66f42492cb6aaf0c55ad3681289802c1e598ea98119edc975bd37618c905a33`; canonical effects is25469B/`b9ea0dfc036a4da09742974011dd98a51aa471a7a2650ebed303f3937e04412d`. Root reports e473d924 changes no D1 source. That revision is not yet resolvable in this spec checkout; root must verify exact pins on the fetched writer base before edits. Retain same-function identity, real movable and conflicting-effect controls; run the existing nine nested/string-slot scenarios under root execution. No budget grant is indicated. Metadata/history and all other D1 files stay outside this writer. Legacy/full-IR obligations remain unchanged.
+
+
+
+### Root follow-up: reconcile the live lowering-cycle graph (2026-10-02)
+
+`tests/issue-3518-lowering-cycle.test.ts` reads current repository sources through its unchanged `valueClosure` (~43). Its exact expected arrays (~197–246) are live graph assertions, not an immutable historical source fixture. Root executed nested ownership21/21 plus original nested9/9; lowering-cycle is24/25, with the graph row failing. This is not a nested semantic failure and not grounds to drop graph obligations.
+
+Root's `.tmp/nested-owner/closure-census.json` (SHA256 `b2a022c50f1e29d52b88d5ca307c74a8e767ac3fcc28325cdaf57b85ff0c9407`) uses the actual unchanged detector and its explicit predecessor override. Old expectations have21 modules/24 edge occurrences; current predecessor has27/31; nested candidate28/32. Existing main drift is EIGHT added modules and TWO removed, net+6: added core binding-key-primitives, date-callables, string-callables, string-runtime and tag-domain, runtime/js-tag-domain, runtime/contracts/js-value-tags and shared/contracts/ir-preparation-errors; removed old ir/js-tag.ts and ir/tag-domain.ts. Root must reconcile each to actual canonical source forwards before freezing literals, not merely accept a new observed count.
+
+The independently isolated nested delta adds only analysis/nested-stackification.ts, replaces old nested→ir/effects with nested→analysis/nested and analysis/nested→analysis/effects, and changes no other predecessor module/edge. Under separately verified custody, root or one specifically assigned test writer updates only the exact current module/edge arrays and their outdated base comment. Preserve detector code, sorting/traversal order, duplicate core/string-runtime→core/string-callables edge occurrences, generic direct-edge count12, all reverse-barrel/unknown/unresolved refusals and all behavioral assertions. No floor, membership-only subset or runtime-derived expected list.
+
+This is a root-owned fourth-path follow-up, not an implicit expansion of the nested writer's three files. Preserve the initial24/25 failure, freeze the complete reviewed predecessor and candidate censuses, then require ordinary25/25 plus unchanged30/30 nested tests on the integrated candidate. No historical receipt change or retirement credit follows.
+
+### Verified independent nested candidate (2026-10-02)
+
+Sol6.1Medium produced and independently reviewed the three-path nested-stackification extraction in its claimed e473-based isolated worktree. Root verified complete production-body preservation and ran21new controls plus9original scenarios:30/30. After a test-only lint repair, the final21/21 controls pass, three-file lint passes, and actual TS7 typecheck exits0 with no diagnostics. The actual lowering-cycle suite reports24/25; its unchanged detector gives27 predecessor modules against old21expected, and28 candidate modules. Candidate adds only the analysis owner and replaces one old dependency edge with two canonical edges. The complete boundary gate exits1 with explicit unclassified-module/unclassified-target refusals for the new owner. These failures are preserved; no all-gates-pass, commit, publication or main-delivery credit. Inventory/current-graph reconciliation remains required.
+
+Evidence is frozen under the nested worktree's .tmp/nested-owner: original and formatted candidate manifests, targeted/final JSON, independent review, actual predecessor/candidate closure census, lint/typecheck output and complete boundary refusal. The existing delivery normal hook terminated1 after631/631 historical and456/456 Number controls, then102failed/3passed program-data rows. All other hook files remain unexecuted. Astra's explicit historical-authority/current-evidence repair and current graph plan are now recorded below; existing receipts/assertions/fixtures and main fixes remain required. Root API/custody review is part of authorized integration; no new user approval is implied. Full IR objective stays active and legacy remains.
+
+### Claimed parent integration of nested analysis (2026-10-02)
+
+The previous goal turn made progress: it produced reviewed unchanged source bodies, completed30/30 targeted tests, and preserved actual graph/inventory failures. The recorded parent-owned integration/control scope (lowering-cycle implementation checkpoint) now supplies bounded continuation authority. Root verified new graph-integration and inventory slice claims on canonical issue-assignments without releasing prior implementation claims. Sol6.1Medium updates only exact current closure literals/comment; root adds the actual analysis owner to roots/entries/classification, raises the actual11-module minimum to12, appends the unchanged12-entry activation obligation and explicit move, and marks the retained facade as a compatibility adapter. Existing allowed edges, evidence and all old activation rows/other classifications remain identical. Full detector remains unchanged and retirement remains unproved.
+
+### Nested analysis integration validation — 2026-10-02
+
+The exact combined candidate passes55/55 (21new ownership,9original nested,25lowering), four-file lint and TS7 typecheck. Inventory validation exits0 with zero policy errors; complete architecture mode retains its explicit incomplete verdict. Independent Sol6.1Medium review found no actionable change. Fresh23-PR scope/patch census identifies PR5753 competing future graph additions and shared inventory rows; neither branch is overwritten, and combined-source reconciliation is required at integration. Full IR objective and legacy remain. Detailed handoff: plan/agent-context/3518-nested-stackification-owner-2026-10-02.md.
