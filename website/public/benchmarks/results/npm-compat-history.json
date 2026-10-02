@@ -23177,6 +23177,124 @@
           "standalone": {}
         }
       }
+    },
+    {
+      "generatedAt": "2026-10-02T11:07:07.463Z",
+      "sourceRevision": "5559606dca6dea47d8e039932fdab3654af65011",
+      "optimizationLevels": {
+        "js-host": 4,
+        "js-host-native": 4,
+        "standalone": 4
+      },
+      "packages": {
+        "uuid": {
+          "jsHostNative": {},
+          "jsHost": {
+            "dynamic": 0.09784878111817007
+          },
+          "standalone": {
+            "static": 0.23078387859336957,
+            "dynamic": 0.22673868739217623
+          }
+        },
+        "acorn": {
+          "jsHostNative": {},
+          "jsHost": {
+            "dynamic": 0.0021331452447427924
+          },
+          "standalone": {
+            "static": 188888.32725844422,
+            "dynamic": 0.07712631614898284
+          }
+        },
+        "cookie": {
+          "jsHostNative": {},
+          "jsHost": {
+            "dynamic": 0.0024726018300667476
+          },
+          "standalone": {
+            "static": 631.8966594304904,
+            "dynamic": 0.11571757751687008
+          }
+        },
+        "react": {
+          "jsHostNative": {},
+          "jsHost": {
+            "dynamic": 0.03655232032577162
+          },
+          "standalone": {
+            "static": 0.3786166991937472,
+            "dynamic": 0.007664306527775931
+          }
+        },
+        "prettier": {
+          "jsHostNative": {},
+          "jsHost": {
+            "dynamic": 0.07485513881551792
+          },
+          "standalone": {}
+        },
+        "clsx": {
+          "jsHostNative": {
+            "dynamic": 0.030331483980131965
+          },
+          "jsHost": {
+            "dynamic": 0.092688300193387
+          },
+          "standalone": {
+            "static": 12.100794732188465,
+            "dynamic": 0.1506750772978497
+          }
+        },
+        "marked": {
+          "jsHostNative": {},
+          "jsHost": {
+            "dynamic": 0.007395534345851106
+          },
+          "standalone": {
+            "static": 0.006078070529616657,
+            "dynamic": 0.004943576661386918
+          }
+        },
+        "hono": {
+          "jsHostNative": {},
+          "jsHost": {
+            "dynamic": 0.005041374393216966
+          },
+          "standalone": {
+            "static": 0.2121704938397736,
+            "dynamic": 0.17615679913231796
+          }
+        },
+        "lodash-es": {
+          "jsHostNative": {},
+          "jsHost": {},
+          "standalone": {
+            "static": 0.024319015006388726,
+            "dynamic": 0.026497842663177472
+          }
+        },
+        "redux": {
+          "jsHostNative": {},
+          "jsHost": {
+            "dynamic": 0.0026758375332181414
+          },
+          "standalone": {
+            "static": 0.06537704872735631,
+            "dynamic": 0.06538992764391345
+          }
+        },
+        "moment": {
+          "jsHostNative": {},
+          "jsHost": {
+            "dynamic": 0.005847487346842894
+          },
+          "standalone": {
+            "static": 0.0009296071625387906,
+            "dynamic": 0.0009652470627656232
+          }
+        }
+      }
     }
   ]
 }
