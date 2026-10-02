@@ -119,6 +119,7 @@
     "check:jstag-seam": "node scripts/check-jstag-seam.mjs",
     "check:ir-layering": "node scripts/check-ir-layering.mjs",
     "check:import-cycles": "node scripts/check-import-cycles.mjs",
+    "check:flat-dir-budget": "node scripts/check-flat-dir-budget.mjs",
     "check:compiler-boundaries": "node scripts/check-compiler-boundaries.mjs",
     "check:compiler-boundaries:inventory": "node scripts/check-compiler-boundaries.mjs --mode inventory",
     "check:edition-ratchet": "npx tsx scripts/test262-edition-ratchet.ts",
