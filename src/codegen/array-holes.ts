@@ -162,6 +162,9 @@ export function scanForArrayHoles(ctx: CodegenContext, root: ts.Node): void {
     if (descriptorArrayReceiver !== undefined) {
       recordDescriptorArrayReceiver(ctx, descriptorArrayReceiver);
     }
+    // (#6774 S13) A tagged template's object and `raw` are FROZEN carriers, so a
+    // strict write to either must observe the refused [[Set]].
+    if (ctx.standalone && ts.isTaggedTemplateExpression(node)) ctx.inheritedSetDescriptorDirty = true;
     if (!ctx.inheritedSetDescriptorDirty) {
       // (#4602) Statically-named triggers poison only their own keys; a
       // trigger whose key cannot be named sets the module-wide flag, which
