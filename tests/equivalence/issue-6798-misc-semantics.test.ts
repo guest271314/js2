@@ -110,4 +110,25 @@ describe("#6798 misc probe-backed semantic divergences", () => {
       [{ fn: "test", args: [] }],
     );
   });
+
+  it("string-bool-union: a boolean/number && / || keeps its boolean tag when stringified or stored as any", async () => {
+    await assertEquivalent(
+      `
+      function f(): number { return 5; }
+      function g(b: boolean): string { return String(b && f()); }
+      function cc(s: string, b: boolean): string { return s + (b && f()) + "|" + ((b || f()) + s); }
+      function arith(b: boolean): number { return (b && f()) + 1; }
+      function cnd(b: boolean): number { let c = 0; if (b && f()) c = 1; while (b && c < 3 && f()) c++; return c; }
+      export function test(): string {
+        const x: any = false && f();
+        return [
+          String(false && f()), String(true || f()), String(true && f()), String(false || f()),
+          g(false), g(true), cc("a", false), cc("b", true), \`\${false && f()}\`, "" + (true || f()),
+          String(x), typeof x, arith(false), arith(true), cnd(true), cnd(false),
+        ].join(";");
+      }
+      `,
+      [{ fn: "test", args: [] }],
+    );
+  });
 });
