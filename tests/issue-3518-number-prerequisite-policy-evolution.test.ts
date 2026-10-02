@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { setImmediate } from "node:timers/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  captureCanonical489dPredecessorPolicySource,
   beforeCanonical3c6InventoryPolicySource,
   authenticateGeneratorInventoryPolicyEvolution,
   authenticateGeneratorInventoryPolicy,
@@ -91,7 +92,9 @@ const raw = (): string =>
       beforeHostCarrierInventoryPolicySource(
         beforeGeneratorInventoryPolicySource(
           beforeCurrentMainInventoryPolicySource(
-            beforeCanonical3c6InventoryPolicySource(read("scripts/compiler-boundaries.json")),
+            beforeCanonical3c6InventoryPolicySource(
+              captureCanonical489dPredecessorPolicySource(read("scripts/compiler-boundaries.json")),
+            ),
           ),
         ),
       ),
@@ -909,7 +912,9 @@ describe("C2a exact runtime preparation policy successor", () => {
       beforeHostCarrierInventoryPolicySource(
         beforeGeneratorInventoryPolicySource(
           beforeCurrentMainInventoryPolicySource(
-            beforeCanonical3c6InventoryPolicySource(read("scripts/compiler-boundaries.json")),
+            beforeCanonical3c6InventoryPolicySource(
+              captureCanonical489dPredecessorPolicySource(read("scripts/compiler-boundaries.json")),
+            ),
           ),
         ),
       ),
@@ -1303,7 +1308,9 @@ describe("dynamic-code inventory successor preserves the C2a policy proof", () =
     beforeHostCarrierInventoryPolicySource(
       beforeGeneratorInventoryPolicySource(
         beforeCurrentMainInventoryPolicySource(
-          beforeCanonical3c6InventoryPolicySource(read("scripts/compiler-boundaries.json")),
+          beforeCanonical3c6InventoryPolicySource(
+            captureCanonical489dPredecessorPolicySource(read("scripts/compiler-boundaries.json")),
+          ),
         ),
       ),
     );
@@ -1821,7 +1828,9 @@ describe("host-carrier current-main inventory successor", () => {
   const hostRaw = (): string =>
     beforeGeneratorInventoryPolicySource(
       beforeCurrentMainInventoryPolicySource(
-        beforeCanonical3c6InventoryPolicySource(read("scripts/compiler-boundaries.json")),
+        beforeCanonical3c6InventoryPolicySource(
+          captureCanonical489dPredecessorPolicySource(read("scripts/compiler-boundaries.json")),
+        ),
       ),
     );
   const hostPolicy = (): Policy => JSON.parse(hostRaw()) as Policy;
@@ -2168,7 +2177,9 @@ describe("host-carrier current-main inventory successor", () => {
 describe("generator eager-refusal current-main inventory successor", () => {
   const generatorRaw = (): string =>
     beforeCurrentMainInventoryPolicySource(
-      beforeCanonical3c6InventoryPolicySource(read("scripts/compiler-boundaries.json")),
+      beforeCanonical3c6InventoryPolicySource(
+        captureCanonical489dPredecessorPolicySource(read("scripts/compiler-boundaries.json")),
+      ),
     );
   const generatorPolicy = (): Policy => JSON.parse(generatorRaw()) as Policy;
   const row: Record<string, string> = {

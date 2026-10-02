@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { setImmediate } from "node:timers/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  captureCanonical489dPredecessorPolicySource,
   beforeCanonical3c6InventoryPolicySource,
   authenticateWellKnownSymbolPolicyEvolution,
   authenticateWellKnownSymbolPolicy,
@@ -52,7 +53,9 @@ const raw = (): string =>
         beforeHostCarrierInventoryPolicySource(
           beforeGeneratorInventoryPolicySource(
             beforeCurrentMainInventoryPolicySource(
-              beforeCanonical3c6InventoryPolicySource(read("scripts/compiler-boundaries.json")),
+              beforeCanonical3c6InventoryPolicySource(
+                captureCanonical489dPredecessorPolicySource(read("scripts/compiler-boundaries.json")),
+              ),
             ),
           ),
         ),

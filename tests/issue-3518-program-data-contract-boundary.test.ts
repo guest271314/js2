@@ -22,6 +22,7 @@ import { runtimeProgramRelocationPairs } from "./helpers/ir-runtime-program-relo
 import { beforeCanonicalInstructionsSource, reconstructC1CurrentSources } from "./helpers/ir-c1-current-source.js";
 import { historicalIrValidationPolicyView } from "./helpers/ir-validation-policy-evolution.js";
 import {
+  captureCanonical489dPredecessorPolicy,
   beforeCanonical3c6InventoryPolicy,
   beforeGeneratorInventoryPolicy,
   beforeHostCarrierInventoryPolicy,
@@ -142,7 +143,9 @@ const policy = () => {
         beforeGeneratorInventoryPolicy(
           beforeCurrentMainInventoryPolicy(
             beforeCanonical3c6InventoryPolicy(
-              JSON.parse(readFileSync(resolve(repository, "scripts/compiler-boundaries.json"), "utf8")),
+              captureCanonical489dPredecessorPolicy(
+                JSON.parse(readFileSync(resolve(repository, "scripts/compiler-boundaries.json"), "utf8")),
+              ),
             ),
           ),
         ),

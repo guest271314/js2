@@ -4171,3 +4171,527 @@ export function beforeCanonical3c6InventoryPolicySource(raw: string): string {
     canonical3c6Fail("raw/semantic reciprocal proof disagree");
   return predecessor;
 }
+
+// Fixed five-row inventory-only successor; the complete signed predecessor helper stays byte-exact.
+const canonical489dReceiptPath = "tests/helpers/ir-runtime-program-policy-canonical-489d.json";
+const canonical489dReceiptSha256 = "52dc8a9359369565c5d1f39f01af8d9c8d853aa1e4b0a1f469622e350f3a7497";
+const canonical489dExpected = {
+  schema: 1,
+  kind: "fixed-canonical-489d-inventory-only-successor",
+  provenance: {
+    checkpoint: "367022d3e960d6346cacad134fd89a12e2afd3ee",
+    previousMain: "3c6fcfc6e4c8bd06fd7528d30593eb988387f0e8",
+    incomingMain: "489d0aacd45b5eb7b11cb06ef4c613a719c20f18",
+    planSha256: "23dc1411c73d288132e44c6cdb9bb1c8f5a791648601fc15969c00f069eacd21",
+    inventoryOnly: true,
+  },
+  before: {
+    source: {
+      bytes: 577771,
+      sha256: "2573c40f37d35a8996dab8cfb7ac5c94ef1b57be0f664845878b21e2b516777a",
+      gitBlob: "8a7a71945ac6c7728c43cd91ae80a8c270b444cf",
+    },
+    dataSha256: "4cf6541e0c4677135d54cc2aa47b29763122e4fc416caff66c6165d3cb1e33ac",
+    fileCount: 1808,
+    filesSha256: "63c4be5ba7d77abd122bbcd55f8273e1fd9ee7a9e59fe522d374d3a0f8c1f54b",
+    activationCount: 101,
+    activationHistorySha256: "9629c457a160096e70c35fc3a986abbd8eca145ac4eb688995194d6c29c83650",
+    layersSha256: "3f66bbff64c157092a04740c644ae17d476d7d168faa1bd23629f97492e0c4f7",
+    allowedEdgesSha256: "efe7e7ed8dee1a009d2bef3ff36dba80df1a805cd3f5b7b472e62ec6dcff64c7",
+  },
+  current: {
+    source: {
+      bytes: 579411,
+      sha256: "82cc93fe5db9e58c118c46fc85db6b3cd4e09656c347358f8334945e70a99d40",
+      gitBlob: "9b8282d67bd0d06b1c27ad005ec27c220c1c0d18",
+    },
+    dataSha256: "f0d41bf5acb4d3378a4b2fa18dd06c5e0720b52deb781ae97ee53dcc0594944c",
+    fileCount: 1813,
+    filesSha256: "8e5de381a3bd0165b308077ce119567fa9f4804d5143c7fcecec34118224021b",
+    activationCount: 101,
+    activationHistorySha256: "9629c457a160096e70c35fc3a986abbd8eca145ac4eb688995194d6c29c83650",
+    layersSha256: "3f66bbff64c157092a04740c644ae17d476d7d168faa1bd23629f97492e0c4f7",
+    allowedEdgesSha256: "efe7e7ed8dee1a009d2bef3ff36dba80df1a805cd3f5b7b472e62ec6dcff64c7",
+  },
+  helperPrefix: {
+    path: "tests/helpers/ir-runtime-program-policy-evolution.ts",
+    bytes: 187631,
+    sha256: "4358379bba95549871b4e17c358b586b8443ec098fb70278eefa4949f96cbeaa",
+    gitBlob: "b8f29db92a90343762aff898dd010e5ac8306560",
+  },
+  predecessorReceipt: {
+    path: "tests/helpers/ir-runtime-program-policy-canonical-3c6.json",
+    bytes: 64620,
+    sha256: "4a9cd6bd5109ab1cd3cbb1050066ef18377bb5e686f9f3111d572123fbc9127c",
+    gitBlob: "46b0ea9de836a5d4d8a8438fda87892438f3d1e0",
+  },
+  rowChanges: [
+    {
+      operation: "addition",
+      beforeIndex: 297,
+      currentIndex: 297,
+      row: {
+        path: "src/codegen/classes/class-ctor-call-apply.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+      beforePrevious: {
+        path: "src/codegen/class-constructor-wrapper.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+      beforeNext: {
+        path: "src/codegen/class-dynamic-keys.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+      currentPrevious: {
+        path: "src/codegen/class-constructor-wrapper.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+      currentNext: {
+        path: "src/codegen/class-dynamic-keys.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+    },
+    {
+      operation: "addition",
+      beforeIndex: 302,
+      currentIndex: 303,
+      row: {
+        path: "src/codegen/classes/class-heritage-comma.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+      beforePrevious: {
+        path: "src/codegen/class-heritage-check.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+      beforeNext: {
+        path: "src/codegen/class-instance-method-names.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+      currentPrevious: {
+        path: "src/codegen/class-heritage-check.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+      currentNext: {
+        path: "src/codegen/classes/class-heritage-runtime-get.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+    },
+    {
+      operation: "addition",
+      beforeIndex: 302,
+      currentIndex: 304,
+      row: {
+        path: "src/codegen/classes/class-heritage-runtime-get.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+      beforePrevious: {
+        path: "src/codegen/class-heritage-check.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+      beforeNext: {
+        path: "src/codegen/class-instance-method-names.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+      currentPrevious: {
+        path: "src/codegen/classes/class-heritage-comma.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+      currentNext: {
+        path: "src/codegen/class-instance-method-names.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+    },
+    {
+      operation: "addition",
+      beforeIndex: 368,
+      currentIndex: 371,
+      row: {
+        path: "src/codegen/classes/ctor-return-override.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+      beforePrevious: {
+        path: "src/codegen/cross-hierarchy-operands.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+      beforeNext: {
+        path: "src/codegen/custom-iterable.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+      currentPrevious: {
+        path: "src/codegen/cross-hierarchy-operands.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+      currentNext: {
+        path: "src/codegen/custom-iterable.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+    },
+    {
+      operation: "addition",
+      beforeIndex: 408,
+      currentIndex: 412,
+      row: {
+        path: "src/codegen/classes/derived-ctor-this-guard.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+      beforePrevious: {
+        path: "src/codegen/derived-ascii-case.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+      beforeNext: {
+        path: "src/codegen/derived-split-scalar.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+      currentPrevious: {
+        path: "src/codegen/derived-ascii-case.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+      currentNext: {
+        path: "src/codegen/derived-split-scalar.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+    },
+  ],
+  raw: {
+    spans: [
+      {
+        beforeOffset: 140128,
+        afterOffset: 140128,
+        before: "",
+        after:
+          '    {\n      "path": "src/codegen/classes/class-ctor-call-apply.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n',
+        beforeSha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        afterSha256: "9f6ab9f503be20bd5f3e166c56d8772dd07b196cc3ac62dbd12b1af274646bd9",
+      },
+      {
+        beforeOffset: 141727,
+        afterOffset: 142054,
+        before: "",
+        after:
+          '    {\n      "path": "src/codegen/classes/class-heritage-comma.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n    {\n      "path": "src/codegen/classes/class-heritage-runtime-get.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n',
+        beforeSha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        afterSha256: "bf1fd16db3a0fd8005f56a64e7c8de9abaaa99df264978b1cf3fedab14ae732d",
+      },
+      {
+        beforeOffset: 162880,
+        afterOffset: 163865,
+        before: "",
+        after:
+          '    {\n      "path": "src/codegen/classes/ctor-return-override.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n',
+        beforeSha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        afterSha256: "47071fb74fc050c93d32e8f69fae66cdea9502589400147b890295a84353fc5f",
+      },
+      {
+        beforeOffset: 175944,
+        afterOffset: 177255,
+        before: "",
+        after:
+          '    {\n      "path": "src/codegen/classes/derived-ctor-this-guard.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n',
+        beforeSha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        afterSha256: "2854cb381a4b29e5ad8e0a1477d9aa55b5a8675bcf390aec303e385d5038dda7",
+      },
+    ],
+  },
+} as const;
+type Canonical489dInventoryReceipt = typeof canonical489dExpected;
+function canonical489dFail(detail: string): never {
+  throw new Error("canonical 489d inventory evolution: " + detail);
+}
+/** Fixed inventory-only epoch: each action rereads all authority; prior source pins stay in the prior chain. */
+export function authenticateCanonical489dInventoryEvolution(
+  text = readFileSync(new URL(`../../${canonical489dReceiptPath}`, import.meta.url), "utf8"),
+): Canonical489dInventoryReceipt {
+  if (typeof text !== "string" || Buffer.byteLength(text) !== 14714 || sha(text) !== canonical489dReceiptSha256)
+    canonical489dFail("receipt digest mismatch");
+  const receipt = JSON.parse(text) as Canonical489dInventoryReceipt;
+  if (!same(receipt, canonical489dExpected)) canonical489dFail("fixed receipt schema/population mismatch");
+  const helper = readFileSync(new URL("./ir-runtime-program-policy-evolution.ts", import.meta.url));
+  currentMainInventoryPin(
+    helper.subarray(0, 187631),
+    receipt.helperPrefix,
+    "complete canonical predecessor helper prefix changed",
+  );
+  currentMainInventoryPin(
+    readFileSync(new URL(`../../${receipt.predecessorReceipt.path}`, import.meta.url)),
+    receipt.predecessorReceipt,
+    "canonical predecessor receipt changed",
+  );
+  const previous = authenticateCanonical3c6InventoryEvolution();
+  if (!same(previous.current, receipt.before)) canonical489dFail("prior canonical 3c6 profile mismatch");
+  if (receipt.rowChanges.length !== 5 || receipt.raw.spans.length !== 4) canonical489dFail("fixed population mismatch");
+  let inserted = 0;
+  const groups = [...new Set(receipt.rowChanges.map((change) => change.beforeIndex))];
+  for (const [i, span] of receipt.raw.spans.entries()) {
+    const group = receipt.rowChanges.filter((change) => change.beforeIndex === groups[i]);
+    const rows = JSON.parse("[" + span.after.trim().replace(/,$/, "") + "]");
+    if (
+      span.before !== "" ||
+      span.afterOffset !== span.beforeOffset + inserted ||
+      sha(span.before) !== span.beforeSha256 ||
+      sha(span.after) !== span.afterSha256 ||
+      !same(
+        rows,
+        group.map((change) => change.row),
+      )
+    )
+      canonical489dFail("fixed raw group/schema/coordinate mismatch");
+    inserted += Buffer.byteLength(span.after);
+  }
+  if (inserted !== 1640) canonical489dFail("fixed raw insertion population mismatch");
+  return freeze(receipt);
+}
+function canonical489dProfile(
+  policy: MutableIrRuntimeProgramPolicy,
+  profile: Canonical489dInventoryReceipt["before"] | Canonical489dInventoryReceipt["current"],
+): void {
+  if (
+    digest(policy) !== profile.dataSha256 ||
+    policy.files.length !== profile.fileCount ||
+    policy.activationHistory.length !== profile.activationCount ||
+    digest(policy.files) !== profile.filesSha256 ||
+    digest(policy.activationHistory) !== profile.activationHistorySha256 ||
+    digest(policy.layers) !== profile.layersSha256 ||
+    digest(policy.allowedEdges) !== profile.allowedEdgesSha256
+  )
+    canonical489dFail("complete policy profile mismatch");
+}
+function canonical489dRows(
+  policy: MutableIrRuntimeProgramPolicy,
+  receipt: Canonical489dInventoryReceipt,
+  current: boolean,
+): void {
+  if (!same(Object.keys(policy), wksTopKeys)) canonical489dFail("fixed top-level schema mismatch");
+  for (const change of receipt.rowChanges) {
+    const at = current ? change.currentIndex : change.beforeIndex;
+    if (
+      !same(policy.files[at - 1], current ? change.currentPrevious : change.beforePrevious) ||
+      !same(policy.files[at + (current ? 1 : 0)], current ? change.currentNext : change.beforeNext) ||
+      policy.files.filter((row) => row.path === change.row.path).length !== (current ? 1 : 0) ||
+      (current &&
+        (!same(Object.keys(policy.files[at]!), Object.keys(change.row)) || !same(policy.files[at], change.row)))
+    )
+      canonical489dFail("fixed row schema/membership/neighbors mismatch");
+  }
+}
+function proveCanonical489dPolicy(
+  value: unknown,
+  verified?: Canonical489dInventoryReceipt,
+): {
+  predecessor: MutableIrRuntimeProgramPolicy;
+  priorPredecessor: MutableIrRuntimeProgramPolicy;
+} {
+  // Primitive/descriptor/proxy/cycle capture remains ahead of every authority read.
+  const current = capture(value) as MutableIrRuntimeProgramPolicy;
+  if (current === null || typeof current !== "object" || Array.isArray(current))
+    canonical489dFail("policy input must be a plain object");
+  const receipt = verified ?? authenticateCanonical489dInventoryEvolution();
+  canonical489dProfile(current, receipt.current);
+  canonical489dRows(current, receipt, true);
+  const predecessor = capture(current) as MutableIrRuntimeProgramPolicy;
+  for (const change of [...receipt.rowChanges].reverse()) predecessor.files.splice(change.currentIndex, 1);
+  canonical489dProfile(predecessor, receipt.before);
+  canonical489dRows(predecessor, receipt, false);
+  const priorPredecessor = beforeCanonical3c6InventoryPolicy(predecessor);
+  const replay = capture(predecessor) as MutableIrRuntimeProgramPolicy;
+  for (const [inserted, change] of receipt.rowChanges.entries()) {
+    if (change.currentIndex !== change.beforeIndex + inserted) canonical489dFail("fixed replay index mismatch");
+    replay.files.splice(change.beforeIndex + inserted, 0, capture(change.row) as Record<string, string>);
+  }
+  canonical489dProfile(replay, receipt.current);
+  canonical489dRows(replay, receipt, true);
+  if (!same(replay, current)) canonical489dFail("complete reciprocal semantic replay mismatch");
+  return { predecessor, priorPredecessor };
+}
+export function beforeCanonical489dInventoryPolicy(value: unknown): MutableIrRuntimeProgramPolicy {
+  return proveCanonical489dPolicy(value).predecessor;
+}
+function applyCanonical489dRaw(raw: string, receipt: Canonical489dInventoryReceipt, forward: boolean): string {
+  const bytes = Buffer.from(raw, "utf8");
+  currentMainInventoryPin(
+    bytes,
+    forward ? receipt.before.source : receipt.current.source,
+    "canonical complete raw source profile mismatch",
+  );
+  const pieces: Buffer[] = [];
+  let consumed = 0;
+  for (const span of receipt.raw.spans) {
+    const at = forward ? span.beforeOffset : span.afterOffset;
+    const from = Buffer.from(forward ? span.before : span.after, "utf8");
+    const to = Buffer.from(forward ? span.after : span.before, "utf8");
+    if (
+      at < consumed ||
+      at > bytes.length ||
+      at + from.length > bytes.length ||
+      !bytes.subarray(at, at + from.length).equals(from) ||
+      (from.length > 0 && (bytes.indexOf(from) !== at || bytes.lastIndexOf(from) !== at))
+    )
+      canonical489dFail("fixed raw span missing/duplicated/reordered");
+    pieces.push(bytes.subarray(consumed, at), to);
+    consumed = at + from.length;
+  }
+  pieces.push(bytes.subarray(consumed));
+  const result = Buffer.concat(pieces);
+  currentMainInventoryPin(
+    result,
+    forward ? receipt.current.source : receipt.before.source,
+    "canonical complete raw output profile mismatch",
+  );
+  return result.toString("utf8");
+}
+export function beforeCanonical489dInventoryPolicySource(raw: string): string {
+  if (typeof raw !== "string") canonical489dFail("raw input must be a primitive string");
+  const receipt = authenticateCanonical489dInventoryEvolution();
+  const predecessor = applyCanonical489dRaw(raw, receipt, false);
+  const semantic = proveCanonical489dPolicy(JSON.parse(raw), receipt);
+  const parsed = JSON.parse(predecessor) as MutableIrRuntimeProgramPolicy;
+  canonical489dProfile(parsed, receipt.before);
+  const priorRaw = beforeCanonical3c6InventoryPolicySource(predecessor);
+  if (
+    !same(parsed, semantic.predecessor) ||
+    !same(JSON.parse(priorRaw), semantic.priorPredecessor) ||
+    applyCanonical489dRaw(predecessor, receipt, true) !== raw
+  )
+    canonical489dFail("raw/semantic reciprocal proof disagree");
+  return predecessor;
+}
+
+/** Fresh exact inventory capture; predecessor policy proof remains a separate caller operation. */
+function captureCanonical489dPolicyOperand(
+  value: unknown,
+  verified?: Canonical489dInventoryReceipt,
+): MutableIrRuntimeProgramPolicy {
+  // Primitive/descriptor/proxy/cycle capture remains ahead of every authority read.
+  const current = capture(value) as MutableIrRuntimeProgramPolicy;
+  if (current === null || typeof current !== "object" || Array.isArray(current))
+    canonical489dFail("policy input must be a plain object");
+  const receipt = verified ?? authenticateCanonical489dInventoryEvolution();
+  canonical489dProfile(current, receipt.current);
+  canonical489dRows(current, receipt, true);
+  const predecessor = capture(current) as MutableIrRuntimeProgramPolicy;
+  for (const change of [...receipt.rowChanges].reverse()) predecessor.files.splice(change.currentIndex, 1);
+  canonical489dProfile(predecessor, receipt.before);
+  canonical489dRows(predecessor, receipt, false);
+  const replay = capture(predecessor) as MutableIrRuntimeProgramPolicy;
+  for (const [inserted, change] of receipt.rowChanges.entries()) {
+    if (change.currentIndex !== change.beforeIndex + inserted) canonical489dFail("fixed replay index mismatch");
+    replay.files.splice(change.beforeIndex + inserted, 0, capture(change.row) as Record<string, string>);
+  }
+  canonical489dProfile(replay, receipt.current);
+  canonical489dRows(replay, receipt, true);
+  if (!same(replay, current)) canonical489dFail("complete reciprocal semantic replay mismatch");
+  return predecessor;
+}
+export function captureCanonical489dPredecessorPolicy(value: unknown): MutableIrRuntimeProgramPolicy {
+  return captureCanonical489dPolicyOperand(value);
+}
+export function captureCanonical489dPredecessorPolicySource(raw: string): string {
+  if (typeof raw !== "string") canonical489dFail("raw input must be a primitive string");
+  const receipt = authenticateCanonical489dInventoryEvolution();
+  const predecessor = applyCanonical489dRaw(raw, receipt, false);
+  const semantic = captureCanonical489dPolicyOperand(JSON.parse(raw), receipt);
+  const parsed = JSON.parse(predecessor) as MutableIrRuntimeProgramPolicy;
+  canonical489dProfile(parsed, receipt.before);
+  if (!same(parsed, semantic) || applyCanonical489dRaw(predecessor, receipt, true) !== raw)
+    canonical489dFail("raw/semantic reciprocal proof disagree");
+  return predecessor;
+}

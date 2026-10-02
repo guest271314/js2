@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import { setImmediate } from "node:timers/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  captureCanonical489dPredecessorPolicySource,
   beforeCanonical3c6InventoryPolicySource,
   authenticateCurrentMainInventoryEvolution,
   beforeCurrentMainInventoryPolicy,
@@ -32,7 +33,10 @@ afterEach(async () => {
 });
 const read = (path: string): string => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 const receiptPath = "tests/helpers/ir-runtime-program-policy-main-inventory-20261002.json";
-const raw = (): string => beforeCanonical3c6InventoryPolicySource(read("scripts/compiler-boundaries.json"));
+const raw = (): string =>
+  beforeCanonical3c6InventoryPolicySource(
+    captureCanonical489dPredecessorPolicySource(read("scripts/compiler-boundaries.json")),
+  );
 const policy = (): Policy => JSON.parse(raw());
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 const sha = (text: string): string => createHash("sha256").update(text).digest("hex");
