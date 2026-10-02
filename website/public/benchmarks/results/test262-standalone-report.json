@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-10-01T23:59:15.105Z",
-  "baseline_generated_at": "2026-10-01T23:59:15.105Z",
-  "baseline_sha": "ea52469ee540dadb23f0a50eecb5f2c5988211b2",
+  "timestamp": "2026-10-02T01:47:45.401Z",
+  "baseline_generated_at": "2026-10-02T01:47:45.401Z",
+  "baseline_sha": "2a81f8fbd54d8a416f20a393f66c57f92453f633",
   "oracle_version": 14,
   "mode": {
     "target": "standalone",
@@ -1473,7 +1473,7 @@
           "assertion_fail:Test262Error: Expected SameValue(«\"null\"», «undefined») to be true",
           "type_error:TypeError: Cannot convert undefined or null to object",
           "assertion_fail:Test262Error: Expected SameValue(«\"{\\\"key\\\":null}\"», «\"{\\\"key\\\":true}\"») to be true",
-          "assertion_fail:Test262Error: Expected SameValue(«#», «null») to be true"
+          "assertion_fail:Test262Error: Expected SameValue(«\"null\"», «\"\\\"bigint\\\"\"») to be true"
         ]
       },
       {
@@ -2617,8 +2617,8 @@
         },
         "error_categories": {
           "host_import_leak": 80,
-          "type_error": 32,
           "assertion_fail": 14,
+          "type_error": 32,
           "illegal_cast": 3,
           "other": 2,
           "syntax_error": 2,
@@ -2634,13 +2634,13 @@
           "test/built-ins/Atomics/exchange/bigint/bad-range.js",
           "test/built-ins/Atomics/load/bigint/bad-range.js",
           "test/built-ins/Atomics/xor/bigint/good-views.js",
-          "test/built-ins/BigInt/asUintN/bigint-tobigint-wrapped-values.js",
-          "test/built-ins/BigInt/valueof-throws.js"
+          "test/built-ins/BigInt/valueof-throws.js",
+          "test/built-ins/BigInt/asUintN/bigint-tobigint-wrapped-values.js"
         ],
         "sample_signatures": [
           "host_import_leak:standalone target emitted host imports: env::SharedArrayBuffer_new (##)",
-          "type_error:TypeError: Cannot convert value to a BigInt",
           "assertion_fail:Test262Error: Expected a Test262Error but got a SyntaxError",
+          "type_error:TypeError: Cannot convert value to a BigInt",
           "host_import_leak:standalone target emitted host imports: env::SharedArrayBuffer_new, env::__timer_set_timeout (##)",
           "assertion_fail:Test262Error: Expected a RangeError but got a SyntaxError"
         ]
