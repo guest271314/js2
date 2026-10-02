@@ -1,10 +1,12 @@
 ---
 id: 6795
 title: "docs: README/STATUS/ROADMAP contradict their own numbers and the code (standalone 85.9 % 'trails' host 81.3 %; eval/Proxy/Temporal listed unsupported; wrong package name), CHANGELOG stops at 0.52 on a 0.71 package, CLAUDE.md names files and flags that do not exist"
-status: ready
+status: in-progress
+assignee: "ttraenkler/claude-dev-6795"
+branch: "claude/issue-6795-docs-sync"
 sprint: Backlog
 created: 2026-09-30
-updated: 2026-09-30
+updated: 2026-10-02
 priority: high
 horizon: m
 feasibility: easy
