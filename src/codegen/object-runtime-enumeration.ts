@@ -1465,6 +1465,7 @@ export function fillObjectAssignProxySourceArm(ctx: CodegenContext, proxyTypeIdx
   if (!objectAssign) return;
 
   const objectKeysIdx = ctx.funcMap.get("__object_keys");
+  const ownKeysAllIdx = ctx.funcMap.get("__proxy_ownkeys_names_dispatch"); // (#6770 S7) [[OwnPropertyKeys]]
   const externLengthIdx = ctx.funcMap.get("__extern_length");
   const externGetIdxIdx = ctx.funcMap.get("__extern_get_idx");
   const getOwnPropertyDescriptorIdx = ctx.funcMap.get("__getOwnPropertyDescriptor");
@@ -1523,9 +1524,14 @@ export function fillObjectAssignProxySourceArm(ctx: CodegenContext, proxyTypeIdx
       op: "if",
       blockType: { kind: "empty" },
       then: [
-        // keys = [[OwnPropertyKeys]](source)
+        // keys = [[OwnPropertyKeys]](source) — the validated full list,
+        // strings AND symbols (#6770 S7: `__object_keys` is now the
+        // enumerable-string projection, which would drop symbols and run the
+        // gopd trap a second time per key).
         { op: "local.get", index: 12 },
-        { op: "call", funcIdx: objectKeysIdx },
+        ...(ownKeysAllIdx !== undefined
+          ? ([{ op: "ref.null.extern" }, { op: "call", funcIdx: ownKeysAllIdx }] satisfies Instr[])
+          : ([{ op: "call", funcIdx: objectKeysIdx }] satisfies Instr[])),
         { op: "local.set", index: keyListLocal },
         // length = ToLength(keys.length), narrowed to the bounded native loop
         { op: "local.get", index: keyListLocal },

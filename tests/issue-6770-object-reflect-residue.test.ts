@@ -672,4 +672,25 @@ try { var e2 = Object.entries(p); if (e2.length === 2 && e2[1][1] === 2) __r |= 
     },
     T,
   );
+
+  it(
+    "p61 — Object.assign from a proxy walks the full [[OwnPropertyKeys]] list, symbols included, one gopd per key (guard: 63 on base)",
+    async () => {
+      const src = `var __r = 0;
+var getOwnKeys = [];
+var s = Symbol();
+var proxy = new Proxy({}, {
+  getOwnPropertyDescriptor: function (_target, key) { getOwnKeys.push(key); },
+  ownKeys: function () { return [s, "foo", "0"]; },
+});
+Object.assign({}, proxy);
+if (getOwnKeys.length === 3) __r |= 1;
+if (getOwnKeys[0] === s) __r |= 2;
+if (getOwnKeys[1] === "foo") __r |= 4;
+if (getOwnKeys[2] === "0") __r |= 8;
+__r |= getOwnKeys.length << 4;\n${END}`;
+      expect(await probe(src)).toBe(63);
+    },
+    T,
+  );
 });
