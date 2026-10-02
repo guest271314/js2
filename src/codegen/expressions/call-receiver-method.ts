@@ -296,6 +296,7 @@ import {
   tryEmitAsyncGenNextDispatch,
   tryEmitAsyncGenReturnThrowDispatch,
 } from "./calls.js";
+import { readEnv } from "../../env.js";
 
 /**
  * (#742 slice 4) Receiver-type method-call dispatch — extracted verbatim from
@@ -1883,7 +1884,7 @@ export function compileReceiverMethodCall(
       // receiver. The static `__anon_*_method` stub cannot do that.
       funcIdx = undefined;
     }
-    if (process.env.DEBUG_MARKED_CODEGEN === "1" && (methodName === "lexInline" || methodName === "lex")) {
+    if (readEnv("DEBUG_MARKED_CODEGEN") === "1" && (methodName === "lexInline" || methodName === "lex")) {
       console.error(
         "[marked-call-receiver]",
         fctx.name,
