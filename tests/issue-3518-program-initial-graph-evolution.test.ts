@@ -21,14 +21,14 @@ import {
 import { programPreAReceiptPath, reconstructProgramPreA } from "./helpers/ir-program-pre-a-evolution.js";
 
 import {
-  reconstructRuntimeProgramRelocationSources,
   runtimeProgramRelocationPairs,
   runtimeProgramRelocationPopulationPaths,
   runtimeProgramRelocationReceiptPath,
 } from "./helpers/ir-runtime-program-relocation.js";
+import { reconstructC1CurrentSources } from "./helpers/ir-c1-current-source.js";
 
 function beforeC1(readLive: (path: string) => string = actual, captureCalls?: string[]): (path: string) => string {
-  const sources = reconstructRuntimeProgramRelocationSources((path) => {
+  const sources = reconstructC1CurrentSources((path) => {
     captureCalls?.push(path);
     return readLive(path);
   });

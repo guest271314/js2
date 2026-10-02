@@ -22,6 +22,8 @@ import {
   irRuntimeProgramPolicyReceiptPath,
   type MutableIrRuntimeProgramPolicy as Policy,
   type IrRuntimeProgramPolicyReceipt as Receipt,
+  beforeCurrentMainInventoryPolicy,
+  beforeCurrentMainInventoryPolicySource,
 } from "./helpers/ir-runtime-program-policy-evolution.js";
 import {
   authenticateIrValidationPolicy,
@@ -32,7 +34,21 @@ afterEach(async () => {
   // Yield between synchronous source proofs so Vitest can process task-update RPCs.
   await setImmediate();
 });
+import { c1HistoricalArtifactPath, type C1HistoricalLogicalPath } from "./helpers/ir-c1-historical-authority.js";
+
 const read = (path: string): string => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
+const historicalPolicyOperandPaths: readonly string[] = [
+  "tests/issue-3518-runtime-program-relocation.test.ts",
+  "tests/issue-3518-program-data-contract-seam.test.ts",
+  "tests/issue-3518-program-ownership-runtime-seam.test.ts",
+  "tests/issue-3518-program-pre-a-evolution.test.ts",
+  "tests/issue-3518-program-initial-graph-evolution.test.ts",
+  "tests/helpers/ir-runtime-program-policy-evolution.ts",
+];
+const historicalPolicyPhysicalPath = (path: string): string =>
+  historicalPolicyOperandPaths.includes(path) ? c1HistoricalArtifactPath(path as C1HistoricalLogicalPath) : path;
+// Raw physical operand reads let the original mutation assertions inspect corruption before the guard rejects it.
+const readHistoricalPolicyOperand = (path: string): string => read(historicalPolicyPhysicalPath(path));
 const sha = (text: string): string => createHash("sha256").update(text).digest("hex");
 const digest = (value: unknown): string => sha(JSON.stringify(value));
 const receiptText = read(irRuntimeProgramPolicyReceiptPath);
@@ -43,7 +59,9 @@ function actual(): Policy {
       beforeRuntimePreparationPolicy(
         beforeDynamicCodeInventoryPolicy(
           beforeHostCarrierInventoryPolicy(
-            beforeGeneratorInventoryPolicy(JSON.parse(read("scripts/compiler-boundaries.json"))),
+            beforeGeneratorInventoryPolicy(
+              beforeCurrentMainInventoryPolicy(JSON.parse(read("scripts/compiler-boundaries.json"))),
+            ),
           ),
         ),
       ),
@@ -101,7 +119,9 @@ describe("C1 exact policy inverse and reciprocal B proof", () => {
           beforeRuntimePreparationPolicySource(
             beforeDynamicCodeInventoryPolicySource(
               beforeHostCarrierInventoryPolicySource(
-                beforeGeneratorInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+                beforeGeneratorInventoryPolicySource(
+                  beforeCurrentMainInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+                ),
               ),
             ),
           ),
@@ -138,6 +158,7 @@ describe("C1 exact policy inverse and reciprocal B proof", () => {
     ]);
   });
   it("pins all eighteen unchanged B authority, C1 source proof and reader inputs", () => {
+    const read = readHistoricalPolicyOperand;
     expect(receipt.provenance.immutableInputs).toHaveLength(18);
     for (const pin of receipt.provenance.immutableInputs) {
       const text = read(pin.path);

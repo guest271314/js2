@@ -1,0 +1,1696 @@
+{
+  "schema": "ir-c1-historical-current-authority-v1",
+  "historicalBase": "bfcf326c9426988e66fa6cc446132ed9ad9c1965",
+  "currentBase": "fcf4b188d0bd19f23665a318316af766e641f737",
+  "artifacts": [
+    {
+      "logicalPath": "src/codegen-linear/index.ts",
+      "artifactPath": "tests/fixtures/issue-3518-c1-historical-authority/linear-index.ts.txt",
+      "pin": {
+        "bytes": 224418,
+        "sha256": "c4648365cfa0fa4526ea64e76cd72b932998a09a4056a8321384b7ef62abbbae",
+        "gitBlob": "9f573d33589ec51a39d2939ada4743eb9651881f"
+      },
+      "purpose": "historical-dependency"
+    },
+    {
+      "logicalPath": "tests/issue-3518-runtime-program-relocation.test.ts",
+      "artifactPath": "tests/fixtures/issue-3518-c1-historical-authority/runtime-program-relocation.test.ts.txt",
+      "pin": {
+        "bytes": 21449,
+        "sha256": "324fa026106c484167f6631158043bf16298d07d6f82f1136808fa07054dcc6b",
+        "gitBlob": "3b90e68bbc2baa5c07305a5c5bc64e536f9cf9b8"
+      },
+      "purpose": "historical-caller"
+    },
+    {
+      "logicalPath": "tests/issue-3518-program-data-contract-seam.test.ts",
+      "artifactPath": "tests/fixtures/issue-3518-c1-historical-authority/program-data-contract-seam.test.ts.txt",
+      "pin": {
+        "bytes": 35973,
+        "sha256": "84f249d70f2546cb9ac025f72c7817d5d58e4950c00691fd585caba7bd0cffda",
+        "gitBlob": "275e1e1b6760719720d040ff4ebe0813efc5e7d8"
+      },
+      "purpose": "historical-caller"
+    },
+    {
+      "logicalPath": "tests/issue-3518-program-ownership-runtime-seam.test.ts",
+      "artifactPath": "tests/fixtures/issue-3518-c1-historical-authority/program-ownership-runtime-seam.test.ts.txt",
+      "pin": {
+        "bytes": 36546,
+        "sha256": "66dfa1235ce24d821a9530a5c3531b56eef2817033d89f0d3e8109f9ead13220",
+        "gitBlob": "858c8395d3d4d4c3ae3a912b64cb2a53f568475b"
+      },
+      "purpose": "historical-caller"
+    },
+    {
+      "logicalPath": "tests/issue-3518-program-pre-a-evolution.test.ts",
+      "artifactPath": "tests/fixtures/issue-3518-c1-historical-authority/program-pre-a-evolution.test.ts.txt",
+      "pin": {
+        "bytes": 17640,
+        "sha256": "0ee5b4d09d0efd9bd5f084fde4fb87bf316ad4aae85867c30d9903cce9353068",
+        "gitBlob": "f59d61d925a7c29d770b3e2c82cb3c4f49570644"
+      },
+      "purpose": "historical-caller"
+    },
+    {
+      "logicalPath": "tests/issue-3518-program-initial-graph-evolution.test.ts",
+      "artifactPath": "tests/fixtures/issue-3518-c1-historical-authority/program-initial-graph-evolution.test.ts.txt",
+      "pin": {
+        "bytes": 24556,
+        "sha256": "44f5ac79766e9046aa4ed3ccc32c5e609209d0000ffe4d7b06d9afcc8049c2e6",
+        "gitBlob": "b776f75396a99c2b0a4b94b1c989b9c85a298c14"
+      },
+      "purpose": "historical-caller"
+    },
+    {
+      "logicalPath": "tests/helpers/ir-runtime-program-policy-evolution.ts",
+      "artifactPath": "tests/fixtures/issue-3518-c1-historical-authority/runtime-program-policy-evolution.ts.txt",
+      "pin": {
+        "bytes": 93405,
+        "sha256": "e243101b31f29b2b4aa2637fdd3f9c814a5b6bada558ce565d3d3c132e71892f",
+        "gitBlob": "2c3781d77ada0953993a57ebe3ce7316c9324e07"
+      },
+      "purpose": "historical-policy-prefix"
+    }
+  ],
+  "immutableAuthorities": [
+    {
+      "path": "tests/helpers/ir-runtime-program-relocation.ts",
+      "pin": {
+        "bytes": 19615,
+        "sha256": "6be4b992fb5a3aafab89112e7f3a4dfcacb67ad7f53edb1c99a17fe55c7c5141",
+        "gitBlob": "fcccc8b7bfaefe8844f8d3eda19612f2dc087cc7"
+      }
+    },
+    {
+      "path": "tests/helpers/ir-runtime-program-relocation.json",
+      "pin": {
+        "bytes": 680099,
+        "sha256": "aeeae92fa9c31d8d7ae6aa8805c91862cb1fa2b79486fa4d69cce29d7d065763",
+        "gitBlob": "e241d372cc2daf18bc23cc0d1ba001e55fb23c62"
+      }
+    },
+    {
+      "path": "tests/helpers/ir-validation-policy-evolution.ts",
+      "pin": {
+        "bytes": 11095,
+        "sha256": "a962c04960b945705e9ac5a354da3e96c8e0cf5543382847231dd3df9204fb40",
+        "gitBlob": "e87bca78dd15e16ee7d9fb9b86caeff327d0c076"
+      }
+    },
+    {
+      "path": "tests/helpers/ir-validation-policy-evolution.json",
+      "pin": {
+        "bytes": 51450,
+        "sha256": "39dacc9d17fb52b6a369ed81d7498afc30b00bc06d89362bba039305aa96fa0e",
+        "gitBlob": "dc2c5f2f32d607b3bf6732c89711d058d2f9b4d6"
+      }
+    },
+    {
+      "path": "tests/helpers/ir-runtime-program-policy-evolution.json",
+      "pin": {
+        "bytes": 6804,
+        "sha256": "8e2589e90fbc697dceba56e1bbe53447250a94f3bcb03d99317ad4878bc1f58c",
+        "gitBlob": "e762f3159a2756477cb87d412483d4f3709f2b61"
+      }
+    },
+    {
+      "path": "tests/helpers/ir-runtime-program-policy-well-known-symbols.json",
+      "pin": {
+        "bytes": 9470,
+        "sha256": "5b28556311bb1548e3fb399fc8dee458fcec60f0d5366714e6298af123b73a61",
+        "gitBlob": "e48472b1abefd4531b0e8d79193f3f95b40c3eca"
+      }
+    },
+    {
+      "path": "tests/helpers/ir-runtime-program-policy-number-prerequisites.json",
+      "pin": {
+        "bytes": 12726,
+        "sha256": "92c0539b00d3b8ba5bb58951c1612f62fa334627f2b928e6ff1485ae9cd25845",
+        "gitBlob": "f603d3bee621e18faec594ebe776c8f540029017"
+      }
+    },
+    {
+      "path": "tests/helpers/ir-runtime-program-policy-runtime-preparation.json",
+      "pin": {
+        "bytes": 6239,
+        "sha256": "3ebfca62d268ca5bcc8b1c461ef6e71b55bd513a5649bf6bce3fe6ee689032ca",
+        "gitBlob": "167136d1f4ffeb6ca938573ae6bc460d04babd94"
+      }
+    },
+    {
+      "path": "tests/helpers/ir-runtime-program-policy-dynamic-code.json",
+      "pin": {
+        "bytes": 6159,
+        "sha256": "785ef0a740ac17ba636bb75b15cf4eed2266ac4ca0ec588e1eb4cff3642a708f",
+        "gitBlob": "4a63f349277bb69ac595ff9e13cd299f0839fce8"
+      }
+    },
+    {
+      "path": "tests/helpers/ir-runtime-program-policy-host-carrier.json",
+      "pin": {
+        "bytes": 4673,
+        "sha256": "30c0912d7868e4da44c083243bb68073e48e70e7eb4b26dbc1b1e73090a5f583",
+        "gitBlob": "e355f998d680b09ca5e221900021740970ec20a0"
+      }
+    },
+    {
+      "path": "tests/helpers/ir-runtime-program-policy-generator-eager-refusal.json",
+      "pin": {
+        "bytes": 4693,
+        "sha256": "5d78bc26201d43531d1a299d42f0ac0ae91a638de71620b94f675378572ccc8c",
+        "gitBlob": "e1ceeb12d63073f2f19b714c4e988dd3e2b4e26d"
+      }
+    }
+  ],
+  "currentInstruments": [
+    {
+      "path": "tests/helpers/ir-c1-historical-authority.ts",
+      "pin": {
+        "bytes": 42099,
+        "sha256": "68ea7931e7a30c1410b57b30b8c023173438a0ac7014d49646d4e2d95d29447f",
+        "gitBlob": "3469e78d055d07cde95ececaf6899c6e84a38ad8"
+      }
+    },
+    {
+      "path": "tests/helpers/ir-c1-current-source.ts",
+      "pin": {
+        "bytes": 22199,
+        "sha256": "b694c9e5f4a2610f4895641e06d4889f21fdf564a1d6f1365ae307b21e5bb132",
+        "gitBlob": "6532f6fd8990afff852b83489dc8452976f64582"
+      }
+    },
+    {
+      "path": "tests/helpers/ir-runtime-program-policy-evolution.ts",
+      "pin": {
+        "bytes": 117269,
+        "sha256": "36c66ebee18b28209e7c3083873d76eec538b48f98753e8a09dac8ce44499180",
+        "gitBlob": "71b4f3d4686092f7ce7d8cc53ae3f5aa9bfa98d1"
+      }
+    },
+    {
+      "path": "tests/issue-3518-program-data-contract-boundary.test.ts",
+      "pin": {
+        "bytes": 28647,
+        "sha256": "f7ff02da3cb2982107f1f24acba52625a271b6c1c9495ef8cc5fb972be5d407e",
+        "gitBlob": "d84bca5980bd549428638d776a48ae8e61946cf9"
+      }
+    },
+    {
+      "path": "tests/issue-3518-program-data-contract-seam.test.ts",
+      "pin": {
+        "bytes": 35990,
+        "sha256": "3117cf2d343b26e76304b7e71b7d926c7823e981f561f3e26f21a151584af2d9",
+        "gitBlob": "3842acb066f9c2289f8ae3f24e07449edd75b969"
+      }
+    },
+    {
+      "path": "tests/issue-3518-program-ownership-runtime-seam.test.ts",
+      "pin": {
+        "bytes": 36563,
+        "sha256": "c04ec57f486796f44c0d59a25937ebffe05d0a5f65778f320cba0b9ca8b6acea",
+        "gitBlob": "cc0c38d27965f48613f074eb6e5e02e44531a3ec"
+      }
+    },
+    {
+      "path": "tests/issue-3518-program-pre-a-evolution.test.ts",
+      "pin": {
+        "bytes": 17660,
+        "sha256": "1bc14ef91a26c7fd248c6a011b880bfe053b8743477262846555af38264bcff7",
+        "gitBlob": "9d74d493e3fda393f7bb0b9cb0770d601b6606b1"
+      }
+    },
+    {
+      "path": "tests/issue-3518-program-initial-graph-evolution.test.ts",
+      "pin": {
+        "bytes": 24576,
+        "sha256": "a73ed1e3cd73a79babd270a086088dfd8645f519dcee75a665f4394488e7b1a4",
+        "gitBlob": "2351c64c3c330e3debf466d00d35f654c3acec74"
+      }
+    },
+    {
+      "path": "tests/issue-3518-runtime-program-relocation.test.ts",
+      "pin": {
+        "bytes": 22159,
+        "sha256": "4addc3893fa3d74c31bc7fc7496e3ed8a539bf1f6ba8ff3a62d27be40b8a1d10",
+        "gitBlob": "eb69e4e17f20c8208f48f90a4bbbda814f9090a2"
+      }
+    },
+    {
+      "path": "tests/issue-3518-runtime-program-policy-evolution.test.ts",
+      "pin": {
+        "bytes": 24202,
+        "sha256": "cbcab84d4b00dfb0ebcc54e4401768863418b45d0ab02adaa9107ca1e55ed8d5",
+        "gitBlob": "fdb2befd9d4da5687c4a007a5b8a4a953d4cba2c"
+      }
+    },
+    {
+      "path": "tests/issue-3518-well-known-symbol-policy-evolution.test.ts",
+      "pin": {
+        "bytes": 26934,
+        "sha256": "ce227fbc7704c843dadfe1a763e7f2334fa51dec232b672401b8542ebabf7fa6",
+        "gitBlob": "7d2a2d93db80e48405fdaa4795e8d0e8b6df4669"
+      }
+    },
+    {
+      "path": "tests/issue-3518-number-prerequisite-policy-evolution.test.ts",
+      "pin": {
+        "bytes": 104491,
+        "sha256": "7f5758673b2b492b28ce4e175262ccf537ad791c988ef069d4c635df7ac65e96",
+        "gitBlob": "eeaafc9bedace7acc876520b57f0b2e80d10edbc"
+      }
+    }
+  ],
+  "instrumentEdits": [
+    {
+      "path": "tests/helpers/ir-runtime-program-policy-evolution.ts",
+      "beforePin": {
+        "bytes": 93405,
+        "sha256": "e243101b31f29b2b4aa2637fdd3f9c814a5b6bada558ce565d3d3c132e71892f",
+        "gitBlob": "2c3781d77ada0953993a57ebe3ce7316c9324e07"
+      },
+      "afterPin": {
+        "bytes": 117269,
+        "sha256": "36c66ebee18b28209e7c3083873d76eec538b48f98753e8a09dac8ce44499180",
+        "gitBlob": "71b4f3d4686092f7ce7d8cc53ae3f5aa9bfa98d1"
+      },
+      "spans": [
+        {
+          "beforeOffset": 277,
+          "afterOffset": 277,
+          "before": "",
+          "after": "import {\n  captureC1HistoricalAuthority,\n  type C1HistoricalCapture,\n  type C1HistoricalLogicalPath,\n} from \"./ir-c1-historical-authority.js\";\n\nconst historicalPolicyOperandPaths: readonly string[] = [\n  \"tests/issue-3518-runtime-program-relocation.test.ts\",\n  \"tests/issue-3518-program-data-contract-seam.test.ts\",\n  \"tests/issue-3518-program-ownership-runtime-seam.test.ts\",\n  \"tests/issue-3518-program-pre-a-evolution.test.ts\",\n  \"tests/issue-3518-program-initial-graph-evolution.test.ts\",\n  \"tests/helpers/ir-runtime-program-policy-evolution.ts\",\n];\nfunction readHistoricalPolicyInput(path: string, authority: C1HistoricalCapture): Buffer {\n  if (historicalPolicyOperandPaths.includes(path))\n    return Buffer.from(authority.readHistorical(path as C1HistoricalLogicalPath), \"utf8\");\n  return readFileSync(new URL(`../../${path}`, import.meta.url));\n}\n"
+        },
+        {
+          "beforeOffset": 4622,
+          "afterOffset": 5477,
+          "before": "    // defineProperty also preserves a literal __proto__ key as ordinary owned data.\n    const result: Record<string, unknown> = {};\n    for (const key of keys as string[])\n      Object.defineProperty(result, key, {\n        value: capture(descriptors[key]!.value, active),\n        enumerable: true,\n        writable: true,\n        configurable: true,\n      });\n    return result;\n",
+          "after": "    return Object.fromEntries(keys.map((key) => [key, capture(descriptors[key as string]!.value, active)]));\n"
+        },
+        {
+          "beforeOffset": 5385,
+          "afterOffset": 5969,
+          "before": "",
+          "after": "  captureC1HistoricalAuthority();\n"
+        },
+        {
+          "beforeOffset": 13800,
+          "afterOffset": 14418,
+          "before": "",
+          "after": "  const historicalAuthority = captureC1HistoricalAuthority();\n"
+        },
+        {
+          "beforeOffset": 15372,
+          "afterOffset": 16052,
+          "before": "    const bytes = readFileSync(new URL(`../../${pin.path}`, import.meta.url));\n",
+          "after": "    const bytes = readHistoricalPolicyInput(pin.path, historicalAuthority);\n"
+        },
+        {
+          "beforeOffset": 15613,
+          "afterOffset": 16290,
+          "before": "  const helper = readFileSync(new URL(\"./ir-runtime-program-policy-evolution.ts\", import.meta.url));\n",
+          "after": "  const helper = Buffer.from(\n    historicalAuthority.readHistorical(\"tests/helpers/ir-runtime-program-policy-evolution.ts\"),\n    \"utf8\",\n  );\n"
+        },
+        {
+          "beforeOffset": 29924,
+          "afterOffset": 30643,
+          "before": "",
+          "after": "  const historicalAuthority = captureC1HistoricalAuthority();\n"
+        },
+        {
+          "beforeOffset": 31624,
+          "afterOffset": 32405,
+          "before": "    const bytes = readFileSync(new URL(`../../${pin.path}`, import.meta.url));\n",
+          "after": "    const bytes = readHistoricalPolicyInput(pin.path, historicalAuthority);\n"
+        },
+        {
+          "beforeOffset": 31868,
+          "afterOffset": 32646,
+          "before": "  const helper = readFileSync(new URL(\"./ir-runtime-program-policy-evolution.ts\", import.meta.url));\n",
+          "after": "  const helper = Buffer.from(\n    historicalAuthority.readHistorical(\"tests/helpers/ir-runtime-program-policy-evolution.ts\"),\n    \"utf8\",\n  );\n"
+        },
+        {
+          "beforeOffset": 45514,
+          "afterOffset": 46334,
+          "before": "",
+          "after": "  const historicalAuthority = captureC1HistoricalAuthority();\n"
+        },
+        {
+          "beforeOffset": 47607,
+          "afterOffset": 48489,
+          "before": "  const helper = readFileSync(new URL(\"./ir-runtime-program-policy-evolution.ts\", import.meta.url));\n",
+          "after": "  const helper = Buffer.from(\n    historicalAuthority.readHistorical(\"tests/helpers/ir-runtime-program-policy-evolution.ts\"),\n    \"utf8\",\n  );\n"
+        },
+        {
+          "beforeOffset": 60398,
+          "afterOffset": 61322,
+          "before": "",
+          "after": "  const historicalAuthority = captureC1HistoricalAuthority();\n"
+        },
+        {
+          "beforeOffset": 62205,
+          "afterOffset": 63191,
+          "before": "  const helper = readFileSync(new URL(\"./ir-runtime-program-policy-evolution.ts\", import.meta.url));\n",
+          "after": "  const helper = Buffer.from(\n    historicalAuthority.readHistorical(\"tests/helpers/ir-runtime-program-policy-evolution.ts\"),\n    \"utf8\",\n  );\n"
+        },
+        {
+          "beforeOffset": 73773,
+          "afterOffset": 74801,
+          "before": "",
+          "after": "  const historicalAuthority = captureC1HistoricalAuthority();\n"
+        },
+        {
+          "beforeOffset": 75095,
+          "afterOffset": 76185,
+          "before": "  const helper = readFileSync(new URL(\"./ir-runtime-program-policy-evolution.ts\", import.meta.url));\n",
+          "after": "  const helper = Buffer.from(\n    historicalAuthority.readHistorical(\"tests/helpers/ir-runtime-program-policy-evolution.ts\"),\n    \"utf8\",\n  );\n"
+        },
+        {
+          "beforeOffset": 85990,
+          "afterOffset": 87122,
+          "before": "",
+          "after": "  const historicalAuthority = captureC1HistoricalAuthority();\n"
+        },
+        {
+          "beforeOffset": 87376,
+          "afterOffset": 88570,
+          "before": "  const helper = readFileSync(new URL(\"./ir-runtime-program-policy-evolution.ts\", import.meta.url));\n",
+          "after": "  const helper = Buffer.from(\n    historicalAuthority.readHistorical(\"tests/helpers/ir-runtime-program-policy-evolution.ts\"),\n    \"utf8\",\n  );\n"
+        },
+        {
+          "beforeOffset": 93405,
+          "afterOffset": 94641,
+          "before": "",
+          "after": "\n// Fixed current-main four-row inventory successor; predecessor algorithms remain unchanged.\nexport const currentMainInventoryReceiptPath = \"tests/helpers/ir-runtime-program-policy-main-inventory-20261002.json\";\nconst currentMainInventoryReceiptSha256 = \"b14b779229974856210fb3907aab7c7d0d97537c3f9d8a6324b083f3b3ef8c5e\";\n// Independently frozen literal authority, never initialized from an inspected receipt or caller.\nconst currentMainInventoryExpected = {\n  schema: 1,\n  kind: \"fixed-main-inventory-four-row-successor\",\n  provenance: {\n    checkpoint: \"bfcf326c9426988e66fa6cc446132ed9ad9c1965\",\n    inputBase: \"6fce22a8bbeaec91828e8b5b6922c3c1b1fa9b97\",\n    incomingMain: \"a93d489420fac74aaba490a249f51251f90584c2\",\n    sourceInput: \"fcf4b188d0bd19f23665a318316af766e641f737\",\n    planSha256: \"25dea34fa24ff59f10b20b5a70da1a2a91061017aa3bcec9be3239c65bc03697\",\n  },\n  before: {\n    source: {\n      bytes: 568552,\n      sha256: \"64103a2fb337874fd435614d461bdd0d46cdfdc8a8dbd61603a4c7cbaf3915ff\",\n      gitBlob: \"b9b8b1787cc202906c4e76cebc598cf460a7f0ae\",\n    },\n    dataSha256: \"2f35e7e2045dd0d024a13b48c8f413fc7fb9e74c63503fafee4e56993d1da1a6\",\n    fileCount: 1780,\n    filesSha256: \"bcd724252a8ff0cdf6799b01f7e0b9eeceead2c6a3e1f49f9625de233b6710e6\",\n    activationCount: 101,\n    activationHistorySha256: \"9629c457a160096e70c35fc3a986abbd8eca145ac4eb688995194d6c29c83650\",\n    layersSha256: \"3f66bbff64c157092a04740c644ae17d476d7d168faa1bd23629f97492e0c4f7\",\n    allowedEdgesSha256: \"efe7e7ed8dee1a009d2bef3ff36dba80df1a805cd3f5b7b472e62ec6dcff64c7\",\n  },\n  current: {\n    source: {\n      bytes: 569224,\n      sha256: \"68b09ea540cbd7c40c2d42d66071b5c096a992729afa865d143bba5d8f894c91\",\n      gitBlob: \"6dfe8603219039d3be53ff7c8804dbd58fa8534a\",\n    },\n    dataSha256: \"e0f089362ce0e56697978858e2d2ab1767b9cf53425f60b76a8cd2d5d17f8057\",\n    fileCount: 1782,\n    filesSha256: \"d9bb59233a38f7e4f074e54b9f1b22761fff2fc00b7805a62e910b4a1fefa02e\",\n    activationCount: 101,\n    activationHistorySha256: \"9629c457a160096e70c35fc3a986abbd8eca145ac4eb688995194d6c29c83650\",\n    layersSha256: \"3f66bbff64c157092a04740c644ae17d476d7d168faa1bd23629f97492e0c4f7\",\n    allowedEdgesSha256: \"efe7e7ed8dee1a009d2bef3ff36dba80df1a805cd3f5b7b472e62ec6dcff64c7\",\n  },\n  helperPrefix: {\n    path: \"tests/helpers/ir-runtime-program-policy-evolution.ts\",\n    bytes: 94912,\n    sha256: \"8b7b061100ffe195437058401fa904a65ccee3302322a97aae899e51f5d84f68\",\n    gitBlob: \"8e979e9b3f6bb6831df63bf6a65c38a6098e6a85\",\n  },\n  predecessorReceipt: {\n    path: \"tests/helpers/ir-runtime-program-policy-generator-eager-refusal.json\",\n    bytes: 4693,\n    sha256: \"5d78bc26201d43531d1a299d42f0ac0ae91a638de71620b94f675378572ccc8c\",\n    gitBlob: \"e1ceeb12d63073f2f19b714c4e988dd3e2b4e26d\",\n  },\n  sourcePins: [\n    {\n      path: \"src/codegen/class-builtin-species-read.ts\",\n      bytes: 2143,\n      sha256: \"12ddf3f2e454845b58f8d2669533d2dd0e596d1d8ccbda1a43cb960e83da31eb\",\n      gitBlob: \"5a7d3ef78ee34bc7fce3d0d6d92911907141f49f\",\n    },\n    {\n      path: \"src/codegen/date-proto-to-json.ts\",\n      bytes: 6733,\n      sha256: \"448717146265ea56a128eaef010338f6511a03ea61230f830deb8179f27f7e2b\",\n      gitBlob: \"4a587c01bc1e68ea519c5e9b290a5d389d3ce13b\",\n    },\n    {\n      path: \"src/codegen/expressions/to-primitive-method-call.ts\",\n      bytes: 4481,\n      sha256: \"fb45a5292e6275ca40b3ee5d190bdd88ecedc6cba933d6b6dc5640b0162d4001\",\n      gitBlob: \"0e3f192257e0437b29fce56205a129529587f4d3\",\n    },\n  ],\n  rowChanges: [\n    {\n      operation: \"addition\",\n      beforeIndex: 366,\n      currentIndex: 366,\n      row: {\n        path: \"src/codegen/class-builtin-species-read.ts\",\n        state: \"unmigrated\",\n        layer: \"mixed-needs-split\",\n        destination: \"backend-wasmgc\",\n        owner: \"3518-coordinator\",\n        nextBoundary: \"Separate AST/context-driven generation, physical resources and generated native runtime.\",\n      },\n      beforePrevious: {\n        path: \"src/codegen/date-parse-native.ts\",\n        state: \"unmigrated\",\n        layer: \"mixed-needs-split\",\n        destination: \"backend-wasmgc\",\n        owner: \"3518-coordinator\",\n        nextBoundary: \"Separate AST/context-driven generation, physical resources and generated native runtime.\",\n      },\n      beforeNext: {\n        path: \"src/codegen/date-proto-to-primitive.ts\",\n        state: \"unmigrated\",\n        layer: \"mixed-needs-split\",\n        destination: \"backend-wasmgc\",\n        owner: \"3518-coordinator\",\n        nextBoundary: \"Separate AST/context-driven generation, physical resources and generated native runtime.\",\n      },\n      currentPrevious: {\n        path: \"src/codegen/date-parse-native.ts\",\n        state: \"unmigrated\",\n        layer: \"mixed-needs-split\",\n        destination: \"backend-wasmgc\",\n        owner: \"3518-coordinator\",\n        nextBoundary: \"Separate AST/context-driven generation, physical resources and generated native runtime.\",\n      },\n      currentNext: {\n        path: \"src/codegen/date-proto-to-json.ts\",\n        state: \"unmigrated\",\n        layer: \"mixed-needs-split\",\n        destination: \"backend-wasmgc\",\n        owner: \"3518-coordinator\",\n        nextBoundary: \"Separate AST/context-driven generation, physical resources and generated native runtime.\",\n      },\n    },\n    {\n      operation: \"addition\",\n      beforeIndex: 366,\n      currentIndex: 367,\n      row: {\n        path: \"src/codegen/date-proto-to-json.ts\",\n        state: \"unmigrated\",\n        layer: \"mixed-needs-split\",\n        destination: \"backend-wasmgc\",\n        owner: \"3518-coordinator\",\n        nextBoundary: \"Separate AST/context-driven generation, physical resources and generated native runtime.\",\n      },\n      beforePrevious: {\n        path: \"src/codegen/date-parse-native.ts\",\n        state: \"unmigrated\",\n        layer: \"mixed-needs-split\",\n        destination: \"backend-wasmgc\",\n        owner: \"3518-coordinator\",\n        nextBoundary: \"Separate AST/context-driven generation, physical resources and generated native runtime.\",\n      },\n      beforeNext: {\n        path: \"src/codegen/date-proto-to-primitive.ts\",\n        state: \"unmigrated\",\n        layer: \"mixed-needs-split\",\n        destination: \"backend-wasmgc\",\n        owner: \"3518-coordinator\",\n        nextBoundary: \"Separate AST/context-driven generation, physical resources and generated native runtime.\",\n      },\n      currentPrevious: {\n        path: \"src/codegen/class-builtin-species-read.ts\",\n        state: \"unmigrated\",\n        layer: \"mixed-needs-split\",\n        destination: \"backend-wasmgc\",\n        owner: \"3518-coordinator\",\n        nextBoundary: \"Separate AST/context-driven generation, physical resources and generated native runtime.\",\n      },\n      currentNext: {\n        path: \"src/codegen/date-proto-to-primitive.ts\",\n        state: \"unmigrated\",\n        layer: \"mixed-needs-split\",\n        destination: \"backend-wasmgc\",\n        owner: \"3518-coordinator\",\n        nextBoundary: \"Separate AST/context-driven generation, physical resources and generated native runtime.\",\n      },\n    },\n    {\n      operation: \"addition\",\n      beforeIndex: 512,\n      currentIndex: 514,\n      row: {\n        path: \"src/codegen/expressions/to-primitive-method-call.ts\",\n        state: \"unmigrated\",\n        layer: \"mixed-needs-split\",\n        destination: \"backend-wasmgc\",\n        owner: \"3518-coordinator\",\n        nextBoundary: \"Separate AST/context-driven generation, physical resources and generated native runtime.\",\n      },\n      beforePrevious: {\n        path: \"src/codegen/expressions/this-keyword.ts\",\n        state: \"unmigrated\",\n        layer: \"mixed-needs-split\",\n        destination: \"backend-wasmgc\",\n        owner: \"3518-coordinator\",\n        nextBoundary: \"Separate AST/context-driven generation, physical resources and generated native runtime.\",\n      },\n      beforeNext: {\n        path: \"src/codegen/expressions/transferred-native-proto-call.ts\",\n        state: \"unmigrated\",\n        layer: \"mixed-needs-split\",\n        destination: \"backend-wasmgc\",\n        owner: \"3518-coordinator\",\n        nextBoundary: \"Separate AST/context-driven generation, physical resources and generated native runtime.\",\n      },\n      currentPrevious: {\n        path: \"src/codegen/expressions/this-keyword.ts\",\n        state: \"unmigrated\",\n        layer: \"mixed-needs-split\",\n        destination: \"backend-wasmgc\",\n        owner: \"3518-coordinator\",\n        nextBoundary: \"Separate AST/context-driven generation, physical resources and generated native runtime.\",\n      },\n      currentNext: {\n        path: \"src/codegen/expressions/transferred-native-proto-call.ts\",\n        state: \"unmigrated\",\n        layer: \"mixed-needs-split\",\n        destination: \"backend-wasmgc\",\n        owner: \"3518-coordinator\",\n        nextBoundary: \"Separate AST/context-driven generation, physical resources and generated native runtime.\",\n      },\n    },\n    {\n      operation: \"removal\",\n      beforeIndex: 1381,\n      currentIndex: 1384,\n      row: {\n        path: \"src/runtime-containment.ts\",\n        state: \"unmigrated\",\n        layer: \"mixed-needs-split\",\n        destination: \"compiler\",\n        owner: \"3518-coordinator\",\n        nextBoundary: \"Review the frontend, orchestration, runtime and shared-contract split before migration.\",\n      },\n      beforePrevious: {\n        path: \"src/resolve/consumer-driven-barrels.ts\",\n        state: \"unmigrated\",\n        layer: \"mixed-needs-split\",\n        destination: \"compiler\",\n        owner: \"3518-coordinator\",\n        nextBoundary: \"Review the frontend, orchestration, runtime and shared-contract split before migration.\",\n      },\n      beforeNext: {\n        path: \"src/runtime-eval.ts\",\n        state: \"unmigrated\",\n        layer: \"mixed-needs-split\",\n        destination: \"compiler\",\n        owner: \"3518-coordinator\",\n        nextBoundary: \"Review the frontend, orchestration, runtime and shared-contract split before migration.\",\n      },\n      currentPrevious: {\n        path: \"src/resolve/consumer-driven-barrels.ts\",\n        state: \"unmigrated\",\n        layer: \"mixed-needs-split\",\n        destination: \"compiler\",\n        owner: \"3518-coordinator\",\n        nextBoundary: \"Review the frontend, orchestration, runtime and shared-contract split before migration.\",\n      },\n      currentNext: {\n        path: \"src/runtime-eval.ts\",\n        state: \"unmigrated\",\n        layer: \"mixed-needs-split\",\n        destination: \"compiler\",\n        owner: \"3518-coordinator\",\n        nextBoundary: \"Review the frontend, orchestration, runtime and shared-contract split before migration.\",\n      },\n    },\n  ],\n  raw: {\n    spans: [\n      {\n        beforeOffset: 162175,\n        afterOffset: 162175,\n        before: \"\",\n        after:\n          '    {\\n      \"path\": \"src/codegen/class-builtin-species-read.ts\",\\n      \"state\": \"unmigrated\",\\n      \"layer\": \"mixed-needs-split\",\\n      \"destination\": \"backend-wasmgc\",\\n      \"owner\": \"3518-coordinator\",\\n      \"nextBoundary\": \"Separate AST/context-driven generation, physical resources and generated native runtime.\"\\n    },\\n    {\\n      \"path\": \"src/codegen/date-proto-to-json.ts\",\\n      \"state\": \"unmigrated\",\\n      \"layer\": \"mixed-needs-split\",\\n      \"destination\": \"backend-wasmgc\",\\n      \"owner\": \"3518-coordinator\",\\n      \"nextBoundary\": \"Separate AST/context-driven generation, physical resources and generated native runtime.\"\\n    },\\n',\n        beforeSha256: \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\n        afterSha256: \"6f6dd24f93539ececc43e1423a466543e5e42e4051f56b33b3954e1c5da0193c\",\n      },\n      {\n        beforeOffset: 209899,\n        afterOffset: 210539,\n        before: \"\",\n        after:\n          '    {\\n      \"path\": \"src/codegen/expressions/to-primitive-method-call.ts\",\\n      \"state\": \"unmigrated\",\\n      \"layer\": \"mixed-needs-split\",\\n      \"destination\": \"backend-wasmgc\",\\n      \"owner\": \"3518-coordinator\",\\n      \"nextBoundary\": \"Separate AST/context-driven generation, physical resources and generated native runtime.\"\\n    },\\n',\n        beforeSha256: \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\n        afterSha256: \"c7a524e5649650927432dc4be13732268461780e960355dc3b45faf2a4b4db31\",\n      },\n      {\n        beforeOffset: 485383,\n        afterOffset: 486357,\n        before:\n          '    {\\n      \"path\": \"src/runtime-containment.ts\",\\n      \"state\": \"unmigrated\",\\n      \"layer\": \"mixed-needs-split\",\\n      \"destination\": \"compiler\",\\n      \"owner\": \"3518-coordinator\",\\n      \"nextBoundary\": \"Review the frontend, orchestration, runtime and shared-contract split before migration.\"\\n    },\\n',\n        after: \"\",\n        beforeSha256: \"45f82bcd707e361470f6ea1ee6543cb54c2a0f5dd248c5b1583499a7b3b38cce\",\n        afterSha256: \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\n      },\n    ],\n  },\n} as const;\ntype CurrentMainInventoryReceipt = typeof currentMainInventoryExpected;\nfunction currentMainInventoryFail(detail: string): never {\n  throw new Error(\"current main inventory evolution: \" + detail);\n}\nfunction currentMainInventoryPin(\n  bytes: Buffer,\n  pin: { readonly bytes: number; readonly sha256: string; readonly gitBlob: string },\n  label: string,\n): void {\n  if (\n    bytes.length !== pin.bytes ||\n    createHash(\"sha256\").update(bytes).digest(\"hex\") !== pin.sha256 ||\n    createHash(\"sha1\").update(`blob ${bytes.length}\\0`).update(bytes).digest(\"hex\") !== pin.gitBlob\n  )\n    currentMainInventoryFail(label);\n}\n/** Authenticate fixed receipt and live source/prefix authorities on every public action. */\nexport function authenticateCurrentMainInventoryEvolution(\n  text = readFileSync(new URL(`../../${currentMainInventoryReceiptPath}`, import.meta.url), \"utf8\"),\n): CurrentMainInventoryReceipt {\n  if (typeof text !== \"string\" || Buffer.byteLength(text) !== 12856 || sha(text) !== currentMainInventoryReceiptSha256)\n    currentMainInventoryFail(\"receipt digest mismatch\");\n  const receipt = JSON.parse(text) as CurrentMainInventoryReceipt;\n  if (!same(receipt, currentMainInventoryExpected)) currentMainInventoryFail(\"fixed receipt population mismatch\");\n  const prefix = readFileSync(new URL(\"./ir-runtime-program-policy-evolution.ts\", import.meta.url));\n  currentMainInventoryPin(\n    beforePolicyCaptureKernelPrefix(prefix.subarray(0, 94641)),\n    receipt.helperPrefix,\n    \"complete predecessor helper prefix changed\",\n  );\n  for (const pin of [receipt.predecessorReceipt, ...receipt.sourcePins])\n    currentMainInventoryPin(\n      readFileSync(new URL(`../../${pin.path}`, import.meta.url)),\n      pin,\n      \"full-file input changed: \" + pin.path,\n    );\n  const predecessor = authenticateGeneratorInventoryPolicyEvolution();\n  if (!same(predecessor.current, receipt.before)) currentMainInventoryFail(\"generator predecessor authority mismatch\");\n  return freeze(receipt);\n}\nfunction currentMainInventorySemanticProfile(\n  policy: MutableIrRuntimeProgramPolicy,\n  profile: CurrentMainInventoryReceipt[\"before\"] | CurrentMainInventoryReceipt[\"current\"],\n): void {\n  if (\n    digest(policy) !== profile.dataSha256 ||\n    policy.files.length !== profile.fileCount ||\n    policy.activationHistory.length !== profile.activationCount ||\n    digest(policy.files) !== profile.filesSha256 ||\n    digest(policy.activationHistory) !== profile.activationHistorySha256 ||\n    digest(policy.layers) !== profile.layersSha256 ||\n    digest(policy.allowedEdges) !== profile.allowedEdgesSha256\n  )\n    currentMainInventoryFail(\"complete policy profile mismatch\");\n}\nfunction currentMainInventoryRows(\n  policy: MutableIrRuntimeProgramPolicy,\n  receipt: CurrentMainInventoryReceipt,\n  forward: boolean,\n): void {\n  if (!same(Object.keys(policy), wksTopKeys)) currentMainInventoryFail(\"fixed top-level schema mismatch\");\n  for (const change of receipt.rowChanges) {\n    const index = forward ? change.beforeIndex : change.currentIndex;\n    const present = forward ? change.operation === \"removal\" : change.operation === \"addition\";\n    const previous = forward ? change.beforePrevious : change.currentPrevious;\n    const next = forward ? change.beforeNext : change.currentNext;\n    if (\n      !same(policy.files[index - 1], previous) ||\n      !same(policy.files[index + (present ? 1 : 0)], next) ||\n      policy.files.filter((row) => row.path === change.row.path).length !== (present ? 1 : 0) ||\n      (present &&\n        (!same(Object.keys(policy.files[index]!), Object.keys(change.row)) || !same(policy.files[index], change.row)))\n    )\n      currentMainInventoryFail(\"fixed row schema, membership or neighbors mismatch\");\n  }\n}\nfunction proveCurrentMainInventoryPolicy(\n  value: unknown,\n  freshlyVerifiedReceipt?: CurrentMainInventoryReceipt,\n): {\n  predecessor: MutableIrRuntimeProgramPolicy;\n  generatorPredecessor: MutableIrRuntimeProgramPolicy;\n} {\n  // Capture descriptors before receipt/source IO; keep subsequent historical mutants raw.\n  const current = capture(value) as MutableIrRuntimeProgramPolicy;\n  const receipt = freshlyVerifiedReceipt ?? authenticateCurrentMainInventoryEvolution();\n  currentMainInventorySemanticProfile(current, receipt.current);\n  currentMainInventoryRows(current, receipt, false);\n  const predecessor = capture(current) as MutableIrRuntimeProgramPolicy;\n  predecessor.files.splice(1384, 0, capture(receipt.rowChanges[3].row) as Record<string, string>);\n  for (const index of [514, 367, 366]) predecessor.files.splice(index, 1);\n  currentMainInventorySemanticProfile(predecessor, receipt.before);\n  currentMainInventoryRows(predecessor, receipt, true);\n  // Genuine generator -> host -> dynamic -> C2a -> Number -> WKS -> C1 -> B verification.\n  const generatorPredecessor = beforeGeneratorInventoryPolicy(predecessor);\n  const replay = capture(predecessor) as MutableIrRuntimeProgramPolicy;\n  replay.files.splice(1381, 1);\n  for (const change of receipt.rowChanges.slice(0, 3))\n    replay.files.splice(change.currentIndex, 0, capture(change.row) as Record<string, string>);\n  currentMainInventorySemanticProfile(replay, receipt.current);\n  currentMainInventoryRows(replay, receipt, false);\n  if (!same(replay, current)) currentMainInventoryFail(\"complete reciprocal semantic replay mismatch\");\n  return { predecessor, generatorPredecessor };\n}\nexport function beforeCurrentMainInventoryPolicy(value: unknown): MutableIrRuntimeProgramPolicy {\n  return proveCurrentMainInventoryPolicy(value).predecessor;\n}\nfunction applyCurrentMainInventoryRaw(raw: string, receipt: CurrentMainInventoryReceipt, forward: boolean): string {\n  const bytes = Buffer.from(raw, \"utf8\");\n  currentMainInventoryPin(\n    bytes,\n    forward ? receipt.before.source : receipt.current.source,\n    \"complete raw source profile mismatch\",\n  );\n  const pieces: Buffer[] = [];\n  let consumed = 0;\n  for (const span of receipt.raw.spans) {\n    const at = forward ? span.beforeOffset : span.afterOffset;\n    const from = Buffer.from(forward ? span.before : span.after, \"utf8\");\n    const to = Buffer.from(forward ? span.after : span.before, \"utf8\");\n    if (\n      at < consumed ||\n      at > bytes.length ||\n      at + from.length > bytes.length ||\n      !bytes.subarray(at, at + from.length).equals(from) ||\n      (from.length > 0 && (bytes.indexOf(from) !== at || bytes.lastIndexOf(from) !== at))\n    )\n      currentMainInventoryFail(\"fixed raw span missing, duplicated or reordered\");\n    // Every slice uses the unchanged original input coordinate domain.\n    pieces.push(bytes.subarray(consumed, at), to);\n    consumed = at + from.length;\n  }\n  pieces.push(bytes.subarray(consumed));\n  const result = Buffer.concat(pieces);\n  currentMainInventoryPin(\n    result,\n    forward ? receipt.current.source : receipt.before.source,\n    \"complete raw output profile mismatch\",\n  );\n  return result.toString(\"utf8\");\n}\nexport function beforeCurrentMainInventoryPolicySource(raw: string): string {\n  if (typeof raw !== \"string\") currentMainInventoryFail(\"raw input must be a primitive string\");\n  const receipt = authenticateCurrentMainInventoryEvolution();\n  const predecessor = applyCurrentMainInventoryRaw(raw, receipt, false);\n  const semantic = proveCurrentMainInventoryPolicy(JSON.parse(raw), receipt);\n  const parsed = JSON.parse(predecessor) as MutableIrRuntimeProgramPolicy;\n  currentMainInventorySemanticProfile(parsed, receipt.before);\n  const generatorRawPredecessor = beforeGeneratorInventoryPolicySource(predecessor);\n  if (\n    !same(parsed, semantic.predecessor) ||\n    !same(JSON.parse(generatorRawPredecessor), semantic.generatorPredecessor) ||\n    applyCurrentMainInventoryRaw(predecessor, receipt, true) !== raw\n  )\n    currentMainInventoryFail(\"raw and semantic reciprocal proof disagree\");\n  return predecessor;\n}\n\n/** Reconstruct only the fixed pre-kernel prefix; every call authenticates its actual supplied bytes. */\nfunction beforePolicyCaptureKernelPrefix(current: Buffer): Buffer {\n  const label = \"complete predecessor helper prefix changed\";\n  currentMainInventoryPin(\n    current,\n    {\n      bytes: 94641,\n      sha256: \"4cf63b340b245b0f4f5ef297dc5a4b56b06507e981a7801ffcfb7e5c101f5103\",\n      gitBlob: \"b33536a95c8b88e84f8e7c60c3c39bce3e2c7d82\",\n    },\n    label,\n  );\n  const offset = 5477;\n  const before = Buffer.from(\n    \"    // defineProperty also preserves a literal __proto__ key as ordinary owned data.\\n    const result: Record<string, unknown> = {};\\n    for (const key of keys as string[])\\n      Object.defineProperty(result, key, {\\n        value: capture(descriptors[key]!.value, active),\\n        enumerable: true,\\n        writable: true,\\n        configurable: true,\\n      });\\n    return result;\\n\",\n    \"utf8\",\n  );\n  const after = Buffer.from(\n    \"    return Object.fromEntries(keys.map((key) => [key, capture(descriptors[key as string]!.value, active)]));\\n\",\n    \"utf8\",\n  );\n  if (\n    !current.subarray(offset, offset + after.length).equals(after) ||\n    current.indexOf(after) !== offset ||\n    current.indexOf(after, offset + 1) !== -1\n  )\n    currentMainInventoryFail(label);\n  const restored = Buffer.concat([current.subarray(0, offset), before, current.subarray(offset + after.length)]);\n  currentMainInventoryPin(\n    restored,\n    {\n      bytes: 94912,\n      sha256: \"8b7b061100ffe195437058401fa904a65ccee3302322a97aae899e51f5d84f68\",\n      gitBlob: \"8e979e9b3f6bb6831df63bf6a65c38a6098e6a85\",\n    },\n    label,\n  );\n  if (!restored.subarray(offset, offset + before.length).equals(before)) currentMainInventoryFail(label);\n  const replay = Buffer.concat([restored.subarray(0, offset), after, restored.subarray(offset + before.length)]);\n  if (!replay.equals(current)) currentMainInventoryFail(label);\n  return restored;\n}\n"
+        }
+      ]
+    },
+    {
+      "path": "tests/issue-3518-program-data-contract-boundary.test.ts",
+      "beforePin": {
+        "bytes": 28535,
+        "sha256": "cd1938063fa11485d4ec15fd260aeb3e65b6fa7a220e46932978f7a06528b8e0",
+        "gitBlob": "7e22a6829277d6475df4714de8d48ad2e76e3ada"
+      },
+      "afterPin": {
+        "bytes": 28647,
+        "sha256": "f7ff02da3cb2982107f1f24acba52625a271b6c1c9495ef8cc5fb972be5d407e",
+        "gitBlob": "d84bca5980bd549428638d776a48ae8e61946cf9"
+      },
+      "spans": [
+        {
+          "beforeOffset": 1053,
+          "afterOffset": 1053,
+          "before": "import {\n  reconstructRuntimeProgramRelocationSources,\n  runtimeProgramRelocationPairs,\n} from \"./helpers/ir-runtime-program-relocation.js\";\n",
+          "after": "import { runtimeProgramRelocationPairs } from \"./helpers/ir-runtime-program-relocation.js\";\nimport { reconstructC1CurrentSources } from \"./helpers/ir-c1-current-source.js\";\n"
+        },
+        {
+          "beforeOffset": 1576,
+          "afterOffset": 1608,
+          "before": "",
+          "after": "  beforeCurrentMainInventoryPolicy,\n"
+        },
+        {
+          "beforeOffset": 4999,
+          "afterOffset": 5067,
+          "before": "          JSON.parse(readFileSync(resolve(repository, \"scripts/compiler-boundaries.json\"), \"utf8\")),\n",
+          "after": "          beforeCurrentMainInventoryPolicy(\n            JSON.parse(readFileSync(resolve(repository, \"scripts/compiler-boundaries.json\"), \"utf8\")),\n          ),\n"
+        },
+        {
+          "beforeOffset": 7460,
+          "afterOffset": 7587,
+          "before": "  const initialC1ProgramSources: ReadonlyMap<string, string> = reconstructRuntimeProgramRelocationSources(rawRead);\n",
+          "after": "  const initialC1ProgramSources: ReadonlyMap<string, string> = reconstructC1CurrentSources(rawRead);\n"
+        }
+      ]
+    },
+    {
+      "path": "tests/issue-3518-program-data-contract-seam.test.ts",
+      "beforePin": {
+        "bytes": 35973,
+        "sha256": "84f249d70f2546cb9ac025f72c7817d5d58e4950c00691fd585caba7bd0cffda",
+        "gitBlob": "275e1e1b6760719720d040ff4ebe0813efc5e7d8"
+      },
+      "afterPin": {
+        "bytes": 35990,
+        "sha256": "3117cf2d343b26e76304b7e71b7d926c7823e981f561f3e26f21a151584af2d9",
+        "gitBlob": "3842acb066f9c2289f8ae3f24e07449edd75b969"
+      },
+      "spans": [
+        {
+          "beforeOffset": 586,
+          "afterOffset": 586,
+          "before": "import {\n  reconstructRuntimeProgramRelocationSources,\n  runtimeProgramRelocationPairs,\n} from \"./helpers/ir-runtime-program-relocation.js\";\n",
+          "after": "import { runtimeProgramRelocationPairs } from \"./helpers/ir-runtime-program-relocation.js\";\nimport { reconstructC1CurrentSources } from \"./helpers/ir-c1-current-source.js\";\n"
+        },
+        {
+          "beforeOffset": 946,
+          "afterOffset": 978,
+          "before": "  const sources = reconstructRuntimeProgramRelocationSources(readLive);\n",
+          "after": "  const sources = reconstructC1CurrentSources(readLive);\n"
+        }
+      ]
+    },
+    {
+      "path": "tests/issue-3518-program-ownership-runtime-seam.test.ts",
+      "beforePin": {
+        "bytes": 36546,
+        "sha256": "66dfa1235ce24d821a9530a5c3531b56eef2817033d89f0d3e8109f9ead13220",
+        "gitBlob": "858c8395d3d4d4c3ae3a912b64cb2a53f568475b"
+      },
+      "afterPin": {
+        "bytes": 36563,
+        "sha256": "c04ec57f486796f44c0d59a25937ebffe05d0a5f65778f320cba0b9ca8b6acea",
+        "gitBlob": "cc0c38d27965f48613f074eb6e5e02e44531a3ec"
+      },
+      "spans": [
+        {
+          "beforeOffset": 1068,
+          "afterOffset": 1068,
+          "before": "import {\n  reconstructRuntimeProgramRelocationSources,\n  runtimeProgramRelocationPairs,\n} from \"./helpers/ir-runtime-program-relocation.js\";\n",
+          "after": "import { runtimeProgramRelocationPairs } from \"./helpers/ir-runtime-program-relocation.js\";\nimport { reconstructC1CurrentSources } from \"./helpers/ir-c1-current-source.js\";\n"
+        },
+        {
+          "beforeOffset": 1422,
+          "afterOffset": 1454,
+          "before": "  const sources = reconstructRuntimeProgramRelocationSources(readLive);\n",
+          "after": "  const sources = reconstructC1CurrentSources(readLive);\n"
+        }
+      ]
+    },
+    {
+      "path": "tests/issue-3518-program-pre-a-evolution.test.ts",
+      "beforePin": {
+        "bytes": 17640,
+        "sha256": "0ee5b4d09d0efd9bd5f084fde4fb87bf316ad4aae85867c30d9903cce9353068",
+        "gitBlob": "f59d61d925a7c29d770b3e2c82cb3c4f49570644"
+      },
+      "afterPin": {
+        "bytes": 17660,
+        "sha256": "1bc14ef91a26c7fd248c6a011b880bfe053b8743477262846555af38264bcff7",
+        "gitBlob": "9d74d493e3fda393f7bb0b9cb0770d601b6606b1"
+      },
+      "spans": [
+        {
+          "beforeOffset": 550,
+          "afterOffset": 550,
+          "before": "  reconstructRuntimeProgramRelocationSources,\n",
+          "after": ""
+        },
+        {
+          "beforeOffset": 764,
+          "afterOffset": 718,
+          "before": "",
+          "after": "import { reconstructC1CurrentSources } from \"./helpers/ir-c1-current-source.js\";\n"
+        },
+        {
+          "beforeOffset": 903,
+          "afterOffset": 938,
+          "before": "  const sources = reconstructRuntimeProgramRelocationSources((path) => {\n",
+          "after": "  const sources = reconstructC1CurrentSources((path) => {\n"
+        }
+      ]
+    },
+    {
+      "path": "tests/issue-3518-program-initial-graph-evolution.test.ts",
+      "beforePin": {
+        "bytes": 24556,
+        "sha256": "44f5ac79766e9046aa4ed3ccc32c5e609209d0000ffe4d7b06d9afcc8049c2e6",
+        "gitBlob": "b776f75396a99c2b0a4b94b1c989b9c85a298c14"
+      },
+      "afterPin": {
+        "bytes": 24576,
+        "sha256": "a73ed1e3cd73a79babd270a086088dfd8645f519dcee75a665f4394488e7b1a4",
+        "gitBlob": "2351c64c3c330e3debf466d00d35f654c3acec74"
+      },
+      "spans": [
+        {
+          "beforeOffset": 855,
+          "afterOffset": 855,
+          "before": "  reconstructRuntimeProgramRelocationSources,\n",
+          "after": ""
+        },
+        {
+          "beforeOffset": 1069,
+          "afterOffset": 1023,
+          "before": "",
+          "after": "import { reconstructC1CurrentSources } from \"./helpers/ir-c1-current-source.js\";\n"
+        },
+        {
+          "beforeOffset": 1186,
+          "afterOffset": 1221,
+          "before": "  const sources = reconstructRuntimeProgramRelocationSources((path) => {\n",
+          "after": "  const sources = reconstructC1CurrentSources((path) => {\n"
+        }
+      ]
+    },
+    {
+      "path": "tests/issue-3518-runtime-program-relocation.test.ts",
+      "beforePin": {
+        "bytes": 21449,
+        "sha256": "324fa026106c484167f6631158043bf16298d07d6f82f1136808fa07054dcc6b",
+        "gitBlob": "3b90e68bbc2baa5c07305a5c5bc64e536f9cf9b8"
+      },
+      "afterPin": {
+        "bytes": 22159,
+        "sha256": "4addc3893fa3d74c31bc7fc7496e3ed8a539bf1f6ba8ff3a62d27be40b8a1d10",
+        "gitBlob": "eb69e4e17f20c8208f48f90a4bbbda814f9090a2"
+      },
+      "spans": [
+        {
+          "beforeOffset": 84,
+          "afterOffset": 84,
+          "before": "import { describe, expect, it } from \"vitest\";\n",
+          "after": "import { setImmediate } from \"node:timers/promises\";\nimport { afterEach, describe, expect, it } from \"vitest\";\n"
+        },
+        {
+          "beforeOffset": 768,
+          "afterOffset": 832,
+          "before": "",
+          "after": "import { captureC1CurrentPopulation, reconstructC1CurrentSources } from \"./helpers/ir-c1-current-source.js\";\n"
+        },
+        {
+          "beforeOffset": 769,
+          "afterOffset": 942,
+          "before": "const population = (): Map<string, string> =>\n  new Map(runtimeProgramRelocationPopulationPaths.map((path) => [path, read(path)]));\n",
+          "after": "afterEach(async () => {\n  // Yield between synchronous source proofs so Vitest can process task-update RPCs.\n  await setImmediate();\n});\n\nconst population = (): Map<string, string> => new Map(captureC1CurrentPopulation().historicalPopulation);\n"
+        },
+        {
+          "beforeOffset": 3672,
+          "afterOffset": 3957,
+          "before": "    const capture = () =>\n      reconstructRuntimeProgramRelocationSources((path) => {\n",
+          "after": "    const capture = () => {\n      // Live capture and its extra authority reads are independently counted by the bridge suite.\n      // This counter retains the unchanged 47-read historical reconstruction stage.\n      const current = captureC1CurrentPopulation();\n      return reconstructRuntimeProgramRelocationSources((path) => {\n"
+        },
+        {
+          "beforeOffset": 3812,
+          "afterOffset": 4342,
+          "before": "        return read(path);\n",
+          "after": "        if (path === runtimeProgramRelocationReceiptPath) return current.receiptText;\n        const source = current.historicalPopulation.get(path);\n        if (source === undefined) throw new Error(`missing captured C1 historical operand: ${path}`);\n        return source;\n"
+        },
+        {
+          "beforeOffset": 3849,
+          "afterOffset": 4626,
+          "before": "",
+          "after": "    };\n"
+        },
+        {
+          "beforeOffset": 4193,
+          "afterOffset": 4977,
+          "before": "    expect(reconstructRuntimeProgramRelocationSources().size).toBe(4);\n",
+          "after": "    expect(reconstructC1CurrentSources().size).toBe(4);\n"
+        },
+        {
+          "beforeOffset": 4335,
+          "afterOffset": 5104,
+          "before": "      reconstructRuntimeProgramRelocationSources((p) =>\n        p === path ? read(p).replace(\"if (!owner)\", \"if (owner)\") : read(p),\n      ),\n",
+          "after": "      reconstructC1CurrentSources((p) => (p === path ? read(p).replace(\"if (!owner)\", \"if (owner)\") : read(p))),\n"
+        },
+        {
+          "beforeOffset": 15874,
+          "afterOffset": 16614,
+          "before": "      reconstructRuntimeProgramRelocationSources((path) => {\n",
+          "after": "      reconstructC1CurrentSources((path) => {\n"
+        },
+        {
+          "beforeOffset": 20777,
+          "afterOffset": 21502,
+          "before": "    const reconstructed = reconstructRuntimeProgramRelocationSources();\n",
+          "after": "    const reconstructed = reconstructC1CurrentSources();\n"
+        }
+      ]
+    },
+    {
+      "path": "tests/issue-3518-runtime-program-policy-evolution.test.ts",
+      "beforePin": {
+        "bytes": 23017,
+        "sha256": "ef8c3253054203d0576aa0029ce86baee73d8d4a4c639901fc83e936ed4f62da",
+        "gitBlob": "27cdb3a1209d874b401e7de30b0bd7e731bdff6c"
+      },
+      "afterPin": {
+        "bytes": 24202,
+        "sha256": "cbcab84d4b00dfb0ebcc54e4401768863418b45d0ab02adaa9107ca1e55ed8d5",
+        "gitBlob": "fdb2befd9d4da5687c4a007a5b8a4a953d4cba2c"
+      },
+      "spans": [
+        {
+          "beforeOffset": 983,
+          "afterOffset": 983,
+          "before": "",
+          "after": "  beforeCurrentMainInventoryPolicy,\n  beforeCurrentMainInventoryPolicySource,\n"
+        },
+        {
+          "beforeOffset": 1351,
+          "afterOffset": 1429,
+          "before": "",
+          "after": "import { c1HistoricalArtifactPath, type C1HistoricalLogicalPath } from \"./helpers/ir-c1-historical-authority.js\";\n\n"
+        },
+        {
+          "beforeOffset": 1452,
+          "afterOffset": 1645,
+          "before": "",
+          "after": "const historicalPolicyOperandPaths: readonly string[] = [\n  \"tests/issue-3518-runtime-program-relocation.test.ts\",\n  \"tests/issue-3518-program-data-contract-seam.test.ts\",\n  \"tests/issue-3518-program-ownership-runtime-seam.test.ts\",\n  \"tests/issue-3518-program-pre-a-evolution.test.ts\",\n  \"tests/issue-3518-program-initial-graph-evolution.test.ts\",\n  \"tests/helpers/ir-runtime-program-policy-evolution.ts\",\n];\nconst historicalPolicyPhysicalPath = (path: string): string =>\n  historicalPolicyOperandPaths.includes(path) ? c1HistoricalArtifactPath(path as C1HistoricalLogicalPath) : path;\n// Raw physical operand reads let the original mutation assertions inspect corruption before the guard rejects it.\nconst readHistoricalPolicyOperand = (path: string): string => read(historicalPolicyPhysicalPath(path));\n"
+        },
+        {
+          "beforeOffset": 1979,
+          "afterOffset": 2978,
+          "before": "            beforeGeneratorInventoryPolicy(JSON.parse(read(\"scripts/compiler-boundaries.json\"))),\n",
+          "after": "            beforeGeneratorInventoryPolicy(\n              beforeCurrentMainInventoryPolicy(JSON.parse(read(\"scripts/compiler-boundaries.json\"))),\n            ),\n"
+        },
+        {
+          "beforeOffset": 4343,
+          "afterOffset": 5405,
+          "before": "                beforeGeneratorInventoryPolicySource(read(\"scripts/compiler-boundaries.json\")),\n",
+          "after": "                beforeGeneratorInventoryPolicySource(\n                  beforeCurrentMainInventoryPolicySource(read(\"scripts/compiler-boundaries.json\")),\n                ),\n"
+        },
+        {
+          "beforeOffset": 5624,
+          "afterOffset": 6763,
+          "before": "",
+          "after": "    const read = readHistoricalPolicyOperand;\n"
+        }
+      ]
+    },
+    {
+      "path": "tests/issue-3518-well-known-symbol-policy-evolution.test.ts",
+      "beforePin": {
+        "bytes": 25860,
+        "sha256": "a93174185368356b0be2527e3f253fc49cc31e01cd8bbd4ba6cb2431bb66e831",
+        "gitBlob": "65873b916d8cfd49804377d0e5045f2e77ee5fe9"
+      },
+      "afterPin": {
+        "bytes": 26934,
+        "sha256": "ce227fbc7704c843dadfe1a763e7f2334fa51dec232b672401b8542ebabf7fa6",
+        "gitBlob": "7d2a2d93db80e48405fdaa4795e8d0e8b6df4669"
+      },
+      "spans": [
+        {
+          "beforeOffset": 879,
+          "afterOffset": 879,
+          "before": "",
+          "after": "  beforeCurrentMainInventoryPolicySource,\n"
+        },
+        {
+          "beforeOffset": 1169,
+          "afterOffset": 1211,
+          "before": "",
+          "after": "import { c1HistoricalArtifactPath, type C1HistoricalLogicalPath } from \"./helpers/ir-c1-historical-authority.js\";\n\n"
+        },
+        {
+          "beforeOffset": 1270,
+          "afterOffset": 1427,
+          "before": "",
+          "after": "const historicalPolicyOperandPaths: readonly string[] = [\n  \"tests/issue-3518-runtime-program-relocation.test.ts\",\n  \"tests/issue-3518-program-data-contract-seam.test.ts\",\n  \"tests/issue-3518-program-ownership-runtime-seam.test.ts\",\n  \"tests/issue-3518-program-pre-a-evolution.test.ts\",\n  \"tests/issue-3518-program-initial-graph-evolution.test.ts\",\n  \"tests/helpers/ir-runtime-program-policy-evolution.ts\",\n];\nconst historicalPolicyPhysicalPath = (path: string): string =>\n  historicalPolicyOperandPaths.includes(path) ? c1HistoricalArtifactPath(path as C1HistoricalLogicalPath) : path;\n// Raw physical operand reads let the original mutation assertions inspect corruption before the guard rejects it.\nconst readHistoricalPolicyOperand = (path: string): string => read(historicalPolicyPhysicalPath(path));\n"
+        },
+        {
+          "beforeOffset": 1704,
+          "afterOffset": 2667,
+          "before": "          beforeGeneratorInventoryPolicySource(read(\"scripts/compiler-boundaries.json\")),\n",
+          "after": "          beforeGeneratorInventoryPolicySource(\n            beforeCurrentMainInventoryPolicySource(read(\"scripts/compiler-boundaries.json\")),\n          ),\n"
+        },
+        {
+          "beforeOffset": 5907,
+          "afterOffset": 6935,
+          "before": "",
+          "after": "    const read = readHistoricalPolicyOperand;\n"
+        }
+      ]
+    },
+    {
+      "path": "tests/issue-3518-number-prerequisite-policy-evolution.test.ts",
+      "beforePin": {
+        "bytes": 102608,
+        "sha256": "ada05306b0868fc4fcf6c9816042bc4cfeca00a1fef8fec68d85e95622474e34",
+        "gitBlob": "924eadef80e2aa3936c895f3d39d42973e1537b5"
+      },
+      "afterPin": {
+        "bytes": 104491,
+        "sha256": "7f5758673b2b492b28ce4e175262ccf537ad791c988ef069d4c635df7ac65e96",
+        "gitBlob": "eeaafc9bedace7acc876520b57f0b2e80d10edbc"
+      },
+      "spans": [
+        {
+          "beforeOffset": 1553,
+          "afterOffset": 1553,
+          "before": "",
+          "after": "  beforeCurrentMainInventoryPolicySource,\n"
+        },
+        {
+          "beforeOffset": 2768,
+          "afterOffset": 2810,
+          "before": "",
+          "after": "import { c1HistoricalArtifactPath, type C1HistoricalLogicalPath } from \"./helpers/ir-c1-historical-authority.js\";\n\n"
+        },
+        {
+          "beforeOffset": 2869,
+          "afterOffset": 3026,
+          "before": "",
+          "after": "const historicalPolicyOperandPaths: readonly string[] = [\n  \"tests/issue-3518-runtime-program-relocation.test.ts\",\n  \"tests/issue-3518-program-data-contract-seam.test.ts\",\n  \"tests/issue-3518-program-ownership-runtime-seam.test.ts\",\n  \"tests/issue-3518-program-pre-a-evolution.test.ts\",\n  \"tests/issue-3518-program-initial-graph-evolution.test.ts\",\n  \"tests/helpers/ir-runtime-program-policy-evolution.ts\",\n];\nconst historicalPolicyPhysicalPath = (path: string): string =>\n  historicalPolicyOperandPaths.includes(path) ? c1HistoricalArtifactPath(path as C1HistoricalLogicalPath) : path;\n// Raw physical operand reads let the original mutation assertions inspect corruption before the guard rejects it.\nconst readHistoricalPolicyOperand = (path: string): string => read(historicalPolicyPhysicalPath(path));\n"
+        },
+        {
+          "beforeOffset": 3342,
+          "afterOffset": 4305,
+          "before": "        beforeGeneratorInventoryPolicySource(read(\"scripts/compiler-boundaries.json\")),\n",
+          "after": "        beforeGeneratorInventoryPolicySource(\n          beforeCurrentMainInventoryPolicySource(read(\"scripts/compiler-boundaries.json\")),\n        ),\n"
+        },
+        {
+          "beforeOffset": 8103,
+          "afterOffset": 9127,
+          "before": "",
+          "after": "    const read = readHistoricalPolicyOperand;\n"
+        },
+        {
+          "beforeOffset": 32724,
+          "afterOffset": 33794,
+          "before": "",
+          "after": "      const read = readHistoricalPolicyOperand;\n"
+        },
+        {
+          "beforeOffset": 32970,
+          "afterOffset": 34088,
+          "before": "        const exactPath = new URL(`../${path}`, import.meta.url).pathname;\n",
+          "after": "        const exactPath = new URL(`../${historicalPolicyPhysicalPath(path)}`, import.meta.url).pathname;\n"
+        },
+        {
+          "beforeOffset": 33502,
+          "afterOffset": 34650,
+          "before": "        const exactPath = new URL(`../${path}`, import.meta.url).pathname;\n",
+          "after": "        const exactPath = new URL(`../${historicalPolicyPhysicalPath(path)}`, import.meta.url).pathname;\n"
+        },
+        {
+          "beforeOffset": 38030,
+          "afterOffset": 39208,
+          "before": "        beforeGeneratorInventoryPolicySource(read(\"scripts/compiler-boundaries.json\")),\n",
+          "after": "        beforeGeneratorInventoryPolicySource(\n          beforeCurrentMainInventoryPolicySource(read(\"scripts/compiler-boundaries.json\")),\n        ),\n"
+        },
+        {
+          "beforeOffset": 39507,
+          "afterOffset": 40746,
+          "before": "",
+          "after": "    const read = readHistoricalPolicyOperand;\n"
+        },
+        {
+          "beforeOffset": 50386,
+          "afterOffset": 51671,
+          "before": "",
+          "after": "      const read = readHistoricalPolicyOperand;\n"
+        },
+        {
+          "beforeOffset": 50472,
+          "afterOffset": 51805,
+          "before": "        exact = new URL(`../${pin}`, import.meta.url).pathname;\n",
+          "after": "        exact = new URL(`../${historicalPolicyPhysicalPath(pin)}`, import.meta.url).pathname;\n"
+        },
+        {
+          "beforeOffset": 54541,
+          "afterOffset": 55904,
+          "before": "      beforeGeneratorInventoryPolicySource(read(\"scripts/compiler-boundaries.json\")),\n",
+          "after": "      beforeGeneratorInventoryPolicySource(\n        beforeCurrentMainInventoryPolicySource(read(\"scripts/compiler-boundaries.json\")),\n      ),\n"
+        },
+        {
+          "beforeOffset": 56567,
+          "afterOffset": 57987,
+          "before": "",
+          "after": "    const read = readHistoricalPolicyOperand;\n"
+        },
+        {
+          "beforeOffset": 73138,
+          "afterOffset": 74604,
+          "before": "",
+          "after": "    const read = readHistoricalPolicyOperand;\n"
+        },
+        {
+          "beforeOffset": 73217,
+          "afterOffset": 74729,
+          "before": "      exact = new URL(`../${path}`, import.meta.url).pathname;\n",
+          "after": "      exact = new URL(`../${historicalPolicyPhysicalPath(path)}`, import.meta.url).pathname;\n"
+        },
+        {
+          "beforeOffset": 74247,
+          "afterOffset": 75789,
+          "before": "  const hostRaw = (): string => beforeGeneratorInventoryPolicySource(read(\"scripts/compiler-boundaries.json\"));\n",
+          "after": "  const hostRaw = (): string =>\n    beforeGeneratorInventoryPolicySource(\n      beforeCurrentMainInventoryPolicySource(read(\"scripts/compiler-boundaries.json\")),\n    );\n"
+        },
+        {
+          "beforeOffset": 76033,
+          "afterOffset": 77632,
+          "before": "",
+          "after": "    const read = readHistoricalPolicyOperand;\n"
+        },
+        {
+          "beforeOffset": 86899,
+          "afterOffset": 88544,
+          "before": "",
+          "after": "    const read = readHistoricalPolicyOperand;\n"
+        },
+        {
+          "beforeOffset": 86980,
+          "afterOffset": 88671,
+          "before": "      exact = new URL(`../${path}`, import.meta.url).pathname;\n",
+          "after": "      exact = new URL(`../${historicalPolicyPhysicalPath(path)}`, import.meta.url).pathname;\n"
+        },
+        {
+          "beforeOffset": 88024,
+          "afterOffset": 89745,
+          "before": "  const generatorRaw = (): string => read(\"scripts/compiler-boundaries.json\");\n",
+          "after": "  const generatorRaw = (): string => beforeCurrentMainInventoryPolicySource(read(\"scripts/compiler-boundaries.json\"));\n"
+        },
+        {
+          "beforeOffset": 89784,
+          "afterOffset": 91545,
+          "before": "",
+          "after": "    const read = readHistoricalPolicyOperand;\n"
+        },
+        {
+          "beforeOffset": 101637,
+          "afterOffset": 103444,
+          "before": "",
+          "after": "    const read = readHistoricalPolicyOperand;\n"
+        },
+        {
+          "beforeOffset": 101728,
+          "afterOffset": 103581,
+          "before": "      exact = new URL(`../${path}`, import.meta.url).pathname;\n",
+          "after": "      exact = new URL(`../${historicalPolicyPhysicalPath(path)}`, import.meta.url).pathname;\n"
+        }
+      ]
+    }
+  ],
+  "population": {
+    "receiptPath": "tests/helpers/ir-runtime-program-relocation.json",
+    "receiptSha256": "aeeae92fa9c31d8d7ae6aa8805c91862cb1fa2b79486fa4d69cce29d7d065763",
+    "currentPaths": [
+      "src/ir/program.ts",
+      "src/ir/program/owner.ts",
+      "src/ir/program-abi-contracts.ts",
+      "src/ir/program/draft-abi-lookup.ts",
+      "src/ir/prepared-component-dependencies.ts",
+      "src/ir/program/runtime-support-dependencies.ts",
+      "src/ir/generator-support.ts",
+      "src/ir/runtime/generator-support.ts"
+    ],
+    "dependencyPaths": [
+      "src/codegen-linear/index.ts",
+      "src/ir/abi-bindings.ts",
+      "src/ir/backend/legality.ts",
+      "src/ir/callable-bindings.ts",
+      "src/ir/capability-abi-validation.ts",
+      "src/ir/core/callable-bindings.ts",
+      "src/ir/core/nodes.ts",
+      "src/ir/core/type-binding-keys.ts",
+      "src/ir/core/types.ts",
+      "src/ir/core/value-references.ts",
+      "src/ir/identity-values.ts",
+      "src/ir/identity.ts",
+      "src/ir/nodes.ts",
+      "src/ir/prepared-component-ownership.ts",
+      "src/ir/prepared-instruction-support.ts",
+      "src/ir/program-abi.ts",
+      "src/ir/program-callable-contract.ts",
+      "src/ir/program-runtime-abi.ts",
+      "src/ir/program-validation.ts",
+      "src/ir/program/abi-lookup.ts",
+      "src/ir/program/abi-signatures.ts",
+      "src/ir/program/abi.ts",
+      "src/ir/program/callable-bindings.ts",
+      "src/ir/program/data.ts",
+      "src/ir/program/errors.ts",
+      "src/ir/program/formatter-support.ts",
+      "src/ir/program/input-contracts.ts",
+      "src/ir/program/prepared-contracts.ts",
+      "src/ir/program/runtime-support.ts",
+      "src/ir/program/startup.ts",
+      "src/ir/runtime-callable-declarations.ts",
+      "src/ir/runtime-manifest.ts",
+      "src/ir/runtime/contracts/prepared.ts",
+      "src/ir/runtime/native-async-callables.ts",
+      "src/ir/string-runtime.ts",
+      "src/ir/types.ts",
+      "src/shared/contracts/ir-identity.ts",
+      "src/shared/contracts/ir-unit-inventory.ts"
+    ],
+    "donorPairs": [
+      ["src/ir/program.ts", "src/ir/program/owner.ts"],
+      ["src/ir/program-abi-contracts.ts", "src/ir/program/draft-abi-lookup.ts"],
+      ["src/ir/prepared-component-dependencies.ts", "src/ir/program/runtime-support-dependencies.ts"],
+      ["src/ir/generator-support.ts", "src/ir/runtime/generator-support.ts"]
+    ],
+    "transferCount": 91,
+    "movedCount": 12,
+    "retainedCount": 79
+  },
+  "linearOptions": {
+    "sourcePath": "src/codegen-linear/index.ts",
+    "declaration": {
+      "kind": "InterfaceDeclaration",
+      "name": "LinearOptions",
+      "exported": true,
+      "typeParameterCount": 0,
+      "heritageClauseCount": 0,
+      "span": "getStart-to-end-utf8",
+      "pin": {
+        "bytes": 1633,
+        "sha256": "5294c0fce2be6c6974b61a3686c05e60aa66d5bb4599fc97cb315ee53cab71be",
+        "gitBlob": "8c594e598e0d946ed92fd658cbe2efe3063ca2c4"
+      }
+    },
+    "bindings": [
+      {
+        "kind": "named-import",
+        "localName": "BuildIrUnitInventoryOptions",
+        "importedName": "BuildIrUnitInventoryOptions",
+        "module": "../ir/identity.js",
+        "targetPath": "src/ir/identity.ts",
+        "clauseTypeOnly": true,
+        "specifierTypeOnly": false
+      },
+      {
+        "kind": "named-import",
+        "localName": "LinearAllocatorPolicyId",
+        "importedName": "LinearAllocatorPolicyId",
+        "module": "../ir/analysis/linear-memory-plan.js",
+        "targetPath": "src/ir/analysis/linear-memory-plan.ts",
+        "clauseTypeOnly": false,
+        "specifierTypeOnly": true
+      },
+      {
+        "kind": "named-import",
+        "localName": "ExternCImportSpec",
+        "importedName": "ExternCImportSpec",
+        "module": "./c-abi.js",
+        "targetPath": "src/codegen-linear/c-abi.ts",
+        "clauseTypeOnly": false,
+        "specifierTypeOnly": true
+      },
+      {
+        "kind": "import-type",
+        "qualifier": "OracleBackend",
+        "module": "../checker/oracle-backend.js",
+        "targetPath": "src/checker/oracle-backend.ts"
+      }
+    ],
+    "closureInputs": [
+      {
+        "path": "src/ir/identity.ts",
+        "pin": {
+          "bytes": 61452,
+          "sha256": "ac9bcf913f1bbe4358f020307b3fd25b47c0fac26be88dfde449ba1d33694e44",
+          "gitBlob": "4a47d555bb511e921e2e9fd70902fa9275d3329a"
+        }
+      },
+      {
+        "path": "src/ir/analysis/linear-memory-plan.ts",
+        "pin": {
+          "bytes": 52704,
+          "sha256": "382cb4acee2de86904da1c0162ecc8b9de4250f9f9cb49dcba57b1a056c1cc3c",
+          "gitBlob": "ae6f9ab03e01c80622e56a69c5b05c6826366d69"
+        }
+      },
+      {
+        "path": "src/checker/oracle-backend.ts",
+        "pin": {
+          "bytes": 12541,
+          "sha256": "870ae53149999324e1a71e6f1b818c139e2710d92ffcd4a78f42317becb58d60",
+          "gitBlob": "1f3d24ed9bb8d07dcbfe5d7a88c16d7059160d93"
+        }
+      },
+      {
+        "path": "src/codegen-linear/c-abi.ts",
+        "pin": {
+          "bytes": 26965,
+          "sha256": "fba055c0a5ed1b823b1bb8644c5cb495e0b26bb087bf36b5d746efda708fb308",
+          "gitBlob": "37eb30e8691a7e30033c74bc03bd386dc08e9d49"
+        }
+      },
+      {
+        "path": "src/codegen-linear/refcount/ownership.ts",
+        "pin": {
+          "bytes": 12067,
+          "sha256": "35a3de8fc817744c5465444e7057652b508c8c8c099d0389a06ee4182fa061e6",
+          "gitBlob": "1f82b3498530a5e7c262b6d2f8aa024605c24d96"
+        }
+      },
+      {
+        "path": "src/ir/types.ts",
+        "pin": {
+          "bytes": 7744,
+          "sha256": "d82e92ee276dd9a57bd69d9dee16410d24225a028bd9dca53bc406f69b9623ac",
+          "gitBlob": "f7717d7c70bb57bd73d799a1d26d1825aa0a41e8"
+        }
+      },
+      {
+        "path": "src/wasm/model/instructions.ts",
+        "pin": {
+          "bytes": 14904,
+          "sha256": "b305b96583e473272f26032cd1e4ad4653a32d4f56db74df50dac7f1c2461b6d",
+          "gitBlob": "699c7b386f529b6017659a2f4b0f3c5671235969"
+        }
+      },
+      {
+        "path": "src/position-map.ts",
+        "pin": {
+          "bytes": 6306,
+          "sha256": "18e228f204079171a28bfc763514fe54aa30030b3e1529dae706f86488b0aecb",
+          "gitBlob": "a79a6f460eae2d51028e1eef673b3f7b363ae243"
+        }
+      },
+      {
+        "path": "src/shared/contracts/source-origin.ts",
+        "pin": {
+          "bytes": 689,
+          "sha256": "cc8e05036afdaca04c3e7055ad22f82c57f6e2e31b7e49a69e9081823c2eacde",
+          "gitBlob": "7d9e62164db0594b761ea88eac9a07ac2d142f73"
+        }
+      },
+      {
+        "path": "src/shared/contracts/ir-unit-inventory.ts",
+        "pin": {
+          "bytes": 4708,
+          "sha256": "f6f253cefa3b4618bd5f2daf2555b6c0d734a715f2dd44a30a83921c0d9b6496",
+          "gitBlob": "e7f088edffda5ef76b726b6786341e5bcc744078"
+        }
+      },
+      {
+        "path": "src/ts-api.ts",
+        "pin": {
+          "bytes": 13456,
+          "sha256": "0b717e14e79b0378e1f350cd23953a63a8df772816c10d9232f36ad54716cc57",
+          "gitBlob": "703ba16ec711d51d26696f76d9b0c34bd28d1d24"
+        }
+      },
+      {
+        "path": "src/frontend/typescript.ts",
+        "pin": {
+          "bytes": 213,
+          "sha256": "9ac41b7a2454026a43ecd3a4358405cfe79d613902680909a30e1b0fe5f0a915",
+          "gitBlob": "31601e20682fee617baef9eb35ff68a8ce981332"
+        }
+      }
+    ],
+    "resolver": {
+      "configInputs": [
+        {
+          "path": "tsconfig.json",
+          "pin": {
+            "bytes": 448,
+            "sha256": "c520c3a1d8da732e73833cb53571f93609d0c899f6bcf638d752cb91b8c1fa79",
+            "gitBlob": "dd5723f20608733c377fba47189ac638808dd365"
+          }
+        },
+        {
+          "path": "package.json",
+          "pin": {
+            "bytes": 29631,
+            "sha256": "6dcd7ca0c6895e71d3bc3373c05b49b6d6b0a07df8732131386e557d82dc6434",
+            "gitBlob": "57ab56f8f065cf84e366bc0f61269336444b0b7b"
+          }
+        },
+        {
+          "path": "pnpm-lock.yaml",
+          "pin": {
+            "bytes": 292598,
+            "sha256": "cd18b2b644544c06017f91c790c44156d6ad178e568b5ae2b3746b0740728273",
+            "gitBlob": "70f62186954477b320c5af66514303e024d8e9c1"
+          }
+        }
+      ],
+      "optionsSource": "tsconfig.json",
+      "optionsSha256": "14b92244397c618aae42e620c2378477d6736ddfe7e10ca1c21665acfd0b83af",
+      "requests": [
+        {
+          "containingFile": "src/codegen-linear/index.ts",
+          "module": "../ir/identity.js",
+          "target": {
+            "scope": "repository",
+            "path": "src/ir/identity.ts"
+          }
+        },
+        {
+          "containingFile": "src/codegen-linear/index.ts",
+          "module": "../ir/analysis/linear-memory-plan.js",
+          "target": {
+            "scope": "repository",
+            "path": "src/ir/analysis/linear-memory-plan.ts"
+          }
+        },
+        {
+          "containingFile": "src/codegen-linear/index.ts",
+          "module": "./c-abi.js",
+          "target": {
+            "scope": "repository",
+            "path": "src/codegen-linear/c-abi.ts"
+          }
+        },
+        {
+          "containingFile": "src/codegen-linear/index.ts",
+          "module": "../checker/oracle-backend.js",
+          "target": {
+            "scope": "repository",
+            "path": "src/checker/oracle-backend.ts"
+          }
+        },
+        {
+          "containingFile": "src/ir/identity.ts",
+          "module": "../position-map.js",
+          "target": {
+            "scope": "repository",
+            "path": "src/position-map.ts"
+          }
+        },
+        {
+          "containingFile": "src/ir/identity.ts",
+          "module": "../shared/contracts/ir-unit-inventory.js",
+          "target": {
+            "scope": "repository",
+            "path": "src/shared/contracts/ir-unit-inventory.ts"
+          }
+        },
+        {
+          "containingFile": "src/ir/identity.ts",
+          "module": "../ts-api.js",
+          "target": {
+            "scope": "repository",
+            "path": "src/ts-api.ts"
+          }
+        },
+        {
+          "containingFile": "src/codegen-linear/c-abi.ts",
+          "module": "../ir/types.js",
+          "target": {
+            "scope": "repository",
+            "path": "src/ir/types.ts"
+          }
+        },
+        {
+          "containingFile": "src/codegen-linear/c-abi.ts",
+          "module": "./refcount/ownership.js",
+          "target": {
+            "scope": "repository",
+            "path": "src/codegen-linear/refcount/ownership.ts"
+          }
+        },
+        {
+          "containingFile": "src/ir/types.ts",
+          "module": "../wasm/model/instructions.js",
+          "target": {
+            "scope": "repository",
+            "path": "src/wasm/model/instructions.ts"
+          }
+        },
+        {
+          "containingFile": "src/position-map.ts",
+          "module": "./shared/contracts/source-origin.js",
+          "target": {
+            "scope": "repository",
+            "path": "src/shared/contracts/source-origin.ts"
+          }
+        },
+        {
+          "containingFile": "src/ts-api.ts",
+          "module": "./frontend/typescript.js",
+          "target": {
+            "scope": "repository",
+            "path": "src/frontend/typescript.ts"
+          }
+        },
+        {
+          "containingFile": "src/frontend/typescript.ts",
+          "module": "typescript",
+          "target": {
+            "scope": "typescript-package",
+            "path": "lib/typescript.d.ts"
+          }
+        }
+      ],
+      "observations": [
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/ir"
+          },
+          "exists": true
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/ir"
+          },
+          "exists": true
+        },
+        {
+          "operation": "fileExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/ir/identity.ts"
+          },
+          "exists": true
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/ir/analysis"
+          },
+          "exists": true
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/ir/analysis"
+          },
+          "exists": true
+        },
+        {
+          "operation": "fileExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/ir/analysis/linear-memory-plan.ts"
+          },
+          "exists": true
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/codegen-linear"
+          },
+          "exists": true
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/codegen-linear"
+          },
+          "exists": true
+        },
+        {
+          "operation": "fileExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/codegen-linear/c-abi.ts"
+          },
+          "exists": true
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/checker"
+          },
+          "exists": true
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/checker"
+          },
+          "exists": true
+        },
+        {
+          "operation": "fileExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/checker/oracle-backend.ts"
+          },
+          "exists": true
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "repository",
+            "path": "src"
+          },
+          "exists": true
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "repository",
+            "path": "src"
+          },
+          "exists": true
+        },
+        {
+          "operation": "fileExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/position-map.ts"
+          },
+          "exists": true
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/shared/contracts"
+          },
+          "exists": true
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/shared/contracts"
+          },
+          "exists": true
+        },
+        {
+          "operation": "fileExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/shared/contracts/ir-unit-inventory.ts"
+          },
+          "exists": true
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "repository",
+            "path": "src"
+          },
+          "exists": true
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "repository",
+            "path": "src"
+          },
+          "exists": true
+        },
+        {
+          "operation": "fileExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/ts-api.ts"
+          },
+          "exists": true
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/ir"
+          },
+          "exists": true
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/ir"
+          },
+          "exists": true
+        },
+        {
+          "operation": "fileExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/ir/types.ts"
+          },
+          "exists": true
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/codegen-linear/refcount"
+          },
+          "exists": true
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/codegen-linear/refcount"
+          },
+          "exists": true
+        },
+        {
+          "operation": "fileExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/codegen-linear/refcount/ownership.ts"
+          },
+          "exists": true
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/wasm/model"
+          },
+          "exists": true
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/wasm/model"
+          },
+          "exists": true
+        },
+        {
+          "operation": "fileExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/wasm/model/instructions.ts"
+          },
+          "exists": true
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/shared/contracts"
+          },
+          "exists": true
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/shared/contracts"
+          },
+          "exists": true
+        },
+        {
+          "operation": "fileExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/shared/contracts/source-origin.ts"
+          },
+          "exists": true
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/frontend"
+          },
+          "exists": true
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/frontend"
+          },
+          "exists": true
+        },
+        {
+          "operation": "fileExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/frontend/typescript.ts"
+          },
+          "exists": true
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/frontend"
+          },
+          "exists": true
+        },
+        {
+          "operation": "fileExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/frontend/package.json"
+          },
+          "exists": false
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "repository",
+            "path": "src"
+          },
+          "exists": true
+        },
+        {
+          "operation": "fileExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/package.json"
+          },
+          "exists": false
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "repository",
+            "path": ""
+          },
+          "exists": true
+        },
+        {
+          "operation": "fileExists",
+          "location": {
+            "scope": "repository",
+            "path": "package.json"
+          },
+          "exists": true
+        },
+        {
+          "operation": "readFile",
+          "location": {
+            "scope": "repository",
+            "path": "package.json"
+          },
+          "pin": {
+            "bytes": 29631,
+            "sha256": "6dcd7ca0c6895e71d3bc3373c05b49b6d6b0a07df8732131386e557d82dc6434",
+            "gitBlob": "57ab56f8f065cf84e366bc0f61269336444b0b7b"
+          }
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/frontend/node_modules"
+          },
+          "exists": false
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "repository",
+            "path": "src/node_modules"
+          },
+          "exists": false
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "repository",
+            "path": "node_modules"
+          },
+          "exists": true
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "typescript-package",
+            "path": ""
+          },
+          "exists": true
+        },
+        {
+          "operation": "fileExists",
+          "location": {
+            "scope": "typescript-package",
+            "path": "package.json"
+          },
+          "exists": true
+        },
+        {
+          "operation": "readFile",
+          "location": {
+            "scope": "typescript-package",
+            "path": "package.json"
+          },
+          "pin": {
+            "bytes": 3620,
+            "sha256": "822ef7ca6452205657b6288b066481ecf508bfbf43455d715cf7d3ec457561e6",
+            "gitBlob": "cccb75de5b204bdd6f084eda262c2e3835a163a3"
+          }
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "repository",
+            "path": "node_modules"
+          },
+          "exists": true
+        },
+        {
+          "operation": "fileExists",
+          "location": {
+            "scope": "repository",
+            "path": "node_modules/typescript.ts"
+          },
+          "exists": false
+        },
+        {
+          "operation": "fileExists",
+          "location": {
+            "scope": "repository",
+            "path": "node_modules/typescript.tsx"
+          },
+          "exists": false
+        },
+        {
+          "operation": "fileExists",
+          "location": {
+            "scope": "repository",
+            "path": "node_modules/typescript.d.ts"
+          },
+          "exists": false
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "typescript-package",
+            "path": "lib"
+          },
+          "exists": true
+        },
+        {
+          "operation": "directoryExists",
+          "location": {
+            "scope": "typescript-package",
+            "path": ""
+          },
+          "exists": true
+        },
+        {
+          "operation": "fileExists",
+          "location": {
+            "scope": "typescript-package",
+            "path": "lib/typescript.d.ts"
+          },
+          "exists": true
+        },
+        {
+          "operation": "realpath",
+          "location": {
+            "scope": "typescript-package",
+            "path": "lib/typescript.d.ts"
+          },
+          "target": {
+            "scope": "typescript-package",
+            "path": "lib/typescript.d.ts"
+          }
+        }
+      ]
+    }
+  }
+}

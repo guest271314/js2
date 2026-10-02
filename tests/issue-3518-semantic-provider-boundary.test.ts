@@ -22,6 +22,7 @@ import {
   beforeWellKnownSymbolPolicy,
   beforeIrRuntimeProgramPolicy,
   type MutableIrRuntimeProgramPolicy,
+  beforeCurrentMainInventoryPolicy,
 } from "./helpers/ir-runtime-program-policy-evolution.js";
 
 const repository = resolve(import.meta.dirname, "..");
@@ -405,7 +406,9 @@ const policy = () => {
     beforeDynamicCodeInventoryPolicy(
       beforeHostCarrierInventoryPolicy(
         beforeGeneratorInventoryPolicy(
-          JSON.parse(readFileSync(resolve(repository, "scripts/compiler-boundaries.json"), "utf8")),
+          beforeCurrentMainInventoryPolicy(
+            JSON.parse(readFileSync(resolve(repository, "scripts/compiler-boundaries.json"), "utf8")),
+          ),
         ),
       ),
     ),

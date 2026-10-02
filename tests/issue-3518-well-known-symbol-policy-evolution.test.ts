@@ -19,13 +19,28 @@ import {
   beforeIrRuntimeProgramPolicy,
   irRuntimeProgramPolicyReceiptPath,
   type MutableIrRuntimeProgramPolicy as Policy,
+  beforeCurrentMainInventoryPolicySource,
 } from "./helpers/ir-runtime-program-policy-evolution.js";
 import { authenticateIrValidationPolicy } from "./helpers/ir-validation-policy-evolution.js";
 afterEach(async () => {
   // Yield between synchronous source proofs so Vitest can process task-update RPCs.
   await setImmediate();
 });
+import { c1HistoricalArtifactPath, type C1HistoricalLogicalPath } from "./helpers/ir-c1-historical-authority.js";
+
 const read = (path: string): string => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
+const historicalPolicyOperandPaths: readonly string[] = [
+  "tests/issue-3518-runtime-program-relocation.test.ts",
+  "tests/issue-3518-program-data-contract-seam.test.ts",
+  "tests/issue-3518-program-ownership-runtime-seam.test.ts",
+  "tests/issue-3518-program-pre-a-evolution.test.ts",
+  "tests/issue-3518-program-initial-graph-evolution.test.ts",
+  "tests/helpers/ir-runtime-program-policy-evolution.ts",
+];
+const historicalPolicyPhysicalPath = (path: string): string =>
+  historicalPolicyOperandPaths.includes(path) ? c1HistoricalArtifactPath(path as C1HistoricalLogicalPath) : path;
+// Raw physical operand reads let the original mutation assertions inspect corruption before the guard rejects it.
+const readHistoricalPolicyOperand = (path: string): string => read(historicalPolicyPhysicalPath(path));
 const sha = (text: string): string => createHash("sha256").update(text).digest("hex");
 const digest = (value: unknown): string => sha(JSON.stringify(value));
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
@@ -34,7 +49,9 @@ const raw = (): string =>
     beforeRuntimePreparationPolicySource(
       beforeDynamicCodeInventoryPolicySource(
         beforeHostCarrierInventoryPolicySource(
-          beforeGeneratorInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+          beforeGeneratorInventoryPolicySource(
+            beforeCurrentMainInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+          ),
         ),
       ),
     ),
@@ -143,6 +160,7 @@ describe("WKS exact successor of genuine C1 and B", () => {
     accepted();
   });
   it("freshly checks all nineteen immutable inputs and the entire original helper prefix", () => {
+    const read = readHistoricalPolicyOperand;
     const r = receipt(),
       c1 = authenticateIrRuntimeProgramPolicyEvolution();
     expect(Buffer.byteLength(receiptText())).toBe(9470);

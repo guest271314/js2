@@ -1,7 +1,8 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { setImmediate } from "node:timers/promises";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   authenticateIrValidationPolicy,
   authenticateIrValidationPolicyEvolution,
@@ -18,7 +19,13 @@ import {
   beforeDynamicCodeInventoryPolicy,
   beforeRuntimePreparationPolicy,
   beforeNumberPrerequisitePolicy,
+  beforeCurrentMainInventoryPolicy,
 } from "./helpers/ir-runtime-program-policy-evolution.js";
+
+afterEach(async () => {
+  // Yield between synchronous source proofs so Vitest can process task-update RPCs.
+  await setImmediate();
+});
 
 interface MutablePolicy {
   layers: { id: string; entries: string[]; roots: string[]; minModules: number; status: string; required: boolean }[];
@@ -38,7 +45,9 @@ function actual(): MutablePolicy {
         beforeRuntimePreparationPolicy(
           beforeDynamicCodeInventoryPolicy(
             beforeHostCarrierInventoryPolicy(
-              beforeGeneratorInventoryPolicy(JSON.parse(read("scripts/compiler-boundaries.json"))),
+              beforeGeneratorInventoryPolicy(
+                beforeCurrentMainInventoryPolicy(JSON.parse(read("scripts/compiler-boundaries.json"))),
+              ),
             ),
           ),
         ),

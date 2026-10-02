@@ -36,6 +36,7 @@ import {
   authenticateIrRuntimeProgramPolicy,
   beforeIrRuntimeProgramPolicy,
   type MutableIrRuntimeProgramPolicy as Policy,
+  beforeCurrentMainInventoryPolicySource,
 } from "./helpers/ir-runtime-program-policy-evolution.js";
 import { authenticateIrValidationPolicy } from "./helpers/ir-validation-policy-evolution.js";
 afterEach(async () => {
@@ -64,7 +65,21 @@ vi.mock("node:fs", async (importOriginal) => {
     },
   };
 });
+import { c1HistoricalArtifactPath, type C1HistoricalLogicalPath } from "./helpers/ir-c1-historical-authority.js";
+
 const read = (path: string): string => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
+const historicalPolicyOperandPaths: readonly string[] = [
+  "tests/issue-3518-runtime-program-relocation.test.ts",
+  "tests/issue-3518-program-data-contract-seam.test.ts",
+  "tests/issue-3518-program-ownership-runtime-seam.test.ts",
+  "tests/issue-3518-program-pre-a-evolution.test.ts",
+  "tests/issue-3518-program-initial-graph-evolution.test.ts",
+  "tests/helpers/ir-runtime-program-policy-evolution.ts",
+];
+const historicalPolicyPhysicalPath = (path: string): string =>
+  historicalPolicyOperandPaths.includes(path) ? c1HistoricalArtifactPath(path as C1HistoricalLogicalPath) : path;
+// Raw physical operand reads let the original mutation assertions inspect corruption before the guard rejects it.
+const readHistoricalPolicyOperand = (path: string): string => read(historicalPolicyPhysicalPath(path));
 const sha = (text: string): string => createHash("sha256").update(text).digest("hex");
 const digest = (value: unknown): string => sha(JSON.stringify(value));
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
@@ -73,7 +88,9 @@ const raw = (): string =>
   beforeRuntimePreparationPolicySource(
     beforeDynamicCodeInventoryPolicySource(
       beforeHostCarrierInventoryPolicySource(
-        beforeGeneratorInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+        beforeGeneratorInventoryPolicySource(
+          beforeCurrentMainInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+        ),
       ),
     ),
   );
@@ -193,6 +210,7 @@ describe("Number prerequisite exact successor of genuine WKS, C1 and B", () => {
     accepted();
   });
   it("pins all 28 full files, exact WKS and nested C1 prefixes, and complete predecessor profile", () => {
+    const read = readHistoricalPolicyOperand;
     const r = receipt(),
       wks = authenticateWellKnownSymbolPolicyEvolution();
     expect(Buffer.byteLength(receiptText())).toBe(12726);
@@ -750,6 +768,7 @@ describe("Number prerequisite exact successor of genuine WKS, C1 and B", () => {
     "tests/helpers/ir-runtime-program-policy-number-prerequisites.json",
   ]) {
     it(`freshly rejects changed file bytes for ${path} through every public action after warm success and restores`, () => {
+      const read = readHistoricalPolicyOperand;
       const p = actual(),
         text = raw(),
         original = read(path);
@@ -758,7 +777,7 @@ describe("Number prerequisite exact successor of genuine WKS, C1 and B", () => {
       beforeNumberPrerequisitePolicy(p);
       beforeNumberPrerequisitePolicySource(text);
       try {
-        const exactPath = new URL(`../${path}`, import.meta.url).pathname;
+        const exactPath = new URL(`../${historicalPolicyPhysicalPath(path)}`, import.meta.url).pathname;
         interceptedReads.set(exactPath, 0);
         intercepted.set(exactPath, 0);
         expect(read(path)).not.toBe(original);
@@ -768,7 +787,7 @@ describe("Number prerequisite exact successor of genuine WKS, C1 and B", () => {
         expect(() => beforeNumberPrerequisitePolicySource(text)).toThrow();
         expect(interceptedReads.get(exactPath)).toBeGreaterThanOrEqual(6);
       } finally {
-        const exactPath = new URL(`../${path}`, import.meta.url).pathname;
+        const exactPath = new URL(`../${historicalPolicyPhysicalPath(path)}`, import.meta.url).pathname;
         intercepted.delete(exactPath);
         interceptedReads.delete(exactPath);
       }
@@ -885,7 +904,9 @@ describe("C2a exact runtime preparation policy successor", () => {
   const currentRaw = (): string =>
     beforeDynamicCodeInventoryPolicySource(
       beforeHostCarrierInventoryPolicySource(
-        beforeGeneratorInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+        beforeGeneratorInventoryPolicySource(
+          beforeCurrentMainInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+        ),
       ),
     );
   const current = (): Policy => JSON.parse(currentRaw()) as Policy;
@@ -922,6 +943,7 @@ describe("C2a exact runtime preparation policy successor", () => {
   }
 
   it("pins actual complete current bytes, ordered populations and all new full-file authorities", () => {
+    const read = readHistoricalPolicyOperand;
     const text = currentRaw(),
       p = current(),
       r = authority();
@@ -1168,10 +1190,11 @@ describe("C2a exact runtime preparation policy successor", () => {
     numberPrerequisitePolicyReceiptPath,
   ])
     it(`freshly refuses changed C2a authority ${pin} on every public action and restores`, () => {
+      const read = readHistoricalPolicyOperand;
       const p = current(),
         text = currentRaw(),
         original = read(pin),
-        exact = new URL(`../${pin}`, import.meta.url).pathname;
+        exact = new URL(`../${historicalPolicyPhysicalPath(pin)}`, import.meta.url).pathname;
       accept(p);
       authority();
       beforeRuntimePreparationPolicy(p);
@@ -1273,7 +1296,9 @@ describe("C2a exact runtime preparation policy successor", () => {
 describe("dynamic-code inventory successor preserves the C2a policy proof", () => {
   const latestRaw = (): string =>
     beforeHostCarrierInventoryPolicySource(
-      beforeGeneratorInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+      beforeGeneratorInventoryPolicySource(
+        beforeCurrentMainInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+      ),
     );
   const latest = (): Policy => JSON.parse(latestRaw()) as Policy;
   const added = { path: "src/runtime/dynamic-code-policy.ts", state: "unmigrated", layer: "legacy-host" };
@@ -1312,6 +1337,7 @@ describe("dynamic-code inventory successor preserves the C2a policy proof", () =
     restore(p, original);
   };
   it("independently pins the current inventory, fixed authority and reciprocal insertion", () => {
+    const read = readHistoricalPolicyOperand;
     const text = latestRaw(),
       p = latest();
     expect(Buffer.byteLength(text)).toBe(567908);
@@ -1754,10 +1780,11 @@ describe("dynamic-code inventory successor preserves the C2a policy proof", () =
     "src/runtime/dynamic-code-policy.ts",
     "src/codegen/array-method-arg-order.ts",
   ])("recaptures changed successor authority %s after success and restores", (path) => {
+    const read = readHistoricalPolicyOperand;
     const p = latest(),
       text = latestRaw(),
       original = read(path),
-      exact = new URL(`../${path}`, import.meta.url).pathname;
+      exact = new URL(`../${historicalPolicyPhysicalPath(path)}`, import.meta.url).pathname;
     accept(p);
     authenticateDynamicCodePolicyEvolution();
     beforeDynamicCodeInventoryPolicy(p);
@@ -1784,7 +1811,10 @@ describe("dynamic-code inventory successor preserves the C2a policy proof", () =
 
 // Direct current-main controls; earlier Number/C2a/two-row readers keep their exact domains.
 describe("host-carrier current-main inventory successor", () => {
-  const hostRaw = (): string => beforeGeneratorInventoryPolicySource(read("scripts/compiler-boundaries.json"));
+  const hostRaw = (): string =>
+    beforeGeneratorInventoryPolicySource(
+      beforeCurrentMainInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+    );
   const hostPolicy = (): Policy => JSON.parse(hostRaw()) as Policy;
   const row: Record<string, string> = {
     path: "src/codegen/host-carrier-to-primitive.ts",
@@ -1819,6 +1849,7 @@ describe("host-carrier current-main inventory successor", () => {
     restore(p, original);
   };
   it("independently pins current-main bytes and debt row and replays its exact predecessor", () => {
+    const read = readHistoricalPolicyOperand;
     const text = hostRaw(),
       p = hostPolicy();
     expect(Buffer.byteLength(text)).toBe(568231);
@@ -2095,10 +2126,11 @@ describe("host-carrier current-main inventory successor", () => {
     "tests/helpers/ir-runtime-program-policy-evolution.ts",
     "src/codegen/host-carrier-to-primitive.ts",
   ])("recaptures changed host-carrier authority %s after success", (path) => {
+    const read = readHistoricalPolicyOperand;
     const p = hostPolicy(),
       text = hostRaw(),
       original = read(path),
-      exact = new URL(`../${path}`, import.meta.url).pathname;
+      exact = new URL(`../${historicalPolicyPhysicalPath(path)}`, import.meta.url).pathname;
     accept(p);
     authenticateHostCarrierPolicyEvolution();
     beforeHostCarrierInventoryPolicy(p);
@@ -2125,7 +2157,7 @@ describe("host-carrier current-main inventory successor", () => {
 
 // Direct generator-current input; all prior control blocks retain their exact captured domains.
 describe("generator eager-refusal current-main inventory successor", () => {
-  const generatorRaw = (): string => read("scripts/compiler-boundaries.json");
+  const generatorRaw = (): string => beforeCurrentMainInventoryPolicySource(read("scripts/compiler-boundaries.json"));
   const generatorPolicy = (): Policy => JSON.parse(generatorRaw()) as Policy;
   const row: Record<string, string> = {
     path: "src/codegen/generator-eager-refusal.ts",
@@ -2160,6 +2192,7 @@ describe("generator eager-refusal current-main inventory successor", () => {
     restore(p, original);
   };
   it("independently pins the generator current profile and exact reciprocal host predecessor", () => {
+    const read = readHistoricalPolicyOperand;
     const text = generatorRaw(),
       p = generatorPolicy();
     expect(Buffer.byteLength(text)).toBe(568552);
@@ -2454,10 +2487,11 @@ describe("generator eager-refusal current-main inventory successor", () => {
     "src/codegen/generator-eager-refusal.ts",
     "src/codegen/host-carrier-to-primitive.ts",
   ])("freshly refuses changed generator/predecessor authority %s and restores", (path) => {
+    const read = readHistoricalPolicyOperand;
     const p = generatorPolicy(),
       text = generatorRaw(),
       original = read(path),
-      exact = new URL(`../${path}`, import.meta.url).pathname;
+      exact = new URL(`../${historicalPolicyPhysicalPath(path)}`, import.meta.url).pathname;
     accept(p);
     authenticateGeneratorInventoryPolicyEvolution();
     beforeGeneratorInventoryPolicy(p);

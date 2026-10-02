@@ -18,10 +18,8 @@ import {
   reconstructProgramInitialGraph,
 } from "./helpers/ir-program-initial-graph-evolution.js";
 import { programCoreTypePath, reconstructProgramCoreTypeEvolution } from "./helpers/ir-program-core-type-evolution.js";
-import {
-  reconstructRuntimeProgramRelocationSources,
-  runtimeProgramRelocationPairs,
-} from "./helpers/ir-runtime-program-relocation.js";
+import { runtimeProgramRelocationPairs } from "./helpers/ir-runtime-program-relocation.js";
+import { reconstructC1CurrentSources } from "./helpers/ir-c1-current-source.js";
 import { historicalIrValidationPolicyView } from "./helpers/ir-validation-policy-evolution.js";
 import {
   beforeGeneratorInventoryPolicy,
@@ -32,6 +30,7 @@ import {
   beforeNumberPrerequisitePolicy,
   beforeWellKnownSymbolPolicy,
   beforeIrRuntimeProgramPolicy,
+  beforeCurrentMainInventoryPolicy,
 } from "./helpers/ir-runtime-program-policy-evolution.js";
 
 const repository = resolve(import.meta.dirname, "..");
@@ -140,7 +139,9 @@ const policy = () => {
     beforeDynamicCodeInventoryPolicy(
       beforeHostCarrierInventoryPolicy(
         beforeGeneratorInventoryPolicy(
-          JSON.parse(readFileSync(resolve(repository, "scripts/compiler-boundaries.json"), "utf8")),
+          beforeCurrentMainInventoryPolicy(
+            JSON.parse(readFileSync(resolve(repository, "scripts/compiler-boundaries.json"), "utf8")),
+          ),
         ),
       ),
     ),
@@ -195,7 +196,7 @@ function fixture(includeOwnership = false) {
     return source;
   };
   const initialIntrinsic = historicalIntrinsicSource(historicalRuntimeRead);
-  const initialC1ProgramSources: ReadonlyMap<string, string> = reconstructRuntimeProgramRelocationSources(rawRead);
+  const initialC1ProgramSources: ReadonlyMap<string, string> = reconstructC1CurrentSources(rawRead);
   const initialPreCProgramRead = (path: string): string => {
     if (!runtimeProgramRelocationPairs.some(([donor]) => donor === path)) return rawRead(path);
     const source = initialC1ProgramSources.get(path);

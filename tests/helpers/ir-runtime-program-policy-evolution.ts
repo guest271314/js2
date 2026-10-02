@@ -2,6 +2,25 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { authenticateIrValidationPolicy, type IrValidationPolicy } from "./ir-validation-policy-evolution.js";
+import {
+  captureC1HistoricalAuthority,
+  type C1HistoricalCapture,
+  type C1HistoricalLogicalPath,
+} from "./ir-c1-historical-authority.js";
+
+const historicalPolicyOperandPaths: readonly string[] = [
+  "tests/issue-3518-runtime-program-relocation.test.ts",
+  "tests/issue-3518-program-data-contract-seam.test.ts",
+  "tests/issue-3518-program-ownership-runtime-seam.test.ts",
+  "tests/issue-3518-program-pre-a-evolution.test.ts",
+  "tests/issue-3518-program-initial-graph-evolution.test.ts",
+  "tests/helpers/ir-runtime-program-policy-evolution.ts",
+];
+function readHistoricalPolicyInput(path: string, authority: C1HistoricalCapture): Buffer {
+  if (historicalPolicyOperandPaths.includes(path))
+    return Buffer.from(authority.readHistorical(path as C1HistoricalLogicalPath), "utf8");
+  return readFileSync(new URL(`../../${path}`, import.meta.url));
+}
 
 export const irRuntimeProgramPolicyReceiptPath = "tests/helpers/ir-runtime-program-policy-evolution.json";
 const receiptSha256 = "8e2589e90fbc697dceba56e1bbe53447250a94f3bcb03d99317ad4878bc1f58c";
@@ -112,16 +131,7 @@ function capture(value: unknown, active = new Set<object>()): unknown {
       }
       return result;
     }
-    // defineProperty also preserves a literal __proto__ key as ordinary owned data.
-    const result: Record<string, unknown> = {};
-    for (const key of keys as string[])
-      Object.defineProperty(result, key, {
-        value: capture(descriptors[key]!.value, active),
-        enumerable: true,
-        writable: true,
-        configurable: true,
-      });
-    return result;
+    return Object.fromEntries(keys.map((key) => [key, capture(descriptors[key as string]!.value, active)]));
   } finally {
     active.delete(value);
   }
@@ -132,6 +142,7 @@ export function authenticateIrRuntimeProgramPolicyEvolution(
 ): IrRuntimeProgramPolicyReceipt {
   if (sha(text) !== receiptSha256) fail("receipt digest mismatch");
   const receipt = JSON.parse(text) as IrRuntimeProgramPolicyReceipt;
+  captureC1HistoricalAuthority();
   if (
     receipt.schema !== 1 ||
     receipt.kind !== "c1-exact-runtime-program-policy-evolution" ||
@@ -354,6 +365,7 @@ export function authenticateWellKnownSymbolPolicyEvolution(
 ): WellKnownSymbolPolicyReceipt {
   if (typeof text !== "string" || sha(text) !== wksReceiptSha256) wksFail("receipt digest mismatch");
   const receipt = JSON.parse(text) as WellKnownSymbolPolicyReceipt;
+  const historicalAuthority = captureC1HistoricalAuthority();
   const c1 = authenticateIrRuntimeProgramPolicyEvolution();
   if (
     !same(Object.keys(receipt), [
@@ -396,11 +408,14 @@ export function authenticateWellKnownSymbolPolicyEvolution(
   )
     wksFail("immutable input membership mismatch");
   for (const pin of receipt.provenance.immutableInputs) {
-    const bytes = readFileSync(new URL(`../../${pin.path}`, import.meta.url));
+    const bytes = readHistoricalPolicyInput(pin.path, historicalAuthority);
     if (bytes.length !== pin.bytes || createHash("sha256").update(bytes).digest("hex") !== pin.sha256)
       wksFail("immutable input changed: " + pin.path);
   }
-  const helper = readFileSync(new URL("./ir-runtime-program-policy-evolution.ts", import.meta.url));
+  const helper = Buffer.from(
+    historicalAuthority.readHistorical("tests/helpers/ir-runtime-program-policy-evolution.ts"),
+    "utf8",
+  );
   if (
     helper.length < wksPrefix.bytes ||
     createHash("sha256").update(helper.subarray(0, wksPrefix.bytes)).digest("hex") !== wksPrefix.sha256
@@ -751,6 +766,7 @@ export function authenticateNumberPrerequisitePolicyEvolution(
 ): NumberPrerequisitePolicyReceipt {
   if (typeof text !== "string" || sha(text) !== numberReceiptSha256) numberFail("receipt digest mismatch");
   const receipt = JSON.parse(text) as NumberPrerequisitePolicyReceipt;
+  const historicalAuthority = captureC1HistoricalAuthority();
   const wks = authenticateWellKnownSymbolPolicyEvolution();
   const expectedInputs = [
     { path: wellKnownSymbolPolicyReceiptPath, bytes: 9470, sha256: wksReceiptSha256 },
@@ -795,11 +811,14 @@ export function authenticateNumberPrerequisitePolicyEvolution(
   )
     numberFail("fixed full-file input membership mismatch");
   for (const pin of pins) {
-    const bytes = readFileSync(new URL(`../../${pin.path}`, import.meta.url));
+    const bytes = readHistoricalPolicyInput(pin.path, historicalAuthority);
     if (bytes.length !== pin.bytes || createHash("sha256").update(bytes).digest("hex") !== pin.sha256)
       numberFail("full-file input changed: " + pin.path);
   }
-  const helper = readFileSync(new URL("./ir-runtime-program-policy-evolution.ts", import.meta.url));
+  const helper = Buffer.from(
+    historicalAuthority.readHistorical("tests/helpers/ir-runtime-program-policy-evolution.ts"),
+    "utf8",
+  );
   if (
     helper.length < numberPrefix.bytes ||
     createHash("sha256").update(helper.subarray(0, numberPrefix.bytes)).digest("hex") !== numberPrefix.sha256
@@ -1117,6 +1136,7 @@ export function authenticateRuntimePreparationPolicyEvolution(
   if (typeof text !== "string" || Buffer.byteLength(text, "utf8") !== 6239 || sha(text) !== preparationReceiptSha256)
     preparationFail("receipt digest mismatch");
   const receipt = JSON.parse(text) as RuntimePreparationPolicyReceipt;
+  const historicalAuthority = captureC1HistoricalAuthority();
   if (
     !same(Object.keys(receipt), [
       "schema",
@@ -1172,7 +1192,10 @@ export function authenticateRuntimePreparationPolicyEvolution(
     if (bytes.length !== pin.bytes || createHash("sha256").update(bytes).digest("hex") !== pin.sha256)
       preparationFail("full-file input changed: " + pin.path);
   }
-  const helper = readFileSync(new URL("./ir-runtime-program-policy-evolution.ts", import.meta.url));
+  const helper = Buffer.from(
+    historicalAuthority.readHistorical("tests/helpers/ir-runtime-program-policy-evolution.ts"),
+    "utf8",
+  );
   if (
     helper.length < preparationPrefix.bytes ||
     createHash("sha256").update(helper.subarray(0, preparationPrefix.bytes)).digest("hex") !== preparationPrefix.sha256
@@ -1438,6 +1461,7 @@ export function authenticateDynamicCodePolicyEvolution(
   if (typeof text !== "string" || Buffer.byteLength(text) !== 6159 || sha(text) !== dynamicReceiptSha256)
     dynamicFail("receipt digest mismatch");
   const receipt = JSON.parse(text) as DynamicCodePolicyReceipt;
+  const historicalAuthority = captureC1HistoricalAuthority();
   if (
     !same(Object.keys(receipt), [
       "schema",
@@ -1484,7 +1508,10 @@ export function authenticateDynamicCodePolicyEvolution(
     afterEnd = span.afterOffset + span.after.length;
     displacement += span.after.length - span.before.length;
   }
-  const helper = readFileSync(new URL("./ir-runtime-program-policy-evolution.ts", import.meta.url));
+  const helper = Buffer.from(
+    historicalAuthority.readHistorical("tests/helpers/ir-runtime-program-policy-evolution.ts"),
+    "utf8",
+  );
   if (
     helper.length < dynamicPrefix.bytes ||
     createHash("sha256").update(helper.subarray(0, dynamicPrefix.bytes)).digest("hex") !== dynamicPrefix.sha256
@@ -1712,6 +1739,7 @@ export function authenticateHostCarrierPolicyEvolution(
   if (typeof text !== "string" || Buffer.byteLength(text) !== 4673 || sha(text) !== hostCarrierReceiptSha256)
     hostCarrierFail("receipt digest mismatch");
   const receipt = JSON.parse(text) as HostCarrierPolicyReceipt;
+  const historicalAuthority = captureC1HistoricalAuthority();
   if (
     !same(Object.keys(receipt), [
       "schema",
@@ -1748,7 +1776,10 @@ export function authenticateHostCarrierPolicyEvolution(
     Buffer.byteLength(span.after) - Buffer.byteLength(span.before) !== 323
   )
     hostCarrierFail("fixed row or raw anchor mismatch");
-  const helper = readFileSync(new URL("./ir-runtime-program-policy-evolution.ts", import.meta.url));
+  const helper = Buffer.from(
+    historicalAuthority.readHistorical("tests/helpers/ir-runtime-program-policy-evolution.ts"),
+    "utf8",
+  );
   if (
     helper.length < hostCarrierPrefix.bytes ||
     createHash("sha256").update(helper.subarray(0, hostCarrierPrefix.bytes)).digest("hex") !== hostCarrierPrefix.sha256
@@ -1953,6 +1984,7 @@ export function authenticateGeneratorInventoryPolicyEvolution(
   if (typeof text !== "string" || Buffer.byteLength(text) !== 4693 || sha(text) !== generatorInventoryReceiptSha256)
     generatorInventoryFail("receipt digest mismatch");
   const receipt = JSON.parse(text) as GeneratorInventoryPolicyReceipt;
+  const historicalAuthority = captureC1HistoricalAuthority();
   if (
     !same(Object.keys(receipt), [
       "schema",
@@ -1989,7 +2021,10 @@ export function authenticateGeneratorInventoryPolicyEvolution(
     Buffer.byteLength(span.after) - Buffer.byteLength(span.before) !== 321
   )
     generatorInventoryFail("fixed row or raw anchor mismatch");
-  const helper = readFileSync(new URL("./ir-runtime-program-policy-evolution.ts", import.meta.url));
+  const helper = Buffer.from(
+    historicalAuthority.readHistorical("tests/helpers/ir-runtime-program-policy-evolution.ts"),
+    "utf8",
+  );
   if (
     helper.length < generatorInventoryPrefix.bytes ||
     createHash("sha256").update(helper.subarray(0, generatorInventoryPrefix.bytes)).digest("hex") !==
@@ -2100,4 +2135,493 @@ export function beforeGeneratorInventoryPolicySource(raw: string): string {
   if (!same(parsed, semantic.predecessor) || applyGeneratorInventoryRaw(predecessor, receipt, true) !== raw)
     generatorInventoryFail("raw and semantic reciprocal proof disagree");
   return predecessor;
+}
+
+// Fixed current-main four-row inventory successor; predecessor algorithms remain unchanged.
+export const currentMainInventoryReceiptPath = "tests/helpers/ir-runtime-program-policy-main-inventory-20261002.json";
+const currentMainInventoryReceiptSha256 = "b14b779229974856210fb3907aab7c7d0d97537c3f9d8a6324b083f3b3ef8c5e";
+// Independently frozen literal authority, never initialized from an inspected receipt or caller.
+const currentMainInventoryExpected = {
+  schema: 1,
+  kind: "fixed-main-inventory-four-row-successor",
+  provenance: {
+    checkpoint: "bfcf326c9426988e66fa6cc446132ed9ad9c1965",
+    inputBase: "6fce22a8bbeaec91828e8b5b6922c3c1b1fa9b97",
+    incomingMain: "a93d489420fac74aaba490a249f51251f90584c2",
+    sourceInput: "fcf4b188d0bd19f23665a318316af766e641f737",
+    planSha256: "25dea34fa24ff59f10b20b5a70da1a2a91061017aa3bcec9be3239c65bc03697",
+  },
+  before: {
+    source: {
+      bytes: 568552,
+      sha256: "64103a2fb337874fd435614d461bdd0d46cdfdc8a8dbd61603a4c7cbaf3915ff",
+      gitBlob: "b9b8b1787cc202906c4e76cebc598cf460a7f0ae",
+    },
+    dataSha256: "2f35e7e2045dd0d024a13b48c8f413fc7fb9e74c63503fafee4e56993d1da1a6",
+    fileCount: 1780,
+    filesSha256: "bcd724252a8ff0cdf6799b01f7e0b9eeceead2c6a3e1f49f9625de233b6710e6",
+    activationCount: 101,
+    activationHistorySha256: "9629c457a160096e70c35fc3a986abbd8eca145ac4eb688995194d6c29c83650",
+    layersSha256: "3f66bbff64c157092a04740c644ae17d476d7d168faa1bd23629f97492e0c4f7",
+    allowedEdgesSha256: "efe7e7ed8dee1a009d2bef3ff36dba80df1a805cd3f5b7b472e62ec6dcff64c7",
+  },
+  current: {
+    source: {
+      bytes: 569224,
+      sha256: "68b09ea540cbd7c40c2d42d66071b5c096a992729afa865d143bba5d8f894c91",
+      gitBlob: "6dfe8603219039d3be53ff7c8804dbd58fa8534a",
+    },
+    dataSha256: "e0f089362ce0e56697978858e2d2ab1767b9cf53425f60b76a8cd2d5d17f8057",
+    fileCount: 1782,
+    filesSha256: "d9bb59233a38f7e4f074e54b9f1b22761fff2fc00b7805a62e910b4a1fefa02e",
+    activationCount: 101,
+    activationHistorySha256: "9629c457a160096e70c35fc3a986abbd8eca145ac4eb688995194d6c29c83650",
+    layersSha256: "3f66bbff64c157092a04740c644ae17d476d7d168faa1bd23629f97492e0c4f7",
+    allowedEdgesSha256: "efe7e7ed8dee1a009d2bef3ff36dba80df1a805cd3f5b7b472e62ec6dcff64c7",
+  },
+  helperPrefix: {
+    path: "tests/helpers/ir-runtime-program-policy-evolution.ts",
+    bytes: 94912,
+    sha256: "8b7b061100ffe195437058401fa904a65ccee3302322a97aae899e51f5d84f68",
+    gitBlob: "8e979e9b3f6bb6831df63bf6a65c38a6098e6a85",
+  },
+  predecessorReceipt: {
+    path: "tests/helpers/ir-runtime-program-policy-generator-eager-refusal.json",
+    bytes: 4693,
+    sha256: "5d78bc26201d43531d1a299d42f0ac0ae91a638de71620b94f675378572ccc8c",
+    gitBlob: "e1ceeb12d63073f2f19b714c4e988dd3e2b4e26d",
+  },
+  sourcePins: [
+    {
+      path: "src/codegen/class-builtin-species-read.ts",
+      bytes: 2143,
+      sha256: "12ddf3f2e454845b58f8d2669533d2dd0e596d1d8ccbda1a43cb960e83da31eb",
+      gitBlob: "5a7d3ef78ee34bc7fce3d0d6d92911907141f49f",
+    },
+    {
+      path: "src/codegen/date-proto-to-json.ts",
+      bytes: 6733,
+      sha256: "448717146265ea56a128eaef010338f6511a03ea61230f830deb8179f27f7e2b",
+      gitBlob: "4a587c01bc1e68ea519c5e9b290a5d389d3ce13b",
+    },
+    {
+      path: "src/codegen/expressions/to-primitive-method-call.ts",
+      bytes: 4481,
+      sha256: "fb45a5292e6275ca40b3ee5d190bdd88ecedc6cba933d6b6dc5640b0162d4001",
+      gitBlob: "0e3f192257e0437b29fce56205a129529587f4d3",
+    },
+  ],
+  rowChanges: [
+    {
+      operation: "addition",
+      beforeIndex: 366,
+      currentIndex: 366,
+      row: {
+        path: "src/codegen/class-builtin-species-read.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+      beforePrevious: {
+        path: "src/codegen/date-parse-native.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+      beforeNext: {
+        path: "src/codegen/date-proto-to-primitive.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+      currentPrevious: {
+        path: "src/codegen/date-parse-native.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+      currentNext: {
+        path: "src/codegen/date-proto-to-json.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+    },
+    {
+      operation: "addition",
+      beforeIndex: 366,
+      currentIndex: 367,
+      row: {
+        path: "src/codegen/date-proto-to-json.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+      beforePrevious: {
+        path: "src/codegen/date-parse-native.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+      beforeNext: {
+        path: "src/codegen/date-proto-to-primitive.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+      currentPrevious: {
+        path: "src/codegen/class-builtin-species-read.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+      currentNext: {
+        path: "src/codegen/date-proto-to-primitive.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+    },
+    {
+      operation: "addition",
+      beforeIndex: 512,
+      currentIndex: 514,
+      row: {
+        path: "src/codegen/expressions/to-primitive-method-call.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+      beforePrevious: {
+        path: "src/codegen/expressions/this-keyword.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+      beforeNext: {
+        path: "src/codegen/expressions/transferred-native-proto-call.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+      currentPrevious: {
+        path: "src/codegen/expressions/this-keyword.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+      currentNext: {
+        path: "src/codegen/expressions/transferred-native-proto-call.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "backend-wasmgc",
+        owner: "3518-coordinator",
+        nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+      },
+    },
+    {
+      operation: "removal",
+      beforeIndex: 1381,
+      currentIndex: 1384,
+      row: {
+        path: "src/runtime-containment.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "compiler",
+        owner: "3518-coordinator",
+        nextBoundary: "Review the frontend, orchestration, runtime and shared-contract split before migration.",
+      },
+      beforePrevious: {
+        path: "src/resolve/consumer-driven-barrels.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "compiler",
+        owner: "3518-coordinator",
+        nextBoundary: "Review the frontend, orchestration, runtime and shared-contract split before migration.",
+      },
+      beforeNext: {
+        path: "src/runtime-eval.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "compiler",
+        owner: "3518-coordinator",
+        nextBoundary: "Review the frontend, orchestration, runtime and shared-contract split before migration.",
+      },
+      currentPrevious: {
+        path: "src/resolve/consumer-driven-barrels.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "compiler",
+        owner: "3518-coordinator",
+        nextBoundary: "Review the frontend, orchestration, runtime and shared-contract split before migration.",
+      },
+      currentNext: {
+        path: "src/runtime-eval.ts",
+        state: "unmigrated",
+        layer: "mixed-needs-split",
+        destination: "compiler",
+        owner: "3518-coordinator",
+        nextBoundary: "Review the frontend, orchestration, runtime and shared-contract split before migration.",
+      },
+    },
+  ],
+  raw: {
+    spans: [
+      {
+        beforeOffset: 162175,
+        afterOffset: 162175,
+        before: "",
+        after:
+          '    {\n      "path": "src/codegen/class-builtin-species-read.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n    {\n      "path": "src/codegen/date-proto-to-json.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n',
+        beforeSha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        afterSha256: "6f6dd24f93539ececc43e1423a466543e5e42e4051f56b33b3954e1c5da0193c",
+      },
+      {
+        beforeOffset: 209899,
+        afterOffset: 210539,
+        before: "",
+        after:
+          '    {\n      "path": "src/codegen/expressions/to-primitive-method-call.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n',
+        beforeSha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        afterSha256: "c7a524e5649650927432dc4be13732268461780e960355dc3b45faf2a4b4db31",
+      },
+      {
+        beforeOffset: 485383,
+        afterOffset: 486357,
+        before:
+          '    {\n      "path": "src/runtime-containment.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "compiler",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Review the frontend, orchestration, runtime and shared-contract split before migration."\n    },\n',
+        after: "",
+        beforeSha256: "45f82bcd707e361470f6ea1ee6543cb54c2a0f5dd248c5b1583499a7b3b38cce",
+        afterSha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      },
+    ],
+  },
+} as const;
+type CurrentMainInventoryReceipt = typeof currentMainInventoryExpected;
+function currentMainInventoryFail(detail: string): never {
+  throw new Error("current main inventory evolution: " + detail);
+}
+function currentMainInventoryPin(
+  bytes: Buffer,
+  pin: { readonly bytes: number; readonly sha256: string; readonly gitBlob: string },
+  label: string,
+): void {
+  if (
+    bytes.length !== pin.bytes ||
+    createHash("sha256").update(bytes).digest("hex") !== pin.sha256 ||
+    createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex") !== pin.gitBlob
+  )
+    currentMainInventoryFail(label);
+}
+/** Authenticate fixed receipt and live source/prefix authorities on every public action. */
+export function authenticateCurrentMainInventoryEvolution(
+  text = readFileSync(new URL(`../../${currentMainInventoryReceiptPath}`, import.meta.url), "utf8"),
+): CurrentMainInventoryReceipt {
+  if (typeof text !== "string" || Buffer.byteLength(text) !== 12856 || sha(text) !== currentMainInventoryReceiptSha256)
+    currentMainInventoryFail("receipt digest mismatch");
+  const receipt = JSON.parse(text) as CurrentMainInventoryReceipt;
+  if (!same(receipt, currentMainInventoryExpected)) currentMainInventoryFail("fixed receipt population mismatch");
+  const prefix = readFileSync(new URL("./ir-runtime-program-policy-evolution.ts", import.meta.url));
+  currentMainInventoryPin(
+    beforePolicyCaptureKernelPrefix(prefix.subarray(0, 94641)),
+    receipt.helperPrefix,
+    "complete predecessor helper prefix changed",
+  );
+  for (const pin of [receipt.predecessorReceipt, ...receipt.sourcePins])
+    currentMainInventoryPin(
+      readFileSync(new URL(`../../${pin.path}`, import.meta.url)),
+      pin,
+      "full-file input changed: " + pin.path,
+    );
+  const predecessor = authenticateGeneratorInventoryPolicyEvolution();
+  if (!same(predecessor.current, receipt.before)) currentMainInventoryFail("generator predecessor authority mismatch");
+  return freeze(receipt);
+}
+function currentMainInventorySemanticProfile(
+  policy: MutableIrRuntimeProgramPolicy,
+  profile: CurrentMainInventoryReceipt["before"] | CurrentMainInventoryReceipt["current"],
+): void {
+  if (
+    digest(policy) !== profile.dataSha256 ||
+    policy.files.length !== profile.fileCount ||
+    policy.activationHistory.length !== profile.activationCount ||
+    digest(policy.files) !== profile.filesSha256 ||
+    digest(policy.activationHistory) !== profile.activationHistorySha256 ||
+    digest(policy.layers) !== profile.layersSha256 ||
+    digest(policy.allowedEdges) !== profile.allowedEdgesSha256
+  )
+    currentMainInventoryFail("complete policy profile mismatch");
+}
+function currentMainInventoryRows(
+  policy: MutableIrRuntimeProgramPolicy,
+  receipt: CurrentMainInventoryReceipt,
+  forward: boolean,
+): void {
+  if (!same(Object.keys(policy), wksTopKeys)) currentMainInventoryFail("fixed top-level schema mismatch");
+  for (const change of receipt.rowChanges) {
+    const index = forward ? change.beforeIndex : change.currentIndex;
+    const present = forward ? change.operation === "removal" : change.operation === "addition";
+    const previous = forward ? change.beforePrevious : change.currentPrevious;
+    const next = forward ? change.beforeNext : change.currentNext;
+    if (
+      !same(policy.files[index - 1], previous) ||
+      !same(policy.files[index + (present ? 1 : 0)], next) ||
+      policy.files.filter((row) => row.path === change.row.path).length !== (present ? 1 : 0) ||
+      (present &&
+        (!same(Object.keys(policy.files[index]!), Object.keys(change.row)) || !same(policy.files[index], change.row)))
+    )
+      currentMainInventoryFail("fixed row schema, membership or neighbors mismatch");
+  }
+}
+function proveCurrentMainInventoryPolicy(
+  value: unknown,
+  freshlyVerifiedReceipt?: CurrentMainInventoryReceipt,
+): {
+  predecessor: MutableIrRuntimeProgramPolicy;
+  generatorPredecessor: MutableIrRuntimeProgramPolicy;
+} {
+  // Capture descriptors before receipt/source IO; keep subsequent historical mutants raw.
+  const current = capture(value) as MutableIrRuntimeProgramPolicy;
+  const receipt = freshlyVerifiedReceipt ?? authenticateCurrentMainInventoryEvolution();
+  currentMainInventorySemanticProfile(current, receipt.current);
+  currentMainInventoryRows(current, receipt, false);
+  const predecessor = capture(current) as MutableIrRuntimeProgramPolicy;
+  predecessor.files.splice(1384, 0, capture(receipt.rowChanges[3].row) as Record<string, string>);
+  for (const index of [514, 367, 366]) predecessor.files.splice(index, 1);
+  currentMainInventorySemanticProfile(predecessor, receipt.before);
+  currentMainInventoryRows(predecessor, receipt, true);
+  // Genuine generator -> host -> dynamic -> C2a -> Number -> WKS -> C1 -> B verification.
+  const generatorPredecessor = beforeGeneratorInventoryPolicy(predecessor);
+  const replay = capture(predecessor) as MutableIrRuntimeProgramPolicy;
+  replay.files.splice(1381, 1);
+  for (const change of receipt.rowChanges.slice(0, 3))
+    replay.files.splice(change.currentIndex, 0, capture(change.row) as Record<string, string>);
+  currentMainInventorySemanticProfile(replay, receipt.current);
+  currentMainInventoryRows(replay, receipt, false);
+  if (!same(replay, current)) currentMainInventoryFail("complete reciprocal semantic replay mismatch");
+  return { predecessor, generatorPredecessor };
+}
+export function beforeCurrentMainInventoryPolicy(value: unknown): MutableIrRuntimeProgramPolicy {
+  return proveCurrentMainInventoryPolicy(value).predecessor;
+}
+function applyCurrentMainInventoryRaw(raw: string, receipt: CurrentMainInventoryReceipt, forward: boolean): string {
+  const bytes = Buffer.from(raw, "utf8");
+  currentMainInventoryPin(
+    bytes,
+    forward ? receipt.before.source : receipt.current.source,
+    "complete raw source profile mismatch",
+  );
+  const pieces: Buffer[] = [];
+  let consumed = 0;
+  for (const span of receipt.raw.spans) {
+    const at = forward ? span.beforeOffset : span.afterOffset;
+    const from = Buffer.from(forward ? span.before : span.after, "utf8");
+    const to = Buffer.from(forward ? span.after : span.before, "utf8");
+    if (
+      at < consumed ||
+      at > bytes.length ||
+      at + from.length > bytes.length ||
+      !bytes.subarray(at, at + from.length).equals(from) ||
+      (from.length > 0 && (bytes.indexOf(from) !== at || bytes.lastIndexOf(from) !== at))
+    )
+      currentMainInventoryFail("fixed raw span missing, duplicated or reordered");
+    // Every slice uses the unchanged original input coordinate domain.
+    pieces.push(bytes.subarray(consumed, at), to);
+    consumed = at + from.length;
+  }
+  pieces.push(bytes.subarray(consumed));
+  const result = Buffer.concat(pieces);
+  currentMainInventoryPin(
+    result,
+    forward ? receipt.current.source : receipt.before.source,
+    "complete raw output profile mismatch",
+  );
+  return result.toString("utf8");
+}
+export function beforeCurrentMainInventoryPolicySource(raw: string): string {
+  if (typeof raw !== "string") currentMainInventoryFail("raw input must be a primitive string");
+  const receipt = authenticateCurrentMainInventoryEvolution();
+  const predecessor = applyCurrentMainInventoryRaw(raw, receipt, false);
+  const semantic = proveCurrentMainInventoryPolicy(JSON.parse(raw), receipt);
+  const parsed = JSON.parse(predecessor) as MutableIrRuntimeProgramPolicy;
+  currentMainInventorySemanticProfile(parsed, receipt.before);
+  const generatorRawPredecessor = beforeGeneratorInventoryPolicySource(predecessor);
+  if (
+    !same(parsed, semantic.predecessor) ||
+    !same(JSON.parse(generatorRawPredecessor), semantic.generatorPredecessor) ||
+    applyCurrentMainInventoryRaw(predecessor, receipt, true) !== raw
+  )
+    currentMainInventoryFail("raw and semantic reciprocal proof disagree");
+  return predecessor;
+}
+
+/** Reconstruct only the fixed pre-kernel prefix; every call authenticates its actual supplied bytes. */
+function beforePolicyCaptureKernelPrefix(current: Buffer): Buffer {
+  const label = "complete predecessor helper prefix changed";
+  currentMainInventoryPin(
+    current,
+    {
+      bytes: 94641,
+      sha256: "4cf63b340b245b0f4f5ef297dc5a4b56b06507e981a7801ffcfb7e5c101f5103",
+      gitBlob: "b33536a95c8b88e84f8e7c60c3c39bce3e2c7d82",
+    },
+    label,
+  );
+  const offset = 5477;
+  const before = Buffer.from(
+    "    // defineProperty also preserves a literal __proto__ key as ordinary owned data.\n    const result: Record<string, unknown> = {};\n    for (const key of keys as string[])\n      Object.defineProperty(result, key, {\n        value: capture(descriptors[key]!.value, active),\n        enumerable: true,\n        writable: true,\n        configurable: true,\n      });\n    return result;\n",
+    "utf8",
+  );
+  const after = Buffer.from(
+    "    return Object.fromEntries(keys.map((key) => [key, capture(descriptors[key as string]!.value, active)]));\n",
+    "utf8",
+  );
+  if (
+    !current.subarray(offset, offset + after.length).equals(after) ||
+    current.indexOf(after) !== offset ||
+    current.indexOf(after, offset + 1) !== -1
+  )
+    currentMainInventoryFail(label);
+  const restored = Buffer.concat([current.subarray(0, offset), before, current.subarray(offset + after.length)]);
+  currentMainInventoryPin(
+    restored,
+    {
+      bytes: 94912,
+      sha256: "8b7b061100ffe195437058401fa904a65ccee3302322a97aae899e51f5d84f68",
+      gitBlob: "8e979e9b3f6bb6831df63bf6a65c38a6098e6a85",
+    },
+    label,
+  );
+  if (!restored.subarray(offset, offset + before.length).equals(before)) currentMainInventoryFail(label);
+  const replay = Buffer.concat([restored.subarray(0, offset), after, restored.subarray(offset + before.length)]);
+  if (!replay.equals(current)) currentMainInventoryFail(label);
+  return restored;
 }
