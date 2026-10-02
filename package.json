@@ -82,7 +82,7 @@
     "new:issue-id": "node scripts/claim-issue.mjs --allocate",
     "preview:issue-id": "node scripts/next-issue-id.mjs",
     "worktree:provision": "bash scripts/provision-worktree-deps.sh",
-    "build": "vite build --config vite.config.lib.ts && node scripts/build-test262-cli.mjs",
+    "build": "vite build --config vite.config.lib.ts && node scripts/prune-dist-declarations.mjs && node scripts/build-test262-cli.mjs",
     "build:jsr": "vite build --config vite.config.lib.ts --mode jsr && node scripts/prepare-jsr-dist.mjs",
     "build:test262-cli": "node scripts/build-test262-cli.mjs",
     "build:runtime-provider": "node scripts/build-runtime-provider.mjs",
