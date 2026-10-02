@@ -1509,9 +1509,11 @@ function compileObjectLiteralWithAccessors(
       fctx.body.push({ op: "local.get", index: objLocal });
       // Host imports require real String keys even with native string storage.
       // Native targets retain their existing native key representation.
-      // (#6774 S15) A well-known-symbol key (`get [Symbol.unscopables]()`) is
-      // the interned symbol carrier, not the "@@name" spelling.
-      const wkSymId = ctx.standalone && propName.startsWith("@@") ? getWellKnownSymbolId(propName.slice(2)) : undefined;
+      // (#6774 S15) `get [Symbol.unscopables]()` is keyed by the interned
+      // symbol carrier (HasBinding reads it there), not the "@@name" spelling.
+      // Deliberately ONLY @@unscopables: widening to @@iterator exposed the
+      // async GetIterator reading @@iterator before @@asyncIterator (79 rows).
+      const wkSymId = ctx.standalone && propName === "@@unscopables" ? getWellKnownSymbolId("unscopables") : undefined;
       const boxSymIdx =
         wkSymId !== undefined
           ? ensureLateImport(ctx, "__box_symbol", [{ kind: "i32" }], [{ kind: "externref" }])
