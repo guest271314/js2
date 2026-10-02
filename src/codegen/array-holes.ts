@@ -50,6 +50,7 @@ import { recordDescriptorArrayReceiver } from "./declarations/descriptor-array-c
 import { armExhaustiveForNonCallableMemberLiteral } from "./class-to-primitive.js"; // (#6771 S2d)
 import { isArrayLengthConstructor } from "./array-length-holes.js"; // (#6771 S3)
 import { noteArrayCtorThisCall } from "./array-ctor-this.js"; // (#6771 S7)
+import { readEnv } from "../env.js";
 
 /**
  * Cheap AST pre-scan: set `ctx.usesArrayHoles` when the program contains any
@@ -164,7 +165,7 @@ export function scanForArrayHoles(ctx: CodegenContext, root: ts.Node): void {
       // bags queue for the dedicated post-visit resolution walk.
       const poisoned = inheritedSetDescriptorUseKeys(node);
       if (poisoned === "all") {
-        if (process.env.JS2WASM_DEBUG_4602) {
+        if (readEnv("JS2WASM_DEBUG_4602")) {
           console.error(
             `[4602] ALL-trigger kind=${ts.SyntaxKind[node.kind]} text=${node.getText().slice(0, 120).replace(/\n/g, " ")}`,
           );
@@ -229,11 +230,11 @@ export function scanForArrayHoles(ctx: CodegenContext, root: ts.Node): void {
     if (ctx.inheritedSetDescriptorDirty) break;
     const resolved = resolveBagIdentifierKeys(root, name);
     if (resolved === "all") {
-      if (process.env.JS2WASM_DEBUG_4602) console.error(`[4602] bag identifier "${name}" escapes — all-keys`);
+      if (readEnv("JS2WASM_DEBUG_4602")) console.error(`[4602] bag identifier "${name}" escapes — all-keys`);
       ctx.inheritedSetDescriptorDirty = true;
     } else for (const key of resolved) ctx.inheritedSetDirtyKeys.add(key);
   }
-  if (process.env.JS2WASM_DEBUG_4602) {
+  if (readEnv("JS2WASM_DEBUG_4602")) {
     console.error(
       `[4602] allDirty=${ctx.inheritedSetDescriptorDirty} dynamicCode=${ctx.dynamicCodeDirty} keys=${JSON.stringify([...ctx.inheritedSetDirtyKeys])}`,
     );
@@ -241,7 +242,7 @@ export function scanForArrayHoles(ctx: CodegenContext, root: ts.Node): void {
   // (#6485) The gate's whole safety argument is "flag clear ⇒ not reached ⇒
   // bytes unchanged", so the flag's HIT RATE over a corpus is evidence, not a
   // detail. This makes it measurable without a second, drifting scan.
-  if (process.env.JS2WASM_DEBUG_6485) console.error(`[6485] isConcatSpreadableDirty=${ctx.isConcatSpreadableDirty}`);
+  if (readEnv("JS2WASM_DEBUG_6485")) console.error(`[6485] isConcatSpreadableDirty=${ctx.isConcatSpreadableDirty}`);
   planHoleyArrayCarrier(ctx, root);
 }
 
