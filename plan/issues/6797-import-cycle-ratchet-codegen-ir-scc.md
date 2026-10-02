@@ -73,3 +73,27 @@ origin: "2026-09-30 codebase review (plan/agent-context/claude-codebase-review-2
   `docs/architecture/codegen-axes.md` gets a "how to verify" line pointing at
   the script.
 - `src/codegen/` flat file count does not grow.
+
+## Follow-up: `check:godfiles` stays out of `quality` (Correction item 4)
+
+Not wired, and its baseline (`scripts/godfile-profile-baseline.json`) is not
+refreshed: making it green would RAISE 24 per-function ceilings and add 23 new
+ones, which is relaxing the gate, not refreshing it. Measured 2026-10-02 on
+`39cc565790` with `node scripts/profile-godfiles.mjs --check` (exit 1,
+47 regressions; the 2026-09-30 review's "two new mega-functions"
+undercounts it). Old→new LOC, or `new` for a
+function over the 150-LOC tracking floor that the baseline does not know:
+
+- `src/codegen/index.ts` (20): generateModule 1269→1910, generateMultiModule 768→1302, planIrOverlay 554→651, emitIteratorMethodExport 169→622, resolveWasmType 380→557, emitToPrimitiveMethodExports 419→516, buildIrClassShapes 298→512, emitDispatchForMethod 411→479, ensureStructForType 380→453, emitMethodDispatch new 441, walkStmtForLetConst 208→284, planIrFirstBodyRouting 158→278, emitClassMemberKindExports new 264, registerImportBindingAliases new 245, buildDispatch 162→235, aliasOneBinding new 219, hoistVarDecl new 201, registerReassignedFunctionGlobals new 197, emitExternrefClassVarargDispatch new 160, preparedExactLexicalModuleInit new 152
+- `src/codegen/object-runtime.ts` (9): ensureObjectRuntime 4234→4725, fillApplyClosure 477→704, fillExternArrayLikeStructArms 310→540, fillClosedStructExternGetArms 317→519, fillDynamicForinVecArms 302→435, fillConcatNativeHoleArms new 310, fillExternSetVecArms new 302, fillExternGetIdxVecArms 159→266, fillClassObjectNameArms new 153
+- `src/codegen/array-methods.ts` (9): compileArrayMethodCall 531→723, emitDynViewSpeciesMethodTwoArm new 298, compileArraySplice 191→275, compileArrayReduceRight 221→265, compileTypedArraySet new 192, compileArrayMap new 172, compileArrayReduce new 169, compileArrayToSpliced new 168, compileArrayConcat new 165
+- `src/codegen/expressions/calls.ts` (8): compileCallExpression 1811→2305, ensureFuncValueWrappersRegistered new 490, buildInlineDynamicDispatch new 454, compileIIFE 263→315, tryRuntimeEvalInterpretedBoundaryIntrinsic 189→239, emitReflectiveNativeProtoClosureCall new 193, tryEmitNativeProtoReflectiveCall new 192, emitDynamicSpreadCall new 190
+- `src/codegen/native-strings.ts` (1): emitExceptionRenderExports new 211
+
+What is still enforced: the required `check:func-budget` gate (#3400) already
+blocks any change-set that grows a function over 300 LOC or adds a new one,
+so the functions above 300 cannot grow further. The 150–300 LOC band is
+unguarded. Options for whoever picks this up: shrink the listed functions
+back under their recorded LOC and then wire the gate, or delete
+`profile-godfiles.mjs --check` as redundant with `check:func-budget` and keep
+the profiler for its report. Either needs a decision, not a baseline refresh.
