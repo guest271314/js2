@@ -1,7 +1,7 @@
 ---
 id: 6774
 title: "ES2015 standalone expressions residue: new.target as a value, super() in arrows / value / fnctor override, computed symbol & numeric keys, tagged-template freeze/this/new/dynamic tag, eval-in-parameter var scope + rest-element params, destructuring member targets, with-routed calls, method-slot delete, loose-eq @@toPrimitive, instanceof chain for native carriers, dynamic-call tail calls"
-status: ready
+status: in-progress
 sprint: current
 created: 2026-09-30
 updated: 2026-09-30
@@ -1221,3 +1221,37 @@ are other lanes'; 7 stay red by construction of this slice.
   `--no-verify`; no `git stash` (A/B by file copy from
   `.tmp/6774/base-src`). Push early; do NOT open a PR — the lead verifies
   the pushed head and opens it.
+
+### 2026-10-02 — interim landing record (Opus, partial)
+
+Landed partially at the project lead's request; the issue stays
+`in-progress`. Measured on the branch merged with `origin/main` @ `2bfe3edd`
+(`scripts/run-test262-paths.mts .tmp/6774/rows.txt --standalone`, in-process):
+**40 / 60 pass** (base `08e61b26`: 0 / 60).
+
+- Steps landed: S1–S8, S11–S13, S15–S19, S21 (two sessions worked this lane
+  in parallel; duplicate S11/S12/S16 implementations were resolved in favour
+  of the first-pushed ones).
+- Still failing, in scope: S9 (`super/prop-{dot,expr}-cls-ref-this.js`),
+  S10 (`object/method-definition/{name,generator}-property-desc.js`), S14
+  (`call/tco-non-eval-{function,function-dynamic,global}.js`), S20
+  (`instanceof/prototype-getter-with-object.js`), S22
+  (`super/call-expr-value.js`, `super/call-bind-this-value.js`), S23
+  (`super/call-proto-not-ctor.js`).
+- Other lanes / deferred (unchanged): `super/call-bind-this-value-twice.js`
+  (#6772 S1b), `new.target/value-via-reflect-construct.js`,
+  `super/call-construct-invocation.js` (#3371), `call/eval-spread.js`,
+  `call/eval-spread-empty-leading.js` (provider capability),
+  `arrow-function/arrow/capturing-closure-variables-2.js`,
+  `call/tco-non-eval-with.js`, `keyed-destructuring-…-with-bindings.js`
+  (#1472), `yield/from-with.js` (#680).
+- S7 sibling matrix (69 `scope-*param*var*` rows): 18 → 4 non-pass, no new
+  failures; residual = IIFE with a rest pattern whose element default is
+  skipped.
+- Pins: `tests/issue-6774-expressions-residue.test.ts` 21/21.
+- Gates: all green bare against `origin/main`.
+- Controls: the S7 ES5/ES2015 control (2,225 rows: eval-code/direct,
+  arguments-object, function-code, rest-parameters,
+  object/method-definition, dstr rest patterns) did not finish before
+  landing (container restarts killed two runs); the merge-queue test262
+  gates (per-edition ES5 ratchet) are the authoritative check.
