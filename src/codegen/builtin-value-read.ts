@@ -63,7 +63,7 @@ import {
 } from "./array-object-proto.js";
 import { emitLazyNativeProtoGet, getBuiltinBrand, getNativeProtoBuiltinGlue } from "./native-proto.js";
 import { resolveStandaloneProtoMemberValueClosure } from "./native-proto-value-read.js";
-import { tryEmitOverriddenProtoMemberRead } from "./object-proto-to-locale-string.js";
+import { tryEmitOverriddenProtoMemberRead } from "./object-model/object-proto-to-locale-string.js";
 import { emitBuiltinProtoConstructorValue } from "./builtin-proto-constructor.js";
 import {
   BUILTIN_STATIC_METHOD_ARITY,

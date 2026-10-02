@@ -40,17 +40,20 @@
  * and emit FRESH instruction arrays per call (a shared `Instr` reachable from
  * two bodies is remapped twice by the late-import shift, #5140/#5316).
  */
-import type { Instr, ValType } from "../ir/types.js";
-import type { CodegenContext } from "./context/types.js";
-import { undefinedExternInstrs } from "./any-helpers.js";
-import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
-import { stringConstantExternrefInstrs } from "./native-strings.js";
-import { isOpenDescriptorShape } from "./property-descriptor-shape.js";
-import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
-import { addFuncType } from "./registry/types.js";
-import { ensureObjVecBuilders } from "./object-runtime.js";
-import { UNDEF_F64_BITS } from "./value-tags.js";
-import { allocatedStructTypeIndices } from "./walk-instructions.js";
+import type { Instr, ValType } from "../../ir/types.js";
+import type { CodegenContext } from "../context/types.js";
+import { mintDefinedFunc, pushDefinedFunc } from "../func-space.js";
+import { isOpenDescriptorShape } from "../property-descriptor-shape.js";
+import { addFuncType } from "../registry/types.js";
+import { UNDEF_F64_BITS } from "../value-tags.js";
+import { allocatedStructTypeIndices } from "../walk-instructions.js";
+import { ensureExnTag } from "../registry/physical-imports.js";
+import { bound } from "./ports.js"; // (#6770/#6797) core helpers, injected — keeps this leaf out of the import SCC
+
+const undefinedExternInstrs = bound("undefinedExternInstrs");
+const stringConstantExternrefInstrs = bound("stringConstantExternrefInstrs");
+const addStringConstantGlobal = bound("addStringConstantGlobal");
+const ensureObjVecBuilders = bound("ensureObjVecBuilders");
 
 const EXTERNREF: ValType = { kind: "externref" };
 const I32: ValType = { kind: "i32" };

@@ -100,7 +100,8 @@ import type { CodegenContext } from "./context/types.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
 import { addFuncType } from "./registry/types.js";
 import { ensureExternStrictEqHelper } from "./any-helpers.js"; // (#5268 review R2-1) key de-dup
-import { fnIntrinsicKeyPhases } from "./object-own-key-order.js"; // (#6770 S3) function key order
+import { fnIntrinsicKeyPhases } from "./object-model/object-own-key-order.js"; // (#6770 S3) function key order
+import { CARRIER_BAG_HAS } from "./object-model/native-names.js"; // (#6770) leaf-shared name
 
 /** #3468 closure-own-property side table (`closure-props.ts`). */
 const IS_CLOSURE_PROP_CARRIER = "__is_closure_prop_carrier";
@@ -123,7 +124,7 @@ const ERROR_PROP_BAG_LOOKUP = "__error_prop_bag_lookup";
 /** `(externref obj) -> externref` — the receiver's bag as a screened `$Object`, or null. */
 export const CARRIER_BAG_OF = "__carrier_bag_of";
 /** `(externref obj, externref key) -> i32` — 1 iff the bag holds a live entry. */
-export const CARRIER_BAG_HAS = "__carrier_bag_has";
+export { CARRIER_BAG_HAS }; // (#6770) defined in object-model/native-names.ts
 /** `(externref obj, externref key) -> externref` — descriptor, or **null = not handled**. */
 export const CARRIER_BAG_GOPD = "__carrier_bag_gopd";
 /** `(externref obj, externref vec, i32 includeNonEnum) -> i32` — 1 iff a bag existed. */

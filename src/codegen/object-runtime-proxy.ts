@@ -29,12 +29,12 @@ import {
   ensureProxyListFromArrayLike,
   proxyTrapAbsentTail,
   proxyTrapReadTail,
-} from "./proxy-trap-read.js"; // (#6770 S8)
+} from "./object-model/proxy-trap-read.js"; // (#6770 S8)
 import {
   ensureEnumerableOwnKeysNative,
   ensureOwnKeysAllNative,
   installProxyKeyBagGuards,
-} from "./proxy-own-keys-surfaces.js"; // (#6770 S7)
+} from "./object-model/proxy-own-keys-surfaces.js"; // (#6770 S7)
 
 /** (#1100/#1355) Reserved trap-invoke driver names — filled by `fillProxyDispatch`. */
 const PROXY_CALL_GET = "__proxy_call_get";

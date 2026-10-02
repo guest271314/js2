@@ -267,7 +267,7 @@ import { ensureTaToStringHelper, taToStringApplies } from "../ta-to-string.js"; 
 import { reserveTaToLocaleString, taToLocaleStringApplies } from "../to-locale-string-element.js"; // (#6651 TA1)
 import { isHostResolvedBuiltinReceiver } from "../standalone-unavailable-globals.js"; // (#1472)
 import { guardedCastBackup, publishNonInstanceSuperReceiver } from "./super-receiver-publish.js"; // (#5350 r2)
-import { tryEmitPrimitiveToLocaleStringInvoke } from "../object-proto-to-locale-string.js"; // (#6770 S5)
+import { tryEmitPrimitiveToLocaleStringInvoke } from "../object-model/object-proto-to-locale-string.js"; // (#6770 S5)
 import { tryEmitTaggedToStringInvoke } from "../object-proto-symbol-tag.js"; // (#6770 S6)
 import {
   BUILTIN_CLASS_NAMES,

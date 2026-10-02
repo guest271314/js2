@@ -21,16 +21,18 @@
  * `__obj_order_index_of_key(ref $AnyString) -> i64`: the canonical index value
  * (no sign, no leading zero, `"0"` alone), else `-1`.
  */
-import type { Instr, ValType } from "../ir/types.js";
-import { ts } from "../ts-api.js";
-import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { withArraySubclassReceiverAsVec } from "./array-subclass-receiver.js";
-import { compileExpression } from "./shared.js";
-import { getFuncRefWrapperRootTypeIdx } from "./closures/funcref-wrapper-types.js";
-import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
-import { nativeStringLiteralInstrs } from "./native-strings.js";
-import { addFuncType } from "./registry/types.js";
-import { STRING_EXOTIC_PUSH_KEYS_FN } from "./string-exotic-own-props.js";
+import type { Instr, ValType } from "../../ir/types.js";
+import { ts } from "../../ts-api.js";
+import type { CodegenContext, FunctionContext } from "../context/types.js";
+import { compileExpression } from "../shared.js";
+import { getFuncRefWrapperRootTypeIdx } from "../closures/funcref-wrapper-types.js";
+import { mintDefinedFunc, pushDefinedFunc } from "../func-space.js";
+import { nativeStringLiteralInstrs } from "../native-string-literals.js";
+import { addFuncType } from "../registry/types.js";
+import { STRING_EXOTIC_PUSH_KEYS_FN } from "./native-names.js";
+import { bound } from "./ports.js"; // (#6770/#6797) core helpers, injected — keeps this leaf out of the import SCC
+
+const withArraySubclassReceiverAsVec = bound("withArraySubclassReceiverAsVec");
 
 export const OBJ_ORDER_INDEX_OF_KEY_FN = "__obj_order_index_of_key";
 

@@ -31,10 +31,10 @@
  *   a primitive-wrapper producer, the same fact `Object(<primitive>)` carries —
  *   so `r.valueOf()` / `r.constructor` take the runtime wrapper arms.
  */
-import type { Instr } from "../ir/types.js";
-import { ts } from "../ts-api.js";
-import type { CodegenContext } from "./context/types.js";
-import { STRING_EXOTIC_PUSH_KEYS_FN } from "./string-exotic-own-props.js";
+import type { Instr } from "../../ir/types.js";
+import { ts } from "../../ts-api.js";
+import type { CodegenContext } from "../context/types.js";
+import { STRING_EXOTIC_PUSH_KEYS_FN } from "./native-names.js";
 
 const PRIMITIVE_TAGS = new Set(["number", "string", "boolean", "bigint", "symbol"]);
 

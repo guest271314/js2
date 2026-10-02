@@ -36,8 +36,8 @@ import { protoIndexForInPushInstrs, protoIndexHasIdxInstrs } from "./proto-index
 import { stringExoticPushKeysPrologue } from "./string-exotic-own-props.js"; // (#4491) §10.4.3 own index keys
 import { definedFuncAt } from "./func-space.js";
 import { orProxyArrayLikeTest, proxyArrayLikeTypeIdx } from "./proxy-array-like.js"; // (#6651 H6)
-import { stringExoticAssignSourceInstrs } from "./object-assign-primitive-operands.js"; // (#6770 S1)
-import { nonObjectEnumerableOwnInstrs } from "./object-own-key-order.js"; // (#6770 S3)
+import { stringExoticAssignSourceInstrs } from "./object-model/object-assign-primitive-operands.js"; // (#6770 S1)
+import { nonObjectEnumerableOwnInstrs } from "./object-model/object-own-key-order.js"; // (#6770 S3)
 
 /**
  * Everything the enumeration/array-like/object-static block reads from the

@@ -49,7 +49,7 @@ import { addFuncType } from "./registry/types.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { buildThrowJsErrorInstrs } from "./js-errors.js";
-import { proxyTrapAbsentTail } from "./proxy-trap-read.js"; // (#6770 S8)
+import { proxyTrapAbsentTail } from "./object-model/proxy-trap-read.js"; // (#6770 S8)
 
 const EXTERNREF: ValType = { kind: "externref" };
 const I32: ValType = { kind: "i32" };

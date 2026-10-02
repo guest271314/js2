@@ -70,7 +70,7 @@ import { ensureRegexMatchFlatVecType, REGEXP_MATCH_VEC_STRUCT } from "./native-r
 import { ensureObjVecBuilders } from "./object-runtime.js";
 import { tryEmitProtoOverrideTwoArm } from "./builtin-proto-member-override.js"; // (#4556 bucket A)
 import { isStandaloneArraySubclass, withArraySubclassReceiverAsVec } from "./array-subclass-receiver.js"; // (#2917)
-import { withOwnKeyListReceiverAsVec } from "./object-own-key-order.js"; // (#6770 S5)
+import { withOwnKeyListReceiverAsVec } from "./object-model/object-own-key-order.js"; // (#6770 S5)
 import { ensureArgcGlobal, ensureCurrentThisGlobal, ensureExtrasArgvGlobal } from "./statements/nested-declarations.js";
 import {
   compileArrowAsClosure,

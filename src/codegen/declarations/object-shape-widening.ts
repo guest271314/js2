@@ -27,7 +27,7 @@ import { sourceContainsWithStatement } from "../source-scan-predicates.js"; // (
 import {
   isReflectiveWriterCallArg,
   markStandaloneReflectiveWriteTargets,
-} from "../object-literal-reflective-escape.js"; // (#6770 S2)
+} from "../object-model/object-literal-reflective-escape.js"; // (#6770 S2)
 import { readEnv } from "../../env.js";
 
 function isUnboxedPrimitiveCarrier(type: ValType): boolean {

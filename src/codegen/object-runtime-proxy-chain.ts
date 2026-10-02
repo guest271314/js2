@@ -45,7 +45,7 @@ import type { ObjectRuntimeTypes } from "./object-runtime.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
 import { SET_DECISION_HANDLED, SET_DECISION_REFUSED } from "./proto-index-store.js";
 import { addFuncType } from "./registry/types.js";
-import { proxyTrapAbsentTail } from "./proxy-trap-read.js"; // (#6770 S8)
+import { proxyTrapAbsentTail } from "./object-model/proxy-trap-read.js"; // (#6770 S8)
 
 /** `$Object` field index of the appended `protoLink` anyref (object-runtime.ts `objectFields`). */
 export const PROTO_LINK_FIELD = 6;

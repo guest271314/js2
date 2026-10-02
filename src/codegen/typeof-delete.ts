@@ -62,7 +62,7 @@ import { isStandaloneUnavailableConstructorGlobal } from "./standalone-unavailab
 import { ensureFunctionNativeProtoGlue } from "./array-object-proto.js";
 import { emitLazyNativeProtoGet } from "./native-proto.js";
 import * as tf from "./typeof-static-folds.js";
-import { strictWrapperThisTypeofIsDynamic } from "./object-proto-to-locale-string.js";
+import { strictWrapperThisTypeofIsDynamic } from "./object-model/object-proto-to-locale-string.js";
 import { classIdentityFromExpression, hasClassStaticMethod } from "./class-static-metadata.js";
 import { identifierHasExplicitHostAmbientValueDeclaration } from "./expressions/identifier-module-storage.js";
 import { maybeRecordArrayProtoIteratorTombstone } from "./expressions/proto-override.js";

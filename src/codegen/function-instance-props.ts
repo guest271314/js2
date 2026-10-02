@@ -110,7 +110,7 @@ import { nativeStringLiteralInstrs } from "./native-string-literals.js";
 // (#4437) the per-declaration `name` / §15.1.5 `length` carrier — read surface
 import { fnMetaArms, type FnMetaArms } from "./function-instance-meta-arms.js";
 import { fillFnIntrinsicSeed } from "./fn-intrinsic-seed.js"; // (#4562) intrinsic length/name record
-import { CARRIER_BAG_HAS } from "./carrier-bag-visibility.js"; // (#6770 S3)
+import { CARRIER_BAG_HAS } from "./object-model/native-names.js"; // (#6770 S3)
 
 /** `(externref fn, externref key) -> i32` — 1 iff fn's bag holds ANY entry for key. */
 export const FNINST_BAG_OWNS = "__fninst_bag_owns";

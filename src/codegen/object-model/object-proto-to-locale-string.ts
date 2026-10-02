@@ -21,20 +21,24 @@
  * `primitive_this_value_getter` row), then `__apply_closure(fn, recv, [])`.
  * A module that never overrides the member compiles byte-identically.
  */
-import { symbolShadowsBuiltinGlobal } from "../checker/builtin-shadow.js";
-import type { ValType } from "../ir/types.js";
-import { ts } from "../ts-api.js";
-import { sourceOverridesBuiltinPrototypeMember } from "./builtin-proto-member-override.js";
-import { tryEnsureNativeProtoBrand } from "./builtin-value-read.js";
-import { allocLocal } from "./context/locals.js";
-import { isStrictFunction } from "./helpers/is-strict-function.js";
-import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { emitFnctorSubclassDynamicMethodCall } from "./expressions/calls.js";
-import { emitLazyNativeProtoGet } from "./native-proto.js";
-import { stringConstantExternrefInstrs } from "./native-strings.js";
-import { ensureObjectRuntime, ensureObjVecBuilders, reserveApplyClosure } from "./object-runtime.js";
-import { addStringConstantGlobal } from "./registry/imports.js";
-import { coerceType, compileExpression, flushLateImportShifts } from "./shared.js";
+import { symbolShadowsBuiltinGlobal } from "../../checker/builtin-shadow.js";
+import type { ValType } from "../../ir/types.js";
+import { ts } from "../../ts-api.js";
+import { allocLocal } from "../context/locals.js";
+import { isStrictFunction } from "../helpers/is-strict-function.js";
+import type { CodegenContext, FunctionContext } from "../context/types.js";
+import { coerceType, compileExpression, flushLateImportShifts } from "../shared.js";
+import { bound } from "./ports.js"; // (#6770/#6797) core helpers, injected — keeps this leaf out of the import SCC
+
+const sourceOverridesBuiltinPrototypeMember = bound("sourceOverridesBuiltinPrototypeMember");
+const tryEnsureNativeProtoBrand = bound("tryEnsureNativeProtoBrand");
+const emitFnctorSubclassDynamicMethodCall = bound("emitFnctorSubclassDynamicMethodCall");
+const emitLazyNativeProtoGet = bound("emitLazyNativeProtoGet");
+const stringConstantExternrefInstrs = bound("stringConstantExternrefInstrs");
+const ensureObjectRuntime = bound("ensureObjectRuntime");
+const ensureObjVecBuilders = bound("ensureObjVecBuilders");
+const reserveApplyClosure = bound("reserveApplyClosure");
+const addStringConstantGlobal = bound("addStringConstantGlobal");
 
 const EXTERNREF: ValType = { kind: "externref" };
 

@@ -21,7 +21,7 @@ import { NATIVE_GENERATOR_PROTO_VIEW } from "./generators-native-protocol.js";
  */
 import type { Instr, ValType } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
-import { proxyTrapAbsentTail } from "./proxy-trap-read.js"; // (#6770 S8)
+import { proxyTrapAbsentTail } from "./object-model/proxy-trap-read.js"; // (#6770 S8)
 import { FUNCTION_FROM_PROTO, PROTO_FROM_FUNCTION } from "./proto-function-value.js"; // (#4637 A1)
 import { BUILTIN_BRAND_TABLE } from "./builtin-brands.js"; // (#5270 step 2)
 import { buildLazyNativeProtoGetInstrs } from "./native-proto.js"; // (#5270 step 2)

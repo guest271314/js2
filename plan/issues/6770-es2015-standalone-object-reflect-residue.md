@@ -42,15 +42,15 @@ loc-budget-allow:
   # the new leaf object-own-key-order.ts.
   - src/codegen/regexp-lastindex-carrier.ts
   - src/codegen/function-instance-props.ts
-  - src/codegen/object-own-key-order.ts
+  - src/codegen/object-model/object-own-key-order.ts
   # S4: the new leaf define-rejection-channel.ts, the empty-literal proto arg
   # (calls.ts compileProtoArg), the rejection-park hook in the descriptor
   # TypeError builder (runtime layer).
-  - src/codegen/define-rejection-channel.ts
+  - src/codegen/object-model/define-rejection-channel.ts
   - src/runtime/wasmgc/values/ordinary-object-descriptor-common.ts
-  - src/codegen/object-literal-reflective-escape.ts
-  - src/codegen/proxy-trap-read.ts
-  - src/codegen/object-proto-to-locale-string.ts
+  - src/codegen/object-model/object-literal-reflective-escape.ts
+  - src/codegen/object-model/proxy-trap-read.ts
+  - src/codegen/object-model/object-proto-to-locale-string.ts
   - scripts/compiler-boundaries.json
   - src/codegen/expressions/call-builtin-static.ts
   - src/codegen/expressions/calls.ts
@@ -93,7 +93,7 @@ loc-budget-allow:
   # S7 (2026-09-30, Opus): the new leaf proxy-own-keys-surfaces.ts (the
   # full-key-list / filter / enumerable-keys / gOPDs / defineProperties /
   # isPrototypeOf natives), and the Proxy-target literal route (new-builtin-globals).
-  - src/codegen/proxy-own-keys-surfaces.ts
+  - src/codegen/object-model/proxy-own-keys-surfaces.ts
   - src/codegen/expressions/new-builtin-globals.ts
   # S8 (2026-10-01, Opus): the new leaf proxy-trap-read.ts (per-operation
   # GetMethod natives, §7.3.20 CreateListFromArrayLike for the ownKeys result);
@@ -104,12 +104,22 @@ loc-budget-allow:
   - src/codegen/object-runtime-proxy-chain.ts
   - src/codegen/analysis/proxy-binding-escape.ts
   - src/codegen/array-holes.ts
+  # 2026-10-02 (#6770, Opus): #6797's import-cycle and flat-dir gates. The seven
+  # #6770 leaves moved to src/codegen/object-model/ and reach the core through
+  # object-model/ports.ts (type-only imports; implementations installed once in
+  # codegen/index.ts, the composition root) so none of them joins the core SCC;
+  # leaf-shared native names live in object-model/native-names.ts and are
+  # re-exported by carrier-bag-visibility.ts / string-exotic-own-props.ts.
+  - src/codegen/index.ts
+  - src/codegen/string-exotic-own-props.ts
+  - src/codegen/object-model/ports.ts
+  - src/codegen/object-model/native-names.ts
 coercion-sites-allow:
   # 2026-09-30 (#6770 S7, Opus): one by-name lookup of the EXISTING ToBoolean
   # native (`__is_truthy`) for a proxy descriptor's `enumerable` field in the
   # EnumerableOwnProperties / ObjectDefineProperties key walks — a call to the
   # engine's own coercion, not a hand-rolled one.
-  - src/codegen/proxy-own-keys-surfaces.ts
+  - src/codegen/object-model/proxy-own-keys-surfaces.ts
 func-budget-allow:
   # 2026-09-30 (#6770 S1, Opus): +10 in the enumeration-helper builder (the
   # string-source arm call, built in the new leaf), +1 in compileElementAccess

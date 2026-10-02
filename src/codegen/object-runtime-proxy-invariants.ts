@@ -44,7 +44,7 @@ import type { CodegenContext } from "./context/types.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
 import { ensureExternStrictEqHelper } from "./any-helpers.js";
-import { ensureOwnKeysAllNative } from "./proxy-own-keys-surfaces.js";
+import { ensureOwnKeysAllNative } from "./object-model/proxy-own-keys-surfaces.js";
 
 const EXTERNREF: ValType = { kind: "externref" };
 const I32: ValType = { kind: "i32" };

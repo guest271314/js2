@@ -1900,6 +1900,22 @@
       "layer": "backend-wasmgc"
     },
     {
+      "path": "src/codegen/object-model/native-names.ts",
+      "state": "unmigrated",
+      "layer": "mixed-needs-split",
+      "destination": "backend-wasmgc",
+      "owner": "3518-coordinator",
+      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."
+    },
+    {
+      "path": "src/codegen/object-model/ports.ts",
+      "state": "unmigrated",
+      "layer": "mixed-needs-split",
+      "destination": "backend-wasmgc",
+      "owner": "3518-coordinator",
+      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."
+    },
+    {
       "path": "src/runtime/wasmgc/values/string-create-body.ts",
       "state": "clean",
       "layer": "native-runtime"
@@ -4660,7 +4676,7 @@
       "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."
     },
     {
-      "path": "src/codegen/define-rejection-channel.ts",
+      "path": "src/codegen/object-model/define-rejection-channel.ts",
       "state": "unmigrated",
       "layer": "mixed-needs-split",
       "destination": "backend-wasmgc",
@@ -7636,7 +7652,7 @@
       "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."
     },
     {
-      "path": "src/codegen/object-assign-primitive-operands.ts",
+      "path": "src/codegen/object-model/object-assign-primitive-operands.ts",
       "state": "unmigrated",
       "layer": "mixed-needs-split",
       "destination": "backend-wasmgc",
@@ -7716,7 +7732,7 @@
       "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."
     },
     {
-      "path": "src/codegen/object-literal-reflective-escape.ts",
+      "path": "src/codegen/object-model/object-literal-reflective-escape.ts",
       "state": "unmigrated",
       "layer": "mixed-needs-split",
       "destination": "backend-wasmgc",
@@ -7740,7 +7756,7 @@
       "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."
     },
     {
-      "path": "src/codegen/object-own-key-order.ts",
+      "path": "src/codegen/object-model/object-own-key-order.ts",
       "state": "unmigrated",
       "layer": "mixed-needs-split",
       "destination": "backend-wasmgc",
@@ -7796,7 +7812,7 @@
       "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."
     },
     {
-      "path": "src/codegen/object-proto-to-locale-string.ts",
+      "path": "src/codegen/object-model/object-proto-to-locale-string.ts",
       "state": "unmigrated",
       "layer": "mixed-needs-split",
       "destination": "backend-wasmgc",
@@ -8372,7 +8388,7 @@
       "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."
     },
     {
-      "path": "src/codegen/proxy-own-keys-surfaces.ts",
+      "path": "src/codegen/object-model/proxy-own-keys-surfaces.ts",
       "state": "unmigrated",
       "layer": "mixed-needs-split",
       "destination": "backend-wasmgc",
@@ -8388,7 +8404,7 @@
       "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."
     },
     {
-      "path": "src/codegen/proxy-trap-read.ts",
+      "path": "src/codegen/object-model/proxy-trap-read.ts",
       "state": "unmigrated",
       "layer": "mixed-needs-split",
       "destination": "backend-wasmgc",

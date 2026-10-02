@@ -92,8 +92,8 @@ import {
 } from "../expressions/promise-subclass.js";
 import { hostRegExpMatchResultNeedsExternref, stripInferenceWrapper } from "../regexp-host-match.js";
 import { taStaticFromOfReflectiveCallNeedsExternref } from "../ta-static-from-of-spec.js";
-import { objectAssignResultNeedsExternref } from "../object-assign-primitive-operands.js";
-import { integrityLiteralResultNeedsExternref } from "../object-literal-reflective-escape.js";
+import { objectAssignResultNeedsExternref } from "../object-model/object-assign-primitive-operands.js";
+import { integrityLiteralResultNeedsExternref } from "../object-model/object-literal-reflective-escape.js";
 import { inferStandaloneRegExpMatchResultType } from "../regexp-standalone.js";
 
 /**

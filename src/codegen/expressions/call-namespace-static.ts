@@ -127,7 +127,7 @@ import {
   tryEmitProxyConstructWithNewTarget,
 } from "./reflect-construct-newtarget.js"; // (#3371 r4)
 import { objectPrototypeIsImmutableInstrs } from "../object-proto-proto-accessor.js"; // (#5268 step 1)
-import { definePropertyBooleanFrom } from "../define-rejection-channel.js"; // (#6770 S4)
+import { definePropertyBooleanFrom } from "../object-model/define-rejection-channel.js"; // (#6770 S4)
 import {
   compileCallExpression,
   compileProtoArg,

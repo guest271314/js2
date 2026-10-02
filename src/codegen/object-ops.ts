@@ -62,7 +62,7 @@ import { compileDescriptorMapAsDynamicObject, staticDescriptorMapKey } from "./d
 import { isDescriptorTranscribableStruct } from "./property-descriptor-shape.js"; // (#4180) #2372 transcription gate
 import { isDirectProxyBinding } from "./proxy-value-provenance.js"; // (#5268 step 2 / review F1+F2)
 import { superWriteMayAddKey } from "./super-write-grown-keys.js"; // (#5350 r2)
-import { inOwnKeyOrder } from "./object-own-key-order.js"; // (#6770 S3)
+import { inOwnKeyOrder } from "./object-model/object-own-key-order.js"; // (#6770 S3)
 import {
   descriptorFieldName,
   inheritedTrueDescriptorFlags,

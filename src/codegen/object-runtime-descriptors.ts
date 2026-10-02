@@ -53,9 +53,9 @@ import {
 import { reserveVecPropsKeySource, vecPropertiesKeySourceArm } from "./vec-props-key-source.js";
 import { protoIndexOwnViewSubstituteInstrs } from "./proto-index-store.js"; // (#2175 P2) own-view companion substitution
 import { CLOSURE_PROTO_OF } from "./closure-prototype-edge.js";
-import { stringExoticLengthBeforeNamedKeyInstrs } from "./object-own-key-order.js"; // (#6770 S3)
-import { ensureDefineRejectionGlobal } from "./define-rejection-channel.js"; // (#6770 S4)
-import { installClosedStructPropertiesGuard } from "./proxy-own-keys-surfaces.js"; // (#6770 S7)
+import { stringExoticLengthBeforeNamedKeyInstrs } from "./object-model/object-own-key-order.js"; // (#6770 S3)
+import { ensureDefineRejectionGlobal } from "./object-model/define-rejection-channel.js"; // (#6770 S4)
+import { installClosedStructPropertiesGuard } from "./object-model/proxy-own-keys-surfaces.js"; // (#6770 S7)
 
 function closurePrototypeDescriptorArm(
   ctx: CodegenContext,

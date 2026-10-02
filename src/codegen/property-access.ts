@@ -227,7 +227,7 @@ import { classMethodCandidatesForProp, reserveMemberGetDispatch } from "./member
 import { resolveReceiverStruct } from "./fnctor-escape-gate.js"; // (#2681/#2686 A3) pinned-struct read dispatch
 import { emitGuardedNativeStringElementGet } from "./string-element-read.js"; // (#3973) any-typed native-string element read
 import { emitStringExoticIndexGet } from "./string-exotic-index.js"; // (#4232) §10.4.3.5 bounds for a statically-string receiver
-import { isObjectAssignPrimitiveResultBinding } from "./object-assign-primitive-operands.js"; // (#6770 S1)
+import { isObjectAssignPrimitiveResultBinding } from "./object-model/object-assign-primitive-operands.js"; // (#6770 S1)
 import { reserveAccessorGetDriver } from "./accessor-driver.js";
 import { S5C_STRUCT_ACCESSOR_CLOSURE } from "./struct-accessor-closure.js";
 import { tryCompileTemporalPropertyAccess } from "./temporal-native.js";

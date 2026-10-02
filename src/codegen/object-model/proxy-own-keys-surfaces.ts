@@ -27,17 +27,21 @@
  *
  * Each filter builds a FRESH `$ObjVec`: a trap's list is the user's own array.
  */
-import type { Instr, ValType } from "../ir/types.js";
-import { ts } from "../ts-api.js";
-import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { allocLocal } from "./context/locals.js";
-import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
-import { addFuncType } from "./registry/types.js";
-import { addStringConstantGlobal } from "./registry/imports.js";
-import { stringConstantExternrefInstrs } from "./native-strings.js";
-import { ensureObjVecBuilders } from "./object-runtime.js";
-import { ensureLateImport, flushLateImportShifts } from "./shared.js";
-import { compileObjectLiteral, compileObjectLiteralAsExternref, objectLiteralForcesHostPath } from "./literals.js";
+import type { Instr, ValType } from "../../ir/types.js";
+import { ts } from "../../ts-api.js";
+import type { CodegenContext, FunctionContext } from "../context/types.js";
+import { allocLocal } from "../context/locals.js";
+import { mintDefinedFunc, pushDefinedFunc } from "../func-space.js";
+import { addFuncType } from "../registry/types.js";
+import { ensureLateImport, flushLateImportShifts } from "../shared.js";
+import { bound } from "./ports.js"; // (#6770/#6797) core helpers, injected — keeps this leaf out of the import SCC
+
+const addStringConstantGlobal = bound("addStringConstantGlobal");
+const stringConstantExternrefInstrs = bound("stringConstantExternrefInstrs");
+const ensureObjVecBuilders = bound("ensureObjVecBuilders");
+const compileObjectLiteral = bound("compileObjectLiteral");
+const compileObjectLiteralAsExternref = bound("compileObjectLiteralAsExternref");
+const objectLiteralForcesHostPath = bound("objectLiteralForcesHostPath");
 
 const EXTERNREF: ValType = { kind: "externref" };
 /** ToBoolean of a descriptor's `enumerable` field — the existing native, looked up by name. */

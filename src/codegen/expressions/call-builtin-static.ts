@@ -9,7 +9,7 @@
 // callee is not one of these, so the caller in calls.ts continues its dispatch
 // chain. Moved verbatim: the emitted Wasm is byte-identical.
 import { ts } from "../../ts-api.js";
-import { emitProxyAwareOwnKeysCall } from "../proxy-own-keys-surfaces.js"; // (#6770 S7)
+import { emitProxyAwareOwnKeysCall } from "../object-model/proxy-own-keys-surfaces.js"; // (#6770 S7)
 import { isBooleanType, isNumberType, isStringType } from "../../checker/type-mapper.js";
 import { ensureIntegrityPredicate } from "../object-integrity-carrier.js"; // (#4032)
 import { emitToInt32 } from "../binary-ops.js";
@@ -120,7 +120,7 @@ import {
   ensureObjectRuntime,
 } from "../object-runtime.js";
 import { isArrayCarrierValType, retainArrayIsArrayExternrefCandidate } from "../array-carrier-brand.js"; // (#4556)
-import { integrityCallLiteralArg } from "../object-literal-reflective-escape.js"; // (#6770 S2)
+import { integrityCallLiteralArg } from "../object-model/object-literal-reflective-escape.js"; // (#6770 S2)
 import {
   BUILTIN_CTOR_NAMES,
   emitArrayIsArrayExternrefPredicate,

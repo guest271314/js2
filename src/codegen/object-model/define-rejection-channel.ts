@@ -31,12 +31,15 @@
  * define step, the #6771 Array `CreateDataProperty` sites) wraps the same way.
  * Standalone only; the host lane's appliers are JS imports.
  */
-import type { Instr } from "../ir/types.js";
-import { buildStandardTryTable } from "../ir/try-table.js";
-import { ensureExternStrictEqHelper } from "./any-helpers.js";
-import { allocLocal } from "./context/locals.js";
-import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { ensureExnTag, nextModuleGlobalIdx } from "./registry/imports.js";
+import type { Instr } from "../../ir/types.js";
+import { allocLocal } from "../context/locals.js";
+import type { CodegenContext, FunctionContext } from "../context/types.js";
+import { ensureExnTag } from "../registry/physical-imports.js";
+import { bound } from "./ports.js"; // (#6770/#6797) core helpers, injected — keeps this leaf out of the import SCC
+
+const buildStandardTryTable = bound("buildStandardTryTable");
+const ensureExternStrictEqHelper = bound("ensureExternStrictEqHelper");
+const nextModuleGlobalIdx = bound("nextModuleGlobalIdx");
 
 const GLOBAL_NAME = "__define_rejection";
 

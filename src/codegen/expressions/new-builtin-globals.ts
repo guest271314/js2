@@ -28,7 +28,7 @@ import {
   nativeBufferBuiltinOf,
 } from "../dataview-native.js";
 import { emitNativeDateParse } from "../date-parse-native.js";
-import { compileOpenProxyOperandLiteral } from "../proxy-own-keys-surfaces.js";
+import { compileOpenProxyOperandLiteral } from "../object-model/proxy-own-keys-surfaces.js";
 import { ensureAnyToStringHelper, ensureNativeStringBoundaryBridge } from "../native-strings.js";
 import { emitNativeNumberFormat } from "../number-format-native.js";
 import { ensureNativeProxyRuntime, ensureObjectRuntime } from "../object-runtime.js";

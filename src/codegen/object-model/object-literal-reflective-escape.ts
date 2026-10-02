@@ -33,7 +33,7 @@
  * `Object.getOwnPropertyDescriptor(o, k)`, `Reflect.get/has/ownKeys`) already
  * works on the struct and does NOT flip the representation.
  */
-import { ts } from "../ts-api.js";
+import { ts } from "../../ts-api.js";
 
 const REFLECT_WRITERS = new Set(["set", "deleteProperty", "defineProperty", "setPrototypeOf", "preventExtensions"]);
 

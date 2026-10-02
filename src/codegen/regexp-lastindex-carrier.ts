@@ -79,7 +79,7 @@ import {
   standaloneRegExpStructTypeIdx,
 } from "./regexp-standalone.js";
 import { ensureExnTag } from "./registry/imports.js";
-import { installRegExpLastIndexReflectionArms } from "./object-own-key-order.js"; // (#6770 S3)
+import { installRegExpLastIndexReflectionArms } from "./object-model/object-own-key-order.js"; // (#6770 S3)
 import { addFuncType } from "./registry/types.js";
 
 const EXTERNREF: ValType = { kind: "externref" };

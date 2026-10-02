@@ -8,7 +8,7 @@ import {
   emitOverriddenProtoMemberCall,
   protoMemberReadIsOverridden,
   tryEmitPrimitiveToLocaleStringInvoke,
-} from "../object-proto-to-locale-string.js"; // (#6770 S5)
+} from "../object-model/object-proto-to-locale-string.js"; // (#6770 S5)
 import { widenJsDefaultGuessSlot, widenJsDefaultGuessSymbolSlot } from "../js-default-param-type-guess.js";
 import { profilePhase } from "../../compile-profile.js";
 import {

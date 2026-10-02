@@ -285,7 +285,7 @@ import {
   registerStringExoticPushKeys,
   stringExoticHasOwnPrologue,
 } from "./string-exotic-own-props.js"; // (#4232/#4491) §10.4.3 own props + own keys
-import { inOwnKeyOrder, registerObjOrderIndexOfKey } from "./object-own-key-order.js"; // (#6770 S3)
+import { inOwnKeyOrder, registerObjOrderIndexOfKey } from "./object-model/object-own-key-order.js"; // (#6770 S3)
 import { ensureWrapperConstructorCarriers, wrapperConstructorArmInstrs } from "./wrapper-constructor-carrier.js"; // (#4223) runtime `<wrapper>.constructor`
 import { overlayRouteActive } from "./typed-lane-overlay-route.js"; // (#4222) overlay-aware index presence
 import { backedBoundsGuard, canonicalIndexDigitStep } from "./vec-index-domain.js"; // (#4434) index domain + sparse tail
@@ -306,7 +306,7 @@ import {
 import { stringWrapperLengthArm } from "./string-wrapper-dynamic-length.js"; // (#6651 C5)
 import { captureWrapperPrimitiveKey } from "./to-primitive-wrapper-slot.js"; // (#4492 wave-5) __to_primitive's [[PrimitiveValue]] arms
 import { buildToPrimitiveBody } from "../runtime/wasmgc/values/to-primitive-bodies.js";
-import { proxyTrapAbsentTail } from "./proxy-trap-read.js"; // (#6770 S8)
+import { proxyTrapAbsentTail } from "./object-model/proxy-trap-read.js"; // (#6770 S8)
 import type {
   ToPrimitiveCoreBindings,
   ToPrimitiveMethodLiterals,
