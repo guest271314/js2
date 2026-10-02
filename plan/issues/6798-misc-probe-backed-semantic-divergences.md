@@ -1,10 +1,10 @@
 ---
 id: 6798
 title: "codegen: probe-backed semantic divergences — `typeof (class {})` → 'object', `typeof y` before `let y` → 'number', `yield*` return value → null, `String(false && f())` → '0', `type i32` saturates while `|0` wraps, resolve-stage catch cannot tell demote from bug"
-status: ready
+status: in-progress
 sprint: Backlog
 created: 2026-09-30
-updated: 2026-09-30
+updated: 2026-10-02
 priority: medium
 horizon: m
 feasibility: medium
@@ -15,7 +15,12 @@ language_feature: multi
 goal: core-semantics
 related: [6420, 4529, 2035, 1691, 4044, 1236, 2715]
 requested_by: ttraenkler/claude-review
+assignee: "ttraenkler/claude-dev-6798"
+branch: "claude/issue-6798-misc-semantics"
 origin: "2026-09-30 codebase review (plan/agent-context/claude-codebase-review-2026-09-30.md) — MEDIUM cluster"
+loc-budget-allow:
+  # 2026-10-02 resolve-stage-catch: typed demote helper + classify the catch (+4)
+  - src/codegen/index.ts
 ---
 
 # #6798 — six smaller divergences, each reproduced on the JS-host lane (2026-09-30)
