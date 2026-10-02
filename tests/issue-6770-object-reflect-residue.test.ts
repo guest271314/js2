@@ -655,4 +655,21 @@ if (A.sv(proxy, proxy)) __r |= 64;\n${END}`;
     },
     T,
   );
+
+  it(
+    "p60 — a gopd trap returning {value: t[k], …} is read as an object by every consumer (RED on base: 42)",
+    async () => {
+      const src = `var __r = 0;
+var p = new Proxy({ a: 1, b: 2 }, {
+  getOwnPropertyDescriptor: function (t, k) {
+    return { value: t[k], writable: true, enumerable: true, configurable: true };
+  },
+});
+try { var d = Object.getOwnPropertyDescriptor(p, "a"); if (d.value === 1 && d.configurable === true) __r |= 1; } catch (e) { __r |= 8; }
+try { if (Object.keys(p).length === 2) __r |= 2; } catch (e) { __r |= 16; }
+try { var e2 = Object.entries(p); if (e2.length === 2 && e2[1][1] === 2) __r |= 4; } catch (e) { __r |= 32; }\n${END}`;
+      expect(await probe(src)).toBe(7);
+    },
+    T,
+  );
 });

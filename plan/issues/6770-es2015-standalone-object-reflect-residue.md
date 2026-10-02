@@ -5,7 +5,7 @@ status: in-progress
 assignee: ttraenkler/opus-6770
 sprint: current
 created: 2026-09-30
-updated: 2026-09-30
+updated: 2026-10-02
 priority: high
 horizon: xl
 feasibility: hard
@@ -775,3 +775,135 @@ mechanical; do them in ONE commit with p11a=15, p11b=31, p11c=31 as the pin.
   `Claude-Session: https://claude.ai/code/session_01FEGi3DmyPRPD5dx4kWU8hs`,
   `Model: Claude Opus 5.5 High`. Never `--no-verify`; no `git stash` (shared
   stack) — use file copies (`.tmp/6770/base-src`) for every A/B.
+
+## Implementation record (2026-09-30 → 2026-10-02, Opus)
+
+### Rows
+
+Bucket = the 49 rows in `.tmp/6770/rows.txt`, run with `flock
+/tmp/claude-0/t262.lock npx tsx scripts/run-test262-paths.mts .tmp/6770/rows.txt
+--isolate --standalone`.
+
+| tree | pass | fail | CE | log |
+| --- | --- | --- | --- | --- |
+| base `origin/main` @ `2ef807a68e` | 0 | 46 | 3 | `.tmp/6770/rows-base.log` |
+| branch @ `d28a7cc156` (S1–S8 + `origin/main` @ `e473d92460` merged in) | **44** | 3 | 2 | `.tmp/6770/rows-m3.log` |
+
+| step | commit | rows fail → pass |
+| --- | --- | --- |
+| S1 `Object.assign` ToObject | `d186279fc8` | 4 — `assign/Target-{String,Number,Boolean}`, `assign/Override-notstringtarget` |
+| S2 reflective-write literals are open `$Object`s | `8ad607dc33` | 6 — `assign/ObjectOverride-sameproperty`, `assign/target-is-frozen-data-property-set-throws`, `assign/target-is-non-extensible-existing-accessor-property`, `Reflect/set/set-value-on-data-descriptor`, `Reflect/deleteProperty/delete-properties`, `entries/symbols-omitted` |
+| S3 own-key order | `a6d62b339f` | 5 — `Reflect/ownKeys/order-after-define-property`, `Reflect/ownKeys/return-on-corresponding-order-large-index`, `getOwnPropertyDescriptors/order-after-define-property`, `keys/order-after-define-property-with-function`, `entries/order-after-define-property-with-function` |
+| S4 Reflect residue | `9173486efc` | 3 — `Reflect/setPrototypeOf/return-false-if-target-is-not-extensible`, `Reflect/defineProperty/return-boolean`, `Reflect/enumerate/undefined` |
+| S5 `Object.prototype` members | `d72d21e6bc` | 4 — `prototype/__proto__/{prop-desc,set-ordinary-obj}`, `prototype/toLocaleString/primitive_this_value{,_getter}` |
+| S6 `Object.prototype.toString` tags | `b2e8173713` | 5 of 8 — `get-symbol-tag-err`, `proxy-revoked-during-get-call`, `symbol-tag-{weakset,weakmap,promise}-builtin` |
+| S7 Proxy `[[OwnPropertyKeys]]` surfaces | `172c0dac29` | 13 — the six `getOwnPropertySymbols`/`getOwnPropertyNames` `proxy-invariant-*`, `keys/proxy-non-enumerable-prop-invariant-3`, `getOwnPropertyDescriptors/{proxy-undefined-descriptor,proxy-no-ownkeys-returned-keys-order}`, `defineProperties/proxy-no-ownkeys-returned-keys-order`, `{seal,freeze}/proxy-with-defineProperty-handler`, `prototype/isPrototypeOf/arg-is-proxy` |
+| S8 per-operation trap lookup | `f1466dc8ed` | 4 — `keys/property-traps-order-with-proxied-array`, `entries/observable-operations`, `values/observable-operations`, `keys/proxy-keys` |
+
+S8 ran after #6766 landed (its Proxy-as-prototype arms are on the merged tree).
+
+### Residual rows (5)
+
+- `Object/prototype/toString/symbol-tag-non-str-builtin.js` — L20
+  `SameValue(«"[object Symbol]"», «"[object Object]"»)`. After
+  `delete Symbol.prototype[Symbol.toStringTag]`, `toString.call(Symbol("desc"))`
+  still answers the brand: the step-14 consult never reaches
+  `Symbol.prototype` from a `$Symbol` carrier (ToObject of a symbol has no
+  wrapper prototype walk in the tag consult), so the carrier arm answers.
+- `Object/prototype/toString/symbol-tag-override-primitives.js` — L26
+  `SameValue(«"[object Boolean]"», «"[object test262]"»)`. A symbol-keyed write
+  on a primitive-wrapper prototype (`Boolean.prototype[Symbol.toStringTag] =
+  "test262"`) is dropped — the wrapper prototype singletons have no
+  symbol-keyed storage the consult reads (p3 bits 4096–32768).
+- `Object/prototype/toString/symbol-tag-generators-builtin.js` — L20
+  `SameValue(«"[object Function]"», «"[object GeneratorFunction]"»)`.
+  `%GeneratorFunction.prototype%` carries no `@@toStringTag`; a generator
+  function classifies as `Function` (p3 bit 512).
+- `Reflect/construct/arguments-list-is-not-array-like.js`,
+  `Object/subclass-object-arg.js` — CE, owned by #3371, untouched.
+
+### Probes (standalone; `.tmp/6770/probe.mts`, node `.tmp/6770/node-ref.cjs`)
+
+At node's value on the branch: p1, p1a–p1g, p4 = 47, p5, p5a–p5f, p6 = 983039,
+p6b = 31, p7 = 32767, p7b = 1048575, p8 = 1023, p9 = 32767, p10 = 8191,
+p11 = 1321, p11a = 15, p11b = 31, p11c = 31, p12 = 681, p20 = 1023, p21, and
+r1–r10 = 0 (`.tmp/6770/probes-s8.cmp`). Not at node's value:
+
+| probe | base | branch | node | missing bits — mechanism |
+| --- | --- | --- | --- | --- |
+| p13 | 268245 | 325589 | 522239 | 2/8/32/65536/131072 — `sv(r.valueOf(), prim)` for an `Object.assign(<prim>, …)` result bound in the SAME module as a `ty(r)` call: the wrapper's `valueOf` through that binding still answers the wrapper. The four S1 rows pass; this is the probe's extra shape |
+| p2 | 232 | 766 | 2047 | 1/1024 — a DIRECT type-changing write `t9.a = "q"` on a closed literal (no reflective builtin involved; outside S2's reflective-write scope); 256 — the probe's sloppy-frozen-write control throws in the strict module |
+| p2b | 29840 | 32476 | 32511 | 1/2 the same direct write; 32 a checker-folded `===` |
+| p3 | 17173654 | 17174015 | 1048575 | 512/4096–32768/65536 — the three S6 residual rows above; 524288 — `Map` (#5116's); +1<<24 — the strict-module throw (see plan) |
+| p4b / p4c | 0 / 518 | 959 / 767 | 1023 | 64 / 256 — an UNTYPED `v.toLocaleString()` on a primitive keeps the generic ToString lowering |
+
+### Pins — `tests/issue-6770-object-reflect-residue.test.ts`
+
+34 tests; branch 34/34 green. Base verdict (pin file copied into
+`.tmp/6770/ms/`, a snapshot of `origin/main` from 2026-10-01, `npx vitest run`):
+all 30 "RED on base" pins fail and the 3 guards pass
+(`.tmp/6770/pins-base.log`); the 34th, p60 (the gopd-result reification
+below, added after that run), answers 42 on that snapshot and 7 (node's) on
+the branch.
+
+### Other issues' pins moved by this work
+
+- `tests/issue-1355e.test.ts` "the ownKeys trap's array result flows through
+  Object.keys": asserted `3` for trap keys the target does not have; node
+  answers `0` (§20.1.2.17 keeps only keys whose [[GetOwnProperty]] is an
+  enumerable descriptor). The target now carries the keys; still `3`.
+- `tests/issue-5316-r6-nonextensible-existing-key-accessor.test.ts` residual
+  pin: at node parity (`5`) on the S1–S7 tree, so the pin asserts `5`.
+- `tests/issue-6637-…` "Object.keys: untyped fn enumerating through an ownKeys
+  trap" went red at S7 — fixed in the S8 commit, not by editing the pin. A
+  getOwnPropertyDescriptor trap that returns `{value: t[k], …}` returns an
+  anonymous open-descriptor struct, which deliberately has no closed-struct
+  `__extern_get` arm (every other boundary reifies it). The trap driver's
+  closure call did not, so the §10.5.5 validator read `configurable` as
+  `undefined` and threw. Pre-existing on main for
+  `Object.getOwnPropertyDescriptor(proxy, k)`; S7 routed `Object.keys` through
+  the trap. The gopd driver now reifies the result
+  (`__proxy_gopd_result_reify`, `proxy-trap-read.ts`).
+
+Proxy/Reflect vitest set (`.tmp/6770/proxy-tests.txt`, 34 files + the pin
+file) on the S8 tree: 18 failures, every one also failing on `origin/main`
+(`.tmp/6770/vitest-proxy-main*.log`); one main failure fixed (#5268 R2-1
+freeze/seal through a Reflect-forwarding defineProperty trap).
+
+### Controls
+
+Population: `.tmp/6770/ctl-all.txt`, 4,952 rows — the ES5 control (3,908 rows:
+ES5-classified rows passing in the standalone baseline under the plan's
+directories) ∪ the ES2015 control (1,044 rows: passing `built-ins/{Proxy,
+Reflect,Object,Symbol,Promise}/**`). Run on a snapshot of the merged branch
+tree (`.tmp/6770/snap-m3`, `d28a7cc156`) with `.tmp/6770/ctlrun.sh`: chunks
+of 100, each under its own `flock /tmp/claude-0/t262.lock`, `--isolate
+--standalone`, QuickJS eval provider built in the snapshot. Any non-pass row is
+re-run on an `origin/main` snapshot to separate this branch's regressions from
+main's own drift.
+
+IN PROGRESS at the time of this commit (~8 s/row behind the shared lock);
+results replace this paragraph.
+
+### Gates
+
+On the merged tree, `LOC_GATE_BASE=$(git rev-parse origin/main)`, chained:
+`check-loc-budget`, `check-func-budget`, `check-coercion-sites`,
+`check:oracle-ratchet`, `check:dead-exports`, `check-compiler-boundaries
+--mode inventory`, `typecheck` — all exit 0 (`.tmp/6770/gates.sh`).
+New leaves registered in `scripts/compiler-boundaries.json`.
+
+### Acceptance
+
+| criterion | state |
+| --- | --- |
+| S1–S7 rows (43) pass on the merged tree | **40 / 43** — three S6 `toString` tag rows are residual (above) |
+| S8 rows (4) pass or are recorded | **4 / 4 pass**; S8 landed after #6766 merged |
+| the two #3371 rows untouched | met |
+| every probe at node's value | **not met** — p13, p2, p2b, p3 (beyond the Map bit), p4b, p4c (table above) |
+| pin file red on base | met — 30 RED-on-base pins red on a 2026-10-01 `origin/main` snapshot, guards green; p60 42 → 7 |
+| 0 pass→non-pass on the ES5 and ES2015 controls | see Controls |
+| gates green, no raw checker, leaves registered | met |
+
+`status` stays `in-progress`: the S6 residual rows and the probe gaps are
+unmet criteria, not recorded-and-accepted ones.
