@@ -1,10 +1,12 @@
 ---
 id: 6792
 title: "runtime: DOM containment exempts `domRoot` itself from the mutation checks — `root.after(x)`, `root.remove()`, `root.insertAdjacentHTML(\"beforebegin\")` escape the container; `src/runtime-containment.ts` is a dead duplicate"
-status: ready
+status: in-progress
 sprint: Backlog
 created: 2026-09-30
-updated: 2026-09-30
+updated: 2026-10-02
+assignee: "ttraenkler/claude-dev-6792"
+branch: "claude/issue-6792-domroot-containment"
 priority: medium
 horizon: s
 feasibility: easy
