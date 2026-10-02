@@ -16,7 +16,7 @@ goal: standalone-gap
 parent: 4444
 related: [4444, 6712, 5206, 5355, 6442, 2961]
 created: 2026-09-28
-updated: 2026-09-28
+updated: 2026-10-02
 ---
 
 # #6717 — Standalone user-visible `Intl` namespace/API gap
@@ -410,3 +410,75 @@ Issue number 6717 was reserved on 2026-09-28 after the repository assignment
 and overlap checks reported no matching implementation claim. It is a local
 Markdown planning record requested by `ttraenkler/codex-es2015-manifest`; no
 GitHub issue or implementation claim was created by this plan.
+
+## 2026-10-02 current-main asset and ownership handoff
+
+A read-only audit at upstream `e473d92460af75ced29e9666e7e97cdde8df12ca`
+found no installed host-free Intl provider or locale-data foundation to reuse.
+Package declarations, lock/module metadata, `node_modules/.pnpm`, and package
+resolution checks found no FormatJS Intl, CLDR, full-icu, or ICU4X dependency.
+The repository asset scan found no CLDR/ICU, likely-subtag, alias, or locale-data
+payload. This is evidence about this checkout, not proof that those projects
+cannot provide a suitable future dependency.
+
+Current source boundaries remain separate:
+
+- `standalone-global-object-carriers.ts` seeds Array/Object/JSON/Math/Proxy/Reflect,
+  not Intl; `builtin-static-globals.ts` has no Intl namespace identity.
+- `extern-declarations.ts` still declares NumberFormat using the host
+  `Intl_NumberFormat` route. Its paired import collection, construction, and
+  method lowering must be changed together for a native route; merely exposing
+  a namespace would leave the two forbidden-import originals unresolved.
+- `runtime.ts` supplies NumberFormat through host Intl, and `identifiers.ts`
+  intentionally materializes ambient Intl only off standalone/WASI. Preserve
+  the completed host-only #5206 behavior.
+- `number-format-native` supplies decimal Number.prototype behavior, not
+  locale matching, locale formatting, formatter state, or formatToParts.
+- #6442's lexical Temporal-provider shim remains restricted to en/en-US and
+  UTC/fixed Etc-GMT zones. It is not a user-global Intl implementation.
+
+No issue 6740 or separate production implementation claim was found in the
+checked worktrees. This existing issue is the applicable unassigned plan;
+the historical 74-row result is still not a current-main measurement. No
+Intl test run, dependency installation, production edit, or completion claim
+was made during this audit.
+
+Next implementation-plan step: select and pin a standards data foundation
+using primary-source provenance/license/version evidence; specify deterministic
+packaging and artifact/cache limits; prove a host-free canonicalization and
+locale-match core. Then claim a coordinated realm-namespace and NumberFormat
+slice with a bounded file list and fresh overlap clearance. Candidate seams
+include identifiers/global carriers/static globals and the paired extern
+registration/import/new/method routes, plus a dedicated formatter/data owner.
+Do not modify the existing host bridge, the Temporal lexical shim, or held IR
+migration areas. All 74 Intl identities and the full 11,778-file goal stay in
+scope; selecting only the tested locales or replacing missing semantics with
+a throwing shell is not an implementation strategy.
+
+### Selected planning direction: offline generated locale tables
+
+Use pinned CLDR JSON as offline source input to a deterministic repository
+generator, rather than assume host Intl or an installed ICU provider exists.
+The [CLDR release index](https://cldr.unicode.org/index/downloads) lists the
+stable 48.2 release and corresponding cldr-json 48.2.0 tag. Before ingesting
+data, record the exact tag/commit, input-file hashes, the pinned release's
+license/notice, generator version, generated-table hash, measured byte sizes,
+and artifact/cache-key effects. No download, new dependency, or runtime
+implementation has happened yet. No project-specific size estimate is claimed.
+
+First complete public API: `Intl.getCanonicalLocales`, with a general locale
+parser/canonicalizer, Unicode alias data, duplicate suppression, and the
+observable access/conversion/error ordering required by
+[CanonicalizeLocaleList](https://tc39.es/ecma402/#sec-canonicalizelocalelist).
+Do not implement only the locales mentioned by current tests. Prepare an
+internal standards-defined lookup matcher over generated available-locale
+data; do not expose a formatter's supportedLocalesOf before its data and
+semantics actually exist. Best-fit matching needs an explicit data-backed
+policy, not an unlabelled prefix-lookup substitute.
+
+ICU4X is a possible alternative data/runtime architecture, not inherently
+incompatible merely because it is written in Rust. Selecting it would require
+separate reproducible toolchain, Wasm linking/ABI, import-policy, and data-size
+proof. The current recommendation favors generated tables because the repo
+has none of that integration today. Keep this choice revisitable from measured
+evidence; full Intl semantics and all frozen originals remain the target.

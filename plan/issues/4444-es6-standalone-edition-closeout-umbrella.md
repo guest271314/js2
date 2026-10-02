@@ -7385,6 +7385,15 @@ open and typed-closed strict-spread return-code controls fail. This rules out
 the captured-local explanation without identifying the precise faulty ABI
 edge yet. The log is `/private/tmp/js2-6739-boolean-21.AQ7K4z/focused.log`,
 SHA256 `89a1886ae815ff92d4e7bf15ed66088827a97e246b30b8fdf1718b9ba6b42699`.
+Subsequent source tracing corrects the attribution: these dynamic-call controls
+select `tryEmitStandaloneDynamicSpreadCall` and `buildSpreadArgList`, whose
+standalone opaque-source branch still calls legacy `__array_from_iter_n`;
+native vec/tuple fast paths bypass materialization entirely. They do not test
+the new strict raw reader. Retain all reds as real argument-spread consumer
+defects, not evidence of a Boolean getter ABI defect. The same owner is preparing
+a true strict-consumer control and a plan for correct shared argument-spread
+wiring, preserving evaluation order and late-import index settlement. Swapping
+only the opaque materializer would not fix the vec/tuple bypasses.
 Preserve all red controls; do not change shared IR/runtime representation
 without evidence. Return the lease to the PR 6246 shepherd for its narrow
 checkpoint/integration and explicit-current-main inventory check. No full
