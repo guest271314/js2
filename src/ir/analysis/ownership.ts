@@ -31,9 +31,9 @@
 // strictly UP the (finite-height) lattice, the analysis is monotone and
 // terminates.
 
-import type { AllocSiteRegistry } from "../alloc-registry.js";
-import { ALLOC_NAMESPACES } from "../alloc-registry.js";
-import type { IrBlock, IrBlockId, IrFunction, IrInstr, IrTerminator, IrValueId } from "../nodes.js";
+import type { AllocSiteRegistry } from "./alloc-registry.js";
+import { ALLOC_NAMESPACES } from "./alloc-registry.js";
+import type { IrBlock, IrBlockId, IrFunction, IrInstr, IrTerminator, IrValueId } from "../core/nodes.js";
 import {
   AccessSet,
   joinAnnotations,
