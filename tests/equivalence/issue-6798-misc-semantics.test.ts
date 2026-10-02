@@ -84,4 +84,30 @@ describe("#6798 misc probe-backed semantic divergences", () => {
       [{ fn: "test", args: [] }],
     );
   });
+
+  it("yield-star-return: the delegate's return value is the yield* expression's value in every position", async () => {
+    await assertEquivalent(
+      `
+      function* inner() { yield 1; return "r"; }
+      function* innerN() { yield 1; return 7; }
+      function id(x: any): any { return x; }
+      function* o1() { yield (yield* inner()); }
+      function* o2() { const rv = yield* inner(); yield "o:" + rv; }
+      function* o3() { return yield* inner(); }
+      function* o4() { yield "o:" + (yield* inner()); }
+      function* o5() { yield id(yield* inner()); }
+      function* o6() { const rv: string = yield* inner(); yield rv.length; }
+      function* o7() { let rv = ""; rv = yield* inner(); yield rv.length; }
+      function* o8() { const n = yield* innerN(); yield n * 2; }
+      export function test(): string {
+        const g = o3(); g.next(); const r3 = g.next();
+        return [
+          [...o1()].join(","), [...o2()].join(","), String(r3.value) + "/" + r3.done, [...o4()].join(","),
+          [...o5()].join(","), [...o6()].join(","), [...o7()].join(","), [...o8()].join(","),
+        ].join("|");
+      }
+      `,
+      [{ fn: "test", args: [] }],
+    );
+  });
 });

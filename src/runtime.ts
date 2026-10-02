@@ -6624,6 +6624,14 @@ function _getProtoMethodBridge(proto: object, name: string): Function {
 
 const _staticMethodNames = new WeakMap<object, string[]>();
 const _classObjectOwnPropertyNames = new WeakMap<object, string[]>();
+// (#6798) Each eager generator buffer's last `yield*` completion value, read
+// (and cleared) once by `__gen_yield_star_result`.
+const _genYieldStarResults = new WeakMap<object, unknown>();
+const _takeGenYieldStarResult = (buf: object): unknown => {
+  const result = _genYieldStarResults.get(buf);
+  _genYieldStarResults.delete(buf);
+  return result;
+};
 // Static methods are invoked by host frameworks through the generic closure
 // bridge. Their object results must be readable host objects (React consumes
 // getDerivedStateFromProps' returned partial state immediately), unlike the
@@ -17608,14 +17616,26 @@ assert._isSameValue = isSameValue;
           }
           const iterable = _materializeIterable(rawIterable, callbackState);
           if (iterable != null && typeof iterable[Symbol.iterator] === "function") {
-            for (const v of iterable) {
+            // (#6798) Step by hand (not for-of) so the delegate's terminal
+            // `{done: true, value}` survives: it is the `yield*` expression's value.
+            const iterator = iterable[Symbol.iterator]();
+            const next = iterator.next;
+            for (;;) {
+              const step = next.call(iterator);
+              if (Object(step) !== step) throw new TypeError("Iterator result is not an object");
+              if (step.done) {
+                _genYieldStarResults.set(buf, step.value);
+                return;
+              }
               if (buf.length >= __EAGER_GEN_LIMIT) {
+                iterator.return?.();
                 throw new RangeError("Eager generator buffer exceeded " + __EAGER_GEN_LIMIT + " yields");
               }
-              buf.push(v);
+              buf.push(step.value);
             }
           }
         };
+      if (name === "__gen_yield_star_result") return _takeGenYieldStarResult;
       // __gen_set_return: (buf, value) → void. Stashes the generator's `return`
       // value on the buffer object (a non-enumerable side property) rather than
       // pushing it as a yielded element. `__create_generator` reads it into

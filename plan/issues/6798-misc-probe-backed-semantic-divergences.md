@@ -21,16 +21,20 @@ origin: "2026-09-30 codebase review (plan/agent-context/claude-codebase-review-2
 loc-budget-allow:
   # 2026-10-02 resolve-stage-catch: typed demote helper + classify the catch (+4)
   - src/codegen/index.ts
-  # 2026-10-02 typeof-class: host typeof / typeof_check recognise a registered class object (+2)
+  # 2026-10-02 typeof-class (+2) / yield-star-return (+20): class-object typeof, yield* completion
   - src/runtime.ts
   # 2026-10-02 typeof-tdz: one TDZ-guard call before each static typeof fold (+2)
   - src/codegen/typeof-delete.ts
+  # 2026-10-02 yield-star-return: host-lane completion guards in the native planner (+5)
+  - src/codegen/generators-native.ts
 func-budget-allow:
-  # 2026-10-02 typeof-class: the two typeof arms live inside resolveImport (+2)
+  # 2026-10-02 typeof-class (+2) / yield-star-return (+14): arms live inside resolveImport
   - src/runtime.ts::resolveImport
   # 2026-10-02 typeof-tdz: the TDZ guard before the fold (+1 each)
   - src/codegen/typeof-delete.ts::compileTypeofExpression
   - src/codegen/typeof-delete.ts::compileTypeofComparison
+  # 2026-10-02 yield-star-return: the native planner's host-lane completion guards (+5)
+  - src/codegen/generators-native.ts::buildNativeGeneratorPlan
 ---
 
 # #6798 — six smaller divergences, each reproduced on the JS-host lane (2026-09-30)
