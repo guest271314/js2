@@ -8,6 +8,7 @@
 // `String.fromCharCode`, `Object.keys`, …). It returns `undefined` when the
 // callee is not one of these, so the caller in calls.ts continues its dispatch
 // chain. Moved verbatim: the emitted Wasm is byte-identical.
+import { classStaticSidecarApplies } from "../class-static-sidecar.js"; // (#6774 S6)
 import { ts } from "../../ts-api.js";
 import { isBooleanType, isNumberType, isStringType } from "../../checker/type-mapper.js";
 import { ensureIntegrityPredicate } from "../object-integrity-carrier.js"; // (#4032)
@@ -3724,6 +3725,8 @@ export function compileBuiltinStaticCall(
     expr.arguments.length >= 1
   ) {
     const arg = expr.arguments[0]!;
+    // (#6774 S6) A class's symbol-keyed statics live on its static sidecar `$Object`.
+    const sidecarIdx = noJsHost(ctx) ? classStaticSidecarFor(ctx, arg) : undefined;
     const argResult = compileExpression(ctx, fctx, arg, { kind: "externref" });
     if (!argResult) {
       fctx.body.push({ op: "ref.null.extern" });
@@ -3732,6 +3735,7 @@ export function compileBuiltinStaticCall(
     if (argResult.kind !== "externref") {
       coerceType(ctx, fctx, argResult, { kind: "externref" });
     }
+    if (sidecarIdx !== undefined) fctx.body.push({ op: "drop" }, { op: "global.get", index: sidecarIdx });
     const funcIdx = ensureLateImport(ctx, "__getOwnPropertySymbols", [{ kind: "externref" }], [{ kind: "externref" }]);
     // (#5268 step 3) §20.1.2.11 step 1 is `ToObject(O)`, which THROWS for
     // null/undefined — the native answers an empty list for every non-`$Object`
@@ -4727,4 +4731,11 @@ export function tryCompileFromCharCodeFamilyReflective(
 
   fctx.body.push({ op: "drop" });
   return undefined; // re-eval-safe by the gate above
+}
+
+/** (#6774 S6) The static sidecar global of a directly named class, when it has one. */
+function classStaticSidecarFor(ctx: CodegenContext, arg: ts.Expression): number | undefined {
+  const className = classIdentityFromExpression(ctx, arg);
+  if (className === undefined || !classStaticSidecarApplies(ctx, className)) return undefined;
+  return ctx.classStaticSidecarGlobals.get(className);
 }

@@ -1717,13 +1717,17 @@ function compileDestructuringAssignment(
       if (
         ts.isBinaryExpression(targetExpr) &&
         targetExpr.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-        ts.isIdentifier(targetExpr.left)
+        (ts.isIdentifier(targetExpr.left) ||
+          // (#6774 S11) `{ x: holder.y = d }` — a member target with an initializer
+          (ctx.standalone &&
+            (ts.isPropertyAccessExpression(targetExpr.left) || ts.isElementAccessExpression(targetExpr.left))))
       ) {
         defaultExpr = targetExpr.right;
         targetExpr = targetExpr.left;
       }
 
       const fieldIdx = fields.findIndex((f) => f.name === propName);
+
       if (fieldIdx === -1) {
         // The source struct has no matching field → reading `obj[prop]` yields
         // `undefined`. Per §13.15.5.5 the default Initializer fires on undefined,
@@ -1842,6 +1846,7 @@ function compileDestructuringAssignment(
         fctx.body.push({ op: "local.get", index: tmpLocal });
         fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx });
         fctx.body.push({ op: "local.set", index: tmpElem });
+        if (defaultExpr) emitMemberTargetDefault(ctx, fctx, tmpElem, fieldType, defaultExpr); // (#6774 S11)
         emitAssignToTarget(ctx, fctx, targetExpr, tmpElem, fieldType);
       }
       // else: unsupported target expression in property assignment — skip
@@ -3049,6 +3054,10 @@ export function emitAssignToTarget(
         ],
         else: [],
       });
+    } else if (ctx.standalone) {
+      // (#6774 S21) A non-vec struct receiver (`t()[k]` where `t` returns an
+      // object): the write used to be dropped. PutValue through the generic set.
+      emitDynamicElementSet(ctx, fctx, target, arrType, valueLocal, valueType);
     }
   }
 }
@@ -6589,3 +6598,34 @@ export {
   compileExternSetFallback,
   compilePropertyAssignment,
 };
+
+/**
+ * (#6774 S11) §13.15.5.6 step 3 for a member target: replace the read value in
+ * `valueLocal` with the initializer when it is `undefined`. A statically typed
+ * (non-externref) read is never `undefined`, so it needs no test.
+ */
+function emitMemberTargetDefault(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  valueLocal: number,
+  valueType: ValType,
+  defaultExpr: ts.Expression,
+): void {
+  if (valueType.kind !== "externref") return;
+  const undefIdx = ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
+  if (undefIdx === undefined) return;
+  flushLateImportShifts(ctx, fctx);
+  fctx.body.push({ op: "local.get", index: valueLocal }, { op: "call", funcIdx: undefIdx });
+  attachDetachedAssignmentBodies(
+    fctx,
+    (body) => ({
+      then: body(() => {
+        const initType = compileExpression(ctx, fctx, defaultExpr, valueType);
+        if (initType && initType.kind !== "externref") coerceType(ctx, fctx, initType, valueType);
+        fctx.body.push({ op: "local.set", index: valueLocal });
+      }),
+      else: [],
+    }),
+    (branches) => fctx.body.push({ op: "if", blockType: { kind: "empty" }, ...branches }),
+  );
+}
