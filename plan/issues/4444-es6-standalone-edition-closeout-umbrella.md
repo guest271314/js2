@@ -7398,3 +7398,94 @@ Preserve all red controls; do not change shared IR/runtime representation
 without evidence. Return the lease to the PR 6246 shepherd for its narrow
 checkpoint/integration and explicit-current-main inventory check. No full
 integrated 11,778-file verification has occurred; the goal remains active.
+
+### 2026-10-02 current integration, iterator provenance, and CI handoff
+
+The user's latest upstream merge request is fulfilled locally by
+`2d105d4d1e948ed93d06e3c603c79d14fb94ecc2`, whose second parent is
+`db906b60073de22c91842fbd6d46f5443cb09b7b`. An ancestry check passes and
+there are no tracked working-tree changes or unresolved merge paths. The two
+pre-existing untracked #6724 diagnostic files were preserved. This merge is
+not pushed: PR 6420 still queues the older `54b8f8fa45` snapshot (position 3
+at the subsequent one-shot observation) and has no merge commit. Do not push
+the unpublished handoff tail into that queued snapshot. A follow-up publication
+must verify what actually landed before deciding its base and contents.
+
+The iterator owner measured **27 pass / 2 fail of 29 focused controls** in
+terminal session 9140. Root independently checked the denominator and log
+SHA256 `7815ebf4e3048115eedfc3cf63bc4ddf09b351ef8bea096540658b2338e65d85`
+at `/private/tmp/js2-6739-family-29-rerun.vf5MYy/focused.log`. All five
+historical generic dynamic Boolean-spread failures now pass. The two retained
+reds are `NUMBER_ARRAY_F64_RED_BODY` and
+`STRICT_NUMBER_ARRAY_F64_RED_BODY`; each expects an ordinary Array's live
+iterator override to run, but receives `0` instead of `1`. The receipt
+predates the small lazy-classifier source change, so it is not a current-source
+or original-Test262 acceptance receipt. Re-run before readiness.
+
+Construction-side inspection now establishes a concrete dependency: static
+`new Float64Array([1, 2])` and ordinary `number[]` both allocate canonical
+`__vec_f64`. An iterator-only type test cannot recover the lost identity.
+The same collision exists in float TypedArray static factories and built-in
+subclass construction. A compatible physical TypedArray subtype is being
+planned against the existing arguments/holey-carrier precedents; parent-typed
+slots must preserve it, and base-type dispatch must explicitly exclude it.
+Clone/map/filter producers and IsArray consumers still need provenance audits.
+Excluding all f64 arrays is an acknowledged wrong observable result, not an
+acceptable completed design. No held IR/index/literal/object-runtime edits
+are authorized by this dependency discovery.
+
+The normal #6739 checkpoint retry resolved the existing local pnpm 10.30.2
+with only Node 24 prepended; no dependency install or symlink change occurred.
+Formatting passed, but the unchanged LOC ratchet rejected
+`iterator-native.ts` at **6481 > 6162 (+319)**. No commit was created.
+The owner is extracting a cohesive helper rather than adding an allowance.
+The Intl data-foundation owner has the serialized heavy lease meanwhile;
+its pinned CLDR input ingestion and generator source are not Test262 credit.
+
+PR 6246 remains an unfinished draft at `e6493c36025ab9f93dab7d5e57389b80896f6ebc`.
+The shepherd inspected required quality run `36967435041`, job
+`110714119093`: CI forces the interpreter eval engine, the fixture reports
+the `REFUSAL` tier, and the 15-control run is **1 pass / 14 fail**, each red
+returning `undefined`. This is a separate CI evaluator mismatch, not proof
+that the four retained native-tier semantic diagnostics increased to fourteen.
+Preserve both receipts and all executable diagnostic expectations. Resolve
+the evaluator contract and the numeric-array/tuple semantic gaps before
+calling that PR mergeable; do not remove tests to turn the gate green.
+
+The frozen baseline remains historical **11,030 / 11,778 pass**. No current
+full integrated-source pass rate, no complete Intl surface, and no 100%
+completion are established by these focused or data-foundation steps.
+
+#### Original-cohort and data-foundation evidence correction
+
+The iterator owner's provenance audit establishes that the historical
+**1 pass / 10 fail of 11** was an eleven-control focused Proxy fixture, not
+an eleven-path original Test262 run. No matching original manifest was found.
+Do not reuse that denominator as an original-suite baseline or claim an
+original Test262 gain from its focused improvement. The old #5131
+`spread-sngl-empty.js` / `spread-mult-empty.js` originals are absent from the
+unchanged goal manifest. The fresh original cohort is instead to be frozen
+from all **32** existing goal members matching
+`test/language/expressions/(call|new)/*spread*`: four eval controls plus
+twenty-eight ordinary call/new protocol rows. It requires a new manifest hash,
+current-source baseline/candidate comparison, and maintained completeness.
+
+The strict worktree's stale `test262/test` symlink currently points to an
+inaccessible old dependency worktree. `git -C test262 rev-parse HEAD` falls
+through to the compiler repository and returns `288ca372d9`; this is not a
+corpus revision. Before running originals, verify the preserved frozen corpus
+and repair only the owner's own stale test/harness links, retaining the prior
+targets. Do not repair or overwrite the shared dependency target. Focused
+compiler controls do not prove that original-suite discovery works.
+
+The data foundation now has a generated **510,335-byte** table (SHA256
+`e006613548e176f9bf836067be4de5afac68441acfd8142e4ed4612934c73632`).
+Root independently verified the public CLDR JSON `48.2.0` tag resolves to
+`bb334e8d6250c9363e957e131bf7e6d08ec72f91`. Seven focused checks pass,
+including actual generator CLI rejection of duplicate provenance keys and a
+release-pin mismatch; failed attempts preserve the existing output bytes.
+Formatting and normal publication gates remain outstanding at this record.
+The retained metadata covers 766 available locales, 7,788 likely-subtag rows,
+and 29 Unicode extension keys, not a runtime Intl implementation. Narrow
+formatter exclusions protect the byte-pinned input and generator-owned output;
+the post-hook generator check must still establish that those bytes survived.
