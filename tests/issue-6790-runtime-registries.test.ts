@@ -4,7 +4,9 @@
 //
 // 1. The Node eval Worker kept every object it ever handed to the host, in both
 //    threads, until `terminate()`.
-// 2. (class-parent registry — see the second describe block)
+// 2. The dynamic class-parent registry (`class C extends <value>`) was one
+//    process-wide table keyed by class NAME, so two live instances that each
+//    declared a `C` with a different parent shared one entry.
 // 3. (linked-provider registry — see the third describe block)
 
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
@@ -15,7 +17,9 @@ import { runInNewContext } from "node:vm";
 import { Worker } from "node:worker_threads";
 import { build } from "esbuild";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { compile } from "../src/index.js";
 import { type NodeEvalWorkerEvaluator, connectNodeEvalWorker } from "../src/runtime-node-eval-worker.js";
+import { buildImports } from "../src/runtime.js";
 
 setFlagsFromString("--expose-gc");
 const hostGc = runInNewContext("gc") as () => void;
@@ -114,4 +118,92 @@ describe("#6790 part 1 — the Node eval Worker releases handles the host droppe
     expect(held.inc()).toBe(42);
     expect(held.n).toBe(42);
   });
+});
+
+describe("#6790 part 2 — class parents are registered per instance, not per class name", () => {
+  /** A host constructor that stamps who constructed the receiver, with a static of the same label. */
+  function makeBase(label: string, log: string[]): Function {
+    const Base = function (this: Record<string, unknown>) {
+      log.push(label);
+      this.tag = label;
+    } as unknown as Function & { who?: string };
+    Base.who = label;
+    return Base;
+  }
+
+  /** Instantiate one compiled binary with the host value its heritage reads at init. */
+  async function instantiateWith(
+    result: Awaited<ReturnType<typeof compile>>,
+    slot: string,
+    value: unknown,
+  ): Promise<Record<string, () => unknown>> {
+    (globalThis as Record<string, unknown>)[slot] = value;
+    try {
+      const imports = buildImports(result.imports, undefined, result.stringPool);
+      const { instance } = await WebAssembly.instantiate(result.binary, imports as unknown as WebAssembly.Imports);
+      imports.setInstance?.(instance);
+      return instance.exports as unknown as Record<string, () => unknown>;
+    } finally {
+      delete (globalThis as Record<string, unknown>)[slot];
+    }
+  }
+
+  it("each instance's SuperCall runs its own parent (property-access heritage)", async () => {
+    const slot = "__issue6790_ns";
+    const result = await compile(
+      `
+        const NS: any = (globalThis as any).${slot};
+        class C extends NS.Base {
+          constructor() { super(); }
+        }
+        export function tag(): any { const c: any = new C(); return c.tag; }
+        export function staticWho(): any { return (C as any).who; }
+      `,
+      { fileName: "issue-6790-a.ts", skipSemanticDiagnostics: true },
+    );
+    expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
+    // The heritage this test is about: resolved by NAME at the SuperCall.
+    expect(result.imports.some((d) => d.name.startsWith("__call_dynamic_class_parent_"))).toBe(true);
+
+    const log: string[] = [];
+    const a = await instantiateWith(result, slot, { Base: makeBase("A", log) });
+    const b = await instantiateWith(result, slot, { Base: makeBase("B", log) });
+
+    // Before #6790 the second registration overwrote the first: A's `new C()`
+    // ran B's constructor (tag "B", log ["B"]) and `C.who` read "B".
+    log.length = 0;
+    expect(a.tag!()).toBe("A");
+    expect(log).toEqual(["A"]);
+    log.length = 0;
+    expect(b.tag!()).toBe("B");
+    expect(log).toEqual(["B"]);
+    expect(a.staticWho!()).toBe("A");
+    expect(b.staticWho!()).toBe("B");
+  }, 120_000);
+
+  it("two different programs declaring the same class name keep their own static parents", async () => {
+    const slotA = "__issue6790_baseA";
+    const slotB = "__issue6790_baseB";
+    const program = (slot: string, extra: string) =>
+      compile(
+        `
+          const P: any = (globalThis as any).${slot};
+          class C extends P {
+            constructor() { super(); }
+          }
+          export function staticWho(): any { return (C as any).who; }
+          export function ${extra}(): number { return 1; }
+        `,
+        { fileName: `issue-6790-${extra}.ts`, skipSemanticDiagnostics: true },
+      );
+    const [first, second] = await Promise.all([program(slotA, "first"), program(slotB, "second")]);
+    expect(first.success && second.success).toBe(true);
+    expect(first.imports.some((d) => d.name === "__register_class_parent")).toBe(true);
+
+    const log: string[] = [];
+    const a = await instantiateWith(first, slotA, makeBase("A", log));
+    const b = await instantiateWith(second, slotB, makeBase("B", log));
+    expect(a.staticWho!()).toBe("A");
+    expect(b.staticWho!()).toBe("B");
+  }, 120_000);
 });

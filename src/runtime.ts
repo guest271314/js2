@@ -154,6 +154,7 @@ import {
 import { resolveSubclassParent } from "./runtime/class-method-host-bridge.js";
 import { createObjectCreateClassInstanceRuntime } from "./runtime/object-create-class-instance.js";
 import * as classStaticParent from "./runtime/class-static-parent.js";
+const _classParents = classStaticParent.classParentsFor; // (#6790) one registry per instance
 import { getWebHostConstructors } from "./runtime/web-host-constructors.js";
 import {
   _rerouteStringSymbolMethodPrimitive,
@@ -6677,7 +6678,8 @@ function _registerClassCtorHandler(
   parentFnctor: any,
   classNameArg: any,
   implicitDynamicParentCtor: any,
-  liveExportSource?: MarshalExportSource,
+  liveExportSource: MarshalExportSource | undefined,
+  classParents: classStaticParent.ClassParentRegistry,
 ): void {
   if (classObj == null || typeof classObj !== "object") return;
   if (liveExportSource !== undefined) _classCtorCallbackStates.set(classObj, liveExportSource);
@@ -6689,8 +6691,7 @@ function _registerClassCtorHandler(
     _classObjectByProtoStruct.set(protoObj, classObj);
   }
   if (parentFnctor != null && typeof parentFnctor === "object") _classFnctorParents.set(classObj, parentFnctor);
-  if (typeof classNameArg === "string" && classNameArg.length > 0)
-    classStaticParent.registerClassObject(classObj, classNameArg);
+  classStaticParent.registerClassObject(classObj, classNameArg, classParents);
   if (implicitDynamicParentCtor === 1) _classImplicitDynamicParentCtor.add(classObj);
   else _classImplicitDynamicParentCtor.delete(classObj);
   _hostProxyCache.delete(classObj);
@@ -6822,25 +6823,15 @@ function _hostPrototypeForInstance(raw: any, exports: Record<string, Function> |
   return proto != null && typeof proto === "object" ? proto : undefined;
 }
 
-/** (#4618) `__register_class_parent` import: dynamic `extends <value>`
- * parent, registered by name at the class declaration statement (see
- * emitRegisterDynamicClassParent). */
-function _registerClassParentHandler(className: any, parentValue: any): void {
-  if (typeof className !== "string" || className.length === 0) return;
-  // (#5280) A null `parentValue` is `class C extends null` — a real heritage, not a missing one; see registerClassParent.
-  classStaticParent.registerClassParent(className, parentValue);
-}
-
-/** (#4618) Lazy dynamic-parent registration for PROPERTY-ACCESS heritage
+/** (#4618) Lazy dynamic-parent resolver for PROPERTY-ACCESS heritage
  * (`class Test extends React.Component`): the compiled value read at the
  * declaration statement can cross as null through the static member lane
  * (observed in the react per-file batch), so the runtime stores the live
  * container object + key and resolves `obj[key]` host-side, on demand, when
  * the class mirror needs the parent. Memoized on first non-null resolve. */
-function _registerClassParentRefHandler(className: any, obj: any, key: any, exports?: Record<string, Function>): void {
-  if (typeof className !== "string" || className.length === 0) return;
-  if (obj == null || typeof key !== "string" || key.length === 0) return;
-  classStaticParent.registerClassParentLazy(className, () => {
+function _classParentRefResolver(obj: any, key: any, exports?: Record<string, Function>): (() => any) | undefined {
+  if (obj == null || typeof key !== "string" || key.length === 0) return undefined;
+  return () => {
     try {
       // The container is often a RAW wasm struct (the compiled module's
       // `exports` object): its props may live in the sidecar OR as real
@@ -6862,12 +6853,11 @@ function _registerClassParentRefHandler(className: any, obj: any, key: any, expo
         if (wrapped != null && wrapped !== obj) v = (wrapped as any)[key];
       }
       if (v == null) v = (obj as any)[key];
-      if (v != null) classStaticParent.rememberClassParent(className, v);
       return v;
     } catch {
       return undefined;
     }
-  });
+  };
 }
 
 /**
@@ -9627,7 +9617,7 @@ function _makeClassCtorMirrorForHost(
     const viaFnctor = _classFnctorParents.get(classObj);
     if (viaFnctor != null) return viaFnctor;
     if (className === "") return undefined;
-    const registered = classStaticParent.getClassParent(className);
+    const registered = classStaticParent.classParentOf(classObj, className);
     if (registered != null) return registered;
     // (#5354) A STATIC `class B extends A` heritage is resolved entirely inside
     // the compiler and registers nothing on the host, so neither record above
@@ -10632,6 +10622,8 @@ interface InstanceState {
   subclassCtors?: Map<string, Function[]>;
   /** user-class name → parent class name (or null). */
   userClassParents?: Map<string, string | null>;
+  /** (#6790) user-class name → dynamic `extends` value, for this instance only. */
+  classParents?: classStaticParent.ClassParentRegistry;
   /**
    * (#2637 B2) `class extends Promise` name → the host-bridged wasm
    * constructor-body callable (`$<Class>_new`, registered via
@@ -14043,21 +14035,21 @@ assert._isSameValue = isSameValue;
             classNameArg,
             implicitDynamicParentCtor,
             callbackState,
+            _classParents(instanceState),
           );
         };
-      if (name === "__register_class_parent") return _registerClassParentHandler;
+      if (name === "__register_class_parent") return _classParents(instanceState).register;
       if (name === "__register_class_parent_ref")
         return function registerClassParentRef(n: any, o: any, k: any): void {
-          _registerClassParentRefHandler(n, o, k, callbackState?.getExports());
+          _classParents(instanceState).registerLazy(n, _classParentRefResolver(o, k, callbackState?.getExports()));
         };
       if (/^__call_dynamic_class_parent_\d+$/.test(name))
         return (parentIdentity: any, receiver: any, ...args: any[]): void => {
           const className = typeof parentIdentity === "string" ? parentIdentity : "";
-          // Dynamic property-access heritage is registered by class name. A
-          // statically named top-level function parent has no class `_init`,
-          // so the compiler passes its canonical closure directly instead.
-          // Both are the same JavaScript SuperCall operation once resolved.
-          const parent = className !== "" ? classStaticParent.getClassParent(className) : parentIdentity;
+          // Property-access heritage is registered by class name, per instance
+          // (#6790). A top-level function parent has no class `_init`, so the
+          // compiler passes its canonical closure; both are one SuperCall.
+          const parent = className !== "" ? _classParents(instanceState).get(className) : parentIdentity;
           const parentCtor =
             typeof parent === "function"
               ? parent
@@ -19590,6 +19582,7 @@ export function buildImports(
     legacyRegExpState: _makeLegacyRegExpState(),
     subclassCtors: new Map<string, Function[]>(),
     userClassParents: new Map<string, string | null>(),
+    classParents: new classStaticParent.ClassParentRegistry(),
   };
 
   installAmbientCompatibility({
