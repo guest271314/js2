@@ -1,7 +1,7 @@
 // #6798 — six probe-backed semantic divergences, one `it` per slice.
 import { describe, expect, it, vi } from "vitest";
 import { compile } from "../../src/index.js";
-import { assertEquivalent } from "./helpers.js";
+import { assertEquivalent, instantiateWithRuntime } from "./helpers.js";
 
 // resolve-stage-catch: a switch the mocked `irClosureSignatureFromFunctionTypeNode`
 // (called from `resolvePositionType`'s FunctionTypeNode arm) reads to simulate a
@@ -130,5 +130,40 @@ describe("#6798 misc probe-backed semantic divergences", () => {
       `,
       [{ fn: "test", args: [] }],
     );
+  });
+
+  // `type i32 = number` is an opt-in that changes semantics on purpose, so the
+  // erased-type JS run is not the oracle: ToInt32 (`v | 0`) is. Every f64 → i32
+  // destination (init, assignment, parameter, field, return, i32 division and
+  // negation) must agree with `| 0` on BOTH lanes. Returns the failing index.
+  it("i32-saturate: an i32-annotated destination converts with ToInt32 (wraps like | 0), both lanes", async () => {
+    const src = `
+      type i32 = number;
+      function id(x: i32): i32 { return x; }
+      function fromNum(x: number): i32 { const r: i32 = x; return r; }
+      function assign(x: number): i32 { let r: i32 = 0; r = x; return r; }
+      function div(a: i32, b: i32): i32 { return a / b; }
+      function neg(a: i32): i32 { return -a; }
+      function mul(a: i32, b: i32): i32 { return a * b; }
+      class P { n: i32 = 0; set(v: number): i32 { this.n = v; return this.n; } }
+      export function test(): number {
+        const vals = [2147483648, NaN, 4294967297, -2147483649, Infinity, -Infinity, 1.9, -1.9, 3e10, -0];
+        const out: number[] = [];
+        for (const v of vals) {
+          const w = v | 0;
+          out.push(fromNum(v) === w ? 1 : 0, assign(v) === w ? 1 : 0, id(v) === w ? 1 : 0, new P().set(v) === w ? 1 : 0);
+        }
+        out.push(div(7, 0) === ((7 / 0) | 0) ? 1 : 0, div(-7, 2) === -3 ? 1 : 0);
+        out.push(neg(-2147483648) === (2147483648 | 0) ? 1 : 0, mul(65536, 65536) === ((65536 * 65536) | 0) ? 1 : 0);
+        for (let i = 0; i < out.length; i++) if (out[i] !== 1) return i;
+        return -1;
+      }
+    `;
+    for (const target of [undefined, "standalone"] as const) {
+      const result = await compile(src, { fileName: "probe.ts", ...(target ? { target } : {}) });
+      expect(result.success, result.errors.map((e) => e.message).join("\n")).toBe(true);
+      const instance = await instantiateWithRuntime(result);
+      expect((instance.exports.test as () => number)(), target ?? "gc").toBe(-1);
+    }
   });
 });
