@@ -892,8 +892,36 @@ of 100, each under its own `flock /tmp/claude-0/t262.lock`, `--isolate
 re-run on an `origin/main` snapshot to separate this branch's regressions from
 main's own drift.
 
-IN PROGRESS at the time of this commit (~8 s/row behind the shared lock);
-results replace this paragraph.
+PARTIAL — stopped at session wrap-up (2026-10-02 11:25 UTC). Run on
+`.tmp/6770/snap-r1` (the tree at `fd48e174ea`), list `.tmp/6770/ctl-ordered.txt`
+(4,861 rows), output `.tmp/6770/ctl-m3/`: chunks 00–24 complete = **2,500 of
+4,861 rows, 1 non-pass**:
+
+- **REGRESSION** `built-ins/Object/assign/strings-and-symbol-order-proxy.js` —
+  L41 `assert.compareArray(getOwnKeys, ownKeysResult)`: actual `[foo, 0]`,
+  expected `[Symbol(), foo, 0]`. Passes on an `origin/main` snapshot
+  (`.tmp/6770/snap-main2`, run 11:24 UTC). `Object.assign` with a Proxy
+  source no longer calls the `getOwnPropertyDescriptor` trap for the
+  symbol-keyed entry of the `ownKeys` result. Likely in S1 (assign ToObject
+  path) or S7/S8 (Proxy `[[OwnPropertyKeys]]` / per-operation trap lookup);
+  not bisected.
+
+Chunks 25–48 (2,361 rows) were not run. `ctlrun.sh` is resumable — it skips
+chunks whose log has a counts line — but `.tmp/` does not survive the
+container, so a new session re-creates the snapshot and list.
+
+### Handoff (2026-10-02, session wrap-up)
+
+PR opened with the `hold` label; it must not be queued until:
+
+1. The `strings-and-symbol-order-proxy.js` regression is fixed (and pinned).
+2. The remaining control rows are run (or the merge_group's standalone
+   regression diff is accepted as the control), with every non-pass row
+   re-checked on `origin/main`.
+3. `origin/main` is merged in again and the gate chain re-run (the branch
+   predates `origin/main` `1aef653b5c`).
+
+Rows stand at 44 / 49 (5 residual, listed above; 2 owned by #3371).
 
 ### Gates
 
