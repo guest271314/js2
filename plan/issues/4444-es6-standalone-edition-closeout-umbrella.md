@@ -7548,3 +7548,42 @@ focused controls, and its implementation-plan MD. The completed data PR and
 other owners' namespace, closure, object-runtime, and IR files stay untouched.
 Compiler-consumable data emission and public runtime integration remain
 explicit dependencies, not parser-only completion claims.
+
+### 2026-10-02 current upstream and measured repair handoff
+
+This supersedes the earlier queued-data/publication state above. Intl data
+foundation PR #6427 is merged on upstream main, but no public standalone Intl
+API or original-suite gain follows from that data alone. The pure locale
+kernel is published separately in PR #6436; its concrete directory-budget
+failure is unresolved and its active issue claim is not transferred. Do not
+alter another owner's kernel or the allowance without coordination.
+
+The complete frozen 11,778-original census at `ce663127` finished with
+**11,392 pass / 361 fail / 25 compile errors**, zero skipped/excluded paths,
+and all 16 completion receipts independently audited. The original population
+and manifest hash remain unchanged. Current-main source changes after that
+measurement must not be retroactively credited to it. The completed census
+and detailed source-owner handoff are published in
+[PR #6449](https://github.com/loopdive/js2/pull/6449).
+
+The completed direct TypedArray HOF repair is published independently in
+[PR #6447](https://github.com/loopdive/js2/pull/6447). Matched authoritative
+128-row validation changes **121 pass / 7 fail → 126 pass / 2 fail**, five
+intended gains, no passing-row regressions, and both unrelated Proxy failures
+preserved. All 39 scoped regression tests passed. This is a measured subset
+gain, not a projected current full-suite percentage or a 100% result.
+
+This documentation branch now includes verified upstream main `ff310447`
+through `c56899e205`. The sole metadata conflict was resolved by preserving
+upstream's ES2015 edition field and both Intl implementation handoffs; only
+the existing umbrella and Intl issue documents differ from upstream source.
+The two unrelated issue-6724 diagnostics remain untracked and untouched.
+The native-eval CI checkpoint has been published in draft PR #6435 at
+`16120f29`; its historical 60/67 semantic receipt and seven reds are retained,
+not converted into current semantic success by structural integration.
+
+Remaining Proxy constructor-admission and Symbol-vector boxing repairs require
+the other machine's exact source-area clearance before implementation. All
+74 original Intl diagnostic paths and the complete 11,778-row objective
+remain required. No exclusions, source emulation, or denominator reduction
+are authorized as substitutes for the final zero-failure verification.
