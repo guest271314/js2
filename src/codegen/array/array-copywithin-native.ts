@@ -21,12 +21,17 @@
  * Reached only through `array-proxy-receiver.ts` (a receiver that traces to a
  * Proxy VALUE); compiled vecs keep their typed lowering.
  */
-import type { Instr, ValType } from "../ir/types.js";
-import { clampRelative, integerArg, requireObjectCoercible, resolveSliceDeps } from "./array-slice-native.js";
-import type { CodegenContext } from "./context/types.js";
-import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
-import { buildThrowJsErrorInstrs } from "./js-errors.js";
-import { addFuncType } from "./registry/types.js";
+import type { Instr, ValType } from "../../ir/types.js";
+import {
+  buildThrowJsErrorInstrs,
+  clampRelative,
+  integerArg,
+  requireObjectCoercible,
+  resolveSliceDeps,
+} from "../helpers/core-delegates.js"; // (#6797) late-bound core
+import type { CodegenContext } from "../context/types.js";
+import { mintDefinedFunc, pushDefinedFunc } from "../func-space.js";
+import { addFuncType } from "../registry/types.js";
 
 const F64: ValType = { kind: "f64" };
 const EXTERNREF: ValType = { kind: "externref" };

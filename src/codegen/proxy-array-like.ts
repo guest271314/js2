@@ -26,8 +26,8 @@ import { ts } from "../ts-api.js";
 import type { Instr } from "../ir/types.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { allocLocal } from "./context/locals.js";
-import { buildThrowJsErrorInstrs } from "./js-errors.js";
-import { arrayCtorThisCallSeen } from "./array-ctor-this.js"; // (#6771 S7)
+import { buildThrowJsErrorInstrs } from "./helpers/core-delegates.js"; // (#6797) late-bound core
+import { arrayCtorThisCallSeen } from "./array/array-ctor-this.js"; // (#6771 S7)
 
 /** The `$Proxy` type index when the array-like arms should admit proxies. */
 export function proxyArrayLikeTypeIdx(ctx: CodegenContext): number | undefined {

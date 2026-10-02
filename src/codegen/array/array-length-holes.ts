@@ -18,12 +18,12 @@
  * form (standalone only — the host lane keeps its bytes), the builders fill the
  * backing with the marker, and the static `k in arr` fold learns the marker.
  */
-import { ts } from "../ts-api.js";
-import type { Instr, ValType } from "../ir/types.js";
-import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { allocTempLocal } from "./context/locals.js";
-import { holeSentinelInstrs, holeTestInstrs } from "./array-holes.js";
-import { getArrTypeIdxFromVec } from "./registry/types.js";
+import { ts } from "../../ts-api.js";
+import type { Instr, ValType } from "../../ir/types.js";
+import type { CodegenContext, FunctionContext } from "../context/types.js";
+import { allocTempLocal } from "../context/locals.js";
+import { holeSentinelInstrs, holeTestInstrs } from "../helpers/core-delegates.js"; // (#6797) late-bound core
+import { getArrTypeIdxFromVec } from "../registry/types.js";
 
 /** `Array(x)` / `new Array(x)` with ONE non-spread argument — the length form. */
 export function isArrayLengthConstructor(node: ts.Node): boolean {

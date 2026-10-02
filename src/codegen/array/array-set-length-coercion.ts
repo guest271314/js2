@@ -29,12 +29,11 @@
  *   non-writable by then (the #4504 result channel: `Reflect.set` answers
  *   false, a strict write throws).
  */
-import type { Instr, ValType, WasmFunction } from "../ir/types.js";
-import { allocLocal } from "./context/locals.js";
-import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { emitArraySetLengthValidation } from "./array-length-define.js";
-import { stringConstantExternrefInstrs } from "./native-strings.js";
-import { coerceType } from "./shared.js";
+import type { Instr, ValType, WasmFunction } from "../../ir/types.js";
+import { allocLocal } from "../context/locals.js";
+import type { CodegenContext, FunctionContext } from "../context/types.js";
+import { emitArraySetLengthValidation, stringConstantExternrefInstrs } from "../helpers/core-delegates.js"; // (#6797) late-bound core
+import { coerceType } from "../shared.js";
 
 const F64: ValType = { kind: "f64" };
 const FLAG_WRITABLE = 0x01; // `$PropEntry.$flags` bit 0 (the object-runtime flag ABI, #1888)

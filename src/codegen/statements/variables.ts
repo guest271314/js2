@@ -92,7 +92,7 @@ import {
 } from "../expressions/promise-subclass.js";
 import { hostRegExpMatchResultNeedsExternref, stripInferenceWrapper } from "../regexp-host-match.js";
 import { taStaticFromOfReflectiveCallNeedsExternref } from "../ta-static-from-of-spec.js";
-import { reflectiveArrayCallNeedsExternref } from "../array-ctor-this.js"; // (#6771)
+import { reflectiveArrayCallNeedsExternref } from "../array/array-ctor-this.js"; // (#6771)
 import { inferStandaloneRegExpMatchResultType } from "../regexp-standalone.js";
 
 /**

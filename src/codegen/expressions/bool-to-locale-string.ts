@@ -26,17 +26,17 @@
  * `Boolean.prototype.toString` / `.toLocaleString` (a pre-scan fact), so every
  * other module keeps its bytes.
  */
-import { ts } from "../ts-api.js";
-import { isStrictContext } from "./helpers/is-strict-function.js";
-import type { Instr, ValType } from "../ir/types.js";
-import { sourceOverridesBuiltinPrototypeMember } from "./builtin-proto-member-override.js";
-import { builtinBrandOffsetOf } from "./builtin-brands.js";
-import { allocLocal } from "./context/locals.js";
-import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { ensureLateImport, flushLateImportShifts } from "./expressions/late-imports.js";
-import { nativeStringLiteralInstrs } from "./native-strings.js";
-import { protoIndexBrandCompanionHasInstrs, protoIndexRecvGetMissInstrs } from "./proto-index-store.js";
-import { makeHelperFctx, reservePlaceholder, reservedFunc, TO_STRING } from "./to-locale-string-element.js";
+import { ts } from "../../ts-api.js";
+import { isStrictContext } from "../helpers/is-strict-function.js";
+import type { Instr, ValType } from "../../ir/types.js";
+import { protoIndexBrandCompanionHasInstrs, sourceOverridesBuiltinPrototypeMember } from "../helpers/core-delegates.js"; // (#6797) late-bound core
+import { builtinBrandOffsetOf } from "../builtin-brands.js";
+import { allocLocal } from "../context/locals.js";
+import type { CodegenContext, FunctionContext } from "../context/types.js";
+import { ensureLateImport, flushLateImportShifts } from "../shared.js";
+import { nativeStringLiteralInstrs } from "../native-string-literals.js";
+import { protoIndexRecvGetMissInstrs } from "../proto-index-read-bindings.js";
+import { makeHelperFctx, reservePlaceholder, reservedFunc, TO_STRING } from "../helpers/reserved-helper-funcs.js";
 
 export const BOOL_TO_LOCALE_STRING = "__bool_to_locale_string";
 /** The `bool.toString()` twin: consults only `"toString"`. */

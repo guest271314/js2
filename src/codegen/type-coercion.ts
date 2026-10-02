@@ -20,7 +20,7 @@ import { anyValueElemFromExternInstrs } from "./anyvalue-elem-materialize.js"; /
 import { ensureAnyToStringHelper, stringConstantExternrefInstrs } from "./native-strings.js";
 import { buildThrowJsErrorInstrs } from "./expressions/helpers.js";
 import { arrayLikeLengthLimitGuard } from "./proxy-array-like.js"; // (#6651 H6)
-import { prepareVecF64UndefElem, vecF64ElemFromExternInstrs } from "./vec-elem-fidelity.js"; // (#6771 S8)
+import { prepareVecF64UndefElem, vecF64ElemFromExternInstrs } from "./array/vec-elem-fidelity.js"; // (#6771 S8)
 import { ensureWrapperStringValueHelper } from "./object-runtime.js";
 import { ensureNativeArrayFromIterN } from "./iterator-native.js";
 import { markNoBrandSiblingShapes } from "./shape-brand.js";

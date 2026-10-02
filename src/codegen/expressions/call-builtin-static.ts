@@ -155,7 +155,7 @@ import { tryCompileFnctorInstanceGetPrototypeOf } from "../fnctor-instance-proto
 import { recordStandaloneRuntimeKeyClassMemberRead } from "../standalone-class-dyn-member.js"; // (#6617)
 import { isStandaloneArraySubclass } from "../array-subclass-receiver.js"; // (#2917)
 import { emitArrayRootedProtoParent } from "../vec-proto-link.js"; // (#2917)
-import { arrayCtorThisCallSeen } from "../array-ctor-this.js"; // (#6771 S7)
+import { arrayCtorThisCallSeen } from "../array/array-ctor-this.js"; // (#6771 S7)
 import {
   BUILTIN_CLASS_NAMES,
   compileCallExpression,

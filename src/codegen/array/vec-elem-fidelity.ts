@@ -40,14 +40,14 @@
  * canonically the number vec's, so no `ref.test` can tell them apart; that case
  * is unchanged.)
  */
-import type { Instr, ValType } from "../ir/types.js";
-import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { allocLocal } from "./context/locals.js";
-import { canonicalUndefinedExternInstrs } from "./any-helpers.js";
-import { ensureLateImport } from "./expressions/late-imports.js";
-import { definedFuncAt } from "./func-space.js";
-import { getArrTypeIdxFromVec } from "./registry/types.js";
-import { UNDEF_F64_BITS } from "./value-tags.js";
+import type { Instr, ValType } from "../../ir/types.js";
+import type { CodegenContext, FunctionContext } from "../context/types.js";
+import { allocLocal } from "../context/locals.js";
+import { canonicalUndefinedExternInstrs } from "../helpers/core-delegates.js"; // (#6797) late-bound core
+import { ensureLateImport } from "../shared.js";
+import { definedFuncAt } from "../func-space.js";
+import { getArrTypeIdxFromVec } from "../registry/types.js";
+import { UNDEF_F64_BITS } from "../value-tags.js";
 
 /** Modules that stored `UNDEF_F64_BITS` into an f64 vec through {@link vecF64ElemFromExternInstrs}. */
 const storesUndefElems = new WeakSet<CodegenContext>();

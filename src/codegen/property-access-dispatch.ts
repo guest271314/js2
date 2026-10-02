@@ -230,7 +230,7 @@ import { linkBrandRoleOf } from "./shape-brand.js";
 import { emitDynamicTemplateRawRead, isDynamicTemplateRawRead } from "./template-raw-dynamic.js";
 import { emitLinkedStaticMemberRead, linkedStaticParentHeritage } from "./standalone-linked-static-inheritance.js"; // (#6644) §15.7.14 step 6 across the link
 import { tryEmitPromiseSubclassCellRead } from "./promise-subclass-cell-read.js";
-import { tryEmitGuardedArrayConstructorRead } from "./array-ctor-this.js"; // (#6771 S7)
+import { tryEmitGuardedArrayConstructorRead } from "./array/array-ctor-this.js"; // (#6771 S7)
 
 /**
  * Sentinel returned by every dispatch helper to mean "this guard band did not

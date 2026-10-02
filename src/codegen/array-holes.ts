@@ -48,8 +48,8 @@ import { isRegExpProtoSymbolWrite } from "./regexp-proto-symbol-writes.js"; // (
 import { planHoleyArrayCarrier } from "./holey-array-plan.js"; // (#4222) isolated sparse-carrier proof
 import { recordDescriptorArrayReceiver } from "./declarations/descriptor-array-carrier.js"; // (#4670)
 import { armExhaustiveForNonCallableMemberLiteral } from "./class-to-primitive.js"; // (#6771 S2d)
-import { isArrayLengthConstructor } from "./array-length-holes.js"; // (#6771 S3)
-import { noteArrayCtorThisCall } from "./array-ctor-this.js"; // (#6771 S7)
+import { isArrayLengthConstructor } from "./array/array-length-holes.js"; // (#6771 S3)
+import { noteArrayCtorThisCall } from "./array/array-ctor-this.js"; // (#6771 S7)
 import { readEnv } from "../env.js";
 
 /**

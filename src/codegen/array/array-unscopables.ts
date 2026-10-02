@@ -16,11 +16,10 @@
  * (configurable) all see one mutable entry. The object is built ONCE, inside
  * the seeder, so every read answers the same identity.
  */
-import type { Instr } from "../ir/types.js";
-import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { PROTOTYPE_SEED_FLAGS } from "../runtime/wasmgc/values/prototype-seeder-bodies.js";
-import { addStringConstantGlobal } from "./registry/imports.js";
-import { stringConstantExternrefInstrs } from "./native-strings.js";
+import type { Instr } from "../../ir/types.js";
+import type { CodegenContext, FunctionContext } from "../context/types.js";
+import { PROTOTYPE_SEED_FLAGS } from "../../runtime/wasmgc/values/prototype-seeder-bodies.js";
+import { addStringConstantGlobal, stringConstantExternrefInstrs } from "../helpers/core-delegates.js"; // (#6797) late-bound core
 
 /** `WELL_KNOWN_SYMBOLS.unscopables` (builtin-value-read.ts). */
 const UNSCOPABLES_SYMBOL_ID = 11;

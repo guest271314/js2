@@ -31,15 +31,13 @@
  * `new Object()` is OrdinaryObjectCreate(%Object.prototype%) —
  * `__new_plain_object()`. {@link objectConstructArm} is that arm.
  */
-import { ts } from "../ts-api.js";
-import type { Instr, ValType } from "../ir/types.js";
-import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { allocLocal } from "./context/locals.js";
-import { emitArrayIsArrayExternrefPredicate } from "./builtin-value-read.js";
-import { emitBuiltinNamespaceObject } from "./builtin-static-globals.js";
-import { compileExpression } from "./shared.js";
-import { ensureLateImport, flushLateImportShifts } from "./expressions/late-imports.js";
-import { nativeStringLiteralInstrs } from "./native-strings.js";
+import { ts } from "../../ts-api.js";
+import type { Instr, ValType } from "../../ir/types.js";
+import type { CodegenContext, FunctionContext } from "../context/types.js";
+import { allocLocal } from "../context/locals.js";
+import { emitArrayIsArrayExternrefPredicate, emitBuiltinNamespaceObject } from "../helpers/core-delegates.js"; // (#6797) late-bound core
+import { compileExpression, ensureLateImport, flushLateImportShifts } from "../shared.js";
+import { nativeStringLiteralInstrs } from "../native-string-literals.js";
 
 const EXTERNREF: ValType = { kind: "externref" };
 const EQ_HEAP_TYPE = -19; // WasmGC `eq` abstract heap type

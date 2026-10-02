@@ -13,7 +13,7 @@ import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, getLocalType } from "./context/locals.js";
 import { probeCompiledType } from "./context/speculative.js";
 import { emitHoleToUndefined, holeTestInstrs, holeToUndefinedInstrs, joinEmptyElementTest } from "./array-holes.js";
-import { holeSearchReadsUndefined } from "./array-length-holes.js"; // (#6771 S3) indexOf skips a hole
+import { holeSearchReadsUndefined } from "./array/array-length-holes.js"; // (#6771 S3) indexOf skips a hole
 import { emitF64HoleToUndef, f64HolesActive, f64HoleTestInstrs, f64HoleToUndefFor } from "./vec-f64-hole-presence.js"; // (#4491 T11)
 import { overlayRouteActive } from "./typed-lane-overlay-route.js"; // (#4491 T11)
 import {
@@ -146,7 +146,7 @@ import { compileArrayPushSpread } from "./array-push-spread.js"; // (#5361)
 import { callArgsNeedEarlyEvaluation, planCallArgs } from "./array-method-arg-order.js"; // (#6787)
 import { taDynDetachedGuardPrologue } from "./ta-dyn-method-call.js"; // (#6651 E6) join/toLocaleString
 import { reserveNumberToLocaleString } from "./to-locale-string-element.js"; // (#6651 TA1) numeric element Invoke
-import { reserveBoolToLocaleString } from "./bool-to-locale-string.js"; // (#6771 S6) boolean element Invoke
+import { reserveBoolToLocaleString } from "./expressions/bool-to-locale-string.js"; // (#6771 S6) boolean element Invoke
 
 // (#3264) Array.prototype-borrow subsystem extracted to array-prototype-borrow.ts;
 // re-export the two public entries so existing importers keep resolving.

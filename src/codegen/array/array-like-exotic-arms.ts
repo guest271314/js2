@@ -29,13 +29,13 @@
  * helper exist), the same discipline as `ta-dyn-mop.ts`'s `__extern_length`
  * arm. A module with neither a closure nor the wrapper helper keeps its bytes.
  */
-import type { Instr, ValType, WasmFunction } from "../ir/types.js";
-import type { CodegenContext } from "./context/types.js";
-import { BUILTIN_INSTANCE_CARRIER_STRUCT_NAMES } from "./builtin-instance-key-presence.js";
-import { collectClosureBaseWrapperTypeIdxs } from "./closure-classifier.js";
-import { definedFuncAt } from "./func-space.js";
-import { nativeStringLiteralInstrs } from "./native-strings.js";
-import { buildArrayLikeToLengthFromExternref } from "./object-runtime-enumeration.js";
+import type { Instr, ValType, WasmFunction } from "../../ir/types.js";
+import type { CodegenContext } from "../context/types.js";
+import { BUILTIN_INSTANCE_CARRIER_STRUCT_NAMES } from "../builtin-instance-key-presence.js";
+import { collectClosureBaseWrapperTypeIdxs } from "../closure-classifier.js";
+import { definedFuncAt } from "../func-space.js";
+import { nativeStringLiteralInstrs } from "../native-string-literals.js";
+import { buildArrayLikeToLengthFromExternref } from "../helpers/core-delegates.js"; // (#6797) late-bound core
 
 const ANYREF: ValType = { kind: "anyref" };
 

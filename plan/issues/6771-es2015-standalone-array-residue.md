@@ -21,7 +21,7 @@ loc-budget-allow:
   # (commit e7cd6a20a1 + 501bcd9b0e, reverted by 83fc243108) — same files, same
   # +485 lines; the new leaf `array-copywithin-native.ts` comes back with it.
   - src/codegen/analysis/proxy-binding-escape.ts
-  - src/codegen/array-copywithin-native.ts
+  - src/codegen/array/array-copywithin-native.ts
   - src/codegen/array-methods.ts
   - src/codegen/array-prototype-borrow.ts
   - src/codegen/array-proxy-receiver.ts
@@ -58,10 +58,10 @@ loc-budget-allow:
   - src/codegen/object-integrity-proxy.ts
   - src/codegen/object-runtime-proxy-chain.ts
   - src/codegen/array-species.ts
-  - src/codegen/array-like-exotic-arms.ts
-  - src/codegen/array-unscopables.ts
-  - src/codegen/bool-to-locale-string.ts
-  - src/codegen/array-set-length-coercion.ts
+  - src/codegen/array/array-like-exotic-arms.ts
+  - src/codegen/array/array-unscopables.ts
+  - src/codegen/expressions/bool-to-locale-string.ts
+  - src/codegen/array/array-set-length-coercion.ts
   - src/codegen/proxy-trap-getmethod.ts
   - scripts/compiler-boundaries.json
   # 2026-09-30 (#6771 implementation, Opus): wiring lines only — S1's Proxy-trap
@@ -71,8 +71,8 @@ loc-budget-allow:
   # proxy-trap-closure-return.ts / array-like-exotic-arms.ts / array-length-holes.ts.
   - src/codegen/closures.ts
   - src/codegen/index.ts
-  - src/codegen/proxy-trap-closure-return.ts
-  - src/codegen/array-length-holes.ts
+  - src/codegen/closures/proxy-trap-closure-return.ts
+  - src/codegen/array/array-length-holes.ts
   # S6: `typeof this` must not fold to "object" in strict code whose `this`
   # TypeScript types as a primitive wrapper (one guard + its import; the
   # predicate lives in bool-to-locale-string.ts).
@@ -90,14 +90,24 @@ loc-budget-allow:
   # `__extern_set` vec-length arm (vec-length-set.ts, three hook lines + import),
   # the static assignment + non-writable fold (assignment.ts, granted above);
   # bodies in array-set-length-coercion.ts.
-  - src/codegen/vec-elem-fidelity.ts
+  - src/codegen/array/vec-elem-fidelity.ts
   - src/codegen/vec-length-set.ts
   # S7 follow-up (2026-09-30): `var r = Array.from.call(C, …)` / an O-returning
   # or species-creating `Array.prototype.X.call(…)` keeps an externref slot —
   # one call in `transferredArrayLikeResultNeedsExternref` + its import (the
   # #6651 E5 hook); the predicate lives in array-ctor-this.ts.
   - src/codegen/statements/variables.ts
-  - src/codegen/array-ctor-this.ts
+  - src/codegen/array/array-ctor-this.ts
+  # 2026-10-02 (#6771 x #6797 import-cycle ratchet): the leaves above moved out
+  # of flat src/codegen/ (flat-dir budget) and no longer import core modules —
+  # they reach the 16 core helpers they need through the late-bound wrappers in
+  # helpers/core-delegates.ts, registered once at module scope by expressions.ts
+  # (16 imports + one register call). to-locale-string-element.ts's
+  # helper-reservation primitives moved verbatim to helpers/reserved-helper-funcs.ts
+  # so the Boolean twin stops importing it (net shrink there).
+  - src/codegen/expressions.ts
+  - src/codegen/helpers/core-delegates.ts
+  - src/codegen/helpers/reserved-helper-funcs.ts
 func-budget-allow:
   # 2026-09-30 (#6771 plan): each gains one arm / one guard / one route.
   - src/codegen/array-methods.ts::setupArrayLoop
@@ -140,8 +150,11 @@ coercion-sites-allow:
   # `number_toString` for exactly this). S1 re-applies the #6651 H6 copyWithin
   # body (reviewed there, grant stranded by the revert); S2's closure / builtin
   # carrier arms delegate by the same key.
-  - src/codegen/array-copywithin-native.ts
-  - src/codegen/array-like-exotic-arms.ts
+  - src/codegen/array/array-copywithin-native.ts
+  - src/codegen/array/array-like-exotic-arms.ts
+  # 2026-10-02 (#6771 x #6797): not a new site — `TO_STRING = "__extern_toString"`
+  # moved verbatim from to-locale-string-element.ts with the reservation helpers.
+  - src/codegen/helpers/reserved-helper-funcs.ts
 ---
 
 ## Problem
@@ -1077,3 +1090,48 @@ sites, oracle ratchet, dead exports, compiler boundaries (`--mode inventory
 - Pins red on base: met (23 of 23 RED cases).
 - Status stays `in-progress`: the remaining rows wait on #6770 S4 / S8 and a
   new lib.dom-merge issue, not on work in this lane.
+
+## 2026-10-02 — import-cycle ratchet (#6797) follow-up (Opus)
+
+Merged with `origin/main`, the branch failed two new `quality` gates:
+`check-import-cycles` (largest SCC 697 → 706: the nine leaves this issue added
+sat inside the codegen strongly-connected component) and `check-flat-dir-budget`
+(`src/codegen/*.ts` 829 → 838). Both are fixed without touching either baseline.
+
+**Why the leaves were in the cycle.** Each leaf is called by core modules
+(array-holes, vec-overlay, type-coercion, index, …) and called core helpers
+back (`buildThrowJsErrorInstrs`, `stringConstantExternrefInstrs`,
+`holeSentinelInstrs`, …). Cutting the inbound side would need a registrar
+outside the SCC, and tests import `codegen/index.ts` directly, bypassing
+`compiler.ts`. So the cut is on the outbound side:
+
+- **Free cuts:** `ensureLateImport` / `flushLateImportShifts` / `compileExpression`
+  / `coerceType` now come from the existing `shared.ts` delegates;
+  `nativeStringLiteralInstrs` from `native-string-literals.ts` and
+  `protoIndexRecvGetMissInstrs` from `proto-index-read-bindings.ts` (both
+  re-exported unchanged by the core modules, and both outside the SCC).
+- **Moved below both:** `TO_STRING`, `reservePlaceholder`, `makeHelperFctx`,
+  `reservedFunc` moved verbatim from `to-locale-string-element.ts` to
+  `helpers/reserved-helper-funcs.ts`.
+- **Late-bound:** the 16 remaining core helpers go through same-named wrappers
+  in `helpers/core-delegates.ts`. That module imports only types, so it sits
+  below both sides. `expressions.ts` registers the real functions once, at
+  module scope, next to the `shared.ts` registrations. The wrappers forward
+  their arguments unchanged. An unregistered call throws a named error and
+  never falls back.
+- **Flat-dir:** the seven Array leaves moved to `src/codegen/array/`,
+  `bool-to-locale-string.ts` to `expressions/` (it also serves `bool.toString()`
+  receiver calls, so it is not Array-only) and `proxy-trap-closure-return.ts`
+  to `closures/`. These are pure moves: only import paths changed.
+  `proxy-array-like.ts` predates this issue and stays flat, now out of the SCC.
+
+Measured on the merged tree: import-cycles OK (largest SCC 697, 5 SCCs);
+flat-dir 829/829. The 68 compiled modules (the 34 rows × sloppy/strict, with
+the harness, `--target standalone`) are byte-identical between the pre-cut
+and post-cut `src/` (`.tmp/bytecmp.mts`). The QuickJS eval adapter is also
+byte-identical (sha256 `6fdabe43…`). Pins: 29/29.
+Rows (`flock … run-test262-paths.mts .tmp/array/rows.txt --isolate
+--standalone`, QuickJS provider rebuilt): **30 pass / 4 fail**, the same four
+residuals as above. Gates (`LOC_GATE_BASE=origin/main` loc and func budgets,
+coercion sites, oracle ratchet, dead exports, compiler-boundaries inventory,
+claude-md paths, typecheck, import cycles, flat-dir): all exit 0.

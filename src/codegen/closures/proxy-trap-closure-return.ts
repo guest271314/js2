@@ -33,10 +33,10 @@
  * literal passed as the handler (argument 1) of `new Proxy(…)` or
  * `Proxy.revocable(…)`. Every other closure keeps its bytes.
  */
-import { ts } from "../ts-api.js";
-import type { ValType } from "../ir/types.js";
-import type { CodegenContext } from "./context/types.js";
-import { widenMixedUndefinedReturn } from "./mixed-return-widening.js";
+import { ts } from "../../ts-api.js";
+import type { ValType } from "../../ir/types.js";
+import type { CodegenContext } from "../context/types.js";
+import { widenMixedUndefinedReturn } from "../mixed-return-widening.js";
 
 /** Is `lit` the handler argument of `new Proxy(t, lit)` / `Proxy.revocable(t, lit)`? */
 function isProxyHandlerLiteral(lit: ts.ObjectLiteralExpression): boolean {

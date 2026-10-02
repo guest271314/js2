@@ -58,7 +58,7 @@ import { NON_ARRAY_BYTE_VEC_ELEM_KINDS } from "./object-runtime.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { getArrTypeIdxFromVec, getOrRegisterVecBaseType } from "./registry/types.js";
 import { buildVecLengthHoleFill } from "./vec-length-hole-fill.js";
-import { arraySetLengthDynamicParts } from "./array-set-length-coercion.js"; // (#6771 S10a)
+import { arraySetLengthDynamicParts } from "./array/array-set-length-coercion.js"; // (#6771 S10a)
 
 /** `key == "length"` over an externref key (param `keyParam`); i32 on stack. */
 function keyIsLengthInstrs(

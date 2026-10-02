@@ -61,7 +61,7 @@ import { emitLazyNativeProtoGet } from "./native-proto.js";
 import { buildTaCtorInheritedFromOfGetArm } from "./ta-static-from-of-body.js";
 import { fillHofTaDynViewPresenceBypass } from "./hof-native.js"; // (#6651 E6)
 import { fillOrdinarySetTypedArrayArm } from "./object-runtime-ordinary-set.js"; // (#6651 E6)
-import { taDynViewOwnLengthArm } from "./array-like-exotic-arms.js"; // (#6771 S2c)
+import { taDynViewOwnLengthArm } from "./array/array-like-exotic-arms.js"; // (#6771 S2c)
 import { fillArrayBufferGetPrototypeOfArm } from "./expressions/object-get-prototype-of.js"; // (#6769 S10)
 import { protoWalkConstructorArmInstrs } from "./vec-constructor-carrier.js"; // (#6775 S7)
 

@@ -72,7 +72,7 @@ import {
   fillBuiltinCollectionDynConstruct,
 } from "./builtin-collection-dyn-construct.js"; // (#6720)
 import { standaloneLinkBoundaryPeerIndex } from "./standalone-link-boundary.js"; // (#5383 S2f R12)
-import { arrayCtorThisCallSeen, objectConstructArm } from "./array-ctor-this.js"; // (#6771 S7)
+import { arrayCtorThisCallSeen, objectConstructArm } from "./array/array-ctor-this.js"; // (#6771 S7)
 import { buildOrdinaryConstructCall, unwrapRuntimeEvalCarrierCallee } from "./construct-under-application.js"; // (#6738)
 import { CLASS_CONSTRUCT_DISPATCH, ensureStandaloneClassConstructDispatch } from "./standalone-class-construct.js"; // (#5383 S2g)
 import { RUNTIME_EVAL_INTERP_CALLBACK_BRAND_A, RUNTIME_EVAL_INTERP_CALLBACK_BRAND_B } from "./runtime-eval-boundary.js";

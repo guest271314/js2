@@ -23,7 +23,7 @@ import { getArrTypeIdxFromVec, getOrRegisterResizableAbType, getOrRegisterVecTyp
 import { getOrRegisterHoleyArrayType } from "../registry/types.js";
 import { ensureHoleyArrayNew } from "../vec-elem-set.js";
 import { sparseArrayNewSplitInstrs } from "../vec-sparse-index.js";
-import { holeFilledArrayNewInstrs } from "../array-length-holes.js"; // (#6771 S3)
+import { holeFilledArrayNewInstrs } from "../array/array-length-holes.js"; // (#6771 S3)
 import { compileExpression } from "../shared.js";
 import { coerceType } from "../type-coercion.js"; // (#5150) ToIndex via the ToPrimitive chokepoint
 import { emitSymbolOperandCoercionThrow } from "../tonumber-symbol-throw.js";

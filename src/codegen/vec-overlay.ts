@@ -99,7 +99,7 @@ import {
 } from "./proto-index-store.js";
 import { undefinedExternInstrs } from "./any-helpers.js";
 import { nonExtensibleFreshIndexGuard, nonWritableLengthIndexGuard } from "./vec-define-rejections.js";
-import { fillArraySetLengthRefusal } from "./array-set-length-coercion.js"; // (#6771 S10a)
+import { fillArraySetLengthRefusal } from "./array/array-set-length-coercion.js"; // (#6771 S10a)
 import { nativeStringLiteralInstrs } from "./native-strings.js";
 import { canonicalNumericKeyGuard } from "./vec-index-domain.js"; // (#4434) index domain + sparse tail
 import { SPARSE_INDEX_CEILING } from "./vec-sparse-index.js";
