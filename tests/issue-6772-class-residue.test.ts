@@ -649,3 +649,68 @@ describe("#6772 S5 — a folded computed key still runs its assignment at ClassD
     ).toBe(1);
   });
 });
+
+describe("#6772 S6 — comma heritage and Object.getPrototypeOf of a derived class", () => {
+  it("RED on base (compile error): `extends (calls++, C)` runs once, links C, and getPrototypeOf(D) is C (node 1015)", async () => {
+    expect(
+      await runProbe(`
+        var calls = 0;
+        class C { m() { return 7; } }
+        class D extends (calls++, C) {}
+        var r = calls * 1000;
+        r += (new D().m() === 7) ? 1 : 0;
+        r += (new D() instanceof C) ? 2 : 0;
+        r += (Object.getPrototypeOf(D) === C) ? 4 : 0;
+        r += (Object.getPrototypeOf(D.prototype) === C.prototype) ? 8 : 0;
+        __r = r;
+      `),
+    ).toBe(1015);
+  });
+
+  it("RED on base (448): chains, class-expression parents and bindings, nested and class-expression comma heritages (node 1023)", async () => {
+    expect(
+      await runProbe(`
+        var calls = 0;
+        class C { m() { return 7; } }
+        var CE = class { n() { return 8; } };
+        class D extends C {}
+        class E extends D {}
+        var F = class extends C {};
+        class G extends CE {}
+        function inner() { class H extends (calls++, C) {} return [H, Object.getPrototypeOf(H) === C, new H().m()]; }
+        var H2 = class extends (calls++, calls++, C) {};
+        var r = 0;
+        r += (Object.getPrototypeOf(E) === D) ? 1 : 0;
+        r += (Object.getPrototypeOf(F) === C) ? 2 : 0;
+        r += (Object.getPrototypeOf(G) === CE) ? 4 : 0;
+        var ii = inner();
+        r += (ii[1] && ii[2] === 7) ? 8 : 0;
+        r += (calls === 3) ? 16 : 0;
+        r += (Object.getPrototypeOf(H2) === C && new H2().m() === 7) ? 32 : 0;
+        r += (Object.getPrototypeOf(C) === Function.prototype) ? 64 : 0;
+        r += (new G().n() === 8) ? 128 : 0;
+        r += (Object.getPrototypeOf(E.prototype) === D.prototype) ? 256 : 0;
+        r += (typeof Object.getPrototypeOf(D) === 'function') ? 512 : 0;
+        __r = r;
+      `),
+    ).toBe(1023);
+  });
+
+  it("guard (base 0, node 7): a parameter heritage and a rewritten derived binding decline the fold", async () => {
+    expect(
+      await runProbe(`
+        class C {}
+        var r = 0;
+        function mk(P) { class K extends P {} return K; }
+        var K = mk(C);
+        r += (Object.getPrototypeOf(K) === C) ? 1 : 0;
+        class X extends C {}
+        var saved = X;
+        X = 5;
+        r += (Object.getPrototypeOf(saved) === C) ? 2 : 0;
+        r += (Object.getPrototypeOf(X) === Number.prototype) ? 4 : 0;
+        __r = r;
+      `),
+    ).toBe(0);
+  });
+});

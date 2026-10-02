@@ -249,10 +249,11 @@ describe("#6767 — standalone class definition reflective residue", () => {
     expect(await runStandalone(src)).toBe(1);
   });
 
-  it("RESIDUAL: getPrototypeOf of a DERIVED class object is not its parent (node: 1)", async () => {
-    // Step 2 routes only BASE classes; the fold answers D.prototype for D.
+  it("getPrototypeOf of a DERIVED class object is its parent (node: 1; was RESIDUAL R4, fixed by #6772 S6)", async () => {
+    // Step 2 routes only BASE classes; #6772 S6 answers the parent's class
+    // object for a derived class whose heritage provably names that parent.
     const src = `class B {} class D extends B {} __r = Object.getPrototypeOf(D) === B ? 1 : 0;`;
     expect(runHost(src)).toBe(1);
-    expect(await runStandalone(src)).toBe(0);
+    expect(await runStandalone(src)).toBe(1);
   });
 });

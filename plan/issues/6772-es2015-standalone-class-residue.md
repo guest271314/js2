@@ -59,6 +59,7 @@ loc-budget-allow:
   - src/codegen/class-ctor-call-apply.ts
   - src/codegen/class-heritage-runtime-get.ts
   - src/codegen/class-static-accessor-keys.ts
+  - src/codegen/class-heritage-comma.ts # 2026-10-01 (#6772 S6, Opus implementation): comma-heritage peel + parent-binding proof
   - scripts/compiler-boundaries.json
 func-budget-allow:
   # 2026-09-30 (#6772 plan): one-to-four-line call sites inside functions
@@ -80,6 +81,10 @@ func-budget-allow:
   - src/codegen/typeof-delete.ts::compileTypeofExpression
   # 2026-10-01 (#6772 S4, Opus implementation): same two wrapped lookups.
   - src/codegen/expressions/call-receiver-method.ts::compileReceiverMethodCall
+  # 2026-10-01 (#6772 S6, Opus implementation): one routing line — a
+  # `let C = class extends (e, P) {}` binding goes through module init so the
+  # comma heritage's prefix runs at ClassDefinitionEvaluation.
+  - src/codegen/declarations.ts::collectDeclarations
 ---
 
 ## Problem
@@ -813,7 +818,8 @@ shared lock.
 | S2 | `760fc7205c` | p4 8 -> 63, t2 4608 -> 8191, g6 4 -> 7, g11 10 -> 7, g8 7 -> 31, g2 63 -> 255, g5 63 -> 255; guards g13 63, g16 31, p15 15 | `subclass/class-definition-null-proto-contains-return-override.js`, `subclass/derived-class-return-override-with-object.js`, `subclass/default-constructor-2.js`, `definition/this-access-restriction-2.js` |
 | S3 | `75220d3415` | p5c 0 -> 15 (15); s3a COMPILE-FAIL -> 2 (2); guards s3b 31 (31), p5d 21 | `arguments/default-constructor.js` |
 | S4 | `d2fd895a37` | p9 / p9b / p9e invalid Wasm -> 42 (42), p9c invalid -> 7 (7), p9d invalid -> 127 (127), p9f invalid -> 63 (63), t9 (typed, IR-claimed) IR compile error -> 50 (both lanes); guard s4i 3 (3) | `{statements,expressions}/class/ident-name-method-def-new-escaped.js` |
-| S5 | (this step) | p6 14 -> 15 (15); s5/a 0 -> 1, s5/b 0 -> 2, s5/e 0 -> 1, s5/g 0 -> 1, s5/h (member order) 0 -> 1 (node equal); host lane p6 14 -> 15 too | the four `cpn-class-{decl,expr}[-accessors]-computed-property-name-from-assignment-expression-assignment.js` |
+| S5 | `9368ba74f9` | p6 14 -> 15 (15); s5/a 0 -> 1, s5/b 0 -> 2, s5/e 0 -> 1, s5/g 0 -> 1, s5/h (member order) 0 -> 1 (node equal); host lane p6 14 -> 15 too | the four `cpn-class-{decl,expr}[-accessors]-computed-property-name-from-assignment-expression-assignment.js` |
+| S6 | (this step) | p11 COMPILE-FAIL -> 15 (15); p11b COMPILE-FAIL -> 1015 (1015); p11d 448 -> 1023 (1023); p11g 2 -> 15 (15); p11c (plain `extends C`) 11 -> 15; guard p11e 0 -> 0 (declines; node 7) | `definition/side-effects-in-extends.js` |
 
 S2 design note (deviates from the plan's "set only on an object return"):
 `$__ctor_override` is a RETURN REGISTER written on EVERY exit of a marked
@@ -877,3 +883,27 @@ cases fail on the pre-S5 tree AND on origin/main a895598841 (5 stale RESIDUAL
 pins whose writes/compiles now succeed — w1 987 on main — and r3-review F1,
 which throws on main too: f1 150 on main and branch); issue-5318-r5 /
 issue-5195-r3-heritage-check 46/46.
+
+S6 note: three parts. (1) IR planning (`requireIrPlanningOwnerUnitId`): a
+node inside a class's HERITAGE clause, reaching the class node that keys a
+top-level class's null-owner `class-implicit-constructor` support unit,
+continues the walk to the enclosing owner — the heritage is evaluated in the
+enclosing scope, never in the constructor (all lanes; it used to throw the
+`unowned-planning-owner` invariant, so no previously-compiling program can
+observe the change). (2) New leaf `class-heritage-comma.ts`: on standalone /
+WASI, `collectClassDeclaration` peels `extends (e1, …, C)` to its identifier
+tail, so `C` is linked exactly as for `extends C`; the leading operands are
+evaluated, once and in order, at each ClassDefinitionEvaluation site right
+after the #5195 r3-5 heritage check (which declines a comma heritage, so
+nothing runs twice), and the module-init collector routes such a top-level
+class / class-expression binding through `compileNestedClassDeclaration`. The
+host lane keeps its dynamic-parent registration (p11 host 3, p11c/p11d host
+bytes identical). (3) R4: `Object.getPrototypeOf(D)` for a derived class
+spelled by an unwritten binding answers the parent's class object when the
+heritage identifier is bound, uniquely and unwritten, to that parent's own
+declaration (`heritageBindsParentClass`); a parameter heritage or a rewritten
+binding declines to the old fold (p11e, pinned). #6767's R4 RESIDUAL pin
+flipped to the fixed expectation. `check:ir-fallbacks` unchanged. Unrelated
+pre-existing defect seen while probing (not fixed): a heterogeneous array
+literal returned from a function loses its number elements (`[true, 7, 1]`,
+p11h bit 8, base and branch).

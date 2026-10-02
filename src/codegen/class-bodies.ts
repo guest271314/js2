@@ -28,6 +28,7 @@ import { emitPromiseSubclassProtoLink, isStandalonePromiseSuperForwarder } from 
 // declarations/expressions (the drive gate self-limits to standalone/wasi).
 import { emitAsyncGenerator, isAsyncGenDriveCandidate } from "./async-frame.js";
 import { genBodyReferencesThis, genBodyReferencesSuper, emitCachedFuncClosureAccess } from "./closures.js"; // (#3132 / #3123 fnctor parent closure)
+import { standaloneCommaHeritage } from "./class-heritage-comma.js"; // (#6772 S6)
 import { classMemberFuncKey, classMemberRestParamKey, fnctorAncestorOfClass } from "./class-member-keys.js"; // (#1983 / #3123 / #6699)
 import { dynamicClassKeyGlobalKey, dynamicClassMemberName, isDynamicClassMemberName } from "./class-dynamic-keys.js"; // (#5195 Step 1 / F1)
 import { recordFnMetaMemberDeclaration } from "./function-instance-meta-methods.js"; // (#4440)
@@ -1062,7 +1063,7 @@ export function collectClassDeclaration(
   if (decl.heritageClauses) {
     for (const clause of decl.heritageClauses) {
       if (clause.token === ts.SyntaxKind.ExtendsKeyword && clause.types.length > 0) {
-        const baseExpr = clause.types[0]!.expression;
+        const baseExpr = standaloneCommaHeritage(ctx, decl)?.value ?? clause.types[0]!.expression; // (#6772 S6)
         if (!ctx.standalone && !ctx.wasi)
           hasDynamicHostParent = !ts.isIdentifier(baseExpr) && !ts.isClassExpression(baseExpr);
         if (ts.isIdentifier(baseExpr)) {
