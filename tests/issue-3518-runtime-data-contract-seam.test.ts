@@ -3,8 +3,9 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { setImmediate } from "node:timers/promises";
 import ts from "typescript";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import * as asyncSchema from "../src/runtime/contracts/async-provider-schema.js";
 import * as hostSchema from "../src/runtime/contracts/host-capability-schema.js";
 import * as policy from "../src/runtime/contracts/provider-policy.js";
@@ -44,6 +45,11 @@ import {
 import { readRuntimeContractReceiptSource } from "./helpers/ir-runtime-contract-evolution.js";
 
 import { beforeRuntimePreparationRelocation } from "./helpers/ir-runtime-preparation-relocation.js";
+
+afterEach(async () => {
+  // Yield between synchronous source proofs so Vitest can process task-update RPCs.
+  await setImmediate();
+});
 
 const root = resolve(import.meta.dirname, "..");
 const read = (path: string) => readFileSync(resolve(root, path), "utf8");

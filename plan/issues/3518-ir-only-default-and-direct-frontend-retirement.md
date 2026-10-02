@@ -4873,3 +4873,61 @@ Exact canonical56680e7feb87a090ee8846c8ecb7718933cd3781 is now cleanly merged bu
 Signed b7b6db7ba26f376d15a4824177952db07ce6cfb5 integrated canonical56680e7f with normal hooks, verified SSH signature, exact27 committed/working proof inputs, and all31 incoming metadata entries. Fresh one-shot remote reads then identified canonicalb8c9a12a32f6e565a65d53117ee25e703a7f8fe2. The published fork head remains367022d3, existing ready6405 is held and not queued, and canonical claim3518:c1-main-epoch-20261002 remains this owner.
 
 The exact5668→b8c9 diff adds seven ES2015 source repairs, four regression controls in one new file, and planning/benchmark metadata (25 paths total). No overlap with the PR-owned diff. Root merged b8c9 cleanly, without editing incoming fixes/tests; effect checks preserve all25 incoming blob/mode/working identities and all27 direct proof input bytes. Independent review finds no manifest-pinned changed source; ctor-return-override is an unmigrated inventory row, not a source-byte proof pin. No new inventory successor or pin update is justified by content evolution alone. Proof path: .tmp/c1-main-epoch/final-publication/merge-b8c9-preservation-guard.json. Four incoming regression controls and remaining import/execution impact review are in progress. The earlier2129 passes retain their exact frozen domain and do not grant a blanket current-main codegen equivalence claim. Existing PR publication, actual current-head CI (including unchanged40-minute budget), protected queue and verified main delivery remain pending. Legacy retained; downstream6426 paused.
+
+
+## Implementation Plan — runtime-data 75-case reporter yield (2026-10-02)
+
+Scope: one existing test file, `tests/issue-3518-runtime-data-contract-seam.test.ts`. Astra High specifies; Sol 6.1 Medium implements in an exclusive isolated candidate. Root owns integration, claims, execution, Git and publication. This is a reporter-delivery repair, with no compiler or migration changes.
+
+### Recorded failure and hypothesis
+
+The saved exact CI log `final-publication/b73-ci-terminal-admission/111033600173.log` records 75 passed assertions, one unhandled `[vitest-worker]: Timeout calling "onTaskUpdate"`, process exit 1 and `TEST_OUTCOME: failure`. The ordinary duration is 99.25 seconds, tests 98.09 seconds. Three synchronous historical reconstruction rows individually take 27.780, 27.871 and 29.952 seconds; the actual type-contract row takes 1.588 seconds. Root also retains the same reporter failure at the earlier 367 composition and a separate clean local 75-case run. Advisory job success does not erase the test-step failure.
+
+The inspected file has synchronous cases and no yielding afterEach hook. Repeated synchronous work delaying worker task-update processing is a mechanism-based hypothesis, not established causal attribution from this log. An awaited event-loop yield between tests gives queued IPC/reporting work an opportunity to run. It does not interrupt a single long synchronous test, and success must be measured on the actual CI composition.
+
+### Exact candidate
+
+Baseline: 45097 bytes, SHA256 `deed9c322d3a9caf6d8689cbbb0ada9c9cc2bc3c4cf162031b5e41769f0dfbea`.
+
+Only three textual additions are authorized:
+
+1. Import `setImmediate` from `node:timers/promises` alongside the existing Node imports.
+2. Add `afterEach` to the existing Vitest named import.
+3. Before the current `const root` declaration, add the established test-local hook:
+
+```ts
+afterEach(async () => {
+  // Yield between synchronous source proofs so Vitest can process task-update RPCs.
+  await setImmediate();
+});
+```
+
+Follow the existing `issue-3518-validation-policy-evolution.test.ts` hook exactly. Do not change any test callback, assertion, title, registration order/duplicate occurrence, fixture, source reader, mutation, historical reconstruction, type-contract import, 81-type/eleven-negative control, or existing 60_000 test timeout. Do not alter Vitest private hooks, ordinary unhandled-error policy, reporters, heap, concurrency, the 40-minute job timeout, selector cap 15, advisory status policy or aggregate guards. No catch/ignore/retry or global fake timer/FS mechanism is authorized.
+
+### Authority membership and reseal decision
+
+The test path does not occur anywhere in the actual C1 authority manifest and is not a current instrument, population source, closure input, artifact, recipe operand or config observation. It appears in `ir-runtime-contract-evolution.json` only as `authoring.requirementSource`: immutable historical authoring provenance, 44714 bytes / `8d32a071b57435f7d08d6101f1448d4779ac8edcab31b8d8f671a7b138f4bd52`. The helper explicitly documents that this provenance permits reader plumbing to evolve. Its authenticator pins the receipt itself; its physical capture reads only the 27 source records, not the authoring test. Neither the live `paths` nor `runtime75SourceRequirements` contains this test.
+
+Therefore preserve every receipt and source-authority byte. No manifest/anchor/literal or reciprocal recipe reseal is necessary, and this one-file hook does not justify rerunning the unrelated 2054 controls. Existing required hook and CI selections remain mandatory; this does not exempt them.
+
+### Preservation and acceptance
+
+Freeze original/candidate bytes. Removing exactly the new import, added Vitest binding and hook must recover the complete original file byte-for-byte. Collect original and candidate with the same normal runner to verify all 75 fully qualified registration names in order, including occurrences; collection is not runtime acceptance. If an existing authenticated original collection is available, reuse its names rather than inventing a new denominator. Preserve all prior failed logs.
+
+Run the complete ordinary 75-case suite with unchanged runner flags, heap, timeouts and error policy; require all 75 assertions, process 0, no unhandled RPC errors and normal terminal completion. Keep raw default output and structured results together, because assertion totals alone missed this defect. Record overall duration and existing per-row timings; no speedup claim is required and no additional profiling lane is necessary for this bounded candidate. Root completes the required normal scoped lint/format/type/hook checks.
+
+Then require the exact published-head/current-merge CI shard to execute these 75 cases and finish with `TEST_OUTCOME: success`, process 0 and no unhandled reporter error. This is the positive delivery control under CI timing; the separate local clean run cannot substitute for it. If the RPC error recurs, retain the ordinary failure and report the actual affected timing/logs for a new bounded diagnosis. Do not silently retry to obtain green, lengthen deadlines or introduce another repair under this plan. A passing candidate supports the operational repair, not a universal claim that event-loop starvation was proved.
+
+Legacy retention and the full IR/public Number obligations remain open. No compiler behavior, retirement or additional migration coverage is claimed.
+
+
+### 2026-10-02 — b73 actual reporter refusal and bounded candidate
+
+Current authenticated CI preview239480afca9f706d5d0f4f4895b312f244e59d33 is exactly the published b73aa86fdaca7903bb3c99e90551075ca0f926f0 tree, composed with canonicalb8c9a12a. Ten completed changed-suite jobs have1289 ordinary-clean passed assertions. Reporter75 job111033600173 has75/75 assertions but oneUnhandled onTaskUpdate RPCtimeout, realcommandexit1 and TEST_OUTCOMEfailure; advisoryjobgreen is notacceptance. Fullsavedlog37977B SHA9f4ed183381137c8d7eb6f4b1b82a45f05debc8b3688ff7037f1deb75ee1303c. Duration99.25s/tests98.09s; prior367sameclassfailure and the cleanlocal39.82s remainpreserved. Hold stays; currentfour long-runningjobs andquality were active at snapshot, no manualcancellation.
+
+AstraHigh plan439c735d2d1391f28d2769bfccde79428a516bb622b7e299d764ba2f0f50e50c was recorded in this issue before Sol6.1Medium implementation. Root integrated only the test-local setImmediate import, afterEach binding and awaitedhook. Candidate45299B SHAad8911f06bbc10ea60d273631a4475331c5e76e38aa7ebb6fa1f85e1fd047e3b; reversing those3additions recovers complete original45097B/deed9c322d3a9caf6d8689cbbb0ada9c9cc2bc3c4cf162031b5e41769f0dfbea. Independent review398d2e4538974879aed5e9dab8869fbfd37ea0ab874077ddef05b454c510416a approves exactscope. All75callbacks/assertions/registrations/fixtures/negativecontrols/timeouts remain exact; no runtime/config/errorpolicy/heap/cap/advisory edits. Subject is outside the authenticated authority/recipe domain; no reseal or unrelated2054rerun is justified. Actualsame-runner collection preserves all75ordered names/occurrences. Fullordinary75 executor73919/child63228 is active on these finalcandidate bytes with default+JSON reporters and unchangedflags; no passcredit untilactualterminal/errorproof. Subsequentnormalhooks and exactpublishedheadCI reporter process0/noRPC remainrequired. No causal/speedup, fullmigration/equality or retirementclaim.
+
+
+### 2026-10-02 — reporter-yield candidate ordinary75 clean
+
+Actualexecutor73919/child63228 terminated0; all75assertions passed with0failed/pending/todo and no ordinary/RPC error. Runtimefullnames/order/occurrences exactlymatch originalcollection/runtime records; candidate bytes45299/ad8911f06bbc10ea60d273631a4475331c5e76e38aa7ebb6fa1f85e1fd047e3b and all27authority/config pins+modes remainexact. Duration39.855328917s is not a speedup/causal orUbuntuCI claim. Originalb73onTaskUpdate75/exit1/99.25s remainspreserved; previouslycleanlocal39.8245s cannot substitute forfreshCI. RawdefaultlogSHAbbf9b5322bf250f2dd77aeac7dea72f191df7f5b57f354df60019c2e496ddf5d, resultJSONb2a93031b4dcc171047cf8bde0ba1c4e0c63b3f0f3314add18e4a2ea510812a5 frozen0444 under .tmp/c1-main-epoch/final-publication/reporter75-yield. Normal signedhooks/publication/exactheadCI75errorchannel acceptance stillpending. Holdretained; noforce/bypass/timeoutcap/errorpolicychange, nolegacyretirement.
