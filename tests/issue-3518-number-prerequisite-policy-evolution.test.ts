@@ -5,7 +5,7 @@ import { setImmediate } from "node:timers/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   captureCanonical489dPredecessorPolicySource,
-  beforeCanonical3c6InventoryPolicySource,
+  captureCanonical3c6PredecessorPolicySource,
   authenticateGeneratorInventoryPolicyEvolution,
   authenticateGeneratorInventoryPolicy,
   beforeGeneratorInventoryPolicy,
@@ -38,7 +38,7 @@ import {
   authenticateIrRuntimeProgramPolicy,
   beforeIrRuntimeProgramPolicy,
   type MutableIrRuntimeProgramPolicy as Policy,
-  beforeCurrentMainInventoryPolicySource,
+  captureCurrentMainInventoryPredecessorPolicySource,
 } from "./helpers/ir-runtime-program-policy-evolution.js";
 import { authenticateIrValidationPolicy } from "./helpers/ir-validation-policy-evolution.js";
 afterEach(async () => {
@@ -91,8 +91,8 @@ const raw = (): string =>
     beforeDynamicCodeInventoryPolicySource(
       beforeHostCarrierInventoryPolicySource(
         beforeGeneratorInventoryPolicySource(
-          beforeCurrentMainInventoryPolicySource(
-            beforeCanonical3c6InventoryPolicySource(
+          captureCurrentMainInventoryPredecessorPolicySource(
+            captureCanonical3c6PredecessorPolicySource(
               captureCanonical489dPredecessorPolicySource(read("scripts/compiler-boundaries.json")),
             ),
           ),
@@ -911,8 +911,8 @@ describe("C2a exact runtime preparation policy successor", () => {
     beforeDynamicCodeInventoryPolicySource(
       beforeHostCarrierInventoryPolicySource(
         beforeGeneratorInventoryPolicySource(
-          beforeCurrentMainInventoryPolicySource(
-            beforeCanonical3c6InventoryPolicySource(
+          captureCurrentMainInventoryPredecessorPolicySource(
+            captureCanonical3c6PredecessorPolicySource(
               captureCanonical489dPredecessorPolicySource(read("scripts/compiler-boundaries.json")),
             ),
           ),
@@ -1307,8 +1307,8 @@ describe("dynamic-code inventory successor preserves the C2a policy proof", () =
   const latestRaw = (): string =>
     beforeHostCarrierInventoryPolicySource(
       beforeGeneratorInventoryPolicySource(
-        beforeCurrentMainInventoryPolicySource(
-          beforeCanonical3c6InventoryPolicySource(
+        captureCurrentMainInventoryPredecessorPolicySource(
+          captureCanonical3c6PredecessorPolicySource(
             captureCanonical489dPredecessorPolicySource(read("scripts/compiler-boundaries.json")),
           ),
         ),
@@ -1827,8 +1827,8 @@ describe("dynamic-code inventory successor preserves the C2a policy proof", () =
 describe("host-carrier current-main inventory successor", () => {
   const hostRaw = (): string =>
     beforeGeneratorInventoryPolicySource(
-      beforeCurrentMainInventoryPolicySource(
-        beforeCanonical3c6InventoryPolicySource(
+      captureCurrentMainInventoryPredecessorPolicySource(
+        captureCanonical3c6PredecessorPolicySource(
           captureCanonical489dPredecessorPolicySource(read("scripts/compiler-boundaries.json")),
         ),
       ),
@@ -2176,8 +2176,8 @@ describe("host-carrier current-main inventory successor", () => {
 // Direct generator-current input; all prior control blocks retain their exact captured domains.
 describe("generator eager-refusal current-main inventory successor", () => {
   const generatorRaw = (): string =>
-    beforeCurrentMainInventoryPolicySource(
-      beforeCanonical3c6InventoryPolicySource(
+    captureCurrentMainInventoryPredecessorPolicySource(
+      captureCanonical3c6PredecessorPolicySource(
         captureCanonical489dPredecessorPolicySource(read("scripts/compiler-boundaries.json")),
       ),
     );

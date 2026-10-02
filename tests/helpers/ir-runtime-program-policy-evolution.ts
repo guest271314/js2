@@ -4695,3 +4695,81 @@ export function captureCanonical489dPredecessorPolicySource(raw: string): string
     canonical489dFail("raw/semantic reciprocal proof disagree");
   return predecessor;
 }
+
+// Fresh fixed inventory captures for initial Number fixtures; original full proofs above remain unchanged.
+function captureCurrentMainSemantic(
+  value: unknown,
+  freshlyVerifiedReceipt: CurrentMainInventoryReceipt,
+): {
+  predecessor: MutableIrRuntimeProgramPolicy;
+} {
+  // Capture descriptors before receipt/source IO; keep subsequent historical mutants raw.
+  const current = capture(value) as MutableIrRuntimeProgramPolicy;
+  const receipt = freshlyVerifiedReceipt;
+  currentMainInventorySemanticProfile(current, receipt.current);
+  currentMainInventoryRows(current, receipt, false);
+  const predecessor = capture(current) as MutableIrRuntimeProgramPolicy;
+  predecessor.files.splice(1384, 0, capture(receipt.rowChanges[3].row) as Record<string, string>);
+  for (const index of [514, 367, 366]) predecessor.files.splice(index, 1);
+  currentMainInventorySemanticProfile(predecessor, receipt.before);
+  currentMainInventoryRows(predecessor, receipt, true);
+  const replay = capture(predecessor) as MutableIrRuntimeProgramPolicy;
+  replay.files.splice(1381, 1);
+  for (const change of receipt.rowChanges.slice(0, 3))
+    replay.files.splice(change.currentIndex, 0, capture(change.row) as Record<string, string>);
+  currentMainInventorySemanticProfile(replay, receipt.current);
+  currentMainInventoryRows(replay, receipt, false);
+  if (!same(replay, current)) currentMainInventoryFail("complete reciprocal semantic replay mismatch");
+  return { predecessor };
+}
+
+function captureCanonical3c6Semantic(
+  value: unknown,
+  verified: Canonical3c6InventoryReceipt,
+): {
+  predecessor: MutableIrRuntimeProgramPolicy;
+} {
+  // Primitive/descriptor/proxy/cycle capture remains ahead of every authority read.
+  const current = capture(value) as MutableIrRuntimeProgramPolicy;
+  if (current === null || typeof current !== "object" || Array.isArray(current))
+    canonical3c6Fail("policy input must be a plain object");
+  const receipt = verified;
+  canonical3c6Profile(current, receipt.current);
+  canonical3c6Rows(current, receipt, true);
+  const predecessor = capture(current) as MutableIrRuntimeProgramPolicy;
+  for (const change of [...receipt.rowChanges].reverse()) predecessor.files.splice(change.currentIndex, 1);
+  canonical3c6Profile(predecessor, receipt.before);
+  canonical3c6Rows(predecessor, receipt, false);
+  const replay = capture(predecessor) as MutableIrRuntimeProgramPolicy;
+  for (const [inserted, change] of receipt.rowChanges.entries()) {
+    if (change.currentIndex !== change.beforeIndex + inserted) canonical3c6Fail("fixed replay index mismatch");
+    replay.files.splice(change.beforeIndex + inserted, 0, capture(change.row) as Record<string, string>);
+  }
+  canonical3c6Profile(replay, receipt.current);
+  canonical3c6Rows(replay, receipt, true);
+  if (!same(replay, current)) canonical3c6Fail("complete reciprocal semantic replay mismatch");
+  return { predecessor };
+}
+
+export function captureCanonical3c6PredecessorPolicySource(raw: string): string {
+  if (typeof raw !== "string") canonical3c6Fail("raw input must be a primitive string");
+  const receipt = authenticateCanonical3c6InventoryEvolution();
+  const predecessor = applyCanonical3c6Raw(raw, receipt, false);
+  const semantic = captureCanonical3c6Semantic(JSON.parse(raw), receipt);
+  const parsed = JSON.parse(predecessor) as MutableIrRuntimeProgramPolicy;
+  canonical3c6Profile(parsed, receipt.before);
+  if (!same(parsed, semantic.predecessor) || applyCanonical3c6Raw(predecessor, receipt, true) !== raw)
+    canonical3c6Fail("raw/semantic reciprocal proof disagree");
+  return predecessor;
+}
+export function captureCurrentMainInventoryPredecessorPolicySource(raw: string): string {
+  if (typeof raw !== "string") currentMainInventoryFail("raw input must be a primitive string");
+  const receipt = authenticateCurrentMainInventoryEvolution();
+  const predecessor = applyCurrentMainInventoryRaw(raw, receipt, false);
+  const semantic = captureCurrentMainSemantic(JSON.parse(raw), receipt);
+  const parsed = JSON.parse(predecessor) as MutableIrRuntimeProgramPolicy;
+  currentMainInventorySemanticProfile(parsed, receipt.before);
+  if (!same(parsed, semantic.predecessor) || applyCurrentMainInventoryRaw(predecessor, receipt, true) !== raw)
+    currentMainInventoryFail("raw and semantic reciprocal proof disagree");
+  return predecessor;
+}

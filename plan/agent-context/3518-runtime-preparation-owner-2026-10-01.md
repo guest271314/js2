@@ -2,6 +2,28 @@
 
 The IR migration remains in progress. Retain the legacy implementation until all required IR behavior is implemented, tested and equal. This checkpoint relocates intrinsic preparation and keeps both paths public by identity; it does not complete the native catalog, dynamic code, source issuer, or decoded backend equivalence.
 
+## Current delivery checkpoint — 2026-10-03
+
+Integration owner: `codex/3518-c1-main-epoch-20261002` in
+`worktrees/codex-3518-c1-main-epoch-20261002`. This checkpoint merges exact
+canonical main `9d942be06b07658d3a6d9eb4b4e04bf43a16da34` after the signed
+source integration `f7722d7aa613cea02e258cb0e97bd1cdff923024`. The nine
+incoming benchmark entries and all reviewed source/authority inputs are
+preserved. Existing ready PR6405, “refactor(ir): move intrinsic preparation
+into runtime,” stays held until actual published-head CI acceptance.
+Downstream PR6426 is paused until verified main delivery.
+
+Final ordinary reporter99, current-source278 and full Number456 passed with
+clean process exits/error channels; Number elapsed30m58.776s locally. All27
+final authority hashes/modes match. NativeTS7, uncapped Biome and full
+TypeScript formatting passed, as did the five source ratchets. Normal signed
+hooks, exact published-head/current-composition CI and the protected queue
+remain required; local timing is not CI job-budget proof. Root owns
+Git/claims/publication; native AstraHigh specifies/reviews and Sol6.1Medium
+implements and independently audits. Later dated evidence entries record the
+current state; earlier paths, claims and receipts below are historical.
+
+
 ## Ownership and routing
 
 Astra High specifies hard tasks and records finite implementation plans in `plan/issues/3518-ir-only-default-and-direct-frontend-retirement.md`. Sol 6.1 Medium is the default implementer and independent reviewer; raise effort only for a concrete shared mechanism. Root owns integration, scoped claims, Git and heavy validation. Work is isolated in `/private/tmp/js2-ir-source-invocation-owner-integration-20261001`, branch `codex/3518-source-invocation-owner-integration-20261001`; shared root and donor worktrees are preserved.
@@ -595,3 +617,38 @@ Incoming6833 ordinary result is24/30 assertions passed,6failed with missing Wasm
 Initial6834 childexited1 with63/70 passed and7failed; initial4759 childexited1 with1/11passed and10failed. Missing generatedcompiler bundle/worker-not-ready and originaltimeouts are preserved. Normal repository build:compiler-bundle and build:runtime-bundle then eachactuallyexited0; all27proofinputs and38incomingentries stayedexact. One justifiedordinaryrerun peraffected6834/4759suite after this prerequisite repair is inprogress, with separateevidence and unchangedflags/timeouts/errorpolicy.
 
 Astra's11497B boundedtwo-stage Number planbc994c550d16910695aeffb78e79abe78fe7951d1a4fd266c3987e5d44f9f979 is imported into theexisting3518issue BEFORE implementation. Sol6.1Medium owns only an isolatedprototype/complete-operation diagnostic driver. No tracked helper/Numbertest edits or authority reseal are authorized until independentreview and a material measured signal across both completeNumber andall-fivefixture operations. All456originalcontrols/fullAPIs/receipts/freshauthority and40minuteCIlimit remainrequired. Rootwilllaunch diagnostic onlyafterincomingtestsfinish; no competingheavyworker andno newkernelround.
+
+
+2026-10-03 — material complete-fixture screen, not test acceptance
+
+Root diagnostic32422 completed0 in229.448816s without reaching the600s external diagnostic bound. Five balanced completeNumber pairs yield51.81634486percent median improvement, five positive; completeall-five batch63.60966156percent median improvement, five positive. All12 paired output records have complete byte/SHA/Gitblob parity checked by the executor; all8negative cases genuinelyrefuse with matchingconstructor/name/message;27authority inputs/modes before/afterexact. Rawresult23764B SHA8a9511e46f52787111e7758b943b661bef47dbf6be2cd9d3bc23102c497aeae1 and terminal/freeze/provenance copied under main-5ea9. Selectioncriteria passed; this does NOT establish full456, local99 orCI40minute acceptance. RootauthorizedonlyisolatedPhase2 candidates afteractualmeasurement; no trackedhelper/Number changes orreseal yet.
+
+Rootintegration nowcommittedf7722d7aa613cea02e258cb0e97bd1cdff923024, signedThomas/CodexGPT6Default/fullnormalhooks0;parentsf519+5ea. All38incoming entries and27committed/workingproofinputs exact,cleanbeforethistrackingappend, noMERGE_HEAD, NOTPUSHED. Newbuilderplan/test-placementamendment below recorded BEFORE reporterimplementation.
+
+Placementamendment9bb3b6cd8f9d07bd91621766fe01bee4516a17a8650262f10fc013919b4fae08 imported into existing3518issue beforethirdcandidateimplementation: append24controlstoalreadyselectedreporter75→99; preserveall75originals andcap15. No newtestfile/thirdinstrumentpin.
+
+
+### 2026-10-03 — scoped Number capture integrated; final ordinary acceptance running
+
+Root integrated the independently reviewed Sol6.1Medium candidates on signed HEAD f7722d7aa613cea02e258cb0e97bd1cdff923024 after AstraHigh specifications and reseal review. The complete 212418-byte existing helper prefix, all456 original Number callbacks, and all75 original reporter controls remain exact; the reporter adds24 independently expected capture controls. Only helper/Number instrument pins and their complete reciprocal recipes changed; the manifest, anchor and single independent literal were updated accordingly. All22 unaffected entries of the27-file authority vector remain exact, production src unchanged. Six candidate/authority paths and these two tracking documents are owned uncommitted changes.
+
+Actual ordinary exclusive reporter completion:99/99, childexit0,46.8501056251s, no RPC/unhandled/cancellation errors; collection preserves original75 ordered occurrences plus24. Independent Sol audit confirms all27 final hashes/modes and cleared physical-fault locks/backups. Actual current-source completion:278/278, childexit0,37.26107s, complete ordered names and ordinary errors clear. Original Number raw-span1-duplicate control passes1/456,455filtered, childexit0,8.72995s process elapsed (8.159840875s row); this is not full456 credit. Final27 pins/modes remain exact before/after both lanes. Current-source/control terminal evidence SHA2567c823fccfa5c1976e68f9533b0d221c13fc567517b08f908e73b84fccfac6782.
+
+Root explicitly released the unfiltered ordinary456 lane only after these completions; SolH1 sole heavy worker, directchild83383/outer19531, under final-publication/number-two-stage-final-assembly/full-number456. No source/authority edits, changed deadlines/heap/cap/errorpolicy, cancellation or duplicate run. Full456 actual terminal, native checks/fullnormalhooks, unchanged final selector membership, exact published-head CI Number completion within the unchanged40-minute job budget and error-free99, and protected queue/main ancestry/content remain outstanding. Existing6405 stays held at publishedb73, not pushed; downstream6426 paused and legacy retained.
+
+
+Incoming composition validation is terminal: after the two normal bundle prerequisite builds exited0, the full6834 module-value self-import regression passed70/70, child0,22.102s. Full4759 remains7/11, child1,14.402s; the independent exactcanonical5ea control is also7/11, child1,15.17376s, with all11 names/statuses and allfour complete failure texts equal after only the explicit checkout/test-subject path substitution. Full6833 remains24/30 withsix localNode missing-exception-ref failures, matching the exactcanonical control; the first incoming executor numerical-exit/duration recording gap remains preserved. Neither failure attribution is reported as a passing gate. Both worktrees use independently indexed clean pinned local test262/FYI corpora; donor symlinks and untracked fixtures were preserved. Raw original pre-build failures and final-input custody remain under main-5ea9/incoming-tests.
+
+
+### 2026-10-03 — full final Number acceptance completed
+
+The complete ordinary unfiltered Number456 lane actually terminated: outer19531 exit0, child83383 exit0,456/456 passed,0failed/0pending, exact original ordered registrations, ordinary errors empty. Actual child elapsed1858.776078542s (30m58.776s). All27 final authority hashes/modes are restored. Terminal SHA2565b7ae676850522aba50e8418d9a73bf8b0de16d2f2abc01bb33c58328b8add79; resultJSONd2436758bd956b172cbc7ae2b83acd9456001981eb500e0bdc9a0d625b940d4d; ordinarylog8016ec74c5bf919963cd17383aed176cdb947a5b887c22123321844e0838e8ae. Raw evidence is under final-publication/number-two-stage-final-assembly/full-number456. Together with reporter99 and current-source278,833 distinct ordinary controls passed across these three suites on the final candidate. The earlier single Number control is a repeated subset, not additional coverage. Local timing is not exact-head UbuntuCI40-minute job-budget acceptance.
+
+The conditional native release is now fulfilled. SolH1 runs only sequential nativeTS7, uncapped error-level Biome and full TypeScript Prettier checks, actual session42773, using the reviewed2651-byte executor SHA256b4d9e3fae9bdf2368d27470293ec529ee4d38775c7b5f3f0a2286594596c1468. It performs27-pin before/after custody and preserves actual exits/logs. SolB independently audits the completed456 evidence read-only. Root still owns remaining mandatory source ratchets, normal signed hooks, explicit staging and existing fork publication. No commit/push or protectedmain delivery is yet credited.
+
+
+### 2026-10-03 — final native checks and benchmark-only main integration
+
+Sequential native session42773 actuallyexited0: TS7 child0/8.974s, uncapped Biome child0/1.808s, full TypeScript Prettier child0/31.667s; all27 final hashes/modes exact before/after each. Terminal custody7908B SHA2569838c48825d6c2b29b84586c8ddab5aa5d8503ff5302b370c352569a69137531 binds actual child/executor exits and raw logs. Independent full456 review SHA256c32bf1683cdcc719fc8a829a4a59e54fb86027302f0706fa6392fa8863310634 confirms every ordered registration, full ordinary error channels, actual elapsed and restored27. One initial audit timing-literal mismatch stopped only the audit; it was corrected from the actual raw float without rerunning or modifying tests.
+
+All five mandatory precommit source ratchets exited0 (LOC/function/coercion/oracle/dead-exports). Fresh canonical claim3518:c1-main-epoch-20261002 remains ttraenkler/codex-c1-main-epoch-20261002; exit3 means the verified own claim, no competing owner. Fresh fork and REST head remainb73; ready6405 is OPEN/hold/notqueued. Fresh canonical main9d942be06b07658d3a6d9eb4b4e04bf43a16da34 changes only nine benchmarks/results files relative to5ea. Root merged it cleanly without an automatic commit, preserving every owned candidate byte and all27 inputs; allnine incoming index modes/blobs/worktree identities equal exactcanonical9d. No source/config/receipt epoch or runtime rerun is justified by these benchmark-only changes. Normal signed full-hook commit and push remain required; no main-delivery or exact-headCI acceptance yet.
