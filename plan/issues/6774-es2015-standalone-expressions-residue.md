@@ -52,6 +52,10 @@ loc-budget-allow:
   # 2026-10-01 (#6774 S7 impl, Opus): one import + one wrapped push in the
   # object-literal method pre-registration (rest pattern → rest vec slot).
   - src/codegen/index.ts
+  # 2026-10-02 (#6774 queue fix): S13 marks a standalone tagged template as an
+  # inherited-[[Set]] dirty trigger in scanForArrayHoles (+3). #6771's merge
+  # reset this file's ceiling to its own size, stranding the +3.
+  - src/codegen/array-holes.ts
   # NEW leaves (register each in scripts/compiler-boundaries.json, see Lane protocol)
   # 2026-10-02 (#6774 cycle cut, Opus): the five leaves moved into
   # src/codegen/expressions/ (flat-dir budget, #6797) and import their SCC-side
