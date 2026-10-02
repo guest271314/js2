@@ -138,8 +138,8 @@ Done in this order on `claude/issue-6794-packaging-cli`, one commit per part:
 
 ## Resolution
 
-**Status stays `in-progress`:** parts 1–6 and 8 are fixed; part 7, the
-CLAUDE.md flag line and the `< 100 files` target remain (below).
+**Status stays `in-progress`:** parts 1–6 and 8 are fixed; part 7 and the
+`< 100 files` target remain (below).
 
 `npm pack --dry-run --json`, each after a full `pnpm run build` (2026-10-02):
 
@@ -188,10 +188,9 @@ in the brief, `check:ir-fallbacks`. No budget allowance needed.
   `src/optimize.ts` is receipt-pinned in
   `scripts/compiler-extension-boundaries.json`; any edit fails
   `check:dead-exports` until a human re-signs the receipt. Needs that re-sign.
-- **CLAUDE.md "CLI Flags"** still lists `--nativeStrings` (not a CLI flag; it
-  is the `nativeStrings` compile option, automatic for wasi/standalone). Not
-  edited here: changes to agent instructions need a human, not an agent
-  dispatch.
+- **CLAUDE.md "CLI Flags"**: not edited here (agent-instruction changes need
+  a human). Since fixed on main by #6795, which also adds
+  `check:claude-md-paths` to keep that list in sync with `src/cli.ts`.
 - **`< 100 files`**: 159 entry-reachable `.d.ts` + 50 `examples/` files
   remain. One rolled-up `index.d.ts` (vite-plugin-dts `rollupTypes`) needs
   `@microsoft/api-extractor`, which is not a dependency today.
