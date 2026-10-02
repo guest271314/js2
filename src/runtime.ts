@@ -6418,35 +6418,32 @@ function _decodes(exports: Record<string, Function> | undefined, obj: object): b
 // exports while that instance is alive anyway.
 let _latestInstance: WeakRef<{ getExports: () => Record<string, Function> | undefined }> | undefined;
 
-/** (#5225) Record a linked provider's exports as a decoder for the project. */
-export function registerLinkedProviderModule(exports: Record<string, Function>): void {
-  _linkedProviderMirrors.registerProviderExports(exports);
-  _crossModuleStructs.registerModule(exports);
+/** (#6790) Open a linked project keyed by its root import object; its modules decode only each other. */
+export function beginLinkedProject(rootImports: object): void {
+  _crossModuleStructs.beginProject(rootImports);
 }
 
-/** (#5225) Record the consumer's exports as a decoder for the project. */
-export function registerLinkedConsumerModule(exports: Record<string, Function>): void {
-  _crossModuleStructs.registerModule(exports);
+/** (#5225) Record a linked provider's exports as a decoder for `rootImports`' project. */
+export function registerLinkedProviderModule(exports: Record<string, Function>, rootImports?: object): void {
+  _linkedProviderMirrors.registerProviderExports(exports);
+  _crossModuleStructs.registerModule(exports, rootImports);
+}
+
+/** (#5225) Record the consumer's exports as a decoder for `rootImports`' project. */
+export function registerLinkedConsumerModule(exports: Record<string, Function>, rootImports?: object): void {
+  _crossModuleStructs.registerModule(exports, rootImports);
 }
 
 /**
- * (#5364) Retire the linked project that is no longer live, so the NEXT one
- * starts from an empty registry.
+ * (#5364) Forget every linked project registered so far.
  *
- * Both registries above are module-level singletons with no unregister path.
- * That is correct while a process hosts one linked project, and wrong for a
- * process that hosts many: `scripts/test262-worker.mjs` runs many rows per fork
- * and since #5353 every Temporal row re-instantiates the SAME provider binary.
- * Two instances of one binary share canonical WasmGC types, so project 1's
- * `__struct_field_names` happily names a struct project 2 minted — and
- * `_owningClassObject` (#5354) then answers with project 1's class-object
- * singleton. Nothing throws; the consumer's live `C` and the instance's
- * resolved constructor are simply two unrelated mirrors, so `x instanceof C`
- * is false while `x.constructor.name` reads right.
- *
- * Call it BEFORE instantiating a project, not after tearing one down: "after"
- * has no single owner (a row can throw out of instantiate) and would leave the
- * stale entries live for exactly the window that matters.
+ * (#6790) Correctness no longer depends on it: `instantiateLinkedProviders`
+ * opens a project per call, and two instances of one provider binary — which
+ * share canonical WasmGC types, so project 1's `__struct_field_names` names a
+ * struct project 2 minted and `_owningClassObject` (#5354) would answer with
+ * project 1's class-object singleton — are never consulted across projects.
+ * Kept for the test262 seam (which retires each row before the next) and for
+ * tests that want an empty registry.
  */
 export function resetLinkedProjectRegistry(): void {
   _crossModuleStructs.reset();
