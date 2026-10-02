@@ -1,10 +1,10 @@
 ---
 id: 6799
 title: "ci/process: 46 of the last 300 main commits are `[skip ci]` bot pushes and the queue gate 'fails open'; `.husky/pre-push` runs `git commit --no-verify` and skips `format:check` after a 90 s watchdog; dead workflows and 44 orphaned scripts"
-status: ready
+status: in-progress
 sprint: Backlog
 created: 2026-09-30
-updated: 2026-09-30
+updated: 2026-10-02
 priority: medium
 horizon: m
 feasibility: easy
@@ -15,6 +15,8 @@ language_feature: n/a
 goal: ci-hardening
 related: [3915, 2178, 3988, 4094, 6784, 6796]
 requested_by: ttraenkler/claude-review
+assignee: "ttraenkler/claude-dev-6799"
+branch: "claude/issue-6799-ci-process"
 origin: "2026-09-30 codebase review (plan/agent-context/claude-codebase-review-2026-09-30.md) — #5/#6/#8/#9"
 ---
 

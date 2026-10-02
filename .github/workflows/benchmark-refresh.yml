@@ -455,20 +455,30 @@ jobs:
             --last-refresh "$LAST_REFRESH" \
             --stale-after-hours 6 \
             --reason "landing benchmark artifacts" || RC=$?
-          if [ "$RC" -eq 10 ]; then
-            echo "decision=defer" >> "$GITHUB_OUTPUT"
-          else
-            # 0 = proceed. Anything else is a gate malfunction, and a broken
-            # gate must never freeze the artifact — fail OPEN, loudly.
-            [ "$RC" -eq 0 ] || echo "::warning title=main-push-queue-gate::gate exited ${RC}; failing open"
-            echo "decision=proceed" >> "$GITHUB_OUTPUT"
-          fi
+          # (#6799) FAIL CLOSED on a gate malfunction. 0 = proceed, 10 = defer;
+          # any other exit means the gate itself broke (an uncaught crash, or the
+          # script missing from the checkout),
+          # and a push nobody vetted is exactly what this step exists to stop.
+          # The gate already resolves an UNREADABLE queue or age to "proceed"
+          # internally (exit 0, with a warning), so this branch cannot freeze
+          # the artifact on a flaky API — it only refuses to push past a red
+          # gate, and the red step makes that visible instead of a warning.
+          case "$RC" in
+            0) echo "decision=proceed" >> "$GITHUB_OUTPUT" ;;
+            10) echo "decision=defer" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "decision=error" >> "$GITHUB_OUTPUT"
+              echo "::error title=main-push-queue-gate::gate exited ${RC}; refusing to push main (fail closed, #6799)"
+              exit 1
+              ;;
+          esac
 
       - name: Atomically promote the complete benchmark set
         # A deferred refresh is not a failure: the very next push to main
         # re-measures and promotes, and the 6h staleness floor in the gate
         # bounds how long a permanently busy queue can hold the artifact back.
-        if: steps.queue_gate.outputs.decision != 'defer'
+        # Only an explicit `proceed` pushes — never a missing or error value.
+        if: steps.queue_gate.outputs.decision == 'proceed'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MAIN_DEPLOY_KEY: ${{ secrets.MAIN_DEPLOY_KEY }}
