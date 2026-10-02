@@ -517,7 +517,7 @@ import {
 } from "./new-builtin-globals.js";
 import { compileSuperElementMethodCall, compileSuperMethodCall } from "./new-super.js";
 import { constructorFrameClassName, emitSuperCallBindThis } from "../classes/derived-ctor-this-guard.js"; // (#6772 S1b)
-import { emitSaveParentOverride } from "../classes/ctor-return-override.js"; // (#6772 S2)
+import { emitSaveParentOverride, emitSuperCallValue } from "../classes/ctor-return-override.js"; // (#6772 S2 / #6774 S22)
 import { compileIdentifierCall } from "./call-identifier.js";
 import { compileBuiltinStaticCall, tryCompileFromCharCodeFamilyReflective } from "./call-builtin-static.js";
 import { compileNamespaceStaticCall } from "./call-namespace-static.js";
@@ -8145,7 +8145,7 @@ function compileCallExpression(
       compileSuperCall(ctx, fctx, enclosingClass, thisLocal, expr, []);
       emitSuperCallBindThis(ctx, fctx); // (#5350 r3 / #6772 S1b) BindThisValue
       emitSaveParentOverride(ctx, fctx, enclosingClass); // (#6772 S2)
-      return VOID_RESULT;
+      return ctx.standalone ? emitSuperCallValue(ctx, fctx, thisLocal) : VOID_RESULT; // (#6774 S22) the bound `this`
     }
   }
 
