@@ -51,7 +51,7 @@ import { addFuncType, getOrRegisterVecType, taCtorKindOf } from "./registry/type
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { ensureSymbolCarrier } from "./symbol-native.js";
-import { wellKnownSymbolName } from "./literals.js"; // (#5142) @@<id> → "[Symbol.x]" display name
+import { getWellKnownSymbolId, wellKnownSymbolName } from "./literals.js"; // (#5142) @@<id> → "[Symbol.x]" display name
 // (#4491 T9) `constructor` is an own data property of every builtin prototype and
 // is deliberately NOT in `memberCsv`; the companion gets it from the #4200 carrier.
 import { pushCompanionConstructorSeed } from "./builtin-proto-constructor-seed.js";
@@ -185,7 +185,7 @@ export interface NativeProtoBuiltinGlue {
    * `{writable:true, enumerable:false, configurable:true}` and answered as a
    * string constant by the static value read.
    */
-  dataProps?: ReadonlyArray<readonly [string, string | number]>;
+  dataProps?: ReadonlyArray<readonly [string, string | number] | readonly [string, string | number, number]>;
   /**
    * (#5194 step 1) Brand of this prototype's own `[[Prototype]]` — the parent
    * level of the builtin prototype CHAIN. `Uint8Array.prototype`'s parent is
@@ -595,8 +595,8 @@ export function seededNativeProtoSymbolMembersByBrand(ctx: CodegenContext): Read
         .split(",")
         .map((member) => member.trim())
         .filter((member) => member.startsWith("@@"))
-        .map((member) => Number(member.slice(2)))
-        .filter((id) => Number.isInteger(id)) ?? [];
+        .map((member) => nativeProtoMemberSymbolId(member))
+        .filter((id): id is number => id !== undefined) ?? [];
     // (#6771 S5) Symbol-keyed data props are own companion entries too.
     for (const { id } of glue?.symbolDataProps ?? []) members.push(id);
     if (members.length > 0) out.set(brand, members);
@@ -763,9 +763,9 @@ export function ensureNativeProtoCompanionSeeder(ctx: CodegenContext, brand: num
 
     const body = seedFctx.body;
     if (member.startsWith("@@")) {
-      const symbolId = Number(member.slice(2));
+      const symbolId = nativeProtoMemberSymbolId(member);
       const boxSymbolIdx = ctx.funcMap.get("__box_symbol");
-      if (!Number.isInteger(symbolId) || boxSymbolIdx === undefined) continue;
+      if (symbolId === undefined || boxSymbolIdx === undefined) continue;
       body.push(...buildPrototypeSeedReceiver());
       body.push(...buildPrototypeSeedSymbolKey(symbolId, boxSymbolIdx));
     } else {
@@ -784,7 +784,7 @@ export function ensureNativeProtoCompanionSeeder(ctx: CodegenContext, brand: num
   // (#5194 step 1) A NUMERIC value is `<View>.prototype.BYTES_PER_ELEMENT`
   // (§23.2.7.1), whose attributes are all-false — not §17's — so the numeric
   // arm boxes the constant and uses `PROTO_CONST_DEFINE_FLAGS`.
-  for (const [key, value] of glue.dataProps ?? []) {
+  for (const [key, value, flags] of glue.dataProps ?? []) {
     const defineIdx = ctx.funcMap.get("__defineProperty_value") ?? defineValueIdx;
     if (defineIdx === undefined) continue;
     const boxNumberIdx = typeof value === "number" ? ctx.funcMap.get("__box_number") : undefined;
@@ -799,7 +799,7 @@ export function ensureNativeProtoCompanionSeeder(ctx: CodegenContext, brand: num
       addStringConstantGlobal(ctx, value);
       body.push(...stringConstantExternrefInstrs(ctx, value));
     }
-    body.push(...buildPrototypeSeedDataPropertyTail(typeof value === "number" ? "number" : "string", defineIdx));
+    body.push(...buildPrototypeSeedDataPropertyTail(typeof value === "number" ? "number" : "string", defineIdx, flags));
     installed++;
   }
 
@@ -930,8 +930,21 @@ function makeNativeClosureFctx(
  */
 function nativeProtoMemberDisplayName(member: string): string {
   if (!member.startsWith("@@")) return member;
-  const wellKnown = wellKnownSymbolName(Number(member.slice(2)));
+  const id = nativeProtoMemberSymbolId(member);
+  const wellKnown = id === undefined ? undefined : wellKnownSymbolName(id);
   return wellKnown === undefined ? member : `[Symbol.${wellKnown}]`;
+}
+
+/**
+ * (#6775 S16) Well-known-symbol id of a `@@` member key. Both spellings occur:
+ * `@@<id>` (the glue CSVs) and `@@<name>` (`resolveComputedKeyExpression`'s,
+ * e.g. Function.prototype's `@@hasInstance`), which the seeder used to skip
+ * as `Number("hasInstance")` = NaN — so the member never reached the companion.
+ */
+function nativeProtoMemberSymbolId(member: string): number | undefined {
+  const tail = member.slice(2);
+  const id = /^\d+$/.test(tail) ? Number(tail) : getWellKnownSymbolId(tail);
+  return id !== undefined && Number.isInteger(id) ? id : undefined;
 }
 
 /**
