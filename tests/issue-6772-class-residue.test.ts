@@ -714,3 +714,64 @@ describe("#6772 S6 — comma heritage and Object.getPrototypeOf of a derived cla
     ).toBe(0);
   });
 });
+
+describe("#6772 S7 — a binding assigned two different class expressions resolves dynamically", () => {
+  it("RED on base (0): `C.prototype.false` on the getter class, then on the setter class (node 3)", async () => {
+    expect(
+      await runProbe(`
+        var empty = Object.create(null);
+        var C, value;
+        for (C = class { get ['x' in empty]() { return 'via get'; } }; ; ) { value = C.prototype.false; break; }
+        var r = (value === 'via get') ? 1 : 0;
+        for (C = class { set ['x' in empty](param) { value = param; } }; ; ) { C.prototype.false = 'via set'; break; }
+        r += (value === 'via set') ? 2 : 0;
+        __r = r;
+      `),
+    ).toBe(3);
+  });
+
+  it("guard (base 15): statics, construction and instanceof through the ambiguous binding", async () => {
+    expect(
+      await runProbe(`
+        var C, K1;
+        C = class { static s() { return 3; } };
+        K1 = C;
+        var r = C.s() === 3 ? 1 : 0;
+        var x1 = new C();
+        C = class { static s() { return 4; } };
+        r += C.s() === 4 ? 2 : 0;
+        r += (x1 instanceof K1) ? 4 : 0;
+        r += (new C() instanceof C) ? 8 : 0;
+        __r = r;
+      `),
+    ).toBe(15);
+  });
+
+  it("guard (base 7): one class assigned once keeps the static mapping", async () => {
+    expect(
+      await runProbe(`
+        var C;
+        C = class { get g() { return 5; } static t() { return 6; } };
+        var r = (new C().g === 5) ? 1 : 0;
+        r += (C.t() === 6) ? 2 : 0;
+        r += (C.prototype.constructor === C) ? 4 : 0;
+        __r = r;
+      `),
+    ).toBe(7);
+  });
+
+  it("RESIDUAL (base 102, node 3): constructing the FIRST of two classes with a field-writing constructor throws", async () => {
+    expect(
+      await runProbe(`
+        var C, r = 0;
+        C = class { constructor() { this.a = 1; } };
+        var o1;
+        try { o1 = new C(); r += (o1.a === 1) ? 1 : 0; } catch (e) { r += 100; }
+        C = class { constructor() { this.a = 10; } };
+        var o2;
+        try { o2 = new C(); r += (o2.a === 10) ? 2 : 0; } catch (e) { r += 1000; }
+        __r = r;
+      `),
+    ).toBe(102);
+  });
+});

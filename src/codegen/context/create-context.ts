@@ -275,6 +275,7 @@ export function createCodegenContext(
     classTagCounter: 0,
     classTagMap: new Map(),
     classExprNameMap: new Map(),
+    classExprAmbiguousNames: new Set(),
     anonClassExprNames: new Map(),
     functionNameMap: new Map(),
     sourceMap: options?.sourceMap ?? false,

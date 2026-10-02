@@ -2673,7 +2673,12 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         // Also map the LHS identifier to the synthetic name so `new C()` resolves
         if (nameHint) {
           const syntheticName = ctx.anonClassExprNames.get(rhs);
-          if (syntheticName) {
+          // (#6772 S7) a second, DIFFERENT class bound to the name makes it dynamic
+          const prior = ctx.classExprNameMap.get(nameHint);
+          if (syntheticName && prior !== undefined && prior !== syntheticName) {
+            ctx.classExprNameMap.delete(nameHint);
+            ctx.classExprAmbiguousNames.add(nameHint);
+          } else if (syntheticName && !ctx.classExprAmbiguousNames.has(nameHint)) {
             ctx.classExprNameMap.set(nameHint, syntheticName);
           }
         }
@@ -2818,7 +2823,11 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         for (const decl of stmt.declarationList.declarations) {
           if (ts.isIdentifier(decl.name) && decl.initializer && ts.isClassExpression(decl.initializer)) {
             const syntheticName = ctx.anonClassExprNames.get(decl.initializer);
-            if (syntheticName && !ctx.classExprNameMap.has(decl.name.text)) {
+            if (
+              syntheticName &&
+              !ctx.classExprNameMap.has(decl.name.text) &&
+              !ctx.classExprAmbiguousNames.has(decl.name.text)
+            ) {
               ctx.classExprNameMap.set(decl.name.text, syntheticName);
             }
           }

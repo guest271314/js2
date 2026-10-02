@@ -92,6 +92,9 @@ func-budget-allow:
   # `let C = class extends (e, P) {}` binding goes through module init so the
   # comma heritage's prefix runs at ClassDefinitionEvaluation.
   - src/codegen/declarations.ts::collectDeclarations
+  # 2026-10-02 (#6772 S7, Opus implementation): the one `classExprAmbiguousNames`
+  # initialiser in the context literal (the plan's context/types.ts field).
+  - src/codegen/context/create-context.ts::createCodegenContext
 ---
 
 ## Problem
@@ -827,6 +830,7 @@ shared lock.
 | S4 | `d2fd895a37` | p9 / p9b / p9e invalid Wasm -> 42 (42), p9c invalid -> 7 (7), p9d invalid -> 127 (127), p9f invalid -> 63 (63), t9 (typed, IR-claimed) IR compile error -> 50 (both lanes); guard s4i 3 (3) | `{statements,expressions}/class/ident-name-method-def-new-escaped.js` |
 | S5 | `9368ba74f9` | p6 14 -> 15 (15); s5/a 0 -> 1, s5/b 0 -> 2, s5/e 0 -> 1, s5/g 0 -> 1, s5/h (member order) 0 -> 1 (node equal); host lane p6 14 -> 15 too | the four `cpn-class-{decl,expr}[-accessors]-computed-property-name-from-assignment-expression-assignment.js` |
 | S6 | `a086bbecc4` | p11 COMPILE-FAIL -> 15 (15); p11b COMPILE-FAIL -> 1015 (1015); p11d 448 -> 1023 (1023); p11g 2 -> 15 (15); p11c (plain `extends C`) 11 -> 15; guard p11e 0 -> 0 (declines; node 7) | `definition/side-effects-in-extends.js` |
+| S7 | (this step) | p7d 0 -> 3 (3); p7 1 -> 1 (bits 2/4 are a separate `get [false]` gap, unchanged); guards s7/b 15, s7/c 7, s7/d 3, s7/e 3 (base = branch = node); s7/f 102 both (RESIDUAL, node 3) | `expressions/class/accessor-name-inst-computed-in.js` |
 
 S2 design note (deviates from the plan's "set only on an object return"):
 `$__ctor_override` is a RETURN REGISTER written on EVERY exit of a marked
@@ -932,3 +936,15 @@ the merged tree (not by the earlier run): p11 15, p11b 1015, p11c 15, p11d
 1023, p11g 15, p11e 0 — as recorded; `side-effects-in-extends.js` passes;
 pin file 34/34 at fork heap 1024. Plan prose below still names the old flat
 paths; the S11/S12 leaves go under `classes/` too.
+
+S7 note: `ctx.classExprAmbiguousNames` (context/types.ts) — the assignment-RHS
+collector (declarations.ts) deletes the `classExprNameMap` entry and marks
+the name when a SECOND, different class expression is assigned to it; the
+#1394 var-name bridge no longer re-adds a marked name. Reads then take the
+untyped dynamic path, which already resolves the right prototype accessor.
+Not standalone-gated (the map is lane-independent): host answers for
+p7d / s7/a / s7/b / s7/c are identical on main `ce6631272c` and the branch
+(0 / 14 / 15 / 7). Pre-existing, unchanged, pinned RESIDUAL: constructing
+the FIRST of two classes whose constructor writes a field throws (s7/f 102
+on main and branch, node 3). Neighbour pins: issue-4770 / issue-5383 pass;
+issue-5318-r4 has the same 4 stale RESIDUAL failures on main `ce6631272c`.
