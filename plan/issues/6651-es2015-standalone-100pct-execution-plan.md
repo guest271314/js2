@@ -2582,3 +2582,24 @@ tag order, Proxy `[[OwnPropertyKeys]]` surfaces, and per-operation trap lookup
 (Symbol carrier consult, symbol-keyed writes on wrapper prototypes,
 `%GeneratorFunction%` tag) and the two #3371 `Reflect.construct` CEs —
 mechanisms in #6770's record.
+
+### 2026-10-02 — #6772 class statements/expressions residue — pointer
+
+Branch `issue-6772-class-residue` (record: "2026-09-30 — #6772
+implementation (Opus)" in `plan/issues/6772-es2015-standalone-class-residue.md`).
+The 34-row ES2015 standalone `language/{statements,expressions}/class/**`
+bucket goes **1 → 22 pass** on a tree merged with `origin/main` @
+`ce6631272c` (`--isolate`, base re-measured: 1 pass / 32 fail / 1
+compile_error; `name-binding/const.js` already passed on main). Mechanisms:
+`this`/`super` before `super()` and a second `super()` (S1b), `super(...)`
+extras (S1a), constructor return-override (S2), class constructors through
+`call`/`apply` (S3), `new`/`init`-named members (S4), folded computed-key
+assignments (S5), comma heritage + `Object.getPrototypeOf(derived)` (S6), one
+binding holding two class expressions (S7), static `constructor` accessors
+(S9), RegExp `lastIndex` gOPD/delete (S10), the runtime heritage `prototype`
+read (S11), and distinct slots for a static/instance accessor pair (S12).
+Still red (12): the 9 deferred rows (GeneratorFunction ×5, TypedArray /
+ArrayBuffer / `subclass/builtins.js` behind #6769, `strict-mode/arguments-callee.js`),
+`methods-restricted-properties.js` (S13, not attempted), and
+`fn-name-accessor-{get,set}.js` (#6767 R3: a class with a symbol-keyed static
+accessor hides its literal static accessors from gOPD).
