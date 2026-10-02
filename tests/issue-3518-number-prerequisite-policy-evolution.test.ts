@@ -4,6 +4,11 @@ import { readFileSync } from "node:fs";
 import { setImmediate } from "node:timers/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  authenticateGeneratorInventoryPolicyEvolution,
+  authenticateGeneratorInventoryPolicy,
+  beforeGeneratorInventoryPolicy,
+  beforeGeneratorInventoryPolicySource,
+  generatorInventoryPolicyReceiptPath,
   authenticateHostCarrierPolicyEvolution,
   authenticateHostCarrierInventoryPolicy,
   beforeHostCarrierInventoryPolicy,
@@ -67,7 +72,9 @@ const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 const raw = (): string =>
   beforeRuntimePreparationPolicySource(
     beforeDynamicCodeInventoryPolicySource(
-      beforeHostCarrierInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+      beforeHostCarrierInventoryPolicySource(
+        beforeGeneratorInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+      ),
     ),
   );
 const actual = (): Policy => JSON.parse(raw()) as Policy;
@@ -877,7 +884,9 @@ describe("C2a exact runtime preparation policy successor", () => {
   const path = "src/ir/runtime/intrinsic-preparation.ts";
   const currentRaw = (): string =>
     beforeDynamicCodeInventoryPolicySource(
-      beforeHostCarrierInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+      beforeHostCarrierInventoryPolicySource(
+        beforeGeneratorInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+      ),
     );
   const current = (): Policy => JSON.parse(currentRaw()) as Policy;
   const authority = () => authenticateRuntimePreparationPolicyEvolution();
@@ -1262,7 +1271,10 @@ describe("C2a exact runtime preparation policy successor", () => {
 
 // Exact external-main inventory input; these controls never reuse the historical raw readers.
 describe("dynamic-code inventory successor preserves the C2a policy proof", () => {
-  const latestRaw = (): string => beforeHostCarrierInventoryPolicySource(read("scripts/compiler-boundaries.json"));
+  const latestRaw = (): string =>
+    beforeHostCarrierInventoryPolicySource(
+      beforeGeneratorInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+    );
   const latest = (): Policy => JSON.parse(latestRaw()) as Policy;
   const added = { path: "src/runtime/dynamic-code-policy.ts", state: "unmigrated", layer: "legacy-host" };
   const arrayRow: Record<string, string> = {
@@ -1772,7 +1784,7 @@ describe("dynamic-code inventory successor preserves the C2a policy proof", () =
 
 // Direct current-main controls; earlier Number/C2a/two-row readers keep their exact domains.
 describe("host-carrier current-main inventory successor", () => {
-  const hostRaw = (): string => read("scripts/compiler-boundaries.json");
+  const hostRaw = (): string => beforeGeneratorInventoryPolicySource(read("scripts/compiler-boundaries.json"));
   const hostPolicy = (): Policy => JSON.parse(hostRaw()) as Policy;
   const row: Record<string, string> = {
     path: "src/codegen/host-carrier-to-primitive.ts",
@@ -2108,5 +2120,364 @@ describe("host-carrier current-main inventory successor", () => {
     authenticateHostCarrierPolicyEvolution();
     beforeHostCarrierInventoryPolicy(p);
     beforeHostCarrierInventoryPolicySource(text);
+  });
+});
+
+// Direct generator-current input; all prior control blocks retain their exact captured domains.
+describe("generator eager-refusal current-main inventory successor", () => {
+  const generatorRaw = (): string => read("scripts/compiler-boundaries.json");
+  const generatorPolicy = (): Policy => JSON.parse(generatorRaw()) as Policy;
+  const row: Record<string, string> = {
+    path: "src/codegen/generator-eager-refusal.ts",
+    state: "unmigrated",
+    layer: "mixed-needs-split",
+    destination: "backend-wasmgc",
+    owner: "3518-coordinator",
+    nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+  };
+  const insertion =
+    '    {\n      "path": "src/codegen/generator-eager-refusal.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n';
+  const accept = (p: unknown): void => {
+    expect(authenticateGeneratorInventoryPolicy(p).files).toHaveLength(1780);
+  };
+  const refuse = (p: unknown): void => {
+    expect(() => authenticateGeneratorInventoryPolicy(p)).toThrow();
+    expect(() => beforeGeneratorInventoryPolicy(p)).toThrow();
+  };
+  const restore = (p: Policy, original: string): void => {
+    for (const key of Reflect.ownKeys(p)) expect(Reflect.deleteProperty(p, key)).toBe(true);
+    Object.assign(p, JSON.parse(original));
+    expect(JSON.stringify(p)).toBe(original);
+    accept(p);
+  };
+  const reject = (edit: (p: Policy) => void): void => {
+    const p = generatorPolicy(),
+      original = JSON.stringify(p);
+    accept(p);
+    edit(p);
+    expect(JSON.stringify(p)).not.toBe(original);
+    refuse(p);
+    restore(p, original);
+  };
+  it("independently pins the generator current profile and exact reciprocal host predecessor", () => {
+    const text = generatorRaw(),
+      p = generatorPolicy();
+    expect(Buffer.byteLength(text)).toBe(568552);
+    expect(sha(text)).toBe("64103a2fb337874fd435614d461bdd0d46cdfdc8a8dbd61603a4c7cbaf3915ff");
+    expect(
+      createHash("sha1")
+        .update(`blob ${Buffer.byteLength(text)}\0`)
+        .update(text)
+        .digest("hex"),
+    ).toBe("b9b8b1787cc202906c4e76cebc598cf460a7f0ae");
+    expect(digest(p)).toBe("2f35e7e2045dd0d024a13b48c8f413fc7fb9e74c63503fafee4e56993d1da1a6");
+    expect(p.files).toHaveLength(1780);
+    expect(digest(p.files)).toBe("bcd724252a8ff0cdf6799b01f7e0b9eeceead2c6a3e1f49f9625de233b6710e6");
+    expect(p.files[1615]).toEqual(row);
+    expect(Object.keys(p.files[1615]!)).toEqual(["path", "state", "layer", "destination", "owner", "nextBoundary"]);
+    expect(p.files[1614]!.path).toBe("src/codegen/fnctor-instance-names.ts");
+    expect(p.files[1616]!.path).toBe("src/codegen/generator-function-dynamic.ts");
+    expect(p.layers).toHaveLength(20);
+    expect(p.activationHistory).toHaveLength(101);
+    expect(digest(p.layers)).toBe("3f66bbff64c157092a04740c644ae17d476d7d168faa1bd23629f97492e0c4f7");
+    expect(digest(p.activationHistory)).toBe("9629c457a160096e70c35fc3a986abbd8eca145ac4eb688995194d6c29c83650");
+    expect(digest(p.allowedEdges)).toBe("efe7e7ed8dee1a009d2bef3ff36dba80df1a805cd3f5b7b472e62ec6dcff64c7");
+    for (const [path, bytes, hash] of [
+      [generatorInventoryPolicyReceiptPath, 4693, "5d78bc26201d43531d1a299d42f0ac0ae91a638de71620b94f675378572ccc8c"],
+      [hostCarrierPolicyReceiptPath, 4673, "30c0912d7868e4da44c083243bb68073e48e70e7eb4b26dbc1b1e73090a5f583"],
+      [
+        "src/codegen/generator-eager-refusal.ts",
+        10619,
+        "b44d14368759f11f18b11d75d2a5abb93fc448e0dc5cb7d8501eb0afe6272535",
+      ],
+    ] as const) {
+      const source = read(path);
+      expect(Buffer.byteLength(source)).toBe(bytes);
+      expect(sha(source)).toBe(hash);
+    }
+    const prefix = Buffer.from(read("tests/helpers/ir-runtime-program-policy-evolution.ts")).subarray(0, 80917);
+    expect(prefix.length).toBe(80917);
+    expect(createHash("sha256").update(prefix).digest("hex")).toBe(
+      "2d33fdce750f57d745344fe9c08ecfdd2236bafaca48935bb2376f57255fce8f",
+    );
+    accept(p);
+    const hostText = beforeGeneratorInventoryPolicySource(text),
+      host = beforeGeneratorInventoryPolicy(p);
+    expect(Buffer.byteLength(hostText)).toBe(568231);
+    expect(sha(hostText)).toBe("f3af1f31d813eaef9bd2b955466390616e9549f36e1e7ffffdcead812a611ac3");
+    expect(
+      createHash("sha1")
+        .update(`blob ${Buffer.byteLength(hostText)}\0`)
+        .update(hostText)
+        .digest("hex"),
+    ).toBe("d61ee74048fa3d16c2986fd3e448d234f4e5594b");
+    expect(host.files).toHaveLength(1779);
+    expect(digest(host)).toBe("89780e5ff7c660518ca92981369dab0e341b77e55f02f8e23d2312b615a97856");
+    expect(JSON.parse(hostText)).toEqual(host);
+    expect(Buffer.byteLength(insertion)).toBe(321);
+    expect(hostText.slice(529175).startsWith('    {\n      "path": "src/codegen/generator-function-dynamic.ts",')).toBe(
+      true,
+    );
+    expect(hostText.slice(0, 529175) + insertion + hostText.slice(529175)).toBe(text);
+    const replay = clone(host);
+    replay.files.splice(1615, 0, { ...row });
+    expect(replay).toEqual(p);
+    authenticateHostCarrierInventoryPolicy(host);
+    const two = beforeHostCarrierInventoryPolicy(host);
+    authenticateDynamicCodeInventoryPolicy(two);
+    const c2a = beforeDynamicCodeInventoryPolicy(two);
+    authenticateRuntimePreparationPolicy(c2a);
+    const number = beforeRuntimePreparationPolicy(c2a);
+    authenticateNumberPrerequisitePolicy(number);
+    const wks = beforeNumberPrerequisitePolicy(number);
+    authenticateWellKnownSymbolPolicy(wks);
+    const c1 = beforeWellKnownSymbolPolicy(wks);
+    authenticateIrRuntimeProgramPolicy(c1);
+    authenticateIrValidationPolicy(beforeIrRuntimeProgramPolicy(c1));
+    beforeHostCarrierInventoryPolicySource(hostText);
+  });
+  const mutations: readonly [string, (p: Policy) => void][] = [
+    [
+      "missing",
+      (p) => {
+        p.files.splice(1615, 1);
+      },
+    ],
+    [
+      "duplicate",
+      (p) => {
+        p.files.splice(1615, 0, { ...row });
+      },
+    ],
+    [
+      "moved",
+      (p) => {
+        const moved = p.files.splice(1615, 1)[0]!;
+        p.files.splice(1616, 0, moved);
+      },
+    ],
+    ...["path", "state", "layer", "destination", "owner", "nextBoundary"].map(
+      (field): [string, (p: Policy) => void] => [
+        field,
+        (p) => {
+          p.files[1615]![field] += ".changed";
+        },
+      ],
+    ),
+    [
+      "extra field",
+      (p) => {
+        p.files[1615]!.extra = "changed";
+      },
+    ],
+    [
+      "previous neighbor",
+      (p) => {
+        p.files[1614]!.path += ".changed";
+      },
+    ],
+    [
+      "next neighbor",
+      (p) => {
+        p.files[1616]!.state = "clean";
+      },
+    ],
+    [
+      "retained row",
+      (p) => {
+        p.files[0]!.state = "changed";
+      },
+    ],
+    [
+      "layer",
+      (p) => {
+        p.layers[0]!.roots.push("src/unreviewed");
+      },
+    ],
+    [
+      "activation",
+      (p) => {
+        p.activationHistory[0]!.minModules++;
+      },
+    ],
+    [
+      "allowed edge",
+      (p) => {
+        p.allowedEdges.unreviewed = ["legacy-host"];
+      },
+    ],
+    [
+      "top level",
+      (p) => {
+        p.description = "changed";
+      },
+    ],
+    [
+      "plausible second unmigrated row",
+      (p) => {
+        p.files.splice(1616, 0, { ...row, path: "src/codegen/unreviewed.ts" });
+      },
+    ],
+  ];
+  it.each(mutations)("refuses generator inventory %s after success and restores", (_label, edit) => reject(edit));
+  it.each(["whitespace", "duplicate key", "offset", "missing", "duplicate span", "fragment"] as const)(
+    "refuses exact generator raw %s",
+    (change) => {
+      const text = generatorRaw();
+      beforeGeneratorInventoryPolicySource(text);
+      const at = 529175;
+      const mutant =
+        change === "whitespace"
+          ? text + "\n"
+          : change === "duplicate key"
+            ? text.slice(0, at) +
+              text.slice(at).replace('"state": "unmigrated",', '"state": "unmigrated", "state": "unmigrated",')
+            : change === "offset"
+              ? " " + text
+              : change === "missing"
+                ? text.slice(0, at) + text.slice(at + insertion.length)
+                : change === "duplicate span"
+                  ? text.slice(0, at) + insertion + text.slice(at)
+                  : text.slice(0, at) + "X" + text.slice(at + 1);
+      expect(mutant).not.toBe(text);
+      if (change === "whitespace" || change === "duplicate key") expect(JSON.parse(mutant)).toEqual(JSON.parse(text));
+      expect(() => beforeGeneratorInventoryPolicySource(mutant)).toThrow();
+      beforeGeneratorInventoryPolicySource(text);
+    },
+  );
+  it.each(["accessor", "hidden", "symbol", "prototype", "cycle", "toJSON"] as const)(
+    "captures generator %s before caller execution or authority I/O",
+    (shape) => {
+      const p = generatorPolicy(),
+        original = JSON.stringify(p);
+      accept(p);
+      let calls = 0;
+      if (shape === "accessor")
+        Object.defineProperty(p, "description", {
+          configurable: true,
+          enumerable: true,
+          get() {
+            calls++;
+            return "changed";
+          },
+        });
+      if (shape === "hidden") Object.defineProperty(p.files[1615]!, "path", { enumerable: false });
+      if (shape === "symbol")
+        Object.defineProperty(p, Symbol("extra"), { configurable: true, enumerable: true, value: 1 });
+      if (shape === "prototype") Object.setPrototypeOf(p.files[1615]!, { inherited: true });
+      if (shape === "cycle") p.extra = p;
+      if (shape === "toJSON")
+        p.toJSON = () => {
+          calls++;
+          return generatorPolicy();
+        };
+      const exact = new URL(`../${generatorInventoryPolicyReceiptPath}`, import.meta.url).pathname;
+      try {
+        intercepted.set(exact, 0);
+        interceptedReads.set(exact, 0);
+        refuse(p);
+        expect(calls).toBe(0);
+        expect(interceptedReads.get(exact)).toBe(0);
+      } finally {
+        intercepted.delete(exact);
+        interceptedReads.delete(exact);
+      }
+      restore(p, original);
+    },
+  );
+  it("keeps input immutable and returns detached frozen current and fresh mutable predecessors", () => {
+    const p = generatorPolicy(),
+      original = JSON.stringify(p);
+    accept(p);
+    const frozen = authenticateGeneratorInventoryPolicy(p),
+      first = beforeGeneratorInventoryPolicy(p),
+      second = beforeGeneratorInventoryPolicy(p);
+    expect(JSON.stringify(p)).toBe(original);
+    expect(Object.isFrozen(frozen)).toBe(true);
+    expect(Object.isFrozen(frozen.files[1615])).toBe(true);
+    expect(first).not.toBe(second);
+    expect(first.files).not.toBe(second.files);
+    first.files[0]!.state = "changed";
+    expect(JSON.stringify(p)).toBe(original);
+    p.files[1615]!.state = "clean";
+    expect(frozen.files[1615]!.state).toBe("unmigrated");
+    refuse(p);
+    restore(p, original);
+  });
+  it("refuses prior domains and leaves a captured host mutant visible to its unchanged guard", () => {
+    const p = generatorPolicy();
+    accept(p);
+    expect(() => authenticateHostCarrierInventoryPolicy(p)).toThrow("host carrier inventory policy evolution:");
+    const hostText = beforeGeneratorInventoryPolicySource(generatorRaw()),
+      host = beforeGeneratorInventoryPolicy(p),
+      original = JSON.stringify(host);
+    authenticateHostCarrierInventoryPolicy(host);
+    refuse(host);
+    expect(() => beforeGeneratorInventoryPolicySource(hostText)).toThrow();
+    const two = beforeHostCarrierInventoryPolicy(host);
+    refuse(two);
+    expect(() => beforeGeneratorInventoryPolicySource(beforeHostCarrierInventoryPolicySource(hostText))).toThrow();
+    host.files[605]!.state = "clean";
+    expect(() => authenticateHostCarrierInventoryPolicy(host)).toThrow("host carrier inventory policy evolution:");
+    expect(() => beforeHostCarrierInventoryPolicy(host)).toThrow("host carrier inventory policy evolution:");
+    expect(host.files[605]!.state).toBe("clean");
+    Object.assign(host, JSON.parse(original));
+    authenticateHostCarrierInventoryPolicy(host);
+  });
+  it("refuses boxed raw and receipt strings without coercion", () => {
+    accept(generatorPolicy());
+    let calls = 0;
+    const wrapped = Object(generatorRaw());
+    wrapped.toString = () => {
+      calls++;
+      return generatorRaw();
+    };
+    expect(() => beforeGeneratorInventoryPolicySource(wrapped)).toThrow("raw input must be a primitive string");
+    expect(() => authenticateGeneratorInventoryPolicyEvolution(wrapped)).toThrow("receipt digest mismatch");
+    expect(calls).toBe(0);
+  });
+  it.each(["whitespace", "schema", "profile", "span"] as const)("refuses fixed generator receipt %s", (change) => {
+    accept(generatorPolicy());
+    const text = read(generatorInventoryPolicyReceiptPath),
+      receipt = clone(authenticateGeneratorInventoryPolicyEvolution());
+    if (change === "schema") receipt.schema += ".changed";
+    if (change === "profile") receipt.current.fileCount++;
+    if (change === "span") receipt.addition.rawSpan.afterOffset++;
+    const mutant = change === "whitespace" ? text + "\n" : JSON.stringify(receipt);
+    expect(mutant).not.toBe(text);
+    expect(() => authenticateGeneratorInventoryPolicyEvolution(mutant)).toThrow("receipt digest mismatch");
+  });
+  it.each([
+    generatorInventoryPolicyReceiptPath,
+    hostCarrierPolicyReceiptPath,
+    "tests/helpers/ir-runtime-program-policy-evolution.ts",
+    "src/codegen/generator-eager-refusal.ts",
+    "src/codegen/host-carrier-to-primitive.ts",
+  ])("freshly refuses changed generator/predecessor authority %s and restores", (path) => {
+    const p = generatorPolicy(),
+      text = generatorRaw(),
+      original = read(path),
+      exact = new URL(`../${path}`, import.meta.url).pathname;
+    accept(p);
+    authenticateGeneratorInventoryPolicyEvolution();
+    beforeGeneratorInventoryPolicy(p);
+    beforeGeneratorInventoryPolicySource(text);
+    try {
+      intercepted.set(exact, 0);
+      interceptedReads.set(exact, 0);
+      expect(read(path)).not.toBe(original);
+      expect(() => authenticateGeneratorInventoryPolicyEvolution()).toThrow();
+      refuse(p);
+      expect(() => beforeGeneratorInventoryPolicySource(text)).toThrow();
+      expect(interceptedReads.get(exact)).toBeGreaterThanOrEqual(5);
+    } finally {
+      intercepted.delete(exact);
+      interceptedReads.delete(exact);
+    }
+    expect(read(path)).toBe(original);
+    accept(p);
+    authenticateGeneratorInventoryPolicyEvolution();
+    beforeGeneratorInventoryPolicy(p);
+    beforeGeneratorInventoryPolicySource(text);
   });
 });

@@ -78,3 +78,33 @@ Ordinary focused Vitest run on the exact current-main integration exited0 with39
 
 
 Required current-main preservation gate exited0:12/12observed core callers,10/10full and10/10cut core-type references,6/6full and6/6cut source witnesses. Strict graph closure remains OPEN, nonliteral imports UNKNOWN, and retirement NOT CERTIFIED; these limits remain explicit.
+
+
+### Current-main integration and implementation dispatch — 2026-10-02
+
+Root completed the actual isolated merge of canonical 092ae4451c68ba1aa5bd9cdf76933d2e0d857fbf into signed checkpoint 6ef874eb31bc70b5c138a6ea51824b24488edbcf. The combined policy is exactly the specified 568,552-byte / 1780-row / 64103a2fb337874fd435614d461bdd0d46cdfdc8a8dbd61603a4c7cbaf3915ff profile; incoming generator source remains 10,619 bytes / b44d14368759f11f18b11d75d2a5abb93fc448e0dc5cb7d8501eb0afe6272535. All other 22 own checkpoint paths were independently byte-checked against 6ef before proof edits. New receipt tests/helpers/ir-runtime-program-policy-generator-eager-refusal.json is root-authored and Prettier-formatted at 4,693 bytes / 5d78bc26201d43531d1a299d42f0ac0ae91a638de71620b94f675378572ccc8c; checkpoint6ef and incomingMain092ae are fixed provenance. Offset529175 was measured equal in UTF-8 bytes and UTF-16 code units.
+
+Sol 6.1 Medium owns only the seven proof implementation/test paths in isolated codex/3518-generator-policy-proof-20261002; root owns actual policy/source integration, this unchanged authority, issue/handoff, execution and publication. An independent Sol Medium review found no static blocker in incoming gate semantics. Before writer changes, the actual new uncapped npm lint passed 6,723 files, exit0. This is a real current-tree lint result, not new-proof execution. Incoming generator regression, blocking lint repair, equivalence file-failure/floors and baseline/config changes are retained. No bypass, old guard change, legacy retirement or full migration credit is authorized.
+
+The earlier signed checkpoint normal hooks passed fourteen suites / 2,650 actual assertions with zero reported RPC/unhandled errors, and signature/parents/Thomas-Codex-model attribution/frozen23-path content/clean state were independently verified. It remains local, unpushed, with no new C2a PR. New candidate validation and exact-head protected delivery remain outstanding; original public Number5/9 and full migration scope remain active.
+
+
+### Executed current-main preservation checks — 2026-10-02
+
+On the isolated actual 6ef + 092ae merged tree, the incoming generator and gate regression population passed39/39 across four complete root files, process exit0, ordinary error handling: generator refusal14, equivalence-gate16, baseline ratchet4, lint-failure gate5. This validates preservation of these incoming controls; it is not full equivalence or conformance credit. The actual current boundary inventory exit0 reports1780 modules, inventoryValidtrue, architectureCompletefalse, graphCompletefalse,4unknown,0unresolved,12984forbidden debt records,0transitive violations. Owner intrinsic-preparation retains23 direct records/21unique targets/44resolved closure, with0unknown/0unresolved/0forbidden in that bounded closure. Actual required preservation-v1 check exit0:12/12core callers,10/10full and10/10cut types,6/6full and6/6cut source witnesses. Strict closure remains OPEN because optimize and platform-capability adapter have nonliteral dynamic imports; retirement/deletion is NOTCERTIFIED. Earlier CLI argument failure (missing --json path) is preserved separately and was not counted as a gate result.
+
+These reports were executed while Sol edited disjoint tests only, before its new proof handback. The policy/source bytes are fixed and unaffected by those proof-only edits. Root must still validate and sign the final composed proof candidate and deliver through the protected queue.
+
+
+### Generator successor integration and focused verification — 2026-10-02
+
+Sol6.1Medium handed back seven proof paths: immutable80,917-byte helper prefix, ten initial-capture adapters across six suites, and43 new generator controls; all413 prior Number rows remain. Independent Sol6.1Medium static review found no actionable issue and verified prior caller byte recovery, authority freshness and exact reciprocal321-byte inverse. Root copied only those verified paths plus its fixed receipt and append-only issue/handoff; formatted candidate helper is93,405 bytes/SHA e243101b31f29b2b4aa2637fdd3f9c814a5b6bada558ce565d3d3c132e71892f, Number102,608 bytes/SHA ada05306b0868fc4fcf6c9816042bc4cfeca00a1fef8fec68d85e95622474e34. Full predecessor prefix still byte-identical; seven-file uncapped lint exit0.
+
+Ordinary focused execution exit0 passed44/44 actually executed tests (43 new generator controls plus one original Number positive);412 filtered of456 registered. No reported RPC/unhandled error. This is not a complete456-row or full six-suite result. Next run executes all six affected files without filtering or changed error handling; old immutable suites have separate prior checkpoint evidence. No new runtime/public Number credit or delivery claim.
+
+
+### Complete affected-suite result — 2026-10-02
+
+The integrated, formatted generator candidate completed ordinary test session44542, exit0:1,334/1,334 actual assertions across six complete files,0failed/0pending and no reported RPC/unhandled error. Exact counts: Number456 (all413prior +43new), WKS154, runtime-program204, validation63, program-data105, semantic-provider352. No test-name filter or dangerouslyIgnoreUnhandledErrors was used. All eight formatted candidate pins were rechecked unchanged after execution; predecessor80,917-byte helper prefix and all older authority receipts remain immutable. Source compatibility/incoming39-test and bounded preservation/inventory evidence remain separately described above. Earlier2650 assertions belong to the prior signed checkpoint, not this complete six-file run.
+
+Next is the normal attributed signed integration commit, full hooks without bypass, followed by exact-head fork publication, ready PR and protected queue validation. A normal hook mass-edit self-skip, if observed, will be reported as such and not credited as executed tests. Public Number remains5/9 and full migration/retirement obligations remain incomplete.

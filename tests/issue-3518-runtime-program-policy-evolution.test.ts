@@ -8,8 +8,10 @@ import {
   authenticateIrRuntimeProgramPolicyEvolution,
   beforeIrRuntimeProgramPolicy,
   beforeWellKnownSymbolPolicy,
+  beforeGeneratorInventoryPolicy,
   beforeHostCarrierInventoryPolicy,
   beforeDynamicCodeInventoryPolicy,
+  beforeGeneratorInventoryPolicySource,
   beforeHostCarrierInventoryPolicySource,
   beforeDynamicCodeInventoryPolicySource,
   beforeRuntimePreparationPolicy,
@@ -40,7 +42,9 @@ function actual(): Policy {
     beforeNumberPrerequisitePolicy(
       beforeRuntimePreparationPolicy(
         beforeDynamicCodeInventoryPolicy(
-          beforeHostCarrierInventoryPolicy(JSON.parse(read("scripts/compiler-boundaries.json"))),
+          beforeHostCarrierInventoryPolicy(
+            beforeGeneratorInventoryPolicy(JSON.parse(read("scripts/compiler-boundaries.json"))),
+          ),
         ),
       ),
     ),
@@ -96,7 +100,9 @@ describe("C1 exact policy inverse and reciprocal B proof", () => {
         beforeNumberPrerequisitePolicySource(
           beforeRuntimePreparationPolicySource(
             beforeDynamicCodeInventoryPolicySource(
-              beforeHostCarrierInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+              beforeHostCarrierInventoryPolicySource(
+                beforeGeneratorInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+              ),
             ),
           ),
         ),

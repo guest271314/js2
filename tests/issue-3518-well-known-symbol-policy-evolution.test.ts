@@ -7,6 +7,7 @@ import {
   authenticateWellKnownSymbolPolicyEvolution,
   authenticateWellKnownSymbolPolicy,
   beforeWellKnownSymbolPolicy,
+  beforeGeneratorInventoryPolicySource,
   beforeHostCarrierInventoryPolicySource,
   beforeDynamicCodeInventoryPolicySource,
   beforeRuntimePreparationPolicySource,
@@ -32,7 +33,9 @@ const raw = (): string =>
   beforeNumberPrerequisitePolicySource(
     beforeRuntimePreparationPolicySource(
       beforeDynamicCodeInventoryPolicySource(
-        beforeHostCarrierInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+        beforeHostCarrierInventoryPolicySource(
+          beforeGeneratorInventoryPolicySource(read("scripts/compiler-boundaries.json")),
+        ),
       ),
     ),
   );

@@ -1858,3 +1858,246 @@ export function beforeHostCarrierInventoryPolicySource(raw: string): string {
     hostCarrierFail("raw and semantic reciprocal proof disagree");
   return predecessor;
 }
+
+// Exact generator inventory successor over the complete committed host-carrier proof.
+export const generatorInventoryPolicyReceiptPath =
+  "tests/helpers/ir-runtime-program-policy-generator-eager-refusal.json";
+const generatorInventoryReceiptSha256 = "5d78bc26201d43531d1a299d42f0ac0ae91a638de71620b94f675378572ccc8c";
+const generatorInventoryBeforeProfile = hostCarrierCurrentProfile;
+const generatorInventoryCurrentProfile = {
+  source: {
+    bytes: 568552,
+    sha256: "64103a2fb337874fd435614d461bdd0d46cdfdc8a8dbd61603a4c7cbaf3915ff",
+    gitBlob: "b9b8b1787cc202906c4e76cebc598cf460a7f0ae",
+  },
+  dataSha256: "2f35e7e2045dd0d024a13b48c8f413fc7fb9e74c63503fafee4e56993d1da1a6",
+  fileCount: 1780,
+  filesSha256: "bcd724252a8ff0cdf6799b01f7e0b9eeceead2c6a3e1f49f9625de233b6710e6",
+  activationCount: 101,
+  activationHistorySha256: "9629c457a160096e70c35fc3a986abbd8eca145ac4eb688995194d6c29c83650",
+  layersSha256: "3f66bbff64c157092a04740c644ae17d476d7d168faa1bd23629f97492e0c4f7",
+  allowedEdgesSha256: "efe7e7ed8dee1a009d2bef3ff36dba80df1a805cd3f5b7b472e62ec6dcff64c7",
+};
+const generatorInventoryPrefix = {
+  path: "tests/helpers/ir-runtime-program-policy-evolution.ts",
+  bytes: 80917,
+  sha256: "2d33fdce750f57d745344fe9c08ecfdd2236bafaca48935bb2376f57255fce8f",
+};
+const generatorInventoryHostReceipt = {
+  path: "tests/helpers/ir-runtime-program-policy-host-carrier.json",
+  bytes: 4673,
+  sha256: "30c0912d7868e4da44c083243bb68073e48e70e7eb4b26dbc1b1e73090a5f583",
+};
+// Literal fixed authority, never populated from caller input or a mutable receipt.
+const generatorInventoryAddition: DynamicInventoryAddition = {
+  fileIndex: 1615,
+  beforeIndex: 1615,
+  row: {
+    path: "src/codegen/generator-eager-refusal.ts",
+    state: "unmigrated",
+    layer: "mixed-needs-split",
+    destination: "backend-wasmgc",
+    owner: "3518-coordinator",
+    nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+  },
+  previous: {
+    path: "src/codegen/fnctor-instance-names.ts",
+    state: "unmigrated",
+    layer: "mixed-needs-split",
+    destination: "backend-wasmgc",
+    owner: "3518-coordinator",
+    nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+  },
+  next: {
+    path: "src/codegen/generator-function-dynamic.ts",
+    state: "unmigrated",
+    layer: "mixed-needs-split",
+    destination: "backend-wasmgc",
+    owner: "3518-coordinator",
+    nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+  },
+  sourcePin: {
+    path: "src/codegen/generator-eager-refusal.ts",
+    bytes: 10619,
+    sha256: "b44d14368759f11f18b11d75d2a5abb93fc448e0dc5cb7d8501eb0afe6272535",
+  },
+  rawSpan: {
+    beforeOffset: 529175,
+    afterOffset: 529175,
+    before:
+      '    {\n      "path": "src/codegen/generator-function-dynamic.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n',
+    after:
+      '    {\n      "path": "src/codegen/generator-eager-refusal.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n    {\n      "path": "src/codegen/generator-function-dynamic.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n',
+    beforeSha256: "eaa7278e51f6b98fed1c30f4ba59a0db4736a03c489c860549288c0aa3c1ad1d",
+    afterSha256: "44584a36ba540f0e339e6e15bda22765c85db81114312d418cbec9041f086da3",
+  },
+};
+interface GeneratorInventoryPolicyReceipt {
+  schema: string;
+  kind: string;
+  checkpoint: string;
+  incomingMain: string;
+  before: Profile & { allowedEdgesSha256: string };
+  current: Profile & { allowedEdgesSha256: string };
+  helperPrefix: typeof generatorInventoryPrefix;
+  hostReceipt: typeof generatorInventoryHostReceipt;
+  addition: DynamicInventoryAddition;
+}
+function generatorInventoryFail(detail: string): never {
+  throw new Error("generator inventory policy evolution: " + detail);
+}
+/** Recheck the exact receipt, complete prior helper and both source/receipt authorities afresh. */
+export function authenticateGeneratorInventoryPolicyEvolution(
+  text = readFileSync(new URL(`../../${generatorInventoryPolicyReceiptPath}`, import.meta.url), "utf8"),
+): GeneratorInventoryPolicyReceipt {
+  if (typeof text !== "string" || Buffer.byteLength(text) !== 4693 || sha(text) !== generatorInventoryReceiptSha256)
+    generatorInventoryFail("receipt digest mismatch");
+  const receipt = JSON.parse(text) as GeneratorInventoryPolicyReceipt;
+  if (
+    !same(Object.keys(receipt), [
+      "schema",
+      "kind",
+      "checkpoint",
+      "incomingMain",
+      "before",
+      "current",
+      "helperPrefix",
+      "hostReceipt",
+      "addition",
+    ]) ||
+    receipt.schema !== "ir-runtime-program-policy-generator-eager-refusal-v1" ||
+    receipt.kind !== "external-main-generator-eager-refusal-inventory-successor" ||
+    receipt.checkpoint !== "6ef874eb31bc70b5c138a6ea51824b24488edbcf" ||
+    receipt.incomingMain !== "092ae4451c68ba1aa5bd9cdf76933d2e0d857fbf" ||
+    !same(receipt.before, generatorInventoryBeforeProfile) ||
+    !same(receipt.current, generatorInventoryCurrentProfile) ||
+    !same(receipt.helperPrefix, generatorInventoryPrefix) ||
+    !same(receipt.hostReceipt, generatorInventoryHostReceipt) ||
+    !same(receipt.addition, generatorInventoryAddition)
+  )
+    generatorInventoryFail("fixed receipt population mismatch");
+  const span = receipt.addition.rawSpan;
+  if (
+    receipt.addition.fileIndex !== 1615 ||
+    receipt.addition.beforeIndex !== 1615 ||
+    !span.before ||
+    !span.after ||
+    span.beforeOffset !== 529175 ||
+    span.afterOffset !== 529175 ||
+    sha(span.before) !== span.beforeSha256 ||
+    sha(span.after) !== span.afterSha256 ||
+    Buffer.byteLength(span.after) - Buffer.byteLength(span.before) !== 321
+  )
+    generatorInventoryFail("fixed row or raw anchor mismatch");
+  const helper = readFileSync(new URL("./ir-runtime-program-policy-evolution.ts", import.meta.url));
+  if (
+    helper.length < generatorInventoryPrefix.bytes ||
+    createHash("sha256").update(helper.subarray(0, generatorInventoryPrefix.bytes)).digest("hex") !==
+      generatorInventoryPrefix.sha256
+  )
+    generatorInventoryFail("complete predecessor helper prefix changed");
+  for (const pin of [generatorInventoryHostReceipt, generatorInventoryAddition.sourcePin]) {
+    const bytes = readFileSync(new URL(`../../${pin.path}`, import.meta.url));
+    if (bytes.length !== pin.bytes || createHash("sha256").update(bytes).digest("hex") !== pin.sha256)
+      generatorInventoryFail("full-file input changed: " + pin.path);
+  }
+  const predecessor = authenticateHostCarrierPolicyEvolution();
+  if (!same(predecessor.current, generatorInventoryBeforeProfile))
+    generatorInventoryFail("host predecessor authority mismatch");
+  return freeze(receipt);
+}
+function generatorInventorySemanticProfile(
+  policy: MutableIrRuntimeProgramPolicy,
+  profile: GeneratorInventoryPolicyReceipt["current"],
+): void {
+  if (
+    digest(policy) !== profile.dataSha256 ||
+    policy.files.length !== profile.fileCount ||
+    policy.activationHistory.length !== profile.activationCount ||
+    digest(policy.files) !== profile.filesSha256 ||
+    digest(policy.activationHistory) !== profile.activationHistorySha256 ||
+    digest(policy.layers) !== profile.layersSha256 ||
+    digest(policy.allowedEdges) !== profile.allowedEdgesSha256
+  )
+    generatorInventoryFail("complete policy profile mismatch");
+}
+function proveGeneratorInventoryPolicy(
+  value: unknown,
+  freshlyVerifiedReceipt?: GeneratorInventoryPolicyReceipt,
+): { current: MutableIrRuntimeProgramPolicy; predecessor: MutableIrRuntimeProgramPolicy } {
+  // Descriptor-safe capture precedes authority I/O, caller reads and serialization.
+  const current = capture(value) as MutableIrRuntimeProgramPolicy;
+  const receipt = freshlyVerifiedReceipt ?? authenticateGeneratorInventoryPolicyEvolution();
+  generatorInventorySemanticProfile(current, receipt.current);
+  const addition = receipt.addition;
+  if (
+    !same(Object.keys(current), wksTopKeys) ||
+    current.layers.length !== 20 ||
+    !same(Object.keys(current.files[1615]!), Object.keys(addition.row)) ||
+    !same(current.files[1614], addition.previous) ||
+    !same(current.files[1615], addition.row) ||
+    !same(current.files[1616], addition.next) ||
+    current.files.filter((row) => row.path === addition.row.path).length !== 1
+  )
+    generatorInventoryFail("fixed file row schema/order or neighbors mismatch");
+  const predecessor = capture(current) as MutableIrRuntimeProgramPolicy;
+  predecessor.files.splice(1615, 1);
+  generatorInventorySemanticProfile(predecessor, receipt.before);
+  // Preserve the unchanged host -> two-row -> C2a -> Number -> WKS -> C1 -> B guards.
+  const verified = authenticateHostCarrierInventoryPolicy(predecessor);
+  const replay = capture(verified) as MutableIrRuntimeProgramPolicy;
+  if (!same(replay.files[1614], addition.previous) || !same(replay.files[1615], addition.next))
+    generatorInventoryFail("predecessor replay neighbors mismatch");
+  replay.files.splice(1615, 0, capture(addition.row) as MutableIrRuntimeProgramPolicy["files"][number]);
+  generatorInventorySemanticProfile(replay, receipt.current);
+  if (!same(replay, current)) generatorInventoryFail("complete independent reciprocal replay mismatch");
+  return { current, predecessor };
+}
+export function authenticateGeneratorInventoryPolicy(value: unknown): IrValidationPolicy {
+  return freeze(proveGeneratorInventoryPolicy(value).current) as IrValidationPolicy;
+}
+export function beforeGeneratorInventoryPolicy(value: unknown): MutableIrRuntimeProgramPolicy {
+  return proveGeneratorInventoryPolicy(value).predecessor;
+}
+function generatorInventoryRawProfile(raw: string, profile: Profile): void {
+  const bytes = Buffer.byteLength(raw);
+  if (
+    bytes !== profile.source.bytes ||
+    sha(raw) !== profile.source.sha256 ||
+    createHash("sha1").update(`blob ${bytes}\0`).update(raw).digest("hex") !== profile.source.gitBlob
+  )
+    generatorInventoryFail("complete raw source profile mismatch");
+}
+function applyGeneratorInventoryRaw(raw: string, receipt: GeneratorInventoryPolicyReceipt, forward: boolean): string {
+  generatorInventoryRawProfile(raw, forward ? receipt.before : receipt.current);
+  const span = receipt.addition.rawSpan,
+    at = forward ? span.beforeOffset : span.afterOffset;
+  const from = forward ? span.before : span.after,
+    to = forward ? span.after : span.before;
+  // Explicit UTF-16 code-unit offsets; both frozen prefixes also have equal UTF-8 byte counts.
+  if (
+    !from ||
+    !to ||
+    Buffer.byteLength(raw.slice(0, at)) !== at ||
+    raw.slice(at, at + from.length) !== from ||
+    raw.indexOf(from) !== at ||
+    raw.lastIndexOf(from) !== at
+  )
+    generatorInventoryFail("raw fragment missing, duplicated or reordered");
+  const output = raw.slice(0, at) + to + raw.slice(at + from.length);
+  generatorInventoryRawProfile(output, forward ? receipt.current : receipt.before);
+  return output;
+}
+/** One fixed anchored raw inverse, semantic agreement and unchanged full host raw proof. */
+export function beforeGeneratorInventoryPolicySource(raw: string): string {
+  if (typeof raw !== "string") generatorInventoryFail("raw input must be a primitive string");
+  const receipt = authenticateGeneratorInventoryPolicyEvolution();
+  const predecessor = applyGeneratorInventoryRaw(raw, receipt, false);
+  const semantic = proveGeneratorInventoryPolicy(JSON.parse(raw), receipt);
+  const parsed = JSON.parse(predecessor) as MutableIrRuntimeProgramPolicy;
+  generatorInventorySemanticProfile(parsed, receipt.before);
+  beforeHostCarrierInventoryPolicySource(predecessor);
+  if (!same(parsed, semantic.predecessor) || applyGeneratorInventoryRaw(predecessor, receipt, true) !== raw)
+    generatorInventoryFail("raw and semantic reciprocal proof disagree");
+  return predecessor;
+}
