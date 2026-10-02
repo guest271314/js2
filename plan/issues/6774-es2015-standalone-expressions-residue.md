@@ -1272,3 +1272,17 @@ Landed partially at the project lead's request; the issue stays
     breaking iterator-protocol lookups (`yield*` not-callable family). Narrowed
     to `@@unscopables` (`dfce7588`); all 208 main-passing rows with a
     well-known-symbol accessor pass locally.
+
+#### 2026-10-02 — wide control F1 (measured, after the S15 narrowing)
+
+- **5,128 rows** = the expressions/statements control set (C2) + the S7
+  set + the eval-in-function hoist set, standalone, at `4e090d06` (the
+  parallel twin of `dfce7588`, same `@@unscopables`-only predicate). Run
+  in-process, then every non-pass row re-run with `--isolate`.
+- **181 non-pass, all 181 also non-pass on the merge-base `a8955988`** →
+  **0 regressions.** (Before the narrowing, the same set showed 79 extra
+  failures — the async-generator `yield*` throw family and annexB
+  `for-await-of/iterator-close-return-emulates-undefined-throws-when-called.js`;
+  all 79 pass after it.)
+- Branch head after merging the parallel fixes and `origin/main`:
+  `d7a29bf8`; gates green bare, pins 21/21.
