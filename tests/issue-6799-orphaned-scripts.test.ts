@@ -69,6 +69,16 @@ describe("#6799 orphaned-script detection", () => {
   it("never treats a scripts/ subdirectory file as a candidate", () => {
     expect(run({ "scripts/lib/only.mjs": "" })).toEqual([]);
   });
+
+  it("does not let the baseline's own listing count as a reference (no vacuous pass)", () => {
+    const orphans = run({
+      "scripts/orphaned-scripts-baseline.json": '{"orphans":["scripts/dead.mjs"]}',
+      "scripts/check-orphaned-scripts.mjs": "orphaned-scripts-baseline.json",
+      "package.json": "scripts/check-orphaned-scripts.mjs",
+      "scripts/dead.mjs": "",
+    });
+    expect(orphans).toEqual(["scripts/dead.mjs"]);
+  });
 });
 
 describe("#6799 the repo itself", () => {
@@ -77,5 +87,7 @@ describe("#6799 the repo itself", () => {
     const { orphans } = findOrphans();
     expect(orphans.filter((o: string) => !baseline.orphans.includes(o))).toEqual([]);
     expect(baseline.count).toBe(baseline.orphans.length);
+    // Vacuity guard: the detector still sees the known orphans.
+    expect(orphans.length).toBeGreaterThan(0);
   });
 });

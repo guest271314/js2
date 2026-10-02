@@ -52,7 +52,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const BASELINE_PATH = join(ROOT, "scripts", "orphaned-scripts-baseline.json");
+const BASELINE_REL = "scripts/orphaned-scripts-baseline.json";
+const BASELINE_PATH = join(ROOT, BASELINE_REL);
 const REFERENCE_DIRS = [".github/", ".husky/", ".claude/", "docs/", "plan/method/"];
 const MAX_SOURCE_BYTES = 8 * 1024 * 1024;
 const TOKEN_RE = /[A-Za-z0-9_][A-Za-z0-9_.+-]*/g;
@@ -64,6 +65,9 @@ function trackedFiles() {
 }
 
 function isReferenceSource(path) {
+  // The baseline LISTS every orphan by name; counting it as a reference would
+  // make every listed orphan look referenced and the gate pass vacuously.
+  if (path === BASELINE_REL) return false;
   if (!path.includes("/")) return true; // repo root: package.json, configs, *.md
   if (path.startsWith("scripts/")) return true;
   return REFERENCE_DIRS.some((d) => path.startsWith(d));
