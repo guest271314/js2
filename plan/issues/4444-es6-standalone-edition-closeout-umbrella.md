@@ -7340,3 +7340,52 @@ Parallel Terra lanes inspect whether Promise commit `65764586be` is superseded
 upstream and shepherd open upstream PRs 6246/6255 from fresh state. Avoid
 duplicate Promise publication until source reconciliation finishes. The frozen
 93.6492% result remains historical; current integrated conformance is unmeasured.
+
+### 2026-10-02 latest-main matched Promise repair and iterator handoff
+
+The handoff branch integrated upstream `e473d92460af75ced29e9666e7e97cdde8df12ca`
+in `54b8f8fa450105f1e5fc2ac0c95816b36cff954a`, pushed to upstream PR 6420.
+Normal commit and push gates passed, including all 18 numeric-local controls.
+The shared dirty checkout was not changed. PR 6255 was already merged;
+PR 6246 remains unfinished and draft, with its existing shepherd.
+
+Issue 5197 now has a matched authoritative standalone/QuickJS comparison on
+latest main: clean `e473d92460` baseline run `20261002-043328` is **1 pass /
+1 fail of 2**; candidate `92a48cfa947704e992e32d215c5650676fe7a33c`
+run `20261002-043440` is **2 pass / 0 fail of 2**. Both use the unchanged
+two-path manifest (SHA256 `bc7e0dc371cb7dfd8423b6c36d531d1ae5b7efe61d06a7bf89152f7f71dc327b`),
+frozen corpus `b363f29d3c43c626dc852744ad64a0b48a003693`, and QuickJS artifact
+`e9f8d30bc347dbc56f31b3389f7696eb6dedc9f05ea729781fc412f09a3e6b17`.
+Maintained completeness independently confirms two registered verdicts and
+zero exclusions on each side. The original
+`built-ins/Promise/all/resolve-element-function-prototype.js` flips from a
+SameValue(null, Function.prototype) failure to pass; the independent
+`resolve-function-prototype.js` control remains passing. Both originals belong
+to the frozen 11,778-file goal scope. This proves one bounded repair, not a
+new aggregate pass rate or completion of the broader Promise issue.
+
+Durable receipts live under `benchmarks/results` in
+`/Users/thomas/.codex/worktrees/promise-prototype-baseline/js2` (baseline) and
+`/Users/thomas/.codex/worktrees/promise-prototype/js2` (candidate), with the
+run IDs above. JSONL SHA256 values are respectively
+`7fa701d1bffe17808b3b6102daff50937331c60e8e353d1b5d34d74f54e20682` and
+`1fed29670506bc38cdcd68daa4afee6e12e9ec520a68caeeb9dfbc5a6661a3ad`.
+Publication waits for correction of malformed attribution trailers in two
+unpublished local merge commits. The safety reviewer rejected the proposed
+history repair; direct user approval was requested. No retry, public history
+rewrite, or Promise push occurred.
+
+Issue 6739's latest measured focused fixture is **15 pass / 3 fail of 18**.
+The preserved Boolean failure and both captured-state Boolean-input controls
+are red; a no-spread Boolean-return control passes. This does not establish
+iterator ABI loss because the input controls also write a captured local.
+The same Terra owner's subsequent 21-control run is **16 pass / 5 fail**:
+direct no-spread Boolean return and input return-code controls pass, but both
+open and typed-closed strict-spread return-code controls fail. This rules out
+the captured-local explanation without identifying the precise faulty ABI
+edge yet. The log is `/private/tmp/js2-6739-boolean-21.AQ7K4z/focused.log`,
+SHA256 `89a1886ae815ff92d4e7bf15ed66088827a97e246b30b8fdf1718b9ba6b42699`.
+Preserve all red controls; do not change shared IR/runtime representation
+without evidence. Return the lease to the PR 6246 shepherd for its narrow
+checkpoint/integration and explicit-current-main inventory check. No full
+integrated 11,778-file verification has occurred; the goal remains active.
