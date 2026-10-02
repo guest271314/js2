@@ -1,10 +1,12 @@
 ---
 id: 6796
 title: "repo hygiene: 259 MB tracked — an 18 MB jsonl CLAUDE.md says is no longer committed, `binaryen.js` twice (28 MB), 29 npm tarballs (22 MB), 437 stale ci-status JSONs, `.tmp/` files despite .gitignore, a raw NUL byte in a source file; 3 critical audit advisories; 23 devDeps with zero src imports"
-status: ready
+status: in-progress
 sprint: Backlog
 created: 2026-09-30
-updated: 2026-09-30
+updated: 2026-10-02
+assignee: "ttraenkler/claude-dev-6796"
+branch: "claude/issue-6796-repo-hygiene"
 priority: medium
 horizon: m
 feasibility: easy
