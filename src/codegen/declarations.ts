@@ -8,7 +8,7 @@
 import { isTopLevelClassPrototypeWrite } from "./class-proto-toplevel-write.js";
 import { widenJsDefaultGuessSlot } from "./js-default-param-type-guess.js";
 import { collectScopeLocalDeclNames } from "./scope-local-decl-names.js";
-import { registerResolvedRestParam } from "./resolved-rest-param.js"; // (#1058)
+import { registerResolvedRestParam, restPatternParamVecType } from "./resolved-rest-param.js"; // (#1058)
 import { widenUndefinedDefaultParamSlot } from "./destructuring-params.js";
 import { expressionHasWidenedPropertyType } from "./strict-eq-stale-type.js";
 import { functionReturnsWidenedProperty } from "./declarations/widened-property-return.js";
@@ -140,7 +140,7 @@ import {
 } from "./native-dynamic-boundary-tag.js";
 import { prepareStandaloneNativePromiseNumberBoundary } from "./native-promise-number-boundary.js";
 import { prepareAsyncCallableAbi } from "./async-ir-planning.js";
-import { widenAsyncThenableResults } from "./async-thenable-return.js";
+import { widenAsyncDeclarationResults } from "./async-activation.js"; // (#5371 + #6780)
 import {
   ensureNativeStringBoundaryBridge,
   ensureNativeStringExternBridge,
@@ -252,6 +252,7 @@ import {
 } from "./declarations/struct-type-registration.js";
 import { profileCount, profilePhase } from "../compile-profile.js";
 import { recordBigIntKernel } from "./bigint-carrier-operands.js";
+import { readEnv } from "../env.js";
 /**
  * Record source-level boundary classifications for a user-exported function
  * so the JS-host `wrapExports` can marshal native strings and TypedArray
@@ -1818,7 +1819,10 @@ function registerBodylessFunctionDeclaration(
     params = [];
     for (let i = 0; i < stmt.parameters.length; i++) {
       const param = stmt.parameters[i]!;
-      params.push(lowerParamType(ctx, param, name, i, stmt, sourceFile));
+      params.push(
+        restPatternParamVecType(ctx, param, (t) => getOrRegisterVecType(ctx, "externref", t)) ??
+          lowerParamType(ctx, param, name, i, stmt, sourceFile),
+      );
     }
     if (noJsHost(ctx)) registerResolvedRestParam(ctx, name, stmt, params); // (#6651 A10) rest packs like a plain function
     const nativeGenerator = registerNativeGenerator(ctx, stmt, name, params);
@@ -1878,7 +1882,7 @@ function registerBodylessFunctionDeclaration(
   }
 
   [params, results] = prepareAsyncCallableAbi(ctx, stmt, expandLinearU8ParamTypes(ctx, stmt, params), results);
-  results = widenAsyncThenableResults(ctx, stmt, results);
+  results = widenAsyncDeclarationResults(ctx, stmt, results);
 
   const optionalParams: OptionalParamInfo[] = [];
   for (let i = 0; i < stmt.parameters.length; i++) {
@@ -2588,7 +2592,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
   moduleInitSourceOrdinal(ctx, sourceFile);
   // (#4754) Snapshot once for this declaration collector. The exact token `0`
   // restores #4931's unconditional module-Proxy widening for same-tree A/B.
-  const proxyModuleEscapeGateEnabled = process.env.JS2WASM_PROXY_MODULE_ESCAPE_GATE !== "0";
+  const proxyModuleEscapeGateEnabled = readEnv("JS2WASM_PROXY_MODULE_ESCAPE_GATE") !== "0";
   const runtimeModuleGroups = runtimeModuleDeclarationGroups(sourceFile);
 
   // First: collect enum declarations (so enum values are available)
@@ -2945,7 +2949,10 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         params = [];
         for (let i = 0; i < stmt.parameters.length; i++) {
           const param = stmt.parameters[i]!;
-          params.push(lowerParamType(ctx, param, name, i, stmt, sourceFile));
+          params.push(
+            restPatternParamVecType(ctx, param, (t) => getOrRegisterVecType(ctx, "externref", t)) ??
+              lowerParamType(ctx, param, name, i, stmt, sourceFile),
+          );
         }
         if (noJsHost(ctx)) registerResolvedRestParam(ctx, name, stmt, params); // (#6651 A10) rest packs like a plain function
         const nativeGenerator = registerNativeGenerator(ctx, stmt, name, params);
@@ -3025,7 +3032,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
       }
 
       [params, results] = prepareAsyncCallableAbi(ctx, stmt, expandLinearU8ParamTypes(ctx, stmt, params), results);
-      results = widenAsyncThenableResults(ctx, stmt, results);
+      results = widenAsyncDeclarationResults(ctx, stmt, results);
 
       const optionalParams: OptionalParamInfo[] = [];
       for (let i = 0; i < stmt.parameters.length; i++) {
@@ -6101,7 +6108,7 @@ export function compileDeclarations(
     chunkModuleInitEntries = false,
   ): FunctionContext {
     ctx.irBodyRouteAuditSession?.recordRoot("compileModuleInitBody", "__module_init", sourceFile);
-    if (process.env.JS2WASM_TEST_POISON_DIRECT_MODULE_INIT_BODY === "1") {
+    if (readEnv("JS2WASM_TEST_POISON_DIRECT_MODULE_INIT_BODY") === "1") {
       throw new Error("injected direct module-init body poison");
     }
     // Captured globals are lexical to the function/module-init body that
@@ -6279,7 +6286,7 @@ export function compileDeclarations(
   // for the six measured regression clusters that put it behind this seam. With
   // the seam unset every expression below is `false`/`undefined` and this
   // function takes exactly the two-pass path it took before the slice.
-  const discoveryStaticEnabled = process.env[DISCOVERY_STATIC_ENABLE_SEAM] === "1";
+  const discoveryStaticEnabled = readEnv(DISCOVERY_STATIC_ENABLE_SEAM) === "1";
   const preLift =
     discoveryStaticEnabled && (hasModuleInits || hasStaticInits) && moduleInitMode === "full" && !skipModuleInitBody
       ? planModuleClosurePreLift(ctx, { moduleInitMode, sourceFile, hasAsyncGraphInit })
@@ -6289,7 +6296,7 @@ export function compileDeclarations(
   // restores pass 1 as well as pass 2, not just the recompile.
   const discoveryStatic =
     preLift !== undefined &&
-    process.env.JS2WASM_TEST_FORCE_MODULE_INIT_PASS2 !== "1" &&
+    readEnv("JS2WASM_TEST_FORCE_MODULE_INIT_PASS2") !== "1" &&
     moduleInitDiscoveryIsStatic(preLift);
 
   // (#4195) With pass 1 skipped the dedupe MARK is a program POSITION, not a
@@ -6325,7 +6332,7 @@ export function compileDeclarations(
     // The test-only seam runs the GATE without the registrations, so the suite
     // can MEASURE that the inventory is load-bearing (h1's body loses its
     // `call_ref` and falls back to `__call_function_*`) instead of asserting it.
-    if (process.env[PRELIFT_DISABLE_SEAM] !== "1") {
+    if (readEnv(PRELIFT_DISABLE_SEAM) !== "1") {
       profilePhase("module-init-prelift", () =>
         applyModuleClosurePreLift(ctx, preLift!, createModuleInitFunctionContext()),
       );
@@ -6524,7 +6531,7 @@ export function compileDeclarations(
     // rather than via the scan's AwaitExpression refusal. The env seam restores
     // the unconditional recompile so tests can A/B against the two-pass body.
     if (
-      process.env.JS2WASM_TEST_FORCE_MODULE_INIT_PASS2 === "1" ||
+      readEnv("JS2WASM_TEST_FORCE_MODULE_INIT_PASS2") === "1" ||
       hasAsyncGraphInit ||
       moduleInitChunkingRequired ||
       // (#3523 R4 gap-6a) With pass 1 skipped this IS the only compile, so it
@@ -6683,7 +6690,7 @@ export function compileDeclarations(
     // `wasi-start-export` case.
     if (skipModuleInitBody) {
       const plannedAdapter = ctx.wasi ? "wasi-start-export" : exportModuleInit ? "deferred-export" : "wasm-start";
-      if (process.env.JS2WASM_TEST_MODULE_INIT_DOUBLE_ADAPTER === "1") {
+      if (readEnv("JS2WASM_TEST_MODULE_INIT_DOUBLE_ADAPTER") === "1") {
         // Anti-vacuity seam: install an adapter the planned policy did NOT
         // choose, so the reconciliation below has a real violation to catch.
         // Under WASI the start section is exactly the adapter that would make

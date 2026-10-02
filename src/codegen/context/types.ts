@@ -1050,6 +1050,10 @@ export interface FunctionContext {
    * binding so reads that occur before the first arrow remain unchanged.
    */
   lexicalThisCaptureLocal?: number;
+  /** (#6774 S4) Frame slot holding the `new.target` snapshot arrows capture. */
+  newTargetSnapshotLocal?: number;
+  /** (#6774 S4) A fnctor `new F()` body's `new.target` value: the binding naming `F`. */
+  newTargetValueNode?: ts.Expression;
   /** While lowering a compile-time direct-eval Script, an otherwise absent
    * receiver in a sloppy caller denotes the realm global object. This is
    * scoped to the foreign eval AST so ordinary strict/direct-call `this`
@@ -4020,9 +4024,9 @@ export interface CodegenContext extends StandaloneCapabilityDemandState, BodyRou
     /**
      * (#2025) Whether the method body reads `this` (param 0), computed at
      * registration BEFORE the TypeError-helper late import shifts function
-     * indices (which would make a finalize-time `methodFuncIdx` lookup point at
-     * the wrong function). Finalize reuses this captured value to decide whether
-     * the trampoline's null-`this` arm throws a catchable TypeError.
+     * indices. Finalize reuses it to decide whether the null-`this` arm throws
+     * a catchable TypeError; (#6789) `undefined` = body not compiled yet at
+     * registration, so finalize rescans the compiled body.
      */
     methodUsesThis?: boolean;
     /**

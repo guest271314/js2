@@ -4,6 +4,7 @@
  *
  * Extracted from codegen/index.ts (#1013).
  */
+import { hoistParameterEvalVars } from "./expressions/eval-param-scope-hoist.js"; // (#6774 S7)
 import { ts, forEachChild } from "../ts-api.js";
 import { widenJsDefaultGuessSlot } from "./js-default-param-type-guess.js";
 import { isVoidType, unwrapPromiseType } from "../checker/type-mapper.js";
@@ -87,6 +88,7 @@ import {
 export const INLINE_MAX_INSTRS = 10;
 
 import { findTdzViolatingParamRef } from "./param-tdz.js";
+import { readEnv } from "../env.js";
 
 /**
  * (#1042) Re-point a function to a func type with the same params but a new
@@ -137,10 +139,10 @@ export const INLINE_DISALLOWED_OPS = new Set([
 export const frameSnapshotAtCompile = new Map<WasmFunction, { locals: number; bodyLen: number }>();
 
 export function dumpFrameBreach(ctx: CodegenContext, func: WasmFunction): void {
-  if (process.env?.JS2WASM_FRAME_STAGES) {
+  if (readEnv("JS2WASM_FRAME_STAGES")) {
     frameSnapshotAtCompile.set(func, { locals: func.locals.length, bodyLen: func.body.length });
   }
-  if (!process.env?.JS2WASM_FRAME_OPS) return;
+  if (!readEnv("JS2WASM_FRAME_OPS")) return;
   const type = ctx.mod.types[func.typeIdx];
   if (!type || type.kind !== "func") return;
   const frame = type.params.length + func.locals.length;
@@ -215,13 +217,13 @@ export function registerInlinableFunction(ctx: CodegenContext, funcName: string,
 }
 
 function assertDirectAsyncBodyAllowed(name: string, isAsync: boolean): void {
-  if (isAsync && process.env.JS2WASM_TEST_POISON_DIRECT_ASYNC_BODY) {
+  if (isAsync && readEnv("JS2WASM_TEST_POISON_DIRECT_ASYNC_BODY")) {
     throw new Error(`direct async body poison reached ${name}`);
   }
 }
 
 function assertDirectFunctionBodyAllowed(name: string): void {
-  const poisoned = process.env.JS2WASM_TEST_POISON_DIRECT_FUNCTION_BODY;
+  const poisoned = readEnv("JS2WASM_TEST_POISON_DIRECT_FUNCTION_BODY");
   if (!poisoned) return;
   const names = new Set(poisoned.split(",").map((candidate) => candidate.trim()));
   if (names.has(name)) {
@@ -510,6 +512,7 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
     emitDeclarationArgumentsObject(ctx, fctx, decl, params, func.name);
   }
 
+  hoistParameterEvalVars(ctx, fctx, decl); // (#6774 S7)
   // Emit default-value initialization for parameters with initializers. Known
   // direct callers may inline a constant default, but first-class/dynamic
   // callers cannot; the callee must therefore retain the semantic check.

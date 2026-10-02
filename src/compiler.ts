@@ -60,6 +60,7 @@ import {
 } from "./compiler/output.js";
 import {
   detectEarlyErrors,
+  gateEmittedModule,
   pushSourceAnchoredDiagnostic,
   rewriteEvalSuperCallWithMap,
   validateHardenedMode,
@@ -89,12 +90,13 @@ import { normalizeScriptHtmlLikeComments } from "./compiler/html-like-comments.j
 import * as irIds from "./compiler/ir-outcome-inventory.js";
 import { buildLinearOptions } from "./compiler/linear-options.js";
 import type { CompileError, CompileOptions, CompileResult } from "./index.js";
-import { optimizeBinaryAsync, validateEmittedBinary } from "./optimize.js";
+import { optimizeBinaryAsync } from "./optimize.js";
 import { generateWit } from "./wit-generator.js";
 import {
   foldGroundCallsInMultiFilesForCompile as foldGroundCallsInMulti,
   foldGroundExportCallsForCompile as foldGroundCalls,
 } from "./compiler/ground-call-fold.js";
+import { readEnv } from "./env.js";
 export { compileToObjectSource } from "./compiler/output.js";
 export type { ObjectCompileResult } from "./compiler/output.js";
 
@@ -1048,7 +1050,8 @@ function runPipeline(input: PipelineInput): CompileResult {
       // exactly the #3143 IR-first divergence population) so a whole test-suite
       // run doubles as an empirical throw-site meter. Same env-gated telemetry
       // pattern as JS2WASM_LOG_IR_FALLBACKS; inert (no fs touch) when unset.
-      if (process.env.JS2WASM_IR_POSTCLAIM_LOG && result.irPostClaimErrors?.length) {
+      const postClaimLog = readEnv("JS2WASM_IR_POSTCLAIM_LOG");
+      if (postClaimLog && result.irPostClaimErrors?.length) {
         try {
           // Dynamic import kept out of the module graph on purpose: this is
           // node-only telemetry and `compiler.ts` is also bundled for the
@@ -1064,7 +1067,7 @@ function runPipeline(input: PipelineInput): CompileResult {
           const lines = result.irPostClaimErrors
             .map((e) => JSON.stringify({ file, func: e.func, kind: e.kind, message: e.message }))
             .join("\n");
-          appendFileSync(process.env.JS2WASM_IR_POSTCLAIM_LOG, lines + "\n");
+          appendFileSync(postClaimLog, lines + "\n");
         } catch {
           // Telemetry must never fail a compile.
         }
@@ -1280,31 +1283,15 @@ function finalizePipelineModule(
   // low-level buildImports compatibility defaults.
   const importsHelper = generateImportsHelper(adapterManifest);
 
-  // Step 8 (#4420): opt-in engine validation. `success: true` above only says
-  // codegen finished — it is NOT a claim that the bytes form a module, and a
-  // miscompile therefore escaped as a green result (`compileFiles` on
-  // `src/emit/binary.ts` returned success with 268 KB the engine rejected).
+  // Step 8 (#4420, #6776): engine validation, ON unless `validate: false`.
   // Wired HERE, at the one exit every driver funnels through (compileSourceSync
   // / compileSource / compileMultiSource / compileFilesSource all return
   // runPipeline's result), so no caller can be validated while another is not.
-  // Runs BEFORE the async wasm-opt pass, which is deliberate: the optimizer
-  // validates its own output already (#1941, and it refuses to ship bytes it
-  // broke), so this gate answers for what CODEGEN produced. The binary is
+  // Runs BEFORE the async wasm-opt pass, which validates its own output
+  // (#1941), so this gate answers for what CODEGEN produced. The binary is
   // still returned on failure — a caller that just learned its module is
   // invalid needs the bytes to dump or diff.
-  let emittedBinaryAccepted = true;
-  if (options.validate === true && binary.length > 0) {
-    const validation = validateEmittedBinary(binary);
-    if (!validation.valid) {
-      emittedBinaryAccepted = false;
-      pushSourceAnchoredDiagnostic(
-        errors,
-        diagnosticAnchor,
-        `emitted WebAssembly failed validation${validation.detail ? ` — ${validation.detail}` : ""}`,
-        "error",
-      );
-    }
-  }
+  const emittedBinaryAccepted = gateEmittedModule(binary, options, errors, diagnosticAnchor);
 
   return {
     binary,
@@ -1796,57 +1783,7 @@ export async function compileMultiSource(
   profileCount("source-files", multiAst.sourceFiles.length);
   profileCount("program-files", multiAst.program.getSourceFiles().length);
 
-  // When allowJs is set (e.g. compiling npm packages like lodash-es), only report
-  // diagnostics from the entry file — dependency files may have TS errors we can't
-  // control (missing globals, JSDoc param issues, etc.). strictJsSyntax is the
-  // explicit exception for syntax-test graphs whose complete literal JavaScript
-  // input is owned by the caller (#3506).
-  const isEntryDiag = (diag: { file?: { fileName: string } }) =>
-    !options.allowJs || options.strictJsSyntax === true || !diag.file || diag.file === multiAst.entryFile;
-
-  for (const diag of multiAst.diagnostics) {
-    if (diag.category === 1 && isEntryDiag(diag)) {
-      const pos = diag.file ? diag.file.getLineAndCharacterOfPosition(diag.start ?? 0) : { line: 0, character: 0 };
-      const severity = diagnosticSeverity(diag, multiAst.checker);
-      errors.push({
-        // #1929 — flatten the full DiagnosticMessageChain (keeps the "because…"
-        // elaboration) and attribute the source file for multi-file compiles.
-        message: ts.flattenDiagnosticMessageText(diag.messageText, "\n"),
-        line: pos.line + 1,
-        column: pos.character + 1,
-        severity,
-        code: diag.code,
-        ...(diag.file ? { file: diag.file.fileName } : {}),
-      });
-    }
-  }
-
-  // When allowJs is set, don't bail on TS diagnostics — JS packages with JSDoc
-  // annotations produce many false-positive errors (TS1016 optional params,
-  // TS2322 type mismatches, TS8017 signature-in-JS, etc.). Codegen handles it
-  // fine. strictJsSyntax restores only the syntactic rejection gate; semantic
-  // JavaScript diagnostics retain the existing allowJs policy.
-  const hasSyntaxErrors =
-    (!options.allowJs || options.strictJsSyntax === true) &&
-    multiAst.syntacticDiagnostics.some(
-      (d) =>
-        d.category === 1 &&
-        isEntryDiag(d) &&
-        multiAst.sourceFiles.some((sf) => d.file === sf) &&
-        // (#3451) Apply the SAME tolerance list the single-file gate applies.
-        // Without it `strictJsSyntax` is not "the single-file gate for a
-        // graph" but a stricter one, and every entry in that list names source
-        // that is valid JavaScript — so the linked test262 lane rejected rows
-        // the authoritative single-module lane compiles and runs.
-        !TOLERATED_SYNTAX_CODES.has(d.code),
-    );
-  const hasHardTypeErrors =
-    !options.allowJs &&
-    multiAst.diagnostics.some((d) => isHardTypeScriptDiagnostic(d, multiAst.checker) && isEntryDiag(d));
-
-  if ((hasSyntaxErrors || hasHardTypeErrors) && errors.length > 0) {
-    return failResult(errors);
-  }
+  if (collectMultiDiagnostics(multiAst, options, errors)) return failResult(errors);
 
   // #1927 — early-errors / safe / hardened validation + codegen + emit are the
   // shared pipeline core (runPipeline). The multi path runs hardened mode now
@@ -1920,6 +1857,64 @@ export async function compileMultiSource(
 }
 
 /**
+ * #1927/#6794 — the TS-diagnostic gate shared by both multi-file adapters
+ * (`compileMultiSource` and `compileFilesSource`). Pushes the reportable
+ * diagnostics into `errors`; returns true when a syntax or hard type error
+ * must abort the compile.
+ */
+function collectMultiDiagnostics(multiAst: MultiTypedAST, options: CompileOptions, errors: CompileError[]): boolean {
+  // When allowJs is set (e.g. compiling npm packages like lodash-es), only report
+  // diagnostics from the entry file — dependency files may have TS errors we can't
+  // control (missing globals, JSDoc param issues, etc.). strictJsSyntax is the
+  // explicit exception for syntax-test graphs whose complete literal JavaScript
+  // input is owned by the caller (#3506).
+  const isEntryDiag = (diag: { file?: { fileName: string } }) =>
+    !options.allowJs || options.strictJsSyntax === true || !diag.file || diag.file === multiAst.entryFile;
+
+  for (const diag of multiAst.diagnostics) {
+    if (diag.category === 1 && isEntryDiag(diag)) {
+      const pos = diag.file ? diag.file.getLineAndCharacterOfPosition(diag.start ?? 0) : { line: 0, character: 0 };
+      const severity = diagnosticSeverity(diag, multiAst.checker);
+      errors.push({
+        // #1929 — flatten the full DiagnosticMessageChain (keeps the "because…"
+        // elaboration) and attribute the source file for multi-file compiles.
+        message: ts.flattenDiagnosticMessageText(diag.messageText, "\n"),
+        line: pos.line + 1,
+        column: pos.character + 1,
+        severity,
+        code: diag.code,
+        ...(diag.file ? { file: diag.file.fileName } : {}),
+      });
+    }
+  }
+
+  // When allowJs is set, don't bail on TS diagnostics — JS packages with JSDoc
+  // annotations produce many false-positive errors (TS1016 optional params,
+  // TS2322 type mismatches, TS8017 signature-in-JS, etc.). Codegen handles it
+  // fine. strictJsSyntax restores only the syntactic rejection gate; semantic
+  // JavaScript diagnostics retain the existing allowJs policy.
+  const hasSyntaxErrors =
+    (!options.allowJs || options.strictJsSyntax === true) &&
+    multiAst.syntacticDiagnostics.some(
+      (d) =>
+        d.category === 1 &&
+        isEntryDiag(d) &&
+        multiAst.sourceFiles.some((sf) => d.file === sf) &&
+        // (#3451) Apply the SAME tolerance list the single-file gate applies.
+        // Without it `strictJsSyntax` is not "the single-file gate for a
+        // graph" but a stricter one, and every entry in that list names source
+        // that is valid JavaScript — so the linked test262 lane rejected rows
+        // the authoritative single-module lane compiles and runs.
+        !TOLERATED_SYNTAX_CODES.has(d.code),
+    );
+  const hasHardTypeErrors =
+    !options.allowJs &&
+    multiAst.diagnostics.some((d) => isHardTypeScriptDiagnostic(d, multiAst.checker) && isEntryDiag(d));
+
+  return (hasSyntaxErrors || hasHardTypeErrors) && errors.length > 0;
+}
+
+/**
  * Compile a TypeScript project from an entry file on disk.
  * Uses ts.createProgram with real filesystem access -- TypeScript resolves
  * all imports automatically via standard module resolution.
@@ -1942,31 +1937,10 @@ export async function compileFilesSource(entryPath: string, options: CompileOpti
     ...(options.tsconfig !== undefined ? { tsconfig: options.tsconfig } : {}),
   });
 
-  for (const diag of multiAst.diagnostics) {
-    if (diag.category === 1) {
-      const pos = diag.file ? diag.file.getLineAndCharacterOfPosition(diag.start ?? 0) : { line: 0, character: 0 };
-      const severity = diagnosticSeverity(diag, multiAst.checker);
-      errors.push({
-        // #1929 — flatten the full DiagnosticMessageChain (keeps the "because…"
-        // elaboration) and attribute the source file for multi-file compiles.
-        message: ts.flattenDiagnosticMessageText(diag.messageText, "\n"),
-        line: pos.line + 1,
-        column: pos.character + 1,
-        severity,
-        code: diag.code,
-        ...(diag.file ? { file: diag.file.fileName } : {}),
-      });
-    }
-  }
-
-  const hasSyntaxErrors = multiAst.syntacticDiagnostics.some(
-    (d) => d.category === 1 && multiAst.sourceFiles.some((sf) => d.file === sf),
-  );
-  const hasHardTypeErrors = multiAst.diagnostics.some((d) => isHardTypeScriptDiagnostic(d, multiAst.checker));
-
-  if ((hasSyntaxErrors || hasHardTypeErrors) && errors.length > 0) {
-    return failResult(errors);
-  }
+  // #6794 — the SAME gate as compileMulti: tolerated syntax codes, and the
+  // allowJs entry-only / no-semantic-bail policy. This path used to fail a JS
+  // project on sloppy octals or decorators that compileProject accepts.
+  if (collectMultiDiagnostics(multiAst, options, errors)) return failResult(errors);
 
   // #1927 — early-errors / safe / hardened validation + codegen + emit are the
   // shared pipeline core (runPipeline). This path gains hardened-mode parity

@@ -1,4 +1,5 @@
 import { initializeNativeGeneratorFunctionValue } from "./generators-factory-prototype.js";
+import { snapshotArrowNewTarget } from "./expressions/new-target-value.js";
 import { widenJsDefaultGuessSlot } from "./js-default-param-type-guess.js";
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
@@ -22,6 +23,8 @@ import type { FieldDef, Instr, LocalDef, StructTypeDef, ValType } from "../ir/ty
 import { isStandalonePromiseActive } from "./async-scheduler.js"; // (#2867 Gap 1) native-$Promise carrier gate
 import { emitEagerAsyncPromiseWrap, parkedAsyncClosureWrapsPromise } from "./async-eager-promise.js"; // (#4630)
 import { widenAsyncThenableResult } from "./async-thenable-return.js"; // (#5371)
+import { restPatternParamSlot } from "./resolved-rest-param.js"; // (#6774 S7)
+import { hoistParameterEvalVars } from "./expressions/eval-param-scope-hoist.js"; // (#6774 S7)
 import { applyNullableElemParamOverride } from "./array-hof-nullable-elem-param.js"; // (#6602) nullable vec element at the HOF callback boundary
 import { definedFuncAt, funcSignatureOf, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2 read chokepoint / S3b stable-regime minting)
 import { pushProgramAbiNestedCallable, pushProgramAbiTypedThisTwin } from "./program-abi-source-callable-planning.js";
@@ -31,6 +34,7 @@ import { stringConstantExternrefInstrs } from "./native-strings.js"; // (#2025)
 import { emitWasiErrorConstructor } from "./registry/error-types.js"; // (#2025)
 import { widenClosureReturnForPreInitVar } from "./declarations/hoisted-var-preinit-read.js"; // (#4206)
 import { widenClosureReturnForDynamicModuleBinding } from "./declarations/heterogeneous-scalar-var-widening.js";
+import { widenProxyTrapMixedReturn } from "./closures/proxy-trap-closure-return.js"; // (#6771 S1)
 import { popBody, pushBody } from "./context/bodies.js";
 import { recordClosureBody } from "./context/body-route-audit.js";
 import { reportError } from "./context/errors.js";
@@ -130,11 +134,7 @@ export {
 // pulls the `async-cps`/`async-frame` chain which imports back into `closures`
 // (a cycle), so it must evaluate after this module's other deps are loaded to
 // avoid perturbing the init order of the coercion-engine/string-ops chain.
-import {
-  planAsyncClosureActivation,
-  emitAsyncClosureBody,
-  reportDeclinedAsyncRejectionHazard,
-} from "./async-activation.js";
+import { planAsyncClosureActivation, emitAsyncClosureBody, reportDeclinedAsyncBody } from "./async-activation.js";
 import { emitAsyncGenerator, isAsyncGenDriveCandidate } from "./async-frame.js"; // (#2865) async-gen fn-expr producer
 import { asyncClosurePromiseWrapEnabled, reserveAsyncClosurePromiseWrapper } from "./async-closure-promise.js"; // (#4648)
 // (#3164) Native generator FUNCTION EXPRESSIONS (standalone/wasi): the lifted
@@ -235,6 +235,7 @@ import {
   ensureFuncClosureSingleton,
   emitCachedFuncClosureAccess,
 } from "./closures/method-trampolines.js";
+import { readEnv } from "../env.js";
 export {
   emitObjectMethodAsClosure,
   finalizeMethodTrampolines,
@@ -2140,6 +2141,8 @@ export function computeClosureWrapperSig(
     if (hasBindingPattern && wasmType.kind !== "externref") {
       wasmType = { kind: "externref" };
     }
+    // (#6774 S7) `(...[a]) => …` packs its extras like `(...a)`: the rest vec.
+    wasmType = restPatternParamSlot(ctx, p, wasmType);
     if (ctx.forceExternrefCallbackParams && isVecOrArrayRefType(ctx, wasmType)) {
       wasmType = { kind: "externref" };
     }
@@ -2216,10 +2219,15 @@ export function computeClosureWrapperSig(
       // externref — the runtime value is a HOST plain object; a struct-typed
       // return null-drops it on the failed ref.test (see
       // resolveWasmTypeForClosureReturn).
-      const resolvedReturn = widenClosureReturnForDynamicModuleBinding(
+      const resolvedReturn = widenProxyTrapMixedReturn(
         ctx,
         arrow,
-        widenClosureReturnForPreInitVar(ctx, arrow, resolveWasmTypeForClosureReturn(ctx, retType)),
+        retType,
+        widenClosureReturnForDynamicModuleBinding(
+          ctx,
+          arrow,
+          widenClosureReturnForPreInitVar(ctx, arrow, resolveWasmTypeForClosureReturn(ctx, retType)),
+        ),
       );
       // (#4707) Proxy/host-object bindings retain their externref carrier when
       // returned from a closure, despite TypeScript's structural return type.
@@ -2459,6 +2467,17 @@ export function methodBodyRefsShadowedOuterLocal(method: ts.FunctionLikeDeclarat
  */
 export function genBodyReferencesSuper(node: ts.Node): boolean {
   if (node.kind === ts.SyntaxKind.SuperKeyword) return true;
+  // (#6774 S5) A direct `eval("…super…")` is spliced into this frame and reads its [[HomeObject]].
+  if (
+    ts.isCallExpression(node) &&
+    ts.isIdentifier(node.expression) &&
+    node.expression.text === "eval" &&
+    node.arguments[0] !== undefined &&
+    ts.isStringLiteralLike(node.arguments[0]) &&
+    /\bsuper\b/.test(node.arguments[0].text)
+  ) {
+    return true;
+  }
   if (
     ts.isFunctionExpression(node) ||
     ts.isFunctionDeclaration(node) ||
@@ -3078,6 +3097,7 @@ export function compileLiftedClosureBody(
     emitLiftedClosureArgumentsObject(ctx, liftedFctx, arrow, body, arrowParams, reachesDirectEval);
   }
 
+  hoistParameterEvalVars(ctx, liftedFctx, arrow); // (#6774 S7)
   // Emit default-value initialization for simple params with defaults
   emitArrowParamDefaults(ctx, liftedFctx, arrow, 1 /* skip __self */);
 
@@ -3477,7 +3497,7 @@ function reportClosureFrameBreach(
   };
   walk(liftedFctx.body);
   if (worst < 0) return;
-  if (process.env?.JS2WASM_FRAME_OPS) {
+  if (readEnv("JS2WASM_FRAME_OPS")) {
     const flat: string[] = [];
     const dump = (instrs: readonly Instr[], depth: number): void => {
       for (const instr of instrs) {
@@ -3522,7 +3542,7 @@ function reportClosureFrameBreach(
  * Consumed by `scripts/profile-buckets.mjs`.
  */
 function reportClosureNameMap(arrow: ts.ArrowFunction | ts.FunctionExpression, closureName: string): void {
-  if (typeof process === "undefined" || !process.env?.JS2WASM_CLOSURE_NAME_MAP) return;
+  if (typeof process === "undefined" || !readEnv("JS2WASM_CLOSURE_NAME_MAP")) return;
   let label = ts.isFunctionExpression(arrow) && arrow.name ? arrow.name.text : "";
   if (!label) {
     const parent = arrow.parent;
@@ -3666,12 +3686,12 @@ export function compileArrowAsClosure(
       closureReturnType = { kind: "externref" };
       eagerAsyncPromiseWrap = true;
     }
-    // (#3587) Declined async arrow/fn-expr with a genuinely-suspending await
-    // inside a `try`: refuse loudly instead of silently compiling the legacy
-    // pass-through that cannot deliver awaited rejections. Still reported for
+    // (#3587/#6780) Declined async arrow/fn-expr with a suspension inside a `try`
+    // or only settled awaits: refuse loudly instead of silently compiling the
+    // legacy pass-through (lost rejections / inline continuations). Still reported for
     // the #4630 wrap — the wrap settles the COMPLETION value, it does not make
     // the parked pass-through deliver awaited rejections.
-    reportDeclinedAsyncRejectionHazard(ctx, arrow);
+    reportDeclinedAsyncBody(ctx, arrow);
   }
   // (#4648) NOTE — a DECLINED (await-free) async closure does NOT get the
   // Promise wrapper here; only the host-callback bridge does (see
@@ -3702,10 +3722,11 @@ export function compileArrowAsClosure(
   ) {
     const thisLocal = fctx.lexicalThisCaptureLocal ?? allocLocal(fctx, "__arrow_lexical_this", { kind: "externref" });
     fctx.lexicalThisCaptureLocal = thisLocal;
-    const thisNode = findOwnThisReference(body) ?? ts.factory.createThis();
+    const thisNode = findOwnThisReference(body) ?? syntheticThisIn(arrow);
     compileExpression(ctx, fctx, thisNode, { kind: "externref" });
     fctx.body.push({ op: "local.set", index: thisLocal });
   }
+  snapshotArrowNewTarget(ctx, fctx, arrow); // (#6774 S4) lexical `new.target`
   const { captures, selfBindingName } = planClosureCaptures(ctx, fctx, arrow, body, additionalCaptureNames);
   // Object-literal method closures need a stable [[HomeObject]] for `super`.
   // Capture the freshly allocated object itself, rather than using
@@ -3784,7 +3805,7 @@ export function compileArrowAsClosure(
   // together with the offending source text. The end-of-codegen checker can only
   // say which function is broken; this says which ARROW produced it, which is
   // the last link needed to reduce a fixture. Inert unless set.
-  if (typeof process !== "undefined" && process.env?.JS2WASM_CHECK_FRAMES) {
+  if (typeof process !== "undefined" && readEnv("JS2WASM_CHECK_FRAMES")) {
     reportClosureFrameBreach(ctx, arrow, closureName, liftedFuncTypeIdx, liftedFctx);
   }
   pushProgramAbiNestedCallable(ctx, arrow, liftedFuncIdx, {
@@ -4798,7 +4819,7 @@ export function compileArrowAsCallback(
         }
       } else {
         // Immutable capture or already-boxed: push directly
-        if (process.env?.JS2WASM_FRAME_OPS) {
+        if (readEnv("JS2WASM_FRAME_OPS")) {
           const liveFrame = fctx.params.length + fctx.locals.length;
           if (cap.localIdx >= liveFrame) {
             process.stderr.write(
@@ -4885,3 +4906,14 @@ function closureBodyUsesArguments(node: ts.Node): boolean {
 // Register compileArrowAsClosure in the shared module so other modules
 // can call it without a direct import cycle.
 registerCompileArrowAsClosure(compileArrowAsClosure);
+
+/**
+ * (#6774 S16) A synthetic `this` parented to `arrow`, so the unbound-`this`
+ * strictness test (`isStrictContext`) sees the arrow's real context instead of
+ * a parentless node (which it reads as sloppy → the global object).
+ */
+function syntheticThisIn(arrow: ts.Node): ts.Expression {
+  const node = ts.factory.createThis();
+  (node as unknown as { parent: ts.Node }).parent = arrow;
+  return node;
+}

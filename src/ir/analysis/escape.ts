@@ -25,9 +25,9 @@
 // classification; Phase 1 only produces it (matching #1587's "annotation-only
 // demonstration consumer" discipline).
 
-import type { AllocSiteRegistry } from "../alloc-registry.js";
-import { ALLOC_NAMESPACES } from "../alloc-registry.js";
-import type { IrFunction, IrInstr, IrTerminator, IrValueId } from "../nodes.js";
+import type { AllocSiteRegistry } from "./alloc-registry.js";
+import { ALLOC_NAMESPACES } from "./alloc-registry.js";
+import type { IrFunction, IrInstr, IrTerminator, IrValueId } from "../core/nodes.js";
 import { analyzeOwnership, type OwnershipResult } from "./ownership.js";
 
 /**

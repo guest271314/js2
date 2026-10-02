@@ -29,6 +29,7 @@ import { classIdentityFromExpression } from "../class-static-metadata.js"; // (#
 import { bindingIsUniqueAndNeverWritten } from "../class-heritage-check.js"; // (#6772 S6)
 import { heritageBindsParentClass } from "../class-heritage-comma.js"; // (#6772 S6)
 import { emitLazyClassObjectGet } from "./extern.js"; // (#6772 S6)
+import { arrayTypedValueMayNotBeArray } from "../proxy-array-like.js"; // (#6651 H6)
 
 const NATIVE_COLLECTION_NAMES = new Set(["Map", "Set", "WeakMap", "WeakSet"]);
 
@@ -556,7 +557,8 @@ export function tryCompileEs5GetPrototypeOfValue(
   if (staticType === "symbol") return emitEs5IntrinsicPrototype(ctx, fctx, expr, "Symbol");
 
   const knownPrototypeName = ES5_OBJECT_PROTOTYPES.get(ctx.oracle.declaredNameOf(arg0) ?? "");
-  if (knownPrototypeName) {
+  // (#6651 H6) An Array-typed value may be a species result or a Proxy here.
+  if (knownPrototypeName && !(knownPrototypeName === "Array" && arrayTypedValueMayNotBeArray(ctx))) {
     return emitEs5IntrinsicPrototype(ctx, fctx, expr, knownPrototypeName);
   }
   if (ctx.oracle.signatureOf(arg0) !== undefined || ts.isFunctionExpression(arg0) || ts.isArrowFunction(arg0)) {

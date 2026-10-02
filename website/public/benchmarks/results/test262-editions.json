@@ -1,8 +1,8 @@
 [
   {
     "edition": "ES5",
-    "pass": 7999,
-    "fail": 1005,
+    "pass": 8001,
+    "fail": 1003,
     "ce": 25,
     "skip": 0,
     "total": 9029,
@@ -48,8 +48,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 10267,
-    "fail": 1417,
+    "pass": 10275,
+    "fail": 1409,
     "ce": 20,
     "skip": 0,
     "total": 11704,
@@ -66,8 +66,8 @@
       },
       {
         "name": "generators",
-        "pass": 2189,
-        "fail": 297,
+        "pass": 2191,
+        "fail": 295,
         "ce": 0,
         "skip": 0,
         "total": 2486,
@@ -201,12 +201,12 @@
       },
       {
         "name": "let",
-        "pass": 61,
-        "fail": 15,
+        "pass": 63,
+        "fail": 13,
         "ce": 0,
         "skip": 0,
         "total": 76,
-        "pct": 80
+        "pct": 83
       },
       {
         "name": "Symbol.match",
@@ -462,12 +462,12 @@
       },
       {
         "name": "const",
-        "pass": 11,
-        "fail": 2,
+        "pass": 13,
+        "fail": 0,
         "ce": 0,
         "skip": 0,
         "total": 13,
-        "pct": 85
+        "pct": 100
       },
       {
         "name": "error-stack-accessor",
@@ -1507,8 +1507,8 @@
   },
   {
     "edition": "ES2020",
-    "pass": 1396,
-    "fail": 610,
+    "pass": 1398,
+    "fail": 608,
     "ce": 11,
     "skip": 18,
     "total": 2035,
@@ -1642,12 +1642,12 @@
       },
       {
         "name": "optional-chaining",
-        "pass": 39,
-        "fail": 12,
+        "pass": 41,
+        "fail": 10,
         "ce": 1,
         "skip": 0,
         "total": 52,
-        "pct": 75
+        "pct": 79
       },
       {
         "name": "Symbol.iterator",
@@ -3789,8 +3789,8 @@
   },
   {
     "edition": "ES2027",
-    "pass": 496,
-    "fail": 396,
+    "pass": 497,
+    "fail": 395,
     "ce": 5,
     "skip": 0,
     "total": 897,
@@ -3798,8 +3798,8 @@
     "features": [
       {
         "name": "explicit-resource-management",
-        "pass": 283,
-        "fail": 147,
+        "pass": 284,
+        "fail": 146,
         "ce": 0,
         "skip": 0,
         "total": 430,
@@ -4304,9 +4304,9 @@
   },
   {
     "edition": "Unclassified (untagged)",
-    "pass": 4510,
-    "fail": 793,
-    "ce": 142,
+    "pass": 4523,
+    "fail": 778,
+    "ce": 144,
     "skip": 0,
     "total": 5445,
     "pct": 83

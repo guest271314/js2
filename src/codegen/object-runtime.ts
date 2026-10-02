@@ -305,6 +305,7 @@ import {
 import { stringWrapperLengthArm } from "./string-wrapper-dynamic-length.js"; // (#6651 C5)
 import { captureWrapperPrimitiveKey } from "./to-primitive-wrapper-slot.js"; // (#4492 wave-5) __to_primitive's [[PrimitiveValue]] arms
 import { buildToPrimitiveBody } from "../runtime/wasmgc/values/to-primitive-bodies.js";
+import { registerExpressionHelpers } from "./registry/expression-helper-delegates.js";
 import type {
   ToPrimitiveCoreBindings,
   ToPrimitiveMethodLiterals,
@@ -4251,6 +4252,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         boxSymbolIdx,
         applyClosureIdx,
         defaultHint: stringExtern("default"),
+        defaultHintNative: nativeStringLiteralInstrs(ctx, "default"),
         errors: [
           stringExtern(typeErrorMessage),
           stringExtern(typeErrorMessage),
@@ -10360,7 +10362,7 @@ export function fillDynamicForinVecArms(ctx: CodegenContext): void {
         : [];
     // (#4220) `<array>.constructor` on a receiver only known at RUNTIME —
     // rationale and blast radius in vec-constructor-carrier.ts.
-    const ctorBody = vecConstructorArmInstrs(ctx, keyIs("constructor"));
+    const ctorBody = vecConstructorArmInstrs(ctx, keyIs("constructor"), gAny);
     const arm: Instr[] = [
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
@@ -11895,3 +11897,5 @@ export const OBJECT_RUNTIME_HELPER_NAMES: ReadonlySet<string> = new Set([
   // builder (the value arrives already boxed as a `$Symbol` carrier).
   "__new_Symbol",
 ]);
+
+registerExpressionHelpers({ ensureObjVecBuilders, reserveApplyClosure }); // (#6797) late-bound for the expressions/ leaves

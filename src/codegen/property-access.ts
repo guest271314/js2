@@ -449,6 +449,7 @@ function tryCompileStandaloneArrayIteratorRead(
 }
 
 import { tryBuiltinPrototypeGetterBrandThrow } from "./builtin-prototype-brand.js";
+import { tryCompileClassBuiltinSpeciesRead } from "./class-builtin-species-read.js"; // (#6775 S14)
 import { tryCompileFunctionPoisonRead } from "./function-poison-pill-access.js";
 import { isFnctorLayoutStructName } from "./fnctor-layout-emit.js"; // (#3927) per-type layouts
 import { tryEmitPrimitiveAbsentPropertyRead } from "./primitive-absent-property.js"; // (#4483) absent prop of a number/boolean primitive → undefined
@@ -477,6 +478,7 @@ import {
   tryStringLengthIteratorAndExternClassReads,
   trySuperAndImportMetaRead,
 } from "./property-access-dispatch.js"; // (#3276) Wave B — extracted guard bands
+import { readEnv } from "../env.js";
 
 /**
  * (#3037 CS1b) True when `expr` is a direct operand of a standalone
@@ -3534,6 +3536,13 @@ export function taViewReceiverTypeIdx(
   return undefined;
 }
 
+function receiverHasOwnComputedProto(ctx: CodegenContext, expr: ts.PropertyAccessExpression): boolean {
+  // The member resolves to a `["__proto__"]: v` definition of an object literal.
+  return ctx.oracle
+    .declarationsOf(expr.name)
+    .some((d) => ts.isPropertyAssignment(d) && ts.isComputedPropertyName(d.name));
+}
+
 /**
  * Dynamic member READ off an open-object carrier. The established standalone
  * growable-object case keeps its reserved-accessor/callable exclusions. The
@@ -3549,7 +3558,10 @@ function tryOpenObjectDynamicGet(
   expr: ts.PropertyAccessExpression,
   propName: string,
 ): ValType | null | undefined {
-  const irWithTarget = isIrWithOpenObjectTargetReceiver(ctx, expr.expression);
+  // (#6774 S2) `{ ["__proto__"]: v }` holds an OWN "__proto__" data property:
+  // read it raw, never through the reserved proto-walk / typed-unbox lowerings.
+  const ownProto = ctx.standalone && propName === "__proto__" && receiverHasOwnComputedProto(ctx, expr);
+  const irWithTarget = ownProto || isIrWithOpenObjectTargetReceiver(ctx, expr.expression);
   if (!irWithTarget && !ctx.standalone) return undefined;
   // (#6772 S2) a return-override class binding may hold the foreign override
   // object: read the raw MOP value (never the checker's field type).
@@ -3624,7 +3636,7 @@ function tryKnownFnctorDynamicObjectCarrierGet(
   propName: string,
 ): ValType | undefined {
   // Narrow rollback switch used by the Acorn exact A/B benchmark.
-  if (process.env.JS2WASM_TYPED_OPEN_CARRIER_READS === "0") return undefined;
+  if (readEnv("JS2WASM_TYPED_OPEN_CARRIER_READS") === "0") return undefined;
   if (!ctx.standalone) return undefined;
   if (!ts.isPropertyAccessExpression(expr.expression)) return undefined;
   const carrierRead = expr.expression;
@@ -3997,6 +4009,14 @@ export function compilePropertyAccess(
   // file; their identifiers are compiled as externrefs, but the checker cannot
   // answer property-access queries for those unbound declarations. Keep this
   // lane dynamic so expressions such as `a1.length` and `this.shifted` remain evaluable.
+  // (#6774 S5) A spliced `eval("super.x")` resolves against the CALLER frame's home object.
+  if (
+    isForeignEvalNode(expr) &&
+    expr.expression.kind === ts.SyntaxKind.SuperKeyword &&
+    !ts.isPrivateIdentifier(expr.name)
+  ) {
+    return compileSuperPropertyAccess(ctx, fctx, expr, expr.name.text);
+  }
   if (isForeignEvalNode(expr)) {
     const foreignPoison = tryCompileFunctionPoisonRead(ctx, fctx, expr);
     if (foreignPoison !== undefined) return foreignPoison;
@@ -5148,7 +5168,8 @@ export function compileElementAccess(
   const jsonParseElementType = tryEmitJsonParseElementAccess(ctx, fctx, expr);
   if (jsonParseElementType !== undefined) return jsonParseElementType;
 
-  const functionHasInstanceRead = tryCompileStandaloneFunctionHasInstanceRead(ctx, fctx, expr);
+  const functionHasInstanceRead =
+    tryCompileStandaloneFunctionHasInstanceRead(ctx, fctx, expr) ?? tryCompileClassBuiltinSpeciesRead(ctx, fctx, expr); // (#6775 S14)
   if (functionHasInstanceRead !== undefined) return functionHasInstanceRead;
 
   // (#4731) Resolve the static Set/Map prototype iterator alias before the

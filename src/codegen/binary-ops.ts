@@ -59,6 +59,7 @@ import { admitsObjectAddition, emitObjectAdd } from "./addition-to-primitive.js"
 import { admitsObjectRelational, reduceRelationalOperandsToPrimitive } from "./relational-to-primitive.js";
 // (#4491 T4) §13.15.3 `+` over object operands.
 import { admitsObjectAdd } from "./add-to-primitive.js";
+import { emitHostArrayCarrierBinary, hostArrayCarrierBinaryArm } from "./host-carrier-to-primitive.js"; // (#6788)
 import { addStringImports, addUnionImports, resolveWasmType } from "./index.js";
 import { isI32CompatibleOperand, nativeTypeOfExpression } from "./native-type-annotations.js";
 import type { InnerResult } from "./shared.js";
@@ -173,6 +174,7 @@ function isDeclaredOracleHeterogeneousPrimitiveUnion(ctx: CodegenContext, expr: 
   return declaration !== undefined && isOracleHeterogeneousPrimitiveUnion(ctx.oracle.typeFactOf(declaration));
 }
 import { compileModulo } from "./remainder.js";
+import { readEnv } from "../env.js";
 export { emitModulo } from "./remainder.js";
 
 // ── Binary operations ─────────────────────────────────────────────────
@@ -227,6 +229,17 @@ const BOOLEAN_PRODUCING_BINARY_OPS: ReadonlySet<ts.SyntaxKind> = new Set([
  * matches every `.kind === "i32"` check). Called at the TAIL of expressions.ts's
  * binary dispatch; its 3 `instanceof` arms return earlier, so they brand themselves.
  */
+const PRIMITIVE_TS_FLAGS =
+  ts.TypeFlags.StringLike |
+  ts.TypeFlags.NumberLike |
+  ts.TypeFlags.BooleanLike |
+  ts.TypeFlags.BigIntLike |
+  ts.TypeFlags.ESSymbolLike |
+  ts.TypeFlags.Null |
+  ts.TypeFlags.Undefined |
+  ts.TypeFlags.Void |
+  ts.TypeFlags.Union;
+
 export function brandBooleanBinaryResult(op: ts.SyntaxKind, result: InnerResult): InnerResult {
   if (
     result !== null &&
@@ -1549,7 +1562,7 @@ export function compileBinaryExpression(
     isNumberType(leftTsType) &&
     isNumberType(rightTsType) &&
     (isNeverUndefinedNumber(fctx, expr.left) || isNeverUndefinedNumber(fctx, expr.right)) &&
-    process.env.JS2WASM_STATIC_NUMBER_EQ !== "0";
+    readEnv("JS2WASM_STATIC_NUMBER_EQ") !== "0";
 
   // (#1961) In nativeStrings mode a `string | undefined` / `string | null`
   // operand (e.g. `"x".at(i)`, optional chains/params) lowers to a NULLABLE
@@ -1707,7 +1720,10 @@ export function compileBinaryExpression(
       (rightTsType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0 &&
       ctx.nativeStrings &&
       ctx.anyStrTypeIdx >= 0) ||
-    rightIsObjectOperand;
+    rightIsObjectOperand ||
+    // (#6774 S19) any other non-primitive checker type (`var y = {}`) may
+    // carry @@toPrimitive / valueOf: §7.2.14 step 11 ToPrimitive, not ToString.
+    (ctx.standalone && !rightIsStrLike && ctx.anyStrTypeIdx >= 0 && (rightTsType.flags & PRIMITIVE_TS_FLAGS) === 0);
   // (#4564) §13.15.3 step 5 reduces BOTH operands BEFORE step 7 asks whether
   // either is a string: `o + ""` must take `valueOf`, but the string routes just
   // below call ToString on the object, which takes `toString`. Standalone only —
@@ -1716,6 +1732,9 @@ export function compileBinaryExpression(
   if (objectPlus && admitsObjectAddition(ctx, leftTsType, rightTsType, expr.left, expr.right)) {
     return emitObjectAdd(ctx, fctx, expr);
   }
+  // (#6788) JS-host twin for an ARRAY operand — see host-carrier-to-primitive.ts.
+  const hostCarrierArm = hostArrayCarrierBinaryArm(ctx, expr, leftTsType, rightTsType);
+  if (hostCarrierArm !== undefined) return emitHostArrayCarrierBinary(ctx, fctx, expr, hostCarrierArm);
   if (
     !wrapperEquality &&
     isStringType(leftTsType) &&
