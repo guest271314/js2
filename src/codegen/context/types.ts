@@ -2152,6 +2152,8 @@ export interface CodegenContext extends StandaloneCapabilityDemandState, BodyRou
   structAccessorClosure: Map<string, { getGlobal?: number; setGlobal?: number }>;
   /** Set of "ClassName_propName" for static getter/setter accessor properties */
   staticAccessorSet: Set<string>;
+  /** (#6772 S12) "ClassName_propName" of every INSTANCE class accessor, filled before any accessor key is minted. */
+  classInstanceAccessorKeys: Set<string>;
   /** Set of "ClassName_methodName" for static methods (no self param) */
   staticMethodSet: Set<string>;
   /** Map from "ClassName_propName" → global index for static properties */

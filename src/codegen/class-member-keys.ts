@@ -239,3 +239,64 @@ export function classHasComputedKeyAssignment(decl: ts.ClassLikeDeclaration): bo
       computedKeyHasAssignment(member.name.expression),
   );
 }
+
+/**
+ * (#6772 S12) funcMap key of a STATIC accessor half. A class may declare
+ * `static get x()` next to `get x()`: the two have different receivers, but
+ * both used to take `<C>_get_x`, so the second registration was skipped (#1983)
+ * and every read of one called the other. When an instance accessor of the
+ * same name exists the static half relocates to `__cm$static$…`; the instance
+ * key, and every class without the collision, stay byte-identical.
+ */
+export function staticAccessorFuncKey(
+  ctx: CodegenContext,
+  className: string,
+  half: "get" | "set",
+  propName: string,
+): string {
+  const legacy = classMemberFuncKey(ctx, `${className}_${half}_${propName}`);
+  return ctx.classInstanceAccessorKeys.has(`${className}_${propName}`) ? `__cm$static$${legacy}` : legacy;
+}
+
+/** funcMap key of an accessor half of either kind. */
+export function classAccessorFuncKey(
+  ctx: CodegenContext,
+  className: string,
+  half: "get" | "set",
+  propName: string,
+  isStatic: boolean,
+): string {
+  return isStatic
+    ? staticAccessorFuncKey(ctx, className, half, propName)
+    : classMemberFuncKey(ctx, `${className}_${half}_${propName}`);
+}
+
+/**
+ * (#6772 S12) `<C>_<p>` names an INSTANCE accessor. `classAccessorSet` holds
+ * both kinds, so the old `has && !staticAccessorSet.has` spelling also said
+ * "no" for an instance accessor that has a static twin.
+ */
+export function isInstanceAccessorKey(ctx: CodegenContext, accessorKey: string): boolean {
+  return (
+    ctx.classAccessorSet.has(accessorKey) &&
+    (!ctx.staticAccessorSet.has(accessorKey) || ctx.classInstanceAccessorKeys.has(accessorKey))
+  );
+}
+
+/**
+ * (#6772 S12) The key a STATIC-receiver site looks up: the relocated static
+ * half when the accessor has an instance twin, otherwise the site's own legacy
+ * key — so every class without the collision keeps its bytes.
+ */
+export function staticReceiverAccessorKey(
+  ctx: CodegenContext,
+  className: string,
+  half: "get" | "set",
+  propName: string,
+  legacyKey: string = classMemberFuncKey(ctx, `${className}_${half}_${propName}`),
+): string {
+  const key = `${className}_${propName}`;
+  return ctx.staticAccessorSet.has(key) && ctx.classInstanceAccessorKeys.has(key)
+    ? staticAccessorFuncKey(ctx, className, half, propName)
+    : legacyKey;
+}

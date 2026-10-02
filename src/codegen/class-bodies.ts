@@ -29,7 +29,12 @@ import { emitPromiseSubclassProtoLink, isStandalonePromiseSuperForwarder } from 
 import { emitAsyncGenerator, isAsyncGenDriveCandidate } from "./async-frame.js";
 import { genBodyReferencesThis, genBodyReferencesSuper, emitCachedFuncClosureAccess } from "./closures.js"; // (#3132 / #3123 fnctor parent closure)
 import { standaloneCommaHeritage } from "./classes/class-heritage-comma.js"; // (#6772 S6)
-import { classMemberFuncKey, classMemberRestParamKey, fnctorAncestorOfClass } from "./class-member-keys.js"; // (#1983 / #3123 / #6699)
+import {
+  classAccessorFuncKey,
+  classMemberFuncKey,
+  classMemberRestParamKey,
+  fnctorAncestorOfClass,
+} from "./class-member-keys.js"; // (#1983 / #3123 / #6699 / #6772 S12)
 import { dynamicClassKeyGlobalKey, dynamicClassMemberName, isDynamicClassMemberName } from "./class-dynamic-keys.js"; // (#5195 Step 1 / F1)
 import { recordFnMetaMemberDeclaration } from "./function-instance-meta-methods.js"; // (#4440)
 import { resolveClassHeritageAlias } from "./class-expression-identity.js";
@@ -1651,6 +1656,10 @@ export function collectClassDeclaration(
   // needs to see the instance member even when the static declaration appears
   // first in source order.
   for (const member of decl.members) {
+    if ((ts.isGetAccessorDeclaration(member) || ts.isSetAccessorDeclaration(member)) && !hasStaticModifier(member)) {
+      const accName = member.name ? resolveInstallableClassMemberName(ctx, className, decl, member) : undefined;
+      if (accName !== undefined) ctx.classInstanceAccessorKeys.add(`${className}_${accName}`); // (#6772 S12)
+    }
     if (!ts.isMethodDeclaration(member) || !member.name || !member.body) continue;
     const methodName = resolveInstallableClassMemberName(ctx, className, decl, member);
     if (methodName === undefined) continue;
@@ -1846,11 +1855,13 @@ export function collectClassDeclaration(
       }
 
       const getterName = `${className}_get_${propName}`;
+      // (#6772 S12) a static half with an instance twin takes its own key.
+      const getterKey = classAccessorFuncKey(ctx, className, "get", propName, hasStaticModifier(member));
       // Skip if a function with this name is already registered (e.g., when
       // both a static and instance getter share the same computed property name,
       // they produce the same function name — avoid creating duplicates that
       // leave empty-body placeholders causing "stack fallthru" validation errors).
-      if (ctx.funcMap.has(classMemberFuncKey(ctx, getterName))) continue; // (#1983)
+      if (ctx.funcMap.has(getterKey)) continue; // (#1983)
       // Getter takes self, returns the accessor return type
       const getterParams: ValType[] = [
         ctx.classExternrefBackedSet.has(className) ? { kind: "externref" } : { kind: "ref", typeIdx: structTypeIdx },
@@ -1866,8 +1877,7 @@ export function collectClassDeclaration(
 
       const getterTypeIdx = addFuncType(ctx, getterParams, getterResults, `${getterName}_type`);
       const getterFuncIdx = mintDefinedFunc(ctx);
-      const getterKey = classMemberFuncKey(ctx, getterName); // (#1983) key + display name
-      ctx.funcMap.set(getterKey, getterFuncIdx);
+      ctx.funcMap.set(getterKey, getterFuncIdx); // (#1983) key + display name
       recordFnMetaMemberDeclaration(ctx, getterName, member); // (#4440) `get p`
 
       pushProgramAbiClassCallable(ctx, member, "unit", getterFuncIdx, {
@@ -1889,8 +1899,9 @@ export function collectClassDeclaration(
       }
 
       const setterName = `${className}_set_${propName}`;
+      const setterKey = classAccessorFuncKey(ctx, className, "set", propName, hasStaticModifier(member)); // (#6772 S12)
       // Skip if already registered (same collision guard as getter above)
-      if (ctx.funcMap.has(classMemberFuncKey(ctx, setterName))) continue; // (#1983)
+      if (ctx.funcMap.has(setterKey)) continue; // (#1983)
       // Setter takes self + value, returns void
       const setterParams: ValType[] = [
         ctx.classExternrefBackedSet.has(className) ? { kind: "externref" } : { kind: "ref", typeIdx: structTypeIdx },
@@ -1902,8 +1913,7 @@ export function collectClassDeclaration(
 
       const setterTypeIdx = addFuncType(ctx, setterParams, [], `${setterName}_type`);
       const setterFuncIdx = mintDefinedFunc(ctx);
-      const setterKey = classMemberFuncKey(ctx, setterName); // (#1983) key + display name
-      ctx.funcMap.set(setterKey, setterFuncIdx);
+      ctx.funcMap.set(setterKey, setterFuncIdx); // (#1983) key + display name
       recordFnMetaMemberDeclaration(ctx, setterName, member); // (#4440) `set p`
 
       pushProgramAbiClassCallable(ctx, member, "unit", setterFuncIdx, {
@@ -3699,10 +3709,11 @@ function compileClassBodiesInner(
       if (propName === undefined) continue; // dynamic computed name — skip
       const getterName = `${className}_get_${propName}`;
       const getterKind = accessorKindOf(member);
-      const priorGetterKind = compiledAccessors.get(getterName);
+      const getterKey = classAccessorFuncKey(ctx, className, "get", propName, getterKind === "static"); // (#6772 S12)
+      const priorGetterKind = compiledAccessors.get(getterKey);
       if (priorGetterKind !== undefined && priorGetterKind !== getterKind) continue; // other kind owns the slot
-      compiledAccessors.set(getterName, getterKind);
-      const getterLocalIdx = funcByName.get(classMemberFuncKey(ctx, getterName)); // (#1983)
+      compiledAccessors.set(getterKey, getterKind);
+      const getterLocalIdx = funcByName.get(getterKey); // (#1983)
       if (getterLocalIdx === undefined) continue;
 
       const func = ctx.mod.functions[getterLocalIdx]!;
@@ -3814,10 +3825,11 @@ function compileClassBodiesInner(
       if (propName === undefined) continue; // dynamic computed name — skip
       const setterName = `${className}_set_${propName}`;
       const setterKind = accessorKindOf(member);
-      const priorSetterKind = compiledAccessors.get(setterName);
+      const setterKey = classAccessorFuncKey(ctx, className, "set", propName, setterKind === "static"); // (#6772 S12)
+      const priorSetterKind = compiledAccessors.get(setterKey);
       if (priorSetterKind !== undefined && priorSetterKind !== setterKind) continue; // other kind owns the slot
-      compiledAccessors.set(setterName, setterKind);
-      const setterLocalIdx = funcByName.get(classMemberFuncKey(ctx, setterName)); // (#1983)
+      compiledAccessors.set(setterKey, setterKind);
+      const setterLocalIdx = funcByName.get(setterKey); // (#1983)
       if (setterLocalIdx === undefined) continue;
 
       const func = ctx.mod.functions[setterLocalIdx]!;

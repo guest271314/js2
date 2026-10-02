@@ -834,7 +834,8 @@ shared lock.
 | S8 | (none) | p8c already 3 on origin/main `ce6631272c` (p8a 1, p8b 15, p8d 3 = node) — fixed on main by another lane | `name-binding/const.js` passes on main and branch (no change here; guard pinned) |
 | S9 | `bb9e1bb060` | p10 3 -> 7 (7), p10c illegal cast -> 7 (7), p10e illegal cast -> 1 (1), s9/a 0 -> 5 (5), s9/c illegal cast -> 3 (3), s9/d illegal cast -> 1 (1), s9/e 0 -> 1 (1); guards p10d 3, s9/b 1 | both `grammar-static-ctor-accessor-meth-valid.js` |
 | S10 | `3a35759bae` | p13d 8 -> 15 (15); s10/a 0 -> 15 (15); s10/b throw -> 63 (63) | `subclass/builtin-objects/RegExp/lastIndex.js` |
-| S11 | (this step) | p17 0 -> 7 (7); s11/b 0 -> 15 (15); guards s11/a 27 = base (node 31, bit 4 pre-existing), p11 15, p11e 0 | `definition/prototype-getter.js` |
+| S11 | `b71d3b14b0` | p17 0 -> 7 (7); s11/b 0 -> 15 (15); guards s11/a 27 = base (node 31, bit 4 pre-existing), p11 15, p11e 0 | `definition/prototype-getter.js` |
+| S12 | (this step) | s12/a 3 -> 15 (15); s12/b 34 -> 63 (63); s12/d 3 -> 15 (15); p12 4 -> 39 (63; bits 8/16 are S13); s12/c 390 -> 455 (4095; the static symbol-keyed half is #6767 R3) | `definition/getters-restricted-ids.js`; `fn-name-accessor-{get,set}.js` stay red (first failing assertion: `Object.getOwnPropertyDescriptor(A, 'id').get` is undefined — A also declares symbol-keyed STATIC accessors, #6767 R3; s12/e 0, node 3) |
 
 S2 design note (deviates from the plan's "set only on an object return"):
 `$__ctor_override` is a RETURN REGISTER written on EVERY exit of a marked
@@ -1009,3 +1010,34 @@ Class control: all 209 baseline-passing ES2015 class rows that contain
 `extends` still pass (non-isolated; 5 re-run `--isolate` after rebuilding the
 QuickJS adapter: 5/5). Neighbour pins issue-5195-r3-heritage-check /
 issue-6767 / issue-6640 / issue-6644 (both) pass.
+
+S12 note: deviates from the plan in where the key logic lives — the helpers
+went into `class-member-keys.ts` (already the funcMap-key module, outside the
+SCC) instead of a new leaf. `ctx.classInstanceAccessorKeys` (`<C>_<p>` of every
+INSTANCE class accessor) is filled in the pre-population loop before any key
+is minted; `staticAccessorFuncKey` relocates a static half with an instance
+twin to `__cm$static$<C>_get_<p>`; `staticReceiverAccessorKey` is what the
+static-receiver consumer sites look up (relocated key for a twin, the site's
+own legacy key otherwise); `isInstanceAccessorKey` replaces the
+`classAccessorSet.has && !staticAccessorSet.has` spelling, which also said
+"no" for an instance accessor with a static twin. Sites: registration and
+body emission (class-bodies.ts), the static-`this` and class-object reads and
+the instance dummy-receiver arm (property-access-dispatch.ts), `C.x = v`,
+`C[k] = v`, `C.prototype[k] = v` (assignment.ts), `C[k]` / `C.prototype[k]`
+(property-access.ts), the prototype install list (class-proto-accessors.ts),
+the member-get dispatcher (member-get-dispatch.ts) and the static sidecar's
+half lookup + closure-cache names (class-static-sidecar.ts — the instance and
+static halves must not share a `emitCachedMethodClosureAccess` cache key).
+The prepared-accessor predicates in declarations.ts were left alone: they
+decline a twin, which is the conservative answer. Byte identity: for every
+class without a static/instance twin, both lanes' binaries are identical to
+S11 (p1, p4, p6, p10, p17, s9/c; sha256 A/B); only twin classes change, on
+both lanes (host s12/a 3 -> 15, s12/b 2 -> 15, s12/d 0 -> 8). The #6767 pins
+flipped: p12 now 511 (= node) and its R1 RESIDUAL now answers 3. Class
+control: the 112 baseline-passing ES2015 class rows containing `static get` /
+`static set` all pass. Neighbour pins issue-6767 / issue-4455 /
+issue-5151 pass; issue-5318-r4 and -r5 keep exactly main's failures (4 and 3).
+Residual (measured): a subclass's read of an inherited static twin is
+still wrong — s12/f (`class Q extends P {}`, `Q.x`) answers 1 on main and on
+the branch (node 3); the inheritance alias loop does not carry the relocated
+static half.

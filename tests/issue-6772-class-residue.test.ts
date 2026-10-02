@@ -922,3 +922,79 @@ describe("#6772 S11 — a runtime heritage's `prototype` is read once at definit
     ).toBe(27);
   });
 });
+
+describe("#6772 S12 — static and instance accessors of one name get distinct function slots", () => {
+  it("RED on base (3): the getters-restricted-ids shape (node 15)", async () => {
+    expect(
+      await runProbe(`
+        class C {
+          get eval() { return 1; }
+          get arguments() { return 2; }
+          static get eval() { return 3; }
+          static get arguments() { return 4; }
+        }
+        var r = (new C().eval === 1) ? 1 : 0;
+        r += (new C().arguments === 2) ? 2 : 0;
+        r += (C.eval === 3) ? 4 : 0;
+        r += (C.arguments === 4) ? 8 : 0;
+        __r = r;
+      `),
+    ).toBe(15);
+  });
+
+  it("RED on base (34): static declared first, setters on both sides, dynamic reads (node 63)", async () => {
+    expect(
+      await runProbe(`
+        var log = 0;
+        class C {
+          static get x() { return 30; }
+          get x() { return 10; }
+          static set y(v) { log += v * 100; }
+          set y(v) { log += v; }
+        }
+        var c = new C();
+        var r = (c.x === 10) ? 1 : 0;
+        r += (C.x === 30) ? 2 : 0;
+        c.y = 1;
+        r += (log === 1) ? 4 : 0;
+        C.y = 2;
+        r += (log === 201) ? 8 : 0;
+        function rd(o, k) { return o[k]; }
+        r += (rd(c, 'x') === 10) ? 16 : 0;
+        r += (rd(C, 'x') === 30) ? 32 : 0;
+        __r = r;
+      `),
+    ).toBe(63);
+  });
+
+  it("RED on base (3): gOPD(C, k).get of a static accessor with and without an instance twin (node 15)", async () => {
+    expect(
+      await runProbe(`
+        class B { static get id() { return 1; } }
+        class A { get id() { return 2; } static get id() { return 3; } }
+        function g(o, k) { var d = Object.getOwnPropertyDescriptor(o, k); return d === undefined || d.get === undefined ? undefined : d.get; }
+        var r = 0;
+        var gb = g(B, 'id');
+        r += (gb !== undefined && gb.call(B) === 1) ? 1 : 0;
+        var ga = g(A, 'id');
+        r += (ga !== undefined) ? 2 : 0;
+        r += (ga !== undefined && ga.call(A) === 3) ? 4 : 0;
+        r += (A.id === 3 && new A().id === 2) ? 8 : 0;
+        __r = r;
+      `),
+    ).toBe(15);
+  });
+
+  it("RESIDUAL (#6767 R3, node 3): a class with a runtime-keyed STATIC accessor hides its literal static accessors from gOPD", async () => {
+    expect(
+      await runProbe(`
+        var namedSym = Symbol('test262');
+        class A { get id() {} static get id() {} static get [namedSym]() {} }
+        var d = Object.getOwnPropertyDescriptor(A, 'id');
+        var r = (d !== undefined && d.get !== undefined) ? 1 : 0;
+        r += (d !== undefined && d.get !== undefined && d.get.name === 'get id') ? 2 : 0;
+        __r = r;
+      `),
+    ).toBe(0);
+  });
+});

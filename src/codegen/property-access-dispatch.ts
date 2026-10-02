@@ -71,7 +71,12 @@ import { receiverIsUndefinedIdentifier } from "./nullish-receiver-coercible.js";
 import { tracesToTypedArrayIntrinsicProto } from "./expressions/calls.js"; // (#6769 S7a) `%TypedArray%.prototype` receiver
 import { resolvesToAmbientGlobal } from "./expressions/non-constructable.js";
 import { popBody, pushBody } from "./context/bodies.js";
-import { classMemberFuncKey, resolveMethodOwnerClass } from "./class-member-keys.js";
+import {
+  classMemberFuncKey,
+  isInstanceAccessorKey,
+  resolveMethodOwnerClass,
+  staticReceiverAccessorKey,
+} from "./class-member-keys.js";
 import { exactClassExpressionTypeName } from "./class-expression-identity.js";
 import { definedFuncAt } from "./func-space.js";
 import {
@@ -2196,7 +2201,7 @@ export function tryIdentifierNamespaceAndStaticReceiverRead(
       const accessorKey = `${enclosingClass}_${propName}`;
       if (ctx.staticAccessorSet.has(accessorKey)) {
         const getterName = `${enclosingClass}_get_${propName}`;
-        const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, getterName));
+        const funcIdx = ctx.funcMap.get(staticReceiverAccessorKey(ctx, enclosingClass, "get", propName)); // (#6772 S12)
         if (funcIdx !== undefined) {
           const retType = emitGetterCallWithDummy(ctx, fctx, enclosingClass, getterName, funcIdx);
           if (retType) return retType;
@@ -2429,7 +2434,7 @@ function emitClassStaticMemberRead(
   const accessorKey = `${resolvedClass}_${propName}`;
   if (ctx.classAccessorSet.has(accessorKey)) {
     const getterName = `${resolvedClass}_get_${propName}`;
-    const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, getterName));
+    const funcIdx = ctx.funcMap.get(staticReceiverAccessorKey(ctx, resolvedClass, "get", propName)); // (#6772 S12)
     if (funcIdx !== undefined) {
       const retType = emitGetterCallWithDummy(ctx, fctx, resolvedClass, getterName, funcIdx);
       return retType ?? { kind: "externref" };
@@ -2599,7 +2604,7 @@ export function tryPrototypeMethodAndArityReads(
       // both `this` and `super` uses. Receiver-sensitive getters deliberately
       // decline this arm and continue through the ordinary path, so this
       // optimization never fabricates a receiver-visible value.
-      if (ctx.classAccessorSet.has(fullName) && !ctx.staticAccessorSet.has(fullName)) {
+      if (isInstanceAccessorKey(ctx, fullName)) {
         const getterName = `${className}_get_${propName}`;
         const getterFuncIdx = ctx.funcMap.get(classMemberFuncKey(ctx, getterName));
         const getterDecl = ctx.fnMetaMemberDecls?.get(getterName);
