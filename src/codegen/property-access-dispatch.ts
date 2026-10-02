@@ -2377,7 +2377,8 @@ function emitClassStaticMemberRead(
   // Wasm (`call[N] expected externref, found ref.func of (ref M)`). Skip
   // the raw path when a static method owns the name, letting the
   // static-method closure arm below handle it correctly.
-  if (propName === "constructor" && !ctx.staticMethodSet.has(fullName)) {
+  // (#6772 S9) a `static get/set constructor` accessor owns the read too.
+  if (propName === "constructor" && !ctx.staticMethodSet.has(fullName) && !ctx.staticAccessorSet.has(fullName)) {
     const ctorName = `${resolvedClass}_constructor`;
     const funcIdx = ctx.funcMap.get(ctorName);
     if (funcIdx !== undefined) {
@@ -4325,7 +4326,10 @@ export function finalizeStructAndDynamicMemberGet(
       fctx.body.push({ op: "call", funcIdx: driverIdx });
       return { kind: "externref" };
     }
-    if (ctx.classAccessorSet.has(accessorKey)) {
+    // (#6772 S9) an accessor named `constructor` can only be STATIC (an
+    // instance one is an early error) — never call it on an instance.
+    const staticCtorAccessor = propName === "constructor" && ctx.staticAccessorSet.has(accessorKey);
+    if (ctx.classAccessorSet.has(accessorKey) && !staticCtorAccessor) {
       const getterName = `${typeName}_get_${propName}`;
       const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, getterName));
       if (funcIdx !== undefined) {

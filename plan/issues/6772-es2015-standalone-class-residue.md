@@ -830,7 +830,9 @@ shared lock.
 | S4 | `d2fd895a37` | p9 / p9b / p9e invalid Wasm -> 42 (42), p9c invalid -> 7 (7), p9d invalid -> 127 (127), p9f invalid -> 63 (63), t9 (typed, IR-claimed) IR compile error -> 50 (both lanes); guard s4i 3 (3) | `{statements,expressions}/class/ident-name-method-def-new-escaped.js` |
 | S5 | `9368ba74f9` | p6 14 -> 15 (15); s5/a 0 -> 1, s5/b 0 -> 2, s5/e 0 -> 1, s5/g 0 -> 1, s5/h (member order) 0 -> 1 (node equal); host lane p6 14 -> 15 too | the four `cpn-class-{decl,expr}[-accessors]-computed-property-name-from-assignment-expression-assignment.js` |
 | S6 | `a086bbecc4` | p11 COMPILE-FAIL -> 15 (15); p11b COMPILE-FAIL -> 1015 (1015); p11d 448 -> 1023 (1023); p11g 2 -> 15 (15); p11c (plain `extends C`) 11 -> 15; guard p11e 0 -> 0 (declines; node 7) | `definition/side-effects-in-extends.js` |
-| S7 | (this step) | p7d 0 -> 3 (3); p7 1 -> 1 (bits 2/4 are a separate `get [false]` gap, unchanged); guards s7/b 15, s7/c 7, s7/d 3, s7/e 3 (base = branch = node); s7/f 102 both (RESIDUAL, node 3) | `expressions/class/accessor-name-inst-computed-in.js` |
+| S7 | `8a6544f974` | p7d 0 -> 3 (3); p7 1 -> 1 (bits 2/4 are a separate `get [false]` gap, unchanged); guards s7/b 15, s7/c 7, s7/d 3, s7/e 3 (base = branch = node); s7/f 102 both (RESIDUAL, node 3) | `expressions/class/accessor-name-inst-computed-in.js` |
+| S8 | (none) | p8c already 3 on origin/main `ce6631272c` (p8a 1, p8b 15, p8d 3 = node) — fixed on main by another lane | `name-binding/const.js` passes on main and branch (no change here; guard pinned) |
+| S9 | (this step) | p10 3 -> 7 (7), p10c illegal cast -> 7 (7), p10e illegal cast -> 1 (1), s9/a 0 -> 5 (5), s9/c illegal cast -> 3 (3), s9/d illegal cast -> 1 (1), s9/e 0 -> 1 (1); guards p10d 3, s9/b 1 | both `grammar-static-ctor-accessor-meth-valid.js` |
 
 S2 design note (deviates from the plan's "set only on an object return"):
 `$__ctor_override` is a RETURN REGISTER written on EVERY exit of a marked
@@ -948,3 +950,18 @@ p7d / s7/a / s7/b / s7/c are identical on main `ce6631272c` and the branch
 the FIRST of two classes whose constructor writes a field throws (s7/f 102
 on main and branch, node 3). Neighbour pins: issue-4770 / issue-5383 pass;
 issue-5318-r4 has the same 4 stale RESIDUAL failures on main `ce6631272c`.
+
+S9 note: two arms in property-access-dispatch.ts. (1) The class-object
+`C.constructor` fold (`emitClassStaticMemberRead`) declines when a static
+accessor owns `<C>_constructor`, so the ordinary static-accessor read below
+calls the getter. (2) The "illegal cast" was not the #6767 param-inference
+family the plan suspected: `finalizeStructAndDynamicMemberGet`'s INSTANCE
+accessor arm tested `classAccessorSet` (which also holds static accessors)
+and called the static `C_get_constructor` with `C.prototype` cast to the
+instance struct. It now skips a `constructor` key that is a static accessor
+(an instance accessor of that name is an early error, so the guard cannot
+hide a real one). The plan's second site (`:4450` class-instance
+`.constructor` arm) needed no change. Not standalone-gated: both conditions
+require a class with a static accessor named `constructor`, which no ES5
+program has. Neighbour pins issue-5195-r3-restricted-properties /
+issue-6767 21/21.

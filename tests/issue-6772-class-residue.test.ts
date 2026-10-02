@@ -775,3 +775,53 @@ describe("#6772 S7 — a binding assigned two different class expressions resolv
     ).toBe(102);
   });
 });
+
+describe("#6772 S8 — a class-expression METHOD writing the class's own name throws TypeError", () => {
+  it("guard (already 3 on origin/main ce6631272c; 1 on the plan's base): constructor and method writes (node 3)", async () => {
+    expect(
+      await runProbe(`
+        var r = 0;
+        try { new (class C { constructor() { C = 42; } }); } catch (e) { r += (e instanceof TypeError) ? 1 : 0; }
+        try { new (class C { m() { C = 42; } }).m(); } catch (e) { r += (e instanceof TypeError) ? 2 : 0; }
+        __r = r;
+      `),
+    ).toBe(3);
+  });
+});
+
+describe("#6772 S9 — a static accessor named `constructor` wins over the class-object `.constructor` fold", () => {
+  it("RED on base (3): own `constructor` on C and C.prototype, distinct values (node 7)", async () => {
+    expect(
+      await runProbe(`
+        var C = class { static get constructor() {} static set constructor(_) {} constructor() {} };
+        var r = C.hasOwnProperty('constructor') ? 1 : 0;
+        r += C.prototype.hasOwnProperty('constructor') ? 2 : 0;
+        r += (C.prototype.constructor !== C.constructor) ? 4 : 0;
+        __r = r;
+      `),
+    ).toBe(7);
+  });
+
+  it("RED on base (illegal cast): both reads through an untyped helper (node 1)", async () => {
+    expect(
+      await runProbe(`
+        function notSame(a, b) { if (a === b) throw new Error("same"); return true; }
+        var C = class { static get constructor() {} static set constructor(_) {} constructor() {} };
+        var r = 0;
+        try { notSame(C.prototype.constructor, C.constructor); r += 1; } catch (e) { r += 100; }
+        __r = r;
+      `),
+    ).toBe(1);
+  });
+
+  it("RED on base (illegal cast / 0): the getter's value, and C.prototype.constructor is still C (node 3)", async () => {
+    expect(
+      await runProbe(`
+        class C { static get constructor() { return 9; } }
+        var r = (C.constructor === 9) ? 1 : 0;
+        r += (C.prototype.constructor === C) ? 2 : 0;
+        __r = r;
+      `),
+    ).toBe(3);
+  });
+});
