@@ -25,6 +25,7 @@ import {
 import type { Instr, ValType } from "../../ir/types.js";
 import { compileArrayMethodCall, resolveArrayInfo, tryCompileDynViewSpeciesMethodCall } from "../array-methods.js";
 import { compileArrayConcatNativeSpec } from "../array-concat-spec.js";
+import { reserveBoolMethodString } from "./bool-to-locale-string.js"; // (#6771 S6)
 import { inheritedBuiltinReceiverType } from "../builtin-subclass-receiver.js"; // (#6651 C5)
 import { isWiredTypedArrayViewName } from "../array-object-proto.js";
 import { ensureWrapperProtoDynamicMember } from "../wrapper-proto-dynamic-demand.js"; // (#4619)
@@ -267,6 +268,8 @@ import { ensureTaToStringHelper, taToStringApplies } from "../ta-to-string.js"; 
 import { reserveTaToLocaleString, taToLocaleStringApplies } from "../to-locale-string-element.js"; // (#6651 TA1)
 import { isHostResolvedBuiltinReceiver } from "../standalone-unavailable-globals.js"; // (#1472)
 import { guardedCastBackup, publishNonInstanceSuperReceiver } from "./super-receiver-publish.js"; // (#5350 r2)
+import { tryEmitPrimitiveToLocaleStringInvoke } from "../object-model/object-proto-to-locale-string.js"; // (#6770 S5)
+import { tryEmitTaggedToStringInvoke } from "../object-proto-symbol-tag.js"; // (#6770 S6)
 import {
   BUILTIN_CLASS_NAMES,
   coerceNumberMethodArgToF64,
@@ -876,6 +879,9 @@ export function compileReceiverMethodCall(
     );
     if (__r !== undefined) return __r;
   }
+  // (#6770 S5) §20.1.3.5 Invoke(<primitive>, "toString") after a wrapper `toString` override.
+  const primitiveToLocaleString = tryEmitPrimitiveToLocaleStringInvoke(ctx, fctx, expr, propAccess);
+  if (primitiveToLocaleString !== undefined) return primitiveToLocaleString;
 
   if (ctx.standalone && propAccess.name.text === "concat" && ts.isIdentifier(propAccess.expression)) {
     const text = propAccess.getSourceFile().text;
@@ -3760,6 +3766,14 @@ export function compileReceiverMethodCall(
   // Boolean method calls: bool.toString(), bool.valueOf()
   if (isBooleanType(receiverType)) {
     const method = propAccess.name.text;
+    // (#6771 S6) An overridden `Boolean.prototype.toString`/`.toLocaleString`
+    // is Invoked on the primitive (bool-to-locale-string.ts); else the fold.
+    if (expr.arguments.length === 0 && reserveBoolMethodString(ctx, fctx, expr, method) !== undefined) {
+      const recvType = compileExpression(ctx, fctx, propAccess.expression, { kind: "i32" });
+      if (recvType && recvType.kind !== "i32") coerceType(ctx, fctx, recvType, { kind: "i32" });
+      fctx.body.push({ op: "call", funcIdx: reserveBoolMethodString(ctx, fctx, expr, method)! });
+      return { kind: "externref" };
+    }
     if (method === "toString") {
       compileExpression(ctx, fctx, propAccess.expression);
       return emitBoolToString(ctx, fctx);
@@ -3908,6 +3922,8 @@ export function compileReceiverMethodCall(
 
     // For externref values (e.g. RegExp.exec result, host objects), delegate to JS toString
     if (wasm.kind === "externref") {
+      const tagged = tryEmitTaggedToStringInvoke(ctx, fctx, propAccess.expression, expr); // (#6770 S6)
+      if (tagged !== undefined) return tagged;
       const toStrIdx = ensureLateImport(ctx, "__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }]);
       flushLateImportShifts(ctx, fctx);
       if (toStrIdx !== undefined) {

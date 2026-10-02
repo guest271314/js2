@@ -62,10 +62,12 @@ import { isStandaloneUnavailableConstructorGlobal } from "./standalone-unavailab
 import { ensureFunctionNativeProtoGlue } from "./array-object-proto.js";
 import { emitLazyNativeProtoGet } from "./native-proto.js";
 import * as tf from "./typeof-static-folds.js";
+import { strictWrapperThisTypeofIsDynamic } from "./object-model/object-proto-to-locale-string.js";
 import { classIdentityFromExpression, hasClassStaticMethod } from "./class-static-metadata.js";
 import { identifierHasExplicitHostAmbientValueDeclaration } from "./expressions/identifier-module-storage.js";
 import { maybeRecordArrayProtoIteratorTombstone } from "./expressions/proto-override.js";
 import { isStandaloneUnavailableTimerGlobal } from "./standalone-timers.js";
+import { strictThisMayBePrimitive } from "./expressions/bool-to-locale-string.js"; // (#6771 S6)
 
 // (#2726 group (b), partial) The only value properties of the global object with
 // `[[Configurable]]: false` (ECMA-262 §19.1). `delete <bareIdentifier>` of any of
@@ -1913,6 +1915,7 @@ export function compileTypeofExpression(
   if (operand.kind === ts.SyntaxKind.ThisKeyword && fctx.directEvalSloppyThisFallback !== undefined) {
     forceRuntimeTypeof = true;
   }
+  if (strictWrapperThisTypeofIsDynamic(ctx, operand, tsType)) forceRuntimeTypeof = true; // (#6770 S5)
   {
     let bareTdz: ts.Expression = operand;
     while (
@@ -1969,6 +1972,8 @@ export function compileTypeofExpression(
     if (!forceRuntimeTypeof && typeofFoldUnsoundForJsParam(ctx, bareTdz)) {
       forceRuntimeTypeof = true;
     }
+    // (#6771 S6) Strict `this` typed as a primitive WRAPPER may be the primitive.
+    if (!forceRuntimeTypeof && strictThisMayBePrimitive(ctx, bareTdz, tsType)) forceRuntimeTypeof = true;
     // (#4491) Read before the binding's own `var x = <init>` statement runs —
     // the hoisted binding still holds `undefined` (see readPrecedesVarInitializer).
     if (!forceRuntimeTypeof && readPrecedesVarInitializer(ctx, fctx, bareTdz)) {
@@ -2063,6 +2068,7 @@ export function compileTypeofExpression(
     // constructor's write, so the fold ignores every OTHER write reaching the
     // field. Killed on a PROVEN write-kind contradiction only.
     if (staticResult !== null && !typeofFoldContradictedByFieldVerdict(ctx, operand, staticResult)) {
+      tf.emitTypeofTdzGuard(ctx, fctx, operand); // (#6798) the fold must still throw in the TDZ
       // (#5312) An uninitialised declared field holds `undefined` until
       // something writes it, so the fold is only half the answer.
       const uninitialised = emitUninitialisedFieldTypeofString(ctx, fctx, operand, staticResult);
@@ -2326,6 +2332,7 @@ export function compileTypeofComparison(
   if (staticTypeof !== null && runtimeEvalMayRebindIdentifier(ctx, fctx, operand)) {
     staticTypeof = null;
   }
+  if (strictWrapperThisTypeofIsDynamic(ctx, operand, tsType)) staticTypeof = null; // (#6770 S5)
   if (
     staticTypeof !== null &&
     ts.isIdentifier(guardOperand) &&
@@ -2433,6 +2440,7 @@ export function compileTypeofComparison(
     staticTypeof = null;
   }
   if (staticTypeof !== null) {
+    tf.emitTypeofTdzGuard(ctx, fctx, operand); // (#6798) the fold must still throw in the TDZ
     // (#5312) Same runtime null test as the plain `typeof` arm, reduced to the
     // boolean the comparison wants.
     const uninitialised = emitUninitialisedFieldTypeofComparison(ctx, fctx, operand, staticTypeof, stringLiteral, isEq);
