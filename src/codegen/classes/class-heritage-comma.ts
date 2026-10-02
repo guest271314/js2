@@ -19,9 +19,9 @@
  * dynamic parent registration (`emitRegisterDynamicClassParent`) and is left
  * byte-identical.
  */
-import { ts } from "../ts-api.js";
-import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { bindingIsUniqueAndNeverWritten } from "./class-heritage-check.js";
+import { ts } from "../../ts-api.js";
+import type { CodegenContext, FunctionContext } from "../context/types.js";
+import { bindingIsUniqueAndNeverWritten } from "../helpers/core-delegates.js"; // (#6797) keeps this leaf out of the codegen SCC
 
 function stripParens(expr: ts.Expression): ts.Expression {
   let current = expr;

@@ -26,8 +26,8 @@ import { emitCachedResolvedThis, recordResolvedThis } from "../receiver-cse.js";
 import { emitLazyClassObjectGet } from "./extern.js";
 import { compileIdentifier } from "./identifiers.js";
 import { tryEmitObjectLiteralMethodReceiverValue } from "../method-receiver-this.js"; // (#6651 A11)
-import { emitUninitializedThisGuard } from "../derived-ctor-this-guard.js"; // (#6772 S1b)
-import { tryEmitDerivedEffectiveThis } from "../ctor-return-override.js"; // (#6772 S2)
+import { emitUninitializedThisGuard } from "../classes/derived-ctor-this-guard.js"; // (#6772 S1b)
+import { tryEmitDerivedEffectiveThis } from "../classes/ctor-return-override.js"; // (#6772 S2)
 import { readEnv } from "../../env.js";
 
 export function compileThisKeyword(

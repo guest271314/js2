@@ -18,11 +18,11 @@
  *
  * Standalone only; everything is a no-op outside a derived constructor.
  */
-import { forEachChild, ts } from "../ts-api.js";
-import { allocLocal } from "./context/locals.js";
-import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { emitThrowReferenceError } from "./js-errors.js";
-import { resolveEnclosingClassName, skipTransparentExpressions } from "./shared.js";
+import { forEachChild, ts } from "../../ts-api.js";
+import { allocLocal } from "../context/locals.js";
+import type { CodegenContext, FunctionContext } from "../context/types.js";
+import { buildThrowJsErrorInstrs } from "../helpers/core-delegates.js"; // (#6797) keeps this leaf out of the codegen SCC
+import { resolveEnclosingClassName, skipTransparentExpressions } from "../shared.js";
 
 const UNINITIALIZED_THIS_MESSAGE =
   "Must call super constructor in derived class before accessing 'this' or returning from derived constructor";
@@ -380,4 +380,9 @@ export function constructorFrameClassName(ctx: CodegenContext, fctx: FunctionCon
     }
   }
   return resolveEnclosingClassName(fctx);
+}
+
+/** `emitThrowReferenceError` (js-errors.ts) through the core delegates. */
+function emitThrowReferenceError(ctx: CodegenContext, fctx: FunctionContext, message: string): void {
+  fctx.body.push(...buildThrowJsErrorInstrs(ctx, "ReferenceError", message, { flush: fctx }));
 }

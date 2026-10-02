@@ -60,7 +60,7 @@ import { typedArrayCtorArgIsArithmeticPrimitive } from "../expressions/typed-arr
 import { compileArrayDestructuring, compileObjectDestructuring } from "./destructuring.js";
 import { compileNestedClassDeclaration, emitUnresolvedComputedAccessorNameEffects } from "./nested-declarations.js";
 import { emitStandaloneHeritageCheck } from "../class-heritage-check.js"; // (#5195 r3-5)
-import { emitStandaloneCommaHeritageEffects } from "../class-heritage-comma.js"; // (#6772 S6)
+import { emitStandaloneCommaHeritageEffects } from "../classes/class-heritage-comma.js"; // (#6772 S6)
 import { emitLocalTdzInit, emitTdzInit } from "./tdz.js";
 import { ensureNativeStringHelpers, flatStringType } from "../native-strings.js";
 import { compileStringBuilderInit } from "../string-builder.js";

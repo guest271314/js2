@@ -110,7 +110,11 @@ import { closureBagInitInstr } from "./closures/closure-header-layout.js";
 
 // Property access + binary ops (used inside compileExpressionInner)
 import { brandBooleanBinaryResult, compileBinaryExpression } from "./binary-ops.js";
-import { compileArrayLiteral, compileObjectLiteral } from "./literals.js";
+import { compileArrayLiteral, compileObjectLiteral, compileObjectLiteralAsExternref } from "./literals.js";
+import { classIdentityFromExpression } from "./class-static-metadata.js"; // (#6772) core delegate
+import { sourceClassForCallee } from "./class-call-without-new.js"; // (#6772) core delegate
+import { runtimeEvalMayReplaceCallee, unwrapCallee } from "./expressions/calls-guards.js"; // (#6772) core delegate
+import { bindingIsUniqueAndNeverWritten } from "./class-heritage-check.js"; // (#6772) core delegate
 import { compileElementAccess, compilePropertyAccess, maybeWrapAnyReadEqualityCarrier } from "./property-access.js";
 import { tryEmitLinkedStaticComputedRead } from "./standalone-linked-static-inheritance.js"; // (#6644)
 import { notePromiseDynamicMemberRead } from "./promise-dynamic-member-read.js"; // (#6651 D5)
@@ -1729,10 +1733,13 @@ registerFlushLateImportShifts(flushLateImportShifts);
 // (#6797) Same idea for the leaves under array/ etc. that core modules call.
 registerCoreDelegates({
   addStringConstantGlobal,
+  bindingIsUniqueAndNeverWritten,
   buildArrayLikeToLengthFromExternref,
   buildThrowJsErrorInstrs,
   canonicalUndefinedExternInstrs,
   clampRelative,
+  classIdentityFromExpression,
+  compileObjectLiteralAsExternref,
   emitArrayIsArrayExternrefPredicate,
   emitArraySetLengthValidation,
   emitBuiltinNamespaceObject,
@@ -1742,6 +1749,9 @@ registerCoreDelegates({
   protoIndexBrandCompanionHasInstrs,
   requireObjectCoercible,
   resolveSliceDeps,
+  runtimeEvalMayReplaceCallee,
+  sourceClassForCallee,
   sourceOverridesBuiltinPrototypeMember,
   stringConstantExternrefInstrs,
+  unwrapCallee,
 });

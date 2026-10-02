@@ -73,7 +73,7 @@ import { collectClassDeclaration, compileClassBodies, type ClassBodyCompileRouti
 import { shouldCollectTopLevelClassForRuntimeHeritage } from "./class-expression-identity.js";
 import { classHasUnresolvedComputedMemberName, classHierarchyHasDynamicMember } from "./class-dynamic-keys.js"; // (#5195 Step 1 / R2-3)
 import { classHasComputedKeyAssignment } from "./class-member-keys.js"; // (#6772 S5)
-import { standaloneCommaHeritage } from "./class-heritage-comma.js"; // (#6772 S6)
+import { standaloneCommaHeritage } from "./classes/class-heritage-comma.js"; // (#6772 S6)
 import { routeTopLevelClassBodies } from "./prepared-class-body-cutover.js";
 import {
   collectBindingPatternNames,

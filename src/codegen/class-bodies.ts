@@ -28,7 +28,7 @@ import { emitPromiseSubclassProtoLink, isStandalonePromiseSuperForwarder } from 
 // declarations/expressions (the drive gate self-limits to standalone/wasi).
 import { emitAsyncGenerator, isAsyncGenDriveCandidate } from "./async-frame.js";
 import { genBodyReferencesThis, genBodyReferencesSuper, emitCachedFuncClosureAccess } from "./closures.js"; // (#3132 / #3123 fnctor parent closure)
-import { standaloneCommaHeritage } from "./class-heritage-comma.js"; // (#6772 S6)
+import { standaloneCommaHeritage } from "./classes/class-heritage-comma.js"; // (#6772 S6)
 import { classMemberFuncKey, classMemberRestParamKey, fnctorAncestorOfClass } from "./class-member-keys.js"; // (#1983 / #3123 / #6699)
 import { dynamicClassKeyGlobalKey, dynamicClassMemberName, isDynamicClassMemberName } from "./class-dynamic-keys.js"; // (#5195 Step 1 / F1)
 import { recordFnMetaMemberDeclaration } from "./function-instance-meta-methods.js"; // (#4440)
@@ -49,12 +49,12 @@ import {
   emitSuperCallBindThis,
   emitSuperInitializedFlagStore,
   ensureSuperInitializedFlagLocal,
-} from "./derived-ctor-this-guard.js"; // (#5350 r3 / #6772 S1b) runtime this-initialised flag
+} from "./classes/derived-ctor-this-guard.js"; // (#5350 r3 / #6772 S1b) runtime this-initialised flag
 import {
   emitCtorFallthroughOverride,
   emitSaveParentOverride,
   markCtorReturnOverrideClass,
-} from "./ctor-return-override.js"; // (#6772 S2)
+} from "./classes/ctor-return-override.js"; // (#6772 S2)
 import { popBody, pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, deduplicateLocals } from "./context/locals.js";

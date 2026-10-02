@@ -164,9 +164,9 @@ import {
 } from "./extern.js";
 import { standaloneClassProtoObjectApplies } from "../class-proto-object.js"; // (#5350 step 1) class [[HomeObject]] gate
 import { emitStandaloneHeritageCheck } from "../class-heritage-check.js"; // (#5195 r3-5)
-import { emitStandaloneCommaHeritageEffects } from "../class-heritage-comma.js"; // (#6772 S6)
-import { emitSuperUninitializedThisCheck, emitUninitializedThisGuard } from "../derived-ctor-this-guard.js"; // (#6772 S1b)
-import { emitNewSiteOverrideSelect } from "../ctor-return-override.js"; // (#6772 S2)
+import { emitStandaloneCommaHeritageEffects } from "../classes/class-heritage-comma.js"; // (#6772 S6)
+import { emitSuperUninitializedThisCheck, emitUninitializedThisGuard } from "../classes/derived-ctor-this-guard.js"; // (#6772 S1b)
+import { emitNewSiteOverrideSelect } from "../classes/ctor-return-override.js"; // (#6772 S2)
 import { compileTemporalNewExpression } from "../temporal-native.js";
 import {
   emitSuperUninitializedThisGuard,

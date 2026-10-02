@@ -24,10 +24,10 @@ import { sourceShadowsGlobalName } from "../source-function-members.js"; // (#51
 import { allocLocal } from "../context/locals.js"; // (#6609)
 import { popBody, pushBody } from "../context/bodies.js"; // (#6630 fallback)
 import { isStandaloneBaseClassOrPrototype } from "../class-proto-object.js"; // (#6767 step 2)
-import { tryEmitOverrideBindingGetPrototypeOf } from "../ctor-return-override.js"; // (#6772 S2)
+import { tryEmitOverrideBindingGetPrototypeOf } from "../classes/ctor-return-override.js"; // (#6772 S2)
 import { classIdentityFromExpression } from "../class-static-metadata.js"; // (#6772 S6)
 import { bindingIsUniqueAndNeverWritten } from "../class-heritage-check.js"; // (#6772 S6)
-import { heritageBindsParentClass } from "../class-heritage-comma.js"; // (#6772 S6)
+import { heritageBindsParentClass } from "../classes/class-heritage-comma.js"; // (#6772 S6)
 import { emitLazyClassObjectGet } from "./extern.js"; // (#6772 S6)
 import { arrayTypedValueMayNotBeArray } from "../proxy-array-like.js"; // (#6651 H6)
 

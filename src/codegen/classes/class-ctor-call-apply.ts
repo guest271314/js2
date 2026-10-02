@@ -15,13 +15,17 @@
  * Narrowing is `sourceClassForCallee`'s: an ambient (`.d.ts`) class models a
  * callable builtin and declines, as does an optional call.
  */
-import { ts } from "../ts-api.js";
-import type { ValType } from "../ir/types.js";
-import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { sourceClassForCallee } from "./class-call-without-new.js";
-import { runtimeEvalMayReplaceCallee, unwrapCallee } from "./expressions/calls-guards.js";
-import { emitThrowTypeError } from "./js-errors.js";
-import { compileExpression } from "./shared.js";
+import { ts } from "../../ts-api.js";
+import type { ValType } from "../../ir/types.js";
+import type { CodegenContext, FunctionContext } from "../context/types.js";
+// (#6797) core helpers through the late-bound delegates, so this leaf stays out of the codegen SCC.
+import {
+  buildThrowJsErrorInstrs,
+  runtimeEvalMayReplaceCallee,
+  sourceClassForCallee,
+  unwrapCallee,
+} from "../helpers/core-delegates.js";
+import { compileExpression } from "../shared.js";
 
 /**
  * Does the class, or a source-class ancestor, declare a STATIC member named
@@ -68,7 +72,8 @@ export function tryEmitClassCtorCallApply(
     if (argType) fctx.body.push({ op: "drop" });
   }
   const name = classDecl.name?.text;
-  emitThrowTypeError(ctx, fctx, `Class constructor ${name ?? ""} cannot be invoked without 'new'`.replace("  ", " "));
+  const message = `Class constructor ${name ?? ""} cannot be invoked without 'new'`.replace("  ", " ");
+  fctx.body.push(...buildThrowJsErrorInstrs(ctx, "TypeError", message, { flush: fctx }));
   fctx.body.push({ op: "ref.null.extern" });
   return { kind: "externref" };
 }

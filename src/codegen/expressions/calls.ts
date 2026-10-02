@@ -41,7 +41,7 @@ import { expectedArgumentCountOfParams } from "../function-expected-argument-cou
 import { reshapeFunctionCtorReflectiveCall } from "../function-ctor-reflective-call.js"; // (#4483) Function.call/apply → Function(…)
 import { tryEmitApplyArgArrayTypeError } from "../apply-arglist-typeerror.js"; // (#4483) §20.2.3.1 step 4 primitive argArray
 import { tryEmitClassConstructorCallWithoutNew } from "../class-call-without-new.js"; // (#4483) §10.2.1 step 2
-import { tryEmitClassCtorCallApply } from "../class-ctor-call-apply.js"; // (#6772 S3)
+import { tryEmitClassCtorCallApply } from "../classes/class-ctor-call-apply.js"; // (#6772 S3)
 import { buildClosureResultBoxing } from "../closures/result-boxing.js"; // (#4082) the single closure-result→externref decision
 import { emitCollectionIteratorVec, ensureMapGroupBy } from "../map-runtime.js"; // (#42) native Set/Map → vec, shared with spread / Array.from; (#3149) native Map.groupBy
 import { isCollectionReflectiveCallShape, tryCompileCollectionReflectiveCall } from "../collections-brand.js"; // (#2604/#3171) {Map,Set,WeakMap,WeakSet}.prototype.METHOD.call brand-check
@@ -511,8 +511,8 @@ import {
   tryCompileCollectionCtorCallWithoutNew,
 } from "./new-builtin-globals.js";
 import { compileSuperElementMethodCall, compileSuperMethodCall } from "./new-super.js";
-import { constructorFrameClassName, emitSuperCallBindThis } from "../derived-ctor-this-guard.js"; // (#6772 S1b)
-import { emitSaveParentOverride } from "../ctor-return-override.js"; // (#6772 S2)
+import { constructorFrameClassName, emitSuperCallBindThis } from "../classes/derived-ctor-this-guard.js"; // (#6772 S1b)
+import { emitSaveParentOverride } from "../classes/ctor-return-override.js"; // (#6772 S2)
 import { compileIdentifierCall } from "./call-identifier.js";
 import { compileBuiltinStaticCall, tryCompileFromCharCodeFamilyReflective } from "./call-builtin-static.js";
 import { compileNamespaceStaticCall } from "./call-namespace-static.js";

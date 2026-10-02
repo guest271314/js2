@@ -63,7 +63,7 @@ import { addStringConstantGlobal } from "../registry/imports.js";
 import { coerceType, compileExpression, resolveEnclosingClassName, VOID_RESULT, type InnerResult } from "../shared.js";
 import { emitToPropertyKeyOnce } from "./computed-member-reference.js";
 import { ensureLateImport, flushLateImportShifts } from "./late-imports.js";
-import { emitSuperUninitializedThisCheck } from "../derived-ctor-this-guard.js"; // (#6772 S1b) moved from new-super
+import { emitSuperUninitializedThisCheck } from "../classes/derived-ctor-this-guard.js"; // (#6772 S1b) moved from new-super
 import {
   classSuperRefEmitters,
   enclosingClassExtendsNull,

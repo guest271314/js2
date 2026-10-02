@@ -43,7 +43,7 @@ import {
 import { definedFuncAt } from "../func-space.js"; // (#1916 S2) positional-read chokepoint
 import { emitUndefined } from "../expressions/late-imports.js";
 import { emitConstructReturnSelect } from "../construct-return-value.js"; // (#4464)
-import { emitCtorBareReturnOverride, tryEmitCtorOverrideReturn } from "../ctor-return-override.js"; // (#6772 S2)
+import { emitCtorBareReturnOverride, tryEmitCtorOverrideReturn } from "../classes/ctor-return-override.js"; // (#6772 S2)
 import {
   emitHostTypedArrayCarrierRegistration,
   isHostTypedArrayCarrierName,

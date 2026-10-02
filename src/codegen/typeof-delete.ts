@@ -66,7 +66,7 @@ import { classIdentityFromExpression, hasClassStaticMethod } from "./class-stati
 import { identifierHasExplicitHostAmbientValueDeclaration } from "./expressions/identifier-module-storage.js";
 import { maybeRecordArrayProtoIteratorTombstone } from "./expressions/proto-override.js";
 import { isStandaloneUnavailableTimerGlobal } from "./standalone-timers.js";
-import { isReturnOverrideMemberRead } from "./ctor-return-override.js"; // (#6772 S2)
+import { isReturnOverrideMemberRead } from "./classes/ctor-return-override.js"; // (#6772 S2)
 import { strictThisMayBePrimitive } from "./expressions/bool-to-locale-string.js"; // (#6771 S6)
 
 // (#2726 group (b), partial) The only value properties of the global object with

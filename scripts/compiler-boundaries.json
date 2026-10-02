@@ -3868,7 +3868,7 @@
       "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."
     },
     {
-      "path": "src/codegen/class-ctor-call-apply.ts",
+      "path": "src/codegen/classes/class-ctor-call-apply.ts",
       "state": "unmigrated",
       "layer": "mixed-needs-split",
       "destination": "backend-wasmgc",
@@ -3916,7 +3916,7 @@
       "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."
     },
     {
-      "path": "src/codegen/class-heritage-comma.ts",
+      "path": "src/codegen/classes/class-heritage-comma.ts",
       "state": "unmigrated",
       "layer": "mixed-needs-split",
       "destination": "backend-wasmgc",
@@ -4452,7 +4452,7 @@
       "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."
     },
     {
-      "path": "src/codegen/ctor-return-override.ts",
+      "path": "src/codegen/classes/ctor-return-override.ts",
       "state": "unmigrated",
       "layer": "mixed-needs-split",
       "destination": "backend-wasmgc",
@@ -4772,7 +4772,7 @@
       "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."
     },
     {
-      "path": "src/codegen/derived-ctor-this-guard.ts",
+      "path": "src/codegen/classes/derived-ctor-this-guard.ts",
       "state": "unmigrated",
       "layer": "mixed-needs-split",
       "destination": "backend-wasmgc",

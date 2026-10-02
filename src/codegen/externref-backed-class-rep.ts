@@ -36,7 +36,7 @@
 import type { ts } from "../ts-api.js";
 import type { ValType } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
-import { isCtorReturnOverrideClass } from "./ctor-return-override.js";
+import { isCtorReturnOverrideClass } from "./classes/ctor-return-override.js";
 
 /**
  * `{ kind: "externref" }` when `sym` names an externref-backed user class,

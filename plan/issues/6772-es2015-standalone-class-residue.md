@@ -53,13 +53,20 @@ loc-budget-allow:
   # `new` / `init` resolves to its relocated slot, not the allocator; prettier
   # wraps each lookup onto three lines (+4, no new logic).
   - src/codegen/expressions/call-receiver-method.ts
-  # NEW leaves (register each in scripts/compiler-boundaries.json, see Lane protocol)
-  - src/codegen/derived-ctor-this-guard.ts
-  - src/codegen/ctor-return-override.ts
-  - src/codegen/class-ctor-call-apply.ts
-  - src/codegen/class-heritage-runtime-get.ts
-  - src/codegen/class-static-accessor-keys.ts
-  - src/codegen/class-heritage-comma.ts # 2026-10-01 (#6772 S6, Opus implementation): comma-heritage peel + parent-binding proof
+  # 2026-10-02 (#6772 merge of origin/main ce6631272c, Opus implementation):
+  # #6797's flat-dir budget and import-cycle ratchet. The class leaves moved to
+  # src/codegen/classes/ and reach the SCC helpers they need through the
+  # late-bound core delegates; expressions.ts registers them (+5 imports, +6
+  # registry entries), core-delegates.ts declares them (+6 types / wrappers).
+  - src/codegen/expressions.ts
+  - src/codegen/helpers/core-delegates.ts
+  # NEW leaves, under src/codegen/classes/ (register each in scripts/compiler-boundaries.json, see Lane protocol)
+  - src/codegen/classes/derived-ctor-this-guard.ts
+  - src/codegen/classes/ctor-return-override.ts
+  - src/codegen/classes/class-ctor-call-apply.ts
+  - src/codegen/classes/class-heritage-runtime-get.ts
+  - src/codegen/classes/class-static-accessor-keys.ts
+  - src/codegen/classes/class-heritage-comma.ts # 2026-10-01 (#6772 S6, Opus implementation): comma-heritage peel + parent-binding proof
   - scripts/compiler-boundaries.json
 func-budget-allow:
   # 2026-09-30 (#6772 plan): one-to-four-line call sites inside functions
@@ -819,7 +826,7 @@ shared lock.
 | S3 | `75220d3415` | p5c 0 -> 15 (15); s3a COMPILE-FAIL -> 2 (2); guards s3b 31 (31), p5d 21 | `arguments/default-constructor.js` |
 | S4 | `d2fd895a37` | p9 / p9b / p9e invalid Wasm -> 42 (42), p9c invalid -> 7 (7), p9d invalid -> 127 (127), p9f invalid -> 63 (63), t9 (typed, IR-claimed) IR compile error -> 50 (both lanes); guard s4i 3 (3) | `{statements,expressions}/class/ident-name-method-def-new-escaped.js` |
 | S5 | `9368ba74f9` | p6 14 -> 15 (15); s5/a 0 -> 1, s5/b 0 -> 2, s5/e 0 -> 1, s5/g 0 -> 1, s5/h (member order) 0 -> 1 (node equal); host lane p6 14 -> 15 too | the four `cpn-class-{decl,expr}[-accessors]-computed-property-name-from-assignment-expression-assignment.js` |
-| S6 | (this step) | p11 COMPILE-FAIL -> 15 (15); p11b COMPILE-FAIL -> 1015 (1015); p11d 448 -> 1023 (1023); p11g 2 -> 15 (15); p11c (plain `extends C`) 11 -> 15; guard p11e 0 -> 0 (declines; node 7) | `definition/side-effects-in-extends.js` |
+| S6 | `a086bbecc4` | p11 COMPILE-FAIL -> 15 (15); p11b COMPILE-FAIL -> 1015 (1015); p11d 448 -> 1023 (1023); p11g 2 -> 15 (15); p11c (plain `extends C`) 11 -> 15; guard p11e 0 -> 0 (declines; node 7) | `definition/side-effects-in-extends.js` |
 
 S2 design note (deviates from the plan's "set only on an object return"):
 `$__ctor_override` is a RETURN REGISTER written on EVERY exit of a marked
@@ -907,3 +914,21 @@ flipped to the fixed expectation. `check:ir-fallbacks` unchanged. Unrelated
 pre-existing defect seen while probing (not fixed): a heterogeneous array
 literal returned from a function loses its number elements (`[true, 7, 1]`,
 p11h bit 8, base and branch).
+
+Merge 2026-10-02 (origin/main `ce6631272c`, #6771/#6773/#6774/#6775 and
+#6797's gates): three import-only conflicts, both sides kept. #6797's two
+new gates failed on the plain merge — `src/codegen/*.ts` 829 -> 833 and the
+largest import SCC 697 -> 702 (the four leaves plus
+`externref-backed-class-rep.ts`, which imports `ctor-return-override`). Fix
+(no baseline edit): the leaves moved to `src/codegen/classes/`, and the SCC
+helpers they call (`classIdentityFromExpression`,
+`compileObjectLiteralAsExternref`, `sourceClassForCallee`,
+`runtimeEvalMayReplaceCallee`, `unwrapCallee`,
+`bindingIsUniqueAndNeverWritten`) go through `helpers/core-delegates.ts`,
+registered by `expressions.ts`; the throws use the existing
+`buildThrowJsErrorInstrs` delegate and the late imports the `shared.ts`
+twins. Gates after: SCC 697, flat 829/829, all others green. S6 re-checked on
+the merged tree (not by the earlier run): p11 15, p11b 1015, p11c 15, p11d
+1023, p11g 15, p11e 0 — as recorded; `side-effects-in-extends.js` passes;
+pin file 34/34 at fork heap 1024. Plan prose below still names the old flat
+paths; the S11/S12 leaves go under `classes/` too.

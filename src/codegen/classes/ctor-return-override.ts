@@ -30,16 +30,25 @@
  * a child collected first is not retro-marked (its bindings may already be
  * typed) — recorded residual.
  */
-import { forEachChild, ts } from "../ts-api.js";
-import type { Instr, ValType } from "../ir/types.js";
-import { findConstructorImplementation } from "./ast-modifiers.js";
-import { classIdentityFromExpression } from "./class-static-metadata.js";
-import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
-import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { ensureLateImport, flushLateImportShifts } from "./expressions/late-imports.js";
-import { buildThrowJsErrorInstrs } from "./js-errors.js";
-import { compileObjectLiteralAsExternref } from "./literals.js";
-import { compileExpression, coerceType, resolveEnclosingClassName, skipTransparentExpressions } from "./shared.js";
+import { forEachChild, ts } from "../../ts-api.js";
+import type { Instr, ValType } from "../../ir/types.js";
+import { findConstructorImplementation } from "../ast-modifiers.js";
+import { allocLocal, allocTempLocal, releaseTempLocal } from "../context/locals.js";
+import type { CodegenContext, FunctionContext } from "../context/types.js";
+// (#6797) core helpers through the late-bound delegates, so this leaf stays out of the codegen SCC.
+import {
+  buildThrowJsErrorInstrs,
+  classIdentityFromExpression,
+  compileObjectLiteralAsExternref,
+} from "../helpers/core-delegates.js";
+import {
+  compileExpression,
+  coerceType,
+  ensureLateImport,
+  flushLateImportShifts,
+  resolveEnclosingClassName,
+  skipTransparentExpressions,
+} from "../shared.js";
 
 const EXTERNREF: ValType = { kind: "externref" };
 const I32: ValType = { kind: "i32" };
