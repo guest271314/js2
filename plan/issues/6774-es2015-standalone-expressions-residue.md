@@ -1255,3 +1255,20 @@ Landed partially at the project lead's request; the issue stays
   object/method-definition, dstr rest patterns) did not finish before
   landing (container restarts killed two runs); the merge-queue test262
   gates (per-edition ES5 ratchet) are the authoritative check.
+
+#### 2026-10-02 — S7 control and merge-queue park (PR #6414)
+
+- **S7 control (measured):** 2,225 rows (eval-code/direct, arguments-object,
+  function-code, rest-parameters, object/method-definition, the dstr
+  rest-pattern rows, the `scope-*param*` matrix), in-process standalone, base
+  `4bd388bf` vs branch `e454227b`: **0 regressions, 14 gains** (153 → 139
+  non-pass; every gain is a `scope-*param*-var-*` row).
+- **merge_group park (run 36962286472)**, two causes, both from earlier steps:
+  - host trap ratchet — S6's open-literal element-call arm was not gated to
+    standalone; `computed-property-names/object/method/number.js` (host:
+    already failing) moved `illegal cast` → `null deref`. Gated (`e33714c8`).
+  - standalone guard (181 pass→other, net −97) — bisected to S15
+    (`4bd388bf`): every well-known-symbol accessor got the symbol-carrier key,
+    breaking iterator-protocol lookups (`yield*` not-callable family). Narrowed
+    to `@@unscopables` (`dfce7588`); all 208 main-passing rows with a
+    well-known-symbol accessor pass locally.
