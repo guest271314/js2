@@ -65,15 +65,51 @@ import { methodBodyUsesSuper } from "./generators-native-ast-scan.js";
 import { emitUnboundThis } from "./helpers/sloppy-this-global.js";
 
 /**
- * For the factory of a native class generator METHOD (`funcName` keys
+ * For the factory of a native generator METHOD (`funcName` keys
  * `ctx.nativeGenerators`, synthesized receiver param): does the generator body
- * use its receiver (`this`, `super`, or a direct eval)? `undefined` for every
+ * use its receiver? A class method answers from its body (`this`, `super`, or a
+ * direct eval). (#6789) An object-literal method answers `false`: its factory
+ * only stores the receiver, and the resume function reads a bare `this` from
+ * the strictness alone (the object-literal half above). `undefined` for every
  * other function — the caller keeps its compiled-body scan.
  */
-export function classGeneratorMethodReadsReceiver(ctx: CodegenContext, funcName: string): boolean | undefined {
+export function generatorMethodReadsReceiver(ctx: CodegenContext, funcName: string): boolean | undefined {
   const info = ctx.nativeGenerators.get(funcName);
-  if (!info?.synthesizedThis || !ts.isClassLike(info.decl.parent) || !info.decl.body) return undefined;
+  if (!info?.synthesizedThis || !info.decl.body) return undefined;
+  if (ts.isObjectLiteralExpression(info.decl.parent)) return false;
+  if (!ts.isClassLike(info.decl.parent)) return undefined;
   return bodyReferencesOwnThis(info.decl.body) || methodBodyUsesSuper(info.decl.body);
+}
+
+/**
+ * (#6789) Does a compiled method body read its receiver (param 0)? With
+ * `guardedReadsAreSafe`, a `local.get 0` that `ref.is_null` tests is not a read,
+ * nor is anything in the `else` arm of the `if` that test feeds — that arm only
+ * runs with a receiver present, so a null one cannot trap there. The value read
+ * {@link tryEmitObjectLiteralMethodReceiverValue} emits is that shape, so the
+ * method-as-closure trampoline hands it the null receiver instead of throwing.
+ */
+export function bodyReadsReceiver(instrs: readonly Instr[], guardedReadsAreSafe: boolean): boolean {
+  for (let i = 0; i < instrs.length; i++) {
+    const instr = instrs[i]!;
+    if (instr.op === "local.get" && (instr as { index?: number }).index === 0) {
+      if (!guardedReadsAreSafe || instrs[i + 1]?.op !== "ref.is_null") return true;
+      const guard = instrs[i + 2] as { op: string; then?: Instr[] } | undefined;
+      if (guard?.op !== "if") continue;
+      if (Array.isArray(guard.then) && bodyReadsReceiver(guard.then, true)) return true;
+      i += 2; // past the `if`: its `else` arm is the present-receiver arm
+      continue;
+    }
+    for (const key of ["body", "then", "else", "catchAll"] as const) {
+      const nested = (instr as Record<string, unknown>)[key];
+      if (Array.isArray(nested) && bodyReadsReceiver(nested, guardedReadsAreSafe)) return true;
+    }
+    const catches = (instr as { catches?: { body?: Instr[] }[] }).catches;
+    if (Array.isArray(catches)) {
+      for (const c of catches) if (Array.isArray(c.body) && bodyReadsReceiver(c.body, guardedReadsAreSafe)) return true;
+    }
+  }
+  return false;
 }
 
 /**
