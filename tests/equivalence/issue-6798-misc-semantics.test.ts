@@ -1,6 +1,7 @@
 // #6798 — six probe-backed semantic divergences, one `it` per slice.
 import { describe, expect, it, vi } from "vitest";
 import { compile } from "../../src/index.js";
+import { assertEquivalent } from "./helpers.js";
 
 // resolve-stage-catch: a switch the mocked `irClosureSignatureFromFunctionTypeNode`
 // (called from `resolvePositionType`'s FunctionTypeNode arm) reads to simulate a
@@ -43,5 +44,25 @@ describe("#6798 misc probe-backed semantic divergences", () => {
     } finally {
       inject.mode = "off";
     }
+  });
+
+  it("typeof-class: a class value read through any / unknown / a parameter is 'function'", async () => {
+    await assertEquivalent(
+      `
+      class K { static s(): number { return 1; } }
+      class Sub extends K {}
+      function g(v: any): string { return typeof v; }
+      export function test(): string {
+        const x: any = class {};
+        const u: unknown = K;
+        const arr: any[] = [K, Sub, new K()];
+        return [
+          typeof (class {}), typeof x, g(x), g(K), g(Sub), typeof u, g(arr[0]), g(arr[1]), g(arr[2]),
+          String(typeof x === "function"), String(typeof x === "object"), String(typeof arr[0] === "function"),
+        ].join(",");
+      }
+      `,
+      [{ fn: "test", args: [] }],
+    );
   });
 });

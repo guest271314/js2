@@ -18452,6 +18452,7 @@ assert._isSameValue = isSameValue;
           // spec answer is "function". Probe via `__is_closure` (matches the
           // discriminator used by `_maybeWrapCallableUnknownArity`).
           if (v != null && typeof v === "object" && _isWasmStruct(v)) {
+            if (_classObjectOwnPropertyNames.has(v)) return "function"; // (#6798) class object (host twin of #6420)
             const exports = callbackState?.getExports();
             const isClosureFn = exports?.__is_closure as ((x: any) => number) | undefined;
             if (typeof isClosureFn === "function") {
@@ -18973,6 +18974,7 @@ assert._isSameValue = isSameValue;
       // wired through setInstance after instantiation. Consult it for the two
       // overlapping categories; ordinary host values stay on native typeof.
       const isCompiledClosure = (value: any): boolean => {
+        if (_classObjectOwnPropertyNames.has(value)) return true; // (#6798) a class object is a constructor
         const classifier = callbackState?.getExports()?.__is_closure;
         if (typeof classifier !== "function") return false;
         try {

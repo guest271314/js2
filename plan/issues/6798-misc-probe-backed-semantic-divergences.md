@@ -21,6 +21,11 @@ origin: "2026-09-30 codebase review (plan/agent-context/claude-codebase-review-2
 loc-budget-allow:
   # 2026-10-02 resolve-stage-catch: typed demote helper + classify the catch (+4)
   - src/codegen/index.ts
+  # 2026-10-02 typeof-class: host typeof / typeof_check recognise a registered class object (+2)
+  - src/runtime.ts
+func-budget-allow:
+  # 2026-10-02 typeof-class: the two typeof arms live inside resolveImport (+2)
+  - src/runtime.ts::resolveImport
 ---
 
 # #6798 — six smaller divergences, each reproduced on the JS-host lane (2026-09-30)
