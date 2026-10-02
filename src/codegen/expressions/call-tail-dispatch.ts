@@ -1122,9 +1122,10 @@ export function compileTailDispatch(
       // Try struct method: structName_methodName
       // (#6774 S6) An open `$Object` literal binding keeps the dynamic call: the
       // closed-shape method arm would `ref.cast` it to the stale inferred struct.
-      const structTypeName = isAccessorReceiver(ctx, skipTransparentExpressions(elemAccess.expression))
-        ? undefined
-        : resolveStructName(ctx, receiverType);
+      const structTypeName =
+        ctx.standalone && isAccessorReceiver(ctx, skipTransparentExpressions(elemAccess.expression))
+          ? undefined
+          : resolveStructName(ctx, receiverType);
       if (structTypeName) {
         const fullName = `${structTypeName}_${methodName}`;
         const funcIdx = ctx.funcMap.get(fullName);
