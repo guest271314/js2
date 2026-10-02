@@ -59,6 +59,7 @@ import {
   emitCtorFallthroughOverride,
   emitSaveParentOverride,
   markCtorReturnOverrideClass,
+  tryEmitFnctorSuperOverride,
 } from "./classes/ctor-return-override.js"; // (#6772 S2)
 import { popBody, pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
@@ -76,6 +77,7 @@ import {
   emitThrowReferenceError,
   emitThrowTypeError,
   getFuncParamTypes,
+  getWasmFuncReturnType,
   wasmFuncReturnsVoid,
 } from "./expressions/helpers.js";
 import { compileSpreadCallArgsWithArguments } from "./expressions/spread-arguments-call.js";
@@ -4521,7 +4523,12 @@ export function compileSuperCall(
         }
         const finalFnctorIdx = ctx.funcMap.get(fnctorParent) ?? fnctorIdx;
         fctx.body.push({ op: "call", funcIdx: finalFnctorIdx });
-        if (!wasmFuncReturnsVoid(ctx, finalFnctorIdx)) fctx.body.push({ op: "drop" });
+        const fnctorResult = wasmFuncReturnsVoid(ctx, finalFnctorIdx)
+          ? undefined
+          : getWasmFuncReturnType(ctx, finalFnctorIdx);
+        // (#6774 S22) a returned Object becomes `this` and `super()`'s value.
+        if (fnctorResult && !tryEmitFnctorSuperOverride(ctx, fctx, fnctorParent, fnctorResult))
+          fctx.body.push({ op: "drop" });
         return;
       }
     }

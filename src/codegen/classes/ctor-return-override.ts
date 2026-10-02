@@ -33,7 +33,7 @@
 import { forEachChild, ts } from "../../ts-api.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { findConstructorImplementation } from "../ast-modifiers.js";
-import { allocLocal, allocTempLocal, releaseTempLocal } from "../context/locals.js";
+import { allocLocal, allocTempLocal, getLocalType, releaseTempLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 // (#6797) core helpers through the late-bound delegates, so this leaf stays out of the codegen SCC.
 import {
@@ -56,6 +56,8 @@ const OVERRIDE_GLOBAL = "__ctor_override";
 const DERIVED_RETURN_MESSAGE = "Derived constructors may only return an object or undefined";
 
 const markedClasses = new WeakMap<CodegenContext, Set<string>>();
+/** (#6774 S22) Top-level FUNCTION parents whose body may return an Object. */
+const fnctorOverrideParents = new WeakMap<CodegenContext, Set<string>>();
 const frameOverrideLocals = new WeakMap<FunctionContext, number>();
 
 /** Is `className` a return-override class (standalone only)? */
@@ -178,7 +180,29 @@ function isProvablyNonObjectReturn(ctx: CodegenContext, expr: ts.Expression): bo
 /** Does the class's OWN constructor body (not nested functions) return a possible Object? */
 function ctorMayReturnObject(ctx: CodegenContext, decl: ts.ClassDeclaration | ts.ClassExpression): boolean {
   const ctor = findConstructorImplementation(decl);
-  if (!ctor?.body) return false;
+  return ctor?.body !== undefined && bodyMayReturnObject(ctx, ctor.body);
+}
+
+/**
+ * (#6774 S22) `class C extends F` where `F` is a top-level FUNCTION whose own
+ * body may `return` an Object: §10.2.1.3 step 13 makes that object `super()`'s
+ * value and the derived `this`, so `F` joins the override channel as a parent.
+ */
+function fnctorParentMayReturnObject(ctx: CodegenContext, parent: string, decl: ts.Node): boolean {
+  if (ctx.classSet.has(parent) || !ctx.topLevelFunctionNames.has(parent)) return false;
+  const fn = decl
+    .getSourceFile()
+    .statements.find((st): st is ts.FunctionDeclaration => ts.isFunctionDeclaration(st) && st.name?.text === parent);
+  return fn?.body !== undefined && bodyMayReturnObject(ctx, fn.body);
+}
+
+/** A parent (class or function) whose construction can publish an override. */
+function parentMayOverride(ctx: CodegenContext, parent: string | undefined): boolean {
+  if (parent === undefined) return false;
+  return isCtorReturnOverrideClass(ctx, parent) || (fnctorOverrideParents.get(ctx)?.has(parent) ?? false);
+}
+
+function bodyMayReturnObject(ctx: CodegenContext, body: ts.Block): boolean {
   let found = false;
   const visit = (node: ts.Node): void => {
     if (found || ts.isFunctionLike(node) || ts.isClassLike(node)) return;
@@ -188,7 +212,7 @@ function ctorMayReturnObject(ctx: CodegenContext, decl: ts.ClassDeclaration | ts
     }
     forEachChild(node, visit);
   };
-  forEachChild(ctor.body, visit);
+  forEachChild(body, visit);
   return found;
 }
 
@@ -204,7 +228,13 @@ export function markCtorReturnOverrideClass(
   if (!ctx.standalone || ctx.classExternrefBackedSet.has(className)) return;
   let set = markedClasses.get(ctx);
   const parent = ctx.classParentMap.get(className);
-  if ((parent !== undefined && set?.has(parent)) || ctorMayReturnObject(ctx, decl)) {
+  const fnctorParent = parent !== undefined && fnctorParentMayReturnObject(ctx, parent, decl);
+  if (fnctorParent) {
+    let parents = fnctorOverrideParents.get(ctx);
+    if (!parents) fnctorOverrideParents.set(ctx, (parents = new Set()));
+    parents.add(parent);
+  }
+  if ((parent !== undefined && set?.has(parent)) || fnctorParent || ctorMayReturnObject(ctx, decl)) {
     if (!set) markedClasses.set(ctx, (set = new Set()));
     set.add(className);
   }
@@ -243,8 +273,7 @@ function markedFrameClass(ctx: CodegenContext, fctx: FunctionContext): string | 
 
 /** Push the frame's "no own override" answer: the parent's override (derived) or null. */
 function pushFrameDefault(ctx: CodegenContext, fctx: FunctionContext, className: string): void {
-  const parent = ctx.classParentMap.get(className);
-  if (parent !== undefined && isCtorReturnOverrideClass(ctx, parent)) {
+  if (parentMayOverride(ctx, ctx.classParentMap.get(className))) {
     fctx.body.push({ op: "local.get", index: frameOverrideLocal(fctx) });
   } else {
     fctx.body.push({ op: "ref.null.extern" });
@@ -257,8 +286,7 @@ function pushFrameDefault(ctx: CodegenContext, fctx: FunctionContext, className:
  * parent's override for this frame's exits. No-op unless the parent is marked.
  */
 export function emitSaveParentOverride(ctx: CodegenContext, fctx: FunctionContext, className: string): void {
-  const parent = ctx.classParentMap.get(className);
-  if (parent === undefined || !isCtorReturnOverrideClass(ctx, parent)) return;
+  if (!parentMayOverride(ctx, ctx.classParentMap.get(className))) return;
   fctx.body.push({ op: "global.get", index: overrideGlobalIdx(ctx) });
   fctx.body.push({ op: "local.set", index: frameOverrideLocal(fctx) });
 }
@@ -273,8 +301,7 @@ export function emitSaveParentOverride(ctx: CodegenContext, fctx: FunctionContex
 function frameThisMayBeOverride(ctx: CodegenContext, fctx: FunctionContext): boolean {
   if (!ctx.standalone || !fctx.isDerivedConstructor || fctx.localMap.get("this") === undefined) return false;
   const className = markedFrameClass(ctx, fctx);
-  const parent = className === undefined ? undefined : ctx.classParentMap.get(className);
-  return parent !== undefined && isCtorReturnOverrideClass(ctx, parent);
+  return parentMayOverride(ctx, className === undefined ? undefined : ctx.classParentMap.get(className));
 }
 
 export function tryEmitDerivedEffectiveThis(ctx: CodegenContext, fctx: FunctionContext): ValType | undefined {
@@ -409,6 +436,61 @@ export function tryEmitCtorOverrideReturn(
   );
   releaseTempLocal(fctx, value);
   return true;
+}
+
+/**
+ * (#6774 S22) The fnctor arm of `super(...)` left the parent FUNCTION's return
+ * value (`resultType`) on the stack: publish §10.2.1.3 step 13's answer in the
+ * register — the value when it is an Object, else null (`this` stays) — for
+ * `emitSaveParentOverride` to keep. Returns false (nothing emitted, the caller
+ * drops the value) unless `parent` is a function override parent.
+ */
+export function tryEmitFnctorSuperOverride(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  parent: string,
+  resultType: ValType,
+): boolean {
+  if (!(fnctorOverrideParents.get(ctx)?.has(parent) ?? false)) return false;
+  if (resultType.kind !== "externref") coerceType(ctx, fctx, resultType, EXTERNREF);
+  const o = ensureLateImport(ctx, "__typeof_object", [EXTERNREF], [I32]);
+  const f = ensureLateImport(ctx, "__typeof_function", [EXTERNREF], [I32]);
+  flushLateImportShifts(ctx, fctx);
+  if (o === undefined || f === undefined) {
+    fctx.body.push({ op: "drop" });
+    return true;
+  }
+  const value = allocTempLocal(fctx, EXTERNREF);
+  fctx.body.push(
+    { op: "local.tee", index: value },
+    { op: "call", funcIdx: o },
+    { op: "local.get", index: value },
+    { op: "call", funcIdx: f },
+    { op: "i32.or" },
+    {
+      op: "if",
+      blockType: { kind: "val", type: EXTERNREF },
+      then: [{ op: "local.get", index: value }],
+      else: [{ op: "ref.null.extern" }],
+    },
+    { op: "global.set", index: overrideGlobalIdx(ctx) },
+  );
+  releaseTempLocal(fctx, value);
+  return true;
+}
+
+/**
+ * (#6774 S22) The VALUE of a nested `super(...)` expression: the bound `this`
+ * (§13.3.7.1 step 8 returns it) — the parent's override when one was bound,
+ * else the instance struct — as externref. Always emits.
+ */
+export function emitSuperCallValue(ctx: CodegenContext, fctx: FunctionContext, selfIdx: number): ValType {
+  if (tryEmitDerivedEffectiveThis(ctx, fctx) !== undefined) return EXTERNREF;
+  fctx.body.push({ op: "local.get", index: selfIdx });
+  const selfType = getLocalType(fctx, selfIdx);
+  if (selfType?.kind === "ref" || selfType?.kind === "ref_null") fctx.body.push({ op: "extern.convert_any" });
+  else if (selfType !== undefined && selfType.kind !== "externref") coerceType(ctx, fctx, selfType, EXTERNREF);
+  return EXTERNREF;
 }
 
 /**

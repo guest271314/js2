@@ -63,6 +63,23 @@ if (isConfigurable({ f: function () {} }, "f")) bits |= 4; if (isConfigurable({ 
 Object.defineProperty(Function.prototype, "prototype", { get: function () { calls++; return Array.prototype; } });
 if ([] instanceof Function.prototype) bits |= 1; if (calls === 1) bits |= 2;`,
   },
+  {
+    // `super()` as a value, and a FUNCTION parent's returned object rebinding
+    // the derived `this` (and the `new` result); class / plain-fnctor parents
+    // as controls for the value.
+    name: "b_super_value_and_fnctor_override",
+    step: "S22",
+    expected: 31,
+    base: "0",
+    body: `var custom = {}; var value, bound, value2, inst;
+function Parent() { return custom; }
+class Child extends Parent { constructor() { value = super(); bound = this; } }
+inst = new Child(); if (sv(value, custom)) bits |= 1; if (sv(bound, custom)) bits |= 2; if (sv(inst, custom)) bits |= 4;
+class B0 { constructor() { this.k = 1; } } class C0 extends B0 { constructor() { value2 = super(); } }
+var c0 = new C0(); if (sv(value2, c0)) bits |= 8;
+function P2() { this.z = 3; } class C2 extends P2 { constructor() { var v = super(); bound = this; value = v; } }
+var c2 = new C2(); if (sv(value, c2) && sv(bound, c2) && c2.z === 3) bits |= 16;`,
+  },
 ];
 
 describe("#6774 r2 — ES2015 standalone expressions residue", () => {

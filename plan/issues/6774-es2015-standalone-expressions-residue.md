@@ -116,6 +116,11 @@ func-budget-allow:
   # 2026-10-01 (#6774 S21, Opus): accessor object-literal types lower to
   # externref (they are always open `$Object`s at run time).
   - src/codegen/index.ts::resolveWasmType
+  # 2026-10-02 (#6774 r2 S22, Opus): the fnctor arm of compileSuperCall keeps the
+  # parent FUNCTION's result for the #6772 override register (+5; body in
+  # classes/ctor-return-override.ts::tryEmitFnctorSuperOverride). class-bodies.ts
+  # itself is granted above (+7 for the same hook).
+  - src/codegen/class-bodies.ts::compileSuperCall
 ---
 
 ## Problem
