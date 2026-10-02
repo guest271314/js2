@@ -88,6 +88,8 @@ const TA_INTERNAL_LENGTH_HOF_METHODS: ReadonlySet<string> = new Set([
   "forEach",
   "every",
   "some",
+  "find",
+  "findIndex",
   "reduce",
   "reduceRight",
 ]);
@@ -588,7 +590,7 @@ export function ensureNativeArrayHof(
  * resolves `<m>` to the `%TypedArray%.prototype` member — are re-pointed at it.
  * Finalize-time (the view type is registered late). The clone retains that
  * bypass where a generic helper has a HasProperty gate, and also swaps the
- * five direct TypedArray HOFs' one generic length read for the dynamic view's
+ * direct TypedArray HOFs' one generic length read for the dynamic view's
  * live internal in-bounds length. Array.prototype's borrowed spelling remains
  * on the original generic helper, so its observable LengthOfArrayLike and
  * HasProperty behavior is unchanged.

@@ -1,7 +1,7 @@
 {
   "generated": "2026-10-02",
   "threshold": 1500,
-  "totalCeiling": 996276,
+  "totalCeiling": 996565,
   "files": {
     "src/codegen-linear/index.ts": 5791,
     "src/codegen-linear/runtime.ts": 4444,
@@ -15,7 +15,7 @@
     "src/codegen/binary-ops-typed-dispatch.ts": 1601,
     "src/codegen/binary-ops.ts": 3554,
     "src/codegen/builtin-value-read.ts": 1844,
-    "src/codegen/class-bodies.ts": 4644,
+    "src/codegen/class-bodies.ts": 4651,
     "src/codegen/closed-method-dispatch.ts": 2163,
     "src/codegen/closure-exports.ts": 2223,
     "src/codegen/closures.ts": 4919,
