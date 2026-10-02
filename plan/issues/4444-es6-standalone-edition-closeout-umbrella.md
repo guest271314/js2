@@ -7587,3 +7587,19 @@ the other machine's exact source-area clearance before implementation. All
 74 original Intl diagnostic paths and the complete 11,778-row objective
 remain required. No exclusions, source emulation, or denominator reduction
 are authorized as substitutes for the final zero-failure verification.
+
+Fresh remaining-method diagnostic `20261002-183521`, at published fix source
+`94d8361` in the isolated #6832 worktree: **3 pass / 4 fail / 7 registered**,
+zero compile errors/skips/exclusions. Root independently read all seven
+original verdicts and the settled v2 receipt (7 started, 7 settled, 7 unique
+canonical verdicts), and preflight verified all seven within the unchanged
+frozen manifest. Math.sign.length and both original Intl poison-constructor
+controls pass. `find/get-length-ignores-length-prop.js` and its `findIndex`
+counterpart still fail under Float64Array/makeArray; `join` and `toLocaleString`
+internal-arraylength rows observe a length getter once instead of zero times.
+These four rows are not repaired or credited to the five-HOF change. The
+maintained wrapper rebuilt the current compiler and canary-verified its
+QuickJS adapter; all artifacts remain local under `.tmp/6832` and timestamped
+`benchmarks/results`. Session 51582 reached actual terminal completion and
+the heavy lease was explicitly returned. Separate consumer attribution and
+owner clearance are prerequisites to the next implementation slice.
