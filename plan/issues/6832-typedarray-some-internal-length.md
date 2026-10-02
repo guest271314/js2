@@ -1,7 +1,7 @@
 ---
 id: 6832
 title: "ES2015 standalone: direct TypedArray HOFs read internal array length"
-status: in-progress
+status: done
 sprint: current
 created: 2026-10-02
 updated: 2026-10-02
@@ -215,3 +215,14 @@ full Test262-suite result.
   untracked; the reviewable change set is limited to the HOF source, this issue
   record, and the focused fixture.
 - Model provenance is truthful: `Model: Codex Unreported Unreported`.
+
+### Landed completion — 2026-10-02
+
+The completed scoped fix was published non-draft in
+[PR #6447](https://github.com/loopdive/js2/pull/6447) at
+`94d8361a6b2ab0a2ea769ce8c3971367048c9b03`, passed normal publication gates,
+and landed on upstream main through
+`cd123eca318c12a8480e8a69383ddfd50d6e4db4`. The measured acceptance above
+supports closing this five-method slice, not the parent 11,778-path goal.
+Separate find/findIndex/join/toLocaleString failures remain out of scope and
+were remeasured as four failures alongside three passing original controls.
