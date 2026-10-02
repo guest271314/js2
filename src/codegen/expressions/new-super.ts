@@ -165,6 +165,7 @@ import {
 import { standaloneClassProtoObjectApplies } from "../class-proto-object.js"; // (#5350 step 1) class [[HomeObject]] gate
 import { emitStandaloneHeritageCheck } from "../class-heritage-check.js"; // (#5195 r3-5)
 import { emitStandaloneCommaHeritageEffects } from "../classes/class-heritage-comma.js"; // (#6772 S6)
+import { emitStandaloneHeritagePrototypeGet } from "../classes/class-heritage-runtime-get.js"; // (#6772 S11)
 import { emitSuperUninitializedThisCheck, emitUninitializedThisGuard } from "../classes/derived-ctor-this-guard.js"; // (#6772 S1b)
 import { emitNewSiteOverrideSelect } from "../classes/ctor-return-override.js"; // (#6772 S2)
 import { compileTemporalNewExpression } from "../temporal-native.js";
@@ -3632,6 +3633,7 @@ function compileClassExpression(ctx: CodegenContext, fctx: FunctionContext, expr
   // expression must be evaluated exactly once.
   if (!needsInScopeBody) emitStandaloneHeritageCheck(ctx, fctx, expr, compileExpression);
   if (!needsInScopeBody) emitStandaloneCommaHeritageEffects(ctx, fctx, expr, compileExpression); // (#6772 S6)
+  if (!needsInScopeBody) emitStandaloneHeritagePrototypeGet(ctx, fctx, expr); // (#6772 S11)
 
   // The generic expression route owns ClassDefinitionEvaluation for inline and
   // comma-position classes. Variable-bound singleton materialization bypasses

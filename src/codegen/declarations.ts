@@ -74,6 +74,7 @@ import { shouldCollectTopLevelClassForRuntimeHeritage } from "./class-expression
 import { classHasUnresolvedComputedMemberName, classHierarchyHasDynamicMember } from "./class-dynamic-keys.js"; // (#5195 Step 1 / R2-3)
 import { classHasComputedKeyAssignment } from "./class-member-keys.js"; // (#6772 S5)
 import { standaloneCommaHeritage } from "./classes/class-heritage-comma.js"; // (#6772 S6)
+import { heritagePrototypeGetTarget } from "./classes/class-heritage-runtime-get.js"; // (#6772 S11)
 import { routeTopLevelClassBodies } from "./prepared-class-body-cutover.js";
 import {
   collectBindingPatternNames,
@@ -2490,6 +2491,7 @@ function collectPreparedTopLevelClassComputedNameEffects(ctx: CodegenContext, st
     (classHasUnresolvedComputedMemberName(ctx, statement) ||
       classHasComputedKeyAssignment(statement) || // (#6772 S5) a folded key's write runs at definition
       standaloneCommaHeritage(ctx, statement) !== undefined || // (#6772 S6) so does a comma heritage's prefix
+      heritagePrototypeGetTarget(ctx, statement) !== undefined || // (#6772 S11) and Get(superclass, "prototype")
       topLevelClassInheritsRuntimeKeys(ctx, statement))
   ) {
     ctx.moduleInitStatements.push(statement);
@@ -4148,6 +4150,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         if (init === undefined || !ts.isClassExpression(init)) return false;
         if (classHasUnresolvedComputedMemberName(ctx, init) || classHasComputedKeyAssignment(init)) return true; // (#6772 S5)
         if (standaloneCommaHeritage(ctx, init) !== undefined) return true; // (#6772 S6)
+        if (heritagePrototypeGetTarget(ctx, init) !== undefined) return true; // (#6772 S11)
         const className = ctx.anonClassExprNames.get(init);
         return className !== undefined && classHierarchyHasDynamicMember(ctx, className);
       });

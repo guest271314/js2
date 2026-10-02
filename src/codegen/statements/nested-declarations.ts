@@ -58,6 +58,7 @@ import { emitToPropertyKeyOnce } from "../expressions/computed-member-reference.
 import { emitLazyProtoGet, emitRegisterDynamicClassParent } from "../expressions/extern.js";
 import { emitStandaloneHeritageCheck } from "../class-heritage-check.js"; // (#5195 r3-5)
 import { emitStandaloneCommaHeritageEffects } from "../classes/class-heritage-comma.js"; // (#6772 S6)
+import { emitStandaloneHeritagePrototypeGet } from "../classes/class-heritage-runtime-get.js"; // (#6772 S11)
 import { classHierarchyHasDynamicMember, dynamicClassKeyGlobalKey } from "../class-dynamic-keys.js"; // (#5195 Step 1 / F1)
 import { computedKeyHasAssignment } from "../class-member-keys.js"; // (#6772 S5)
 import { isForeignEvalNode } from "../expressions/eval-source.js";
@@ -548,6 +549,7 @@ export function compileNestedClassDeclaration(
   // `class-heritage-check.ts`, whose predicate is the safety property here.
   emitStandaloneHeritageCheck(ctx, fctx, decl, compileExpression);
   emitStandaloneCommaHeritageEffects(ctx, fctx, decl, compileExpression); // (#6772 S6)
+  emitStandaloneHeritagePrototypeGet(ctx, fctx, decl); // (#6772 S11)
 
   const isDeferred = ctx.deferredClassBodies.has(className);
   // (#4646) "Already fully compiled" used to be `structMap.has(className)` — a

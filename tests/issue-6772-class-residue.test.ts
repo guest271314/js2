@@ -865,3 +865,60 @@ describe("#6772 S10 — RegExp `lastIndex` is an own non-configurable data prope
     ).toBe(63);
   });
 });
+
+describe("#6772 S11 — a runtime heritage's `prototype` is read once at definition", () => {
+  it("RED on base (0): the getter runs once per definition and a primitive answer throws (node 7)", async () => {
+    expect(
+      await runProbe(`
+        var calls = 0;
+        var Base = function() {}.bind();
+        Object.defineProperty(Base, 'prototype', { get: function() { calls++; return null; }, configurable: true });
+        class C extends Base {}
+        var r = (calls === 1) ? 1 : 0;
+        calls = 0;
+        Object.defineProperty(Base, 'prototype', { get: function() { calls++; return 42; }, configurable: true });
+        try { class C2 extends Base {} } catch (e) { r += (e instanceof TypeError) ? 2 : 0; }
+        r += (calls === 1) ? 4 : 0;
+        __r = r;
+      `),
+    ).toBe(7);
+  });
+
+  it("RED on base (0): nested declaration and class-expression bindings, string prototype (node 15)", async () => {
+    expect(
+      await runProbe(`
+        var calls = 0;
+        var Base = function() {}.bind();
+        Object.defineProperty(Base, 'prototype', { get: function() { calls++; return null; }, configurable: true });
+        function f() { class C extends Base {} return C; }
+        f();
+        var r = (calls === 1) ? 1 : 0;
+        var K = class extends Base {};
+        r += (calls === 2) ? 2 : 0;
+        Object.defineProperty(Base, 'prototype', { get: function() { calls++; return 'str'; }, configurable: true });
+        try { var K2 = class extends Base {}; } catch (e) { r += (e instanceof TypeError) ? 4 : 0; }
+        r += (calls === 3) ? 8 : 0;
+        __r = r;
+      `),
+    ).toBe(15);
+  });
+
+  it("guard (base 27, node 31): valid runtime heritages do not throw (bit 4 is a pre-existing NS.B method gap)", async () => {
+    expect(
+      await runProbe(`
+        var r = 0;
+        function mk(P) { class K extends P { m() { return 5; } } return new K().m(); }
+        try { r += (mk(class { }) === 5) ? 1 : 0; } catch (e) { r += 100; }
+        var F = function() { this.f = 1; };
+        try { class C extends F { } r += 2; } catch (e) { r += 200; }
+        var NS = { B: class { n() { return 3; } } };
+        try { class D extends NS.B { } r += (new D().n() === 3) ? 4 : 0; } catch (e) { r += 400; }
+        function mk2(P) { var K = class extends P { }; return K; }
+        try { mk2(Object); r += 8; } catch (e) { r += 800; }
+        var N = null;
+        try { class E extends N { } r += 16; } catch (e) { r += 1600; }
+        __r = r;
+      `),
+    ).toBe(27);
+  });
+});

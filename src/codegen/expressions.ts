@@ -114,7 +114,8 @@ import { compileArrayLiteral, compileObjectLiteral, compileObjectLiteralAsExtern
 import { classIdentityFromExpression } from "./class-static-metadata.js"; // (#6772) core delegate
 import { sourceClassForCallee } from "./class-call-without-new.js"; // (#6772) core delegate
 import { runtimeEvalMayReplaceCallee, unwrapCallee } from "./expressions/calls-guards.js"; // (#6772) core delegate
-import { bindingIsUniqueAndNeverWritten } from "./class-heritage-check.js"; // (#6772) core delegate
+import { bindingIsUniqueAndNeverWritten, heritageExpressionNeedingRuntimeCheck } from "./class-heritage-check.js"; // (#6772) core delegates
+import { ensureObjectRuntime } from "./object-runtime.js"; // (#6772 S11) core delegate
 import { compileElementAccess, compilePropertyAccess, maybeWrapAnyReadEqualityCarrier } from "./property-access.js";
 import { tryEmitLinkedStaticComputedRead } from "./standalone-linked-static-inheritance.js"; // (#6644)
 import { notePromiseDynamicMemberRead } from "./promise-dynamic-member-read.js"; // (#6651 D5)
@@ -1743,6 +1744,8 @@ registerCoreDelegates({
   emitArrayIsArrayExternrefPredicate,
   emitArraySetLengthValidation,
   emitBuiltinNamespaceObject,
+  ensureObjectRuntime,
+  heritageExpressionNeedingRuntimeCheck,
   holeSentinelInstrs,
   holeTestInstrs,
   integerArg,

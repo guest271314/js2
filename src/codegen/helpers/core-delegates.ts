@@ -42,7 +42,11 @@ import type {
   runtimeEvalMayReplaceCallee as RuntimeEvalMayReplaceCallee,
   unwrapCallee as UnwrapCallee,
 } from "../expressions/calls-guards.js";
-import type { bindingIsUniqueAndNeverWritten as BindingIsUniqueAndNeverWritten } from "../class-heritage-check.js";
+import type {
+  bindingIsUniqueAndNeverWritten as BindingIsUniqueAndNeverWritten,
+  heritageExpressionNeedingRuntimeCheck as HeritageExpressionNeedingRuntimeCheck,
+} from "../class-heritage-check.js";
+import type { ensureObjectRuntime as EnsureObjectRuntime } from "../object-runtime.js";
 
 /** The core functions the leaves reach through this module. */
 export interface CoreDelegates {
@@ -57,6 +61,8 @@ export interface CoreDelegates {
   emitArrayIsArrayExternrefPredicate: typeof EmitArrayIsArrayExternrefPredicate;
   emitArraySetLengthValidation: typeof EmitArraySetLengthValidation;
   emitBuiltinNamespaceObject: typeof EmitBuiltinNamespaceObject;
+  ensureObjectRuntime: typeof EnsureObjectRuntime;
+  heritageExpressionNeedingRuntimeCheck: typeof HeritageExpressionNeedingRuntimeCheck;
   holeSentinelInstrs: typeof HoleSentinelInstrs;
   holeTestInstrs: typeof HoleTestInstrs;
   integerArg: typeof IntegerArg;
@@ -119,6 +125,9 @@ export const classIdentityFromExpression: CoreDelegates["classIdentityFromExpres
   core().classIdentityFromExpression(...a);
 export const compileObjectLiteralAsExternref: CoreDelegates["compileObjectLiteralAsExternref"] = (...a) =>
   core().compileObjectLiteralAsExternref(...a);
+export const ensureObjectRuntime: CoreDelegates["ensureObjectRuntime"] = (...a) => core().ensureObjectRuntime(...a);
+export const heritageExpressionNeedingRuntimeCheck: CoreDelegates["heritageExpressionNeedingRuntimeCheck"] = (...a) =>
+  core().heritageExpressionNeedingRuntimeCheck(...a);
 export const runtimeEvalMayReplaceCallee: CoreDelegates["runtimeEvalMayReplaceCallee"] = (...a) =>
   core().runtimeEvalMayReplaceCallee(...a);
 export const sourceClassForCallee: CoreDelegates["sourceClassForCallee"] = (...a) => core().sourceClassForCallee(...a);

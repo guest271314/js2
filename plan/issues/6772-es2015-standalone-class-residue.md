@@ -833,7 +833,8 @@ shared lock.
 | S7 | `8a6544f974` | p7d 0 -> 3 (3); p7 1 -> 1 (bits 2/4 are a separate `get [false]` gap, unchanged); guards s7/b 15, s7/c 7, s7/d 3, s7/e 3 (base = branch = node); s7/f 102 both (RESIDUAL, node 3) | `expressions/class/accessor-name-inst-computed-in.js` |
 | S8 | (none) | p8c already 3 on origin/main `ce6631272c` (p8a 1, p8b 15, p8d 3 = node) — fixed on main by another lane | `name-binding/const.js` passes on main and branch (no change here; guard pinned) |
 | S9 | `bb9e1bb060` | p10 3 -> 7 (7), p10c illegal cast -> 7 (7), p10e illegal cast -> 1 (1), s9/a 0 -> 5 (5), s9/c illegal cast -> 3 (3), s9/d illegal cast -> 1 (1), s9/e 0 -> 1 (1); guards p10d 3, s9/b 1 | both `grammar-static-ctor-accessor-meth-valid.js` |
-| S10 | (this step) | p13d 8 -> 15 (15); s10/a 0 -> 15 (15); s10/b throw -> 63 (63) | `subclass/builtin-objects/RegExp/lastIndex.js` |
+| S10 | `3a35759bae` | p13d 8 -> 15 (15); s10/a 0 -> 15 (15); s10/b throw -> 63 (63) | `subclass/builtin-objects/RegExp/lastIndex.js` |
+| S11 | (this step) | p17 0 -> 7 (7); s11/b 0 -> 15 (15); guards s11/a 27 = base (node 31, bit 4 pre-existing), p11 15, p11e 0 | `definition/prototype-getter.js` |
 
 S2 design note (deviates from the plan's "set only on an object return"):
 `$__ctor_override` is a RETURN REGISTER written on EVERY exit of a marked
@@ -983,3 +984,28 @@ that passes in the standalone baseline (805) still passes (non-isolated run;
 the 9 rows that first reported "quickjs provider is not built" re-run
 `--isolate` after building it: 9/9). Neighbour pins issue-4098 / issue-4491*:
 the same 6 failures on main `ce6631272c` and the branch.
+
+S11 note: new leaf `classes/class-heritage-runtime-get.ts`, called right after
+the S6 comma-effects line at the three ClassDefinitionEvaluation sites
+(nested-declarations.ts, variables.ts, new-super.ts). For a standalone class
+in `classDynamicUnresolvedHeritageSet` (not linked, no builtin parent, not
+already thrown for by the r3-5 check, heritage not an identifier bound to a
+local function/class DECLARATION, whose `prototype` is a non-configurable data
+property) it compiles the heritage value once (a comma heritage's tail only),
+skips a null/undefined value, reads `__extern_get(v, "prototype")` and throws
+"Class extends value does not have valid prototype property" when the answer
+is neither null/undefined nor an object/function. The module-init collector
+(declarations.ts) routes a top-level class declaration and a class-expression
+binding of that shape through `compileNestedClassDeclaration` so the read
+happens at definition (the row's first class is top-level). Deliberately
+one-sided, recorded residuals: an `undefined` `prototype` (spec: TypeError) is
+not thrown for, IsConstructor (step 5.f) is not re-checked, and a function
+declaration whose `prototype` was reassigned to a primitive is not caught —
+on this lane an unmodelled carrier also answers `undefined`, so throwing there
+could reject valid programs. `ensureObjectRuntime` and
+`heritageExpressionNeedingRuntimeCheck` join the core delegates (#6797, keeps
+the leaf out of the codegen SCC: 697). Host bytes unchanged (standalone-gated).
+Class control: all 209 baseline-passing ES2015 class rows that contain
+`extends` still pass (non-isolated; 5 re-run `--isolate` after rebuilding the
+QuickJS adapter: 5/5). Neighbour pins issue-5195-r3-heritage-check /
+issue-6767 / issue-6640 / issue-6644 (both) pass.
