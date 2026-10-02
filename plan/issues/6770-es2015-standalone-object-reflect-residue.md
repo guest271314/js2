@@ -798,6 +798,8 @@ Bucket = the 49 rows in `.tmp/6770/rows.txt`, run with `flock
 | --- | --- | --- | --- | --- |
 | base `origin/main` @ `2ef807a68e` | 0 | 46 | 3 | `.tmp/6770/rows-base.log` |
 | branch @ `d28a7cc156` (S1–S8 + `origin/main` @ `e473d92460` merged in) | **44** | 3 | 2 | `.tmp/6770/rows-m3.log` |
+| base `origin/main` @ `f156b4ba83` (after #6771/#6774/#6775) | 3 | 43 | 3 | lead re-measure 2026-10-02 |
+| branch @ `f156b4ba83` merged in | **44** | 3 | 2 | lead re-measure 2026-10-02; pins 35/35; full gate chain incl. #6797 gates green |
 
 | step | commit | rows fail → pass |
 | --- | --- | --- |
@@ -892,34 +894,31 @@ of 100, each under its own `flock /tmp/claude-0/t262.lock`, `--isolate
 re-run on an `origin/main` snapshot to separate this branch's regressions from
 main's own drift.
 
-PARTIAL — stopped at session wrap-up (2026-10-02 11:25 UTC). Run on
-`.tmp/6770/snap-r1` (the tree at `fd48e174ea`), list `.tmp/6770/ctl-ordered.txt`
-(4,861 rows), output `.tmp/6770/ctl-m3/`: chunks 00–24 complete = **2,500 of
-4,861 rows, 1 non-pass**:
+PARTIAL — stopped at session wrap-up (2026-10-02 11:25 UTC). List
+`.tmp/6770/ctl-ordered.txt` (4,861 rows), output `.tmp/6770/ctl-m3/`, chunks of
+100. `ctlrun.sh` is resumable, so the run spans two trees:
 
-- **REGRESSION** `built-ins/Object/assign/strings-and-symbol-order-proxy.js` —
-  L41 `assert.compareArray(getOwnKeys, ownKeysResult)`: actual `[foo, 0]`,
-  expected `[Symbol(), foo, 0]`. Passes on an `origin/main` snapshot
-  (`.tmp/6770/snap-main2`, run 11:24 UTC). `Object.assign` with a Proxy
-  source no longer calls the `getOwnPropertyDescriptor` trap for the
-  symbol-keyed entry of the `ownKeys` result. Likely in S1 (assign ToObject
-  path) or S7/S8 (Proxy `[[OwnPropertyKeys]]` / per-operation trap lookup);
-  not bisected.
+| chunks | rows | tree | non-pass |
+| --- | --- | --- | --- |
+| 00–16 | 1,700 | `snap-m3` = `d28a7cc156` (before `c53b9be2c2`) | 1 |
+| 17–24 | 800 | `snap-r1` = `fd48e174ea` (final src) | 0 |
+| 25–48 | 2,361 | not run | — |
 
-Chunks 25–48 (2,361 rows) were not run. `ctlrun.sh` is resumable — it skips
-chunks whose log has a counts line — but `.tmp/` does not survive the
-container, so a new session re-creates the snapshot and list.
+The one non-pass, `built-ins/Object/assign/strings-and-symbol-order-proxy.js`
+(chunk 00, 04:50 UTC), is the S7 control regression that `c53b9be2c2` fixed at
+05:32. It **passes on the final tree**: 6/6 runs in `snap-r1`, and in the
+branch worktree. The wrap-up note that first called it an open regression was
+wrong — it read a chunk log that predates the fix. No regression is known.
 
 ### Handoff (2026-10-02, session wrap-up)
 
-PR opened with the `hold` label; it must not be queued until:
+The PR was opened with `hold` on that misreading. Lifting it needs:
 
-1. The `strings-and-symbol-order-proxy.js` regression is fixed (and pinned).
-2. The remaining control rows are run (or the merge_group's standalone
-   regression diff is accepted as the control), with every non-pass row
-   re-checked on `origin/main`.
-3. `origin/main` is merged in again and the gate chain re-run (the branch
-   predates `origin/main` `1aef653b5c`).
+1. `origin/main` merged in (done: `f156b4ba83`) with rows, pins and the full
+   gate chain re-run on the merged tree.
+2. The control's unrun rows (2,361), plus the 1,700 rows that ran only on the
+   pre-fix tree, are covered by the merge group's full standalone test262 run
+   and its per-test regression diff.
 
 Rows stand at 44 / 49 (5 residual, listed above; 2 owned by #3371).
 

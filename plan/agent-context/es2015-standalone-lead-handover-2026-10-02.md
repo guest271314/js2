@@ -12,8 +12,8 @@
 | #6773 Iterator chunks/windows/join | PR #6421 | merged | 21 / 21 |
 | #6775 misc built-ins | PRs #6416 + #6434 | merged | 38 / 70 (+4 restored by #6434) |
 | #6771 Array residue | PR #6422 | merged | 30 / 34 |
-| #6774 expressions + computed property names | PR #6414 | **in the merge queue** (re-queued 11:16 UTC after a LOC-grant fix) | 40 / 60 |
-| #6770 Object + Reflect | branch `issue-6770-object-reflect-residue`, PR opened with `hold` | **1 regression to fix**, control half-run | 44 / 49 |
+| #6774 expressions + computed property names | PR #6414 | merged (after a LOC-grant fix in the queue) | 40 / 60 |
+| #6770 Object + Reflect | PR #6442 | main `f156b4ba83` merged in; see Open threads | 44 / 49 |
 | #6772 class residue | branch `issue-6772-class-residue` @ `a086bbecc4`, **no PR** | paused (budget); S1a, S1b, S2, S3, S5, S6 committed | see issue record |
 
 Earlier in the session: #6349, #6351, #6348 (compiler-boundaries edit), #6363,
@@ -21,12 +21,11 @@ Earlier in the session: #6349, #6351, #6348 (compiler-boundaries edit), #6363,
 
 ## Open threads
 
-- **#6770** — `built-ins/Object/assign/strings-and-symbol-order-proxy.js`
-  passes on main and fails on the branch (a Proxy source's symbol key no
-  longer reaches the `getOwnPropertyDescriptor` trap). Fix + pin, run the
-  remaining 2,361 control rows (or accept the merge-group diff), merge main,
-  re-run gates, then remove `hold`. Details in the issue's "Controls" and
-  "Handoff" sections.
+- **#6770** — the "regression" reported at wrap-up was stale: the control's
+  chunk 00 ran on a tree from before `c53b9be2c2`, which fixed that row
+  (`Object/assign/strings-and-symbol-order-proxy.js` passes 6/6 on the final
+  tree). The merge queue's full standalone run is the control for the
+  2,361 unrun rows. Details: the issue's "Controls" / "Handoff" sections.
 - **#6772** — S6 (`a086bbecc4`) was committed at wrap-up from the paused
   lane's worktree; the lead did not re-run its measurements. Remaining steps
   per the issue's implementation plan (S7–S12). Before a PR: rows base vs
@@ -39,7 +38,7 @@ Earlier in the session: #6349, #6351, #6348 (compiler-boundaries edit), #6363,
 - **Unanswered user questions**: whether the ~75 cross-realm rows stay in the
   100 % target; whether iterator-chunking rows should be reclassified out of
   ES2015 (classifier left unchanged).
-- PR subscriptions for #6414 remain active in the old session; a scheduled
+- PR subscription for #6442 remains active in the old session; a scheduled
   check-in (`trig_01HbNwzdTiHP7tNiy6JMmFmk`) may fire into it.
 
 ## Proposed and accepted
