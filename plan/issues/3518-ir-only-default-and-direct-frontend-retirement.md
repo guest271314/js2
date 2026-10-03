@@ -5118,3 +5118,147 @@ Fresh user-triggered CI snapshot37078359214 still shows published5b2 Number11107
 
 
 Normal final-assembly gates completed before commit: native TypeScript7 typecheck, uncapped lint6792files, full TypeScript format check and issue integrity each exited0 with all27 input bytes/modes exact before/after every command; native aggregate SHA13dda026cae14bc2ebef14f57b961be2999cc978d68ce6a80fadb4d05004b911. LOC/function/coercion/oracle/dead-export ratchets all exited0 against verified canonical250e069e, preserving all27 input pins and eight incoming entries. Canonical3518:c1-main-epoch-20261002 claim remains held by this owner. Normal signed hooks and exact committed-tree verification follow; publication still waits for original live CI terminal evidence.
+
+
+### 2026-10-03 — published Number job terminal, remaining CPU delivery blocker
+
+The original published5b2 CI37078359214 is now completed/cancelled. Number111073682652 ran from23:38:19Z to00:18:35Z; its command began23:38:44Z and ended with “The operation was canceled” at00:18:33Z. This is consistent with the unchanged40-minute job budget; the raw log does not explicitly state the cancellation cause. No manual cancellation/restart was performed. There is no terminal Number assertion count or passing CI credit. Raw30694B SHA f99ff2b76644899615583893e0d27c6e59ad24bdd662103d1f8fd2471b8b1a2b retained under repair-407-assembly/resumed-ci-terminal. Fatal aggregate111082853771 genuinely exited1 because changed jobs received cancelled instead of success for all15 selected files; raw6524B SHA b47af87ea013d12dc5649641c4a86f02d9f326f2ee332f66b1746160631ee73c. All prior reporter/RPC failures and the new ordinary-clean407+2 local repair acceptance remain separate.
+
+Signed local e023b7b7 stays preserved, unpublished; its awaited hooks solve the two completed RPC failures but do not establish Number CI budget acceptance. Continue only scoped delivery-blocker CPU diagnosis/specification, preserving every456 original test body/assertion, fresh read/order/count, source/history guard, reciprocal recipe, public API, fixture and failure. No cache, guard weakening, timeout/heap/concurrency/selector-cap or error-policy change. AstraHigh specifies the hard task and implementation plan before Sol6.1Medium implementation; Sol may first measure unmodified existing operations in isolated scratch. Root alone integrates authority and owns Git/claim/publication. Fresh canonical main must be rechecked after the resumed external interval; downstream6426 and new migration scope remain paused. Legacy retained, full IR objective unfinished.
+
+
+## Implementation Plan — measure the remaining four Number setup stages before further integration
+
+Astra High architecture; Sol 6.1 Medium diagnostic/implementation after root authorization. Root owns integration, authority reseal, execution, Git and publication. This plan is scoped to the repeated PR6405 Number delivery blocker; no downstream migration work. Preserve signed unpublished e023b7b70fe6d490f83abf0fa556eeafc6cca411 and all old failures. Root imports this exact plan before prototype work. Phase1 authorizes only isolated scratch candidates after dispatch, not tracked edits or reseal.
+
+### Evidence and current-code mechanism
+
+Published5b2 CI job111073682652 ended CANCELLED after40m16 job lifetime and39m49 command lifetime, without terminal assertions. Its saved log SHA256 is `f99ff2b76644899615583893e0d27c6e59ad24bdd662103d1f8fd2471b8b1a2b`. Aggregate111082853771 actually failed because expected success received cancelled. The log says operation cancelled; the unchanged40-minute limit supports a budget-cause inference, not explicit timeout text. No CI456 result is available.
+
+The saved full local456 result after the two-stage repair has456 passes and summed row durations1858.170s: Number247=1326.732s, C2a57=208.022s, dynamic69=177.578s, host40=87.023s, generator43=58.815s. Its separate process timing is about1858.8s. Those results precede the graph reporter reseal; the current helper216744/SHA256 `d5780706ce1c931f83a6d155542da8e8111f4f2448ac7e881bb80b113f24da7c` and Number105327/SHA256 `85bb61ddbe56445bf9ed6d8285ffccb07e5102dd22aa11c1384e6ce362b11d40` are unchanged through e023. Do not claim these durations measure Ubuntu Node22.23.3 performance.
+
+The retained10.50s single-row profile predates the landed two-stage captures; it cannot identify today's CPU shares. Rejected H1 whole-capture3.6% and nonconforming/losing clone/hash kernels remain rejected. This plan does not rerun those screens. Current source shows a different concrete residual: primary `raw` still calls full generator, host, dynamic and C2a raw inverses at lines89–106. Each invokes its own full fresh authenticator, an independent semantic inverse that invokes a preceding full semantic guard, and a preceding full raw guard. The direct test action then runs its original full guard again.
+
+Static successful C1-authenticator expansions, independently checked by SolH1, are generator raw29, host22, dynamic16 and C2a11. The five complete fixture readers currently cost81/70/54/32/3 C1 traversals (`raw/currentRaw/latestRaw/hostRaw/generatorRaw`). This is a call-graph count, not an observed fs-read count or runtime ratio. The proposed capture contracts make those setup counts7/6/5/4/3; every direct full-API action remains unchanged. Incidental recursive SETUP traversals intentionally decrease. Never describe this as preserving their incidental former count; each new invocation preserves its corresponding original authenticator's complete physical read population/order/count and every original direct-control read assertion.
+
+### Four fixed capture contracts to prototype
+
+Append-only proposed API mapping; no existing API/body/prefix edits:
+
+| Existing setup API | Proposed raw capture API | Exact current→predecessor domain |
+|---|---|---|
+| beforeGeneratorInventoryPolicySource | captureGeneratorPredecessorPolicySource |568552/1780 →568231/1779|
+| beforeHostCarrierInventoryPolicySource | captureHostCarrierPredecessorPolicySource |568231/1779 →567908/1778|
+| beforeDynamicCodeInventoryPolicySource | captureDynamicCodePredecessorPolicySource |567908/1778 →567465/1776|
+| beforeRuntimePreparationPolicySource | captureRuntimePreparationPredecessorPolicySource |567465/1776 →567166/1775|
+
+All four signatures are `(raw: string): string`; stale/other epochs remain refused. Each checks primitive-string type before IO, invokes its existing `authenticateGeneratorInventoryPolicyEvolution`, `authenticateHostCarrierPolicyEvolution`, `authenticateDynamicCodePolicyEvolution`, or `authenticateRuntimePreparationPolicyEvolution` exactly once, with no argument. Those ORIGINAL authenticators and their complete transitive reads/guards remain unchanged. No public receipt/capture token, optional bypass, cached validation, shared authority object or read suppression. No additional source-pin domain.
+
+Reuse the original private raw transform/profile functions unchanged: applyGeneratorInventoryRaw, applyHostCarrierInventoryRaw, applyDynamicCodeInventoryRaw, applyRuntimePreparationRaw. Retain complete current and predecessor raw length/SHA/Gitblob checks, fixed span presence/uniqueness/coordinates, independent semantic inverse, complete profile comparison, semantic forward replay/equality, parsed-raw/semantic equality and raw forward replay. Add four private pure semantic routines copied from the exact corresponding prove bodies; remove only recursive preceding semantic API call and use the locally captured predecessor for replay. Their receipt argument is private and must be the value freshly obtained in that SAME public call.
+
+Concrete semantic cuts:
+
+- Generator, proveGeneratorInventoryPolicy at2059: keep top-level/layer/schema/unique-row checks, row1615 and neighbors1614/1616, remove exactly1615, verify complete before profile; replay from `capture(predecessor)` in place of `capture(authenticateHostCarrierInventoryPolicy(predecessor))`; keep predecessor neighbors and exact replay.
+- Host, proveHostCarrierInventoryPolicy at1812: same fixed checks for row605/neighbors604/606 and exact before/replay profiles; replay from captured predecessor instead of full dynamic verification.
+- Dynamic, proveDynamicCodeInventoryPolicy at1544: keep both complete current-row schemas/neighbors/membership and legacy-host55/layers20; remove the two additions descending; verify before; validate BOTH predecessor neighbor positions before either insertion; replay ascending fixed beforeIndex+inserted. Replace only `verifiedC2a` with local predecessor for replay.
+- C2a, proveRuntimePreparationPolicy at1219: this is an activation/layer delta, not merely an inventory row. Keep every fixed1775-file/100-history prefix check, one exact file/activation suffix, ir-runtime20 census, layer8 status/required/roots/entries/minModules checks. Restore1775files/100activations and19entries/minModules; full before profile; replay exact file/activation/layer20. Replace only `verifiedNumber` with local before for replay. No weakening of layer/classification obligations.
+
+The public full raw APIs retain their existing recursive semantic AND raw predecessor calls. These proposed APIs promise a narrower authenticated INITIAL-CAPTURE inverse. They are not replacements for any control's proof API.
+
+### Phase1 — paired complete operations, including an unchanged original control body
+
+Use a new uniquely named scratch directory in Sol's isolated worktree. Freeze actual root e023 inputs/modes, all27 proof paths, exact helper/Number source, four immutable receipts and all copied source segments. Use the existing reviewed diagnostic lifetime/process-group/pin guards; external scratch600-second bound, owned group termination/reap on failure/interruption, no runner/test timeout change. Root launches only with no competing heavy worker after independent static review. Record actual Node executable/version/platform/Vitest version. Use already-installed tooling; no installs or shared node_modules changes. A host-only result must be labelled host-only.
+
+Prototype copies only four fixed pure semantic bodies and required pure private support from the frozen helper, with exact segment hashes. Import ALL actual original exported authenticators/full APIs from the physical root helper. Copy the five actual fixture expressions exactly and switch only the ten prescribed setup call identifiers. Every measured fixture action freshly reads actual compiler-boundaries bytes and executes its complete chain. Do not reuse parsed data, completed output or an earlier authority operation across actions. The old and new outputs must match complete bytes, length/SHA/Gitblob; before/after physical input/mode vectors must remain exact.
+
+Measure three populations separately: primary complete fixture; ordered batch of all five complete fixtures; exact existing Number control `Number prerequisite exact successor of genuine WKS, C1 and B rejects raw span 1 duplicate`. For the control, copy the original callback body at642 plus unchanged `rawRefused` at160 and required binding expressions, recording exact source/body hashes. Bind index1/boundaryduplicate and actual Vitest assertions. Only the `raw()` SETUP implementation selects baseline/proposal; receipt()/beforeNumberPrerequisitePolicySource and all other control actions resolve to ORIGINAL physical root exports. The callback's three raw() invocations, actual duplicate mutant, original full-API refusal, output equality and final healthy full proof must remain exact. Do not simplify this to inverse timing or remove an assertion.
+
+A scratch Vitest wrapper may execute this copied unchanged callback under one explicit diagnostic registration; alternatively a precisely filtered original-row diagnostic is allowed if it meets the same source/body custody. Record1/456 diagnostic/455 not executed, never full acceptance. Existing registered456 tests are untouched. Use ordinary error handling with no errorignore/mocks. The outer measurement wrapper may record setup elapsed time and original full-API control elapsed time separately without changing returned bytes or exceptions. Label wrapper call counts as API/phase observations, NOT measured physical read counts. Physical read order is inherited from unchanged actual functions, backed by segment identity and later original mutation controls. No filesystem interception is needed or permitted.
+
+For each population: one old/new warm pair, then five balanced AB/BA pairs. Both sides execute the complete action independently with fresh input. Check all27 inputs before/after EACH pair, full output parity, ordinary error state and actual successful control completion. Add genuine refusal parity for each stage on boxed raw, stale predecessor, whitespace and valid-JSON retained-row mutation; both old/proposed must actually refuse with equal constructor/name/message. Mark the changed earlier-priority behavior, if any, as a blocker; do not relearn expected errors from mutants. Preserve raw timings and intermediate stage output pins.
+
+Selection requires exact fidelity plus at least30% paired-median reduction in the COMPLETE representative callback and at least20% reduction in both complete primary and five-fixture batch; at least4/5 positive pairs in each. This is a scratch candidate-selection threshold, not a new repository gate or promised CI result. No passing threshold can prove the Ubuntu job will finish. If the callback or fixture gain is weak, any negative accepts, sources change or diagnostic times out, stop before tracked edits/reseal/full456 and report the actual missing evidence. Do not start another microkernel round.
+
+### Conditional implementation and validation implications — only after root accepts Phase1
+
+Source candidates are limited to an append after the complete216744-byte helper prefix and ten initial call identifiers across Number's four outer readers: generator4 occurrences, host3, dynamic2, C2a1. generatorRaw remains unchanged. Add four new named imports; retain every original imported full API still used by controls. Do not global-replace those names: direct mutant/full-API calls remain untouched. Removing only new imports/ten setup replacements must recover whole105327-byte Number source. All456 original titles, callbacks, fixtures, assertions/counters, historical mutation channels and deadlines stay exact.
+
+After material measurement, root may authorize48 independent new controls (12 per proposed API: complete fixed-profile/full-original-API positive; boxed priority with missing witness; stale predecessor; retained-row JSON mutation; whitespace; omission/duplication/valid reordered raw spans; receipt/helper × missing/corrupt warm physical cases). Append a new final describe to the already selected runtime-data reporter file, preserving its existing99 source/controls/hook exactly. Planned147=99+48 must be independently collected; expected profiles/rows/span data are literal frozen original authorities, not learned from candidates. Existing reviewed exclusive lock/backup/byte/mode/inode/restoration harness remains bounded to these four receipts plus policy helper; no other physical target or concurrency change. Complete old456 source controls continue to verify transitive source guards.
+
+Only helper and Number are sealed instruments: root updates their two pins/two complete original→final recipes after formatting, preserving ALL historical beforePins, other10 pins/8recipes, original216744prefix/fullAPIs,11immutable authorities/7artifacts/source/config/resolver/declaration fields and every receipt. Root alone formats/hashes the manifest, anchor and current-source external literal; graph reporter hook and its resealed recipe remain unchanged. Reporter147 is outside instrument membership. Independently replay all ten recipes both directions. No source/config epoch or history-prefix substitution.
+
+Required final ordinary acceptance is planned147 physical reporter exclusively +278 independent authority +UNFILTERED456 =881 rows, subject to collection; diagnostic1/456 is separate. Require error-free process0 and exact final inputs/modes. Existing mandatory native/gates/normal hooks retain their actual scope. Do not automatically rerun unrelated2054 merely to measure this candidate, but do not skip normal selected hooks. Actual repaired-head Ubuntu Number456 must complete under unchanged40-minute job budget; reporter and all required checks/merge-group/main delivery remain outstanding until measured. No cache/guard thinning/count reduction/error masking/heap/timeout/cap/workflow change or legacy retirement.
+
+
+
+### 2026-10-03 — four-stage complete-operation screen accepted before conditional implementation
+
+Root launched only the independently reviewed corrected freeze3be6d3561d6cc0854bc2972d55f2fe4c196ea11e151335baba94bb1f04a033b0. Actual outer27914 and owned driver both exited0; elapsed180.820709s, no600s external bound/interruption. All18 records (one warm+five balanced pairs per each of primary/batch/complete original callback) completed;16 negative comparisons yielded32 actual equal refusals. All33 input bytes/modes remained exact. Twelve ordinary Vitest subprocesses each passed the same original Number raw-span1 duplicate callback with no RPC/unhandled/pending/errors and unchanged35s deadline. These are repeated1/456 diagnostics with455 not executed, never full456 or CI credit. Original bodies/full API bindings/prefixes remain exact.
+
+Both independent runtime reviewers recomputed paired median reductions primary84.78185533%, five-fixture batch81.63769120%, complete callback80.92141220%, five/five positive pairs each. Complete callback median8072.871→1526.367ms; setup median7853.739→1291.492ms, remaining unchanged control work215.399→231.790ms: measured gain lies in setup. This passed the predeclared30%/20% selection thresholds. Node24.4.1/Darwin host-only; original inherited worker heap1024MB, caller4096MB; do not describe it as a measured4GB fork or extrapolate to UbuntuNode22. Actual final ordinary worker settings and unchanged40-minute CI remain mandatory. Runtime review hashes Astra213845200ee23964c7a558c9fc74126f58e71ebff1c0bfc6a2998e8120a353c0 and Sol57005a51317a614c0077381682f4b16f32330aec94ebe8c3426bf968e173eafe; raw custody in repair-407-assembly/resumed-ci-terminal/four-stage-capture-diagnostic.
+
+Conditional implementation is now authorized in isolated scratch: H1 owns append-only helper four captures/pure local inverses plus exactlyfour Number imports/ten fixture call replacements; H2 owns appended48 independently expected capture/refusal/warm physical controls in the existing reporter, preserving all99 original source/controls/hook. Root sole integration/reseal/Git; no root helper/Number/authority edits before candidate review. Full881 planned147+278+456 unfiltered and actual exact-head CI required; no cache/guard thinning/read suppression/counter changes, source/history prefix weakening, timeout/heap/concurrency/cap/workflow changes or legacy retirement. No downstream scope; existing held PR6405 remains published5b2.
+
+### 2026-10-03 — four-stage capture implementation reviewed, final validation pending
+
+Astra independently approved the formatted Sol6.1 Medium helper/Number candidates
+(freeze `08d4e0ea78bdd27111b96cc767215d7cb6a1201fc39ee22aa077bc11a727173a`)
+and 48-control reporter append
+(freeze `24aa485fce3ed6f6b19b8fbee211b06c14eddeebac0d2337713183acde783ac4`).
+The whole 216744-byte helper prefix, original Number callbacks/assertions/mutants,
+and original 134288-byte reporter source remain byte-recoverable. Only four
+imports and ten Number fixture capture call identifiers change. The new reporter
+controls use literal immutable receipts, independent complete raw/semantic replay,
+and the existing exclusive physical fault recovery semantics (bytes, modes, inode).
+No original full API, authority read guard, test deadline, worker configuration,
+workflow, acceptance threshold, or legacy runtime implementation changes.
+
+Root's independently reviewed scratch reseal recomputes the complete original-to-final
+helper and Number recipes; all ten historical before-pins/inverse/replay records,
+other ten instrument pins/eight recipes, graph yield repair, immutable authorities,
+artifacts, and remaining manifest fields stay exact. The unique current-source
+`independentFreeze` scalar binds the new manifest and anchor outside instrument
+membership. Final assembly review and ordinary 147 + 278 + unfiltered 456 = 881
+assertions, exact original registration census, byte/mode restoration, native gates,
+and exact-head Ubuntu CI remain required. Static approval and the host diagnostic
+provide no new full-suite/CI passing credit. PR delivery and downstream scope remain
+held until protected canonical-main delivery is verified; legacy code is retained.
+
+### 2026-10-03 — final reporter controls passed; full Number validation running
+
+The installed four-stage candidate collected exactly 881 registrations: all original
+99 reporter names followed by the 48 new names, all original 278 authority names,
+and all original 456 Number names, unchanged and ordered. The reporter completed
+147/147 in 65.291 seconds with numerical process exit 0, no failed/pending tests,
+no ordinary RPC/unhandled errors, and all 34 input bytes/modes/inodes restored.
+The next authority278 and unfiltered Number456 runs are still pending; this is
+147-control evidence only, not full881 or exact-head CI/queue delivery.
+
+### 2026-10-03 — final four-stage local acceptance: 881/881 ordinary-clean
+
+The exact reviewed/resealed candidate completed all unfiltered final populations:
+reporter **147/147** in 65.291s; current-source **278/278** in 38.246s;
+Number **456/456** in 476.030s (7m56s). Each actual child exited 0, and the root-owned
+outer executor exited 0. There were no failed/pending/todo assertions, ordinary
+RPC/unhandled errors, or assertion/suite failure messages. All original 99 reporter
+names, all original 278 authority names, and all original 456 Number names remained
+ordered and exact; 48 new reporter controls supply the additional denominator.
+All 34 frozen inputs retained exact bytes/SHA256, modes, inodes, and device identities
+before and after collection and each suite. The six installed changes preserve every
+original full API and guard, the complete 216744-byte helper prefix, all historical
+before-pins, all ten full inverse/replay recipes, and the existing initial-graph fix.
+
+This is measured local Node24 evidence for the final input domain. It does not
+establish Ubuntu Node22 execution, the unchanged 40-minute CI job budget, new-head
+initial-graph129/fatal aggregate acceptance, protected queue admission, or main
+delivery. Native repository gates, five ratchets, normal signed hooks, publication
+to the existing ready PR, and exact-head CI remain the next steps. Downstream
+PR6426 and new migration scope remain paused; legacy implementation remains.
+
+Final native TS7, uncapped Biome lint, full TypeScript formatting, issue integrity,
+and the unchanged LOC/function/coercion/oracle/dead-export ratchets all exited 0;
+each retained all 34 frozen input bytes/modes/inodes. Canonical main was freshly
+verified as `250e069e3e53d291a3d747d6b4068b9171ee5d67`, already integrated in e023.
+Independent Sol6.1 Medium review accepted all 881 actual terminal rows and input
+restoration, with no defect. Normal signed commit/push hooks and new-head CI still
+remain separate required evidence; the existing ready PR stays held.

@@ -1,6 +1,16 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 
 import {
+  captureGeneratorPredecessorPolicySource,
+  beforeGeneratorInventoryPolicySource,
+  captureHostCarrierPredecessorPolicySource,
+  beforeHostCarrierInventoryPolicySource,
+  captureDynamicCodePredecessorPolicySource,
+  beforeDynamicCodeInventoryPolicySource,
+  captureRuntimePreparationPredecessorPolicySource,
+  beforeRuntimePreparationPolicySource,
+} from "./helpers/ir-runtime-program-policy-evolution.js";
+import {
   chmodSync,
   closeSync,
   lstatSync,
@@ -2762,6 +2772,762 @@ describe("#3518 runtime policy fixture capture", () => {
             else
               expect(() => epoch.api(input)).toThrow(
                 path === epoch.receiptPath ? /receipt digest mismatch/ : /complete .*prefix changed/,
+              );
+          });
+          expect(fixtureCapturePin(epoch.api(input))).toEqual(epoch.before.source);
+        });
+  }
+});
+
+// Independent literal profiles, rows and spans copied from the four immutable receipts.
+const fourStageCaptureEpochs = [
+  {
+    name: "generator",
+    receiptPath: "tests/helpers/ir-runtime-program-policy-generator-eager-refusal.json",
+    before: {
+      source: {
+        bytes: 568231,
+        sha256: "f3af1f31d813eaef9bd2b955466390616e9549f36e1e7ffffdcead812a611ac3",
+        gitBlob: "d61ee74048fa3d16c2986fd3e448d234f4e5594b",
+      },
+      dataSha256: "89780e5ff7c660518ca92981369dab0e341b77e55f02f8e23d2312b615a97856",
+      fileCount: 1779,
+      filesSha256: "ced3f8116817be3978f55f438b657ca6b36ec8d50827db92bd7d708c2940853b",
+      activationCount: 101,
+      activationHistorySha256: "9629c457a160096e70c35fc3a986abbd8eca145ac4eb688995194d6c29c83650",
+      layersSha256: "3f66bbff64c157092a04740c644ae17d476d7d168faa1bd23629f97492e0c4f7",
+      allowedEdgesSha256: "efe7e7ed8dee1a009d2bef3ff36dba80df1a805cd3f5b7b472e62ec6dcff64c7",
+    },
+    current: {
+      source: {
+        bytes: 568552,
+        sha256: "64103a2fb337874fd435614d461bdd0d46cdfdc8a8dbd61603a4c7cbaf3915ff",
+        gitBlob: "b9b8b1787cc202906c4e76cebc598cf460a7f0ae",
+      },
+      dataSha256: "2f35e7e2045dd0d024a13b48c8f413fc7fb9e74c63503fafee4e56993d1da1a6",
+      fileCount: 1780,
+      filesSha256: "bcd724252a8ff0cdf6799b01f7e0b9eeceead2c6a3e1f49f9625de233b6710e6",
+      activationCount: 101,
+      activationHistorySha256: "9629c457a160096e70c35fc3a986abbd8eca145ac4eb688995194d6c29c83650",
+      layersSha256: "3f66bbff64c157092a04740c644ae17d476d7d168faa1bd23629f97492e0c4f7",
+      allowedEdgesSha256: "efe7e7ed8dee1a009d2bef3ff36dba80df1a805cd3f5b7b472e62ec6dcff64c7",
+    },
+    additions: [
+      {
+        fileIndex: 1615,
+        beforeIndex: 1615,
+        row: {
+          path: "src/codegen/generator-eager-refusal.ts",
+          state: "unmigrated",
+          layer: "mixed-needs-split",
+          destination: "backend-wasmgc",
+          owner: "3518-coordinator",
+          nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+        },
+        previous: {
+          path: "src/codegen/fnctor-instance-names.ts",
+          state: "unmigrated",
+          layer: "mixed-needs-split",
+          destination: "backend-wasmgc",
+          owner: "3518-coordinator",
+          nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+        },
+        next: {
+          path: "src/codegen/generator-function-dynamic.ts",
+          state: "unmigrated",
+          layer: "mixed-needs-split",
+          destination: "backend-wasmgc",
+          owner: "3518-coordinator",
+          nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+        },
+        sourcePin: {
+          path: "src/codegen/generator-eager-refusal.ts",
+          bytes: 10619,
+          sha256: "b44d14368759f11f18b11d75d2a5abb93fc448e0dc5cb7d8501eb0afe6272535",
+        },
+        rawSpan: {
+          beforeOffset: 529175,
+          afterOffset: 529175,
+          before:
+            '    {\n      "path": "src/codegen/generator-function-dynamic.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n',
+          after:
+            '    {\n      "path": "src/codegen/generator-eager-refusal.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n    {\n      "path": "src/codegen/generator-function-dynamic.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n',
+          beforeSha256: "eaa7278e51f6b98fed1c30f4ba59a0db4736a03c489c860549288c0aa3c1ad1d",
+          afterSha256: "44584a36ba540f0e339e6e15bda22765c85db81114312d418cbec9041f086da3",
+        },
+      },
+    ],
+    spans: [
+      {
+        beforeOffset: 529175,
+        afterOffset: 529175,
+        before:
+          '    {\n      "path": "src/codegen/generator-function-dynamic.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n',
+        after:
+          '    {\n      "path": "src/codegen/generator-eager-refusal.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n    {\n      "path": "src/codegen/generator-function-dynamic.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n',
+        beforeSha256: "eaa7278e51f6b98fed1c30f4ba59a0db4736a03c489c860549288c0aa3c1ad1d",
+        afterSha256: "44584a36ba540f0e339e6e15bda22765c85db81114312d418cbec9041f086da3",
+      },
+    ],
+    runtimeLayer: null,
+    fileAppend: null,
+    activationAppend: null,
+    api: captureGeneratorPredecessorPolicySource,
+    full: beforeGeneratorInventoryPolicySource,
+  },
+  {
+    name: "host",
+    receiptPath: "tests/helpers/ir-runtime-program-policy-host-carrier.json",
+    before: {
+      source: {
+        bytes: 567908,
+        sha256: "5c1c4a16928b421c112eb81180a315d31e116ff442a40375e8c6efb4f220c685",
+        gitBlob: "59bdd78821afa174b9273c100a03ec79713249b4",
+      },
+      dataSha256: "65b382b173594abd15ffdef1a51f96daf017f4d91bd60e47f6308da434ab97b3",
+      fileCount: 1778,
+      filesSha256: "c306548d8e3f44695a102d10ef8a9503860e39ef6168719f88f874f616563f54",
+      activationCount: 101,
+      activationHistorySha256: "9629c457a160096e70c35fc3a986abbd8eca145ac4eb688995194d6c29c83650",
+      layersSha256: "3f66bbff64c157092a04740c644ae17d476d7d168faa1bd23629f97492e0c4f7",
+      allowedEdgesSha256: "efe7e7ed8dee1a009d2bef3ff36dba80df1a805cd3f5b7b472e62ec6dcff64c7",
+    },
+    current: {
+      source: {
+        bytes: 568231,
+        sha256: "f3af1f31d813eaef9bd2b955466390616e9549f36e1e7ffffdcead812a611ac3",
+        gitBlob: "d61ee74048fa3d16c2986fd3e448d234f4e5594b",
+      },
+      dataSha256: "89780e5ff7c660518ca92981369dab0e341b77e55f02f8e23d2312b615a97856",
+      fileCount: 1779,
+      filesSha256: "ced3f8116817be3978f55f438b657ca6b36ec8d50827db92bd7d708c2940853b",
+      activationCount: 101,
+      activationHistorySha256: "9629c457a160096e70c35fc3a986abbd8eca145ac4eb688995194d6c29c83650",
+      layersSha256: "3f66bbff64c157092a04740c644ae17d476d7d168faa1bd23629f97492e0c4f7",
+      allowedEdgesSha256: "efe7e7ed8dee1a009d2bef3ff36dba80df1a805cd3f5b7b472e62ec6dcff64c7",
+    },
+    additions: [
+      {
+        fileIndex: 605,
+        beforeIndex: 605,
+        row: {
+          path: "src/codegen/host-carrier-to-primitive.ts",
+          state: "unmigrated",
+          layer: "mixed-needs-split",
+          destination: "backend-wasmgc",
+          owner: "3518-coordinator",
+          nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+        },
+        previous: {
+          path: "src/codegen/host-bridge-exports.ts",
+          state: "unmigrated",
+          layer: "mixed-needs-split",
+          destination: "backend-wasmgc",
+          owner: "3518-coordinator",
+          nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+        },
+        next: {
+          path: "src/codegen/host-fnctor-method-driver.ts",
+          state: "unmigrated",
+          layer: "mixed-needs-split",
+          destination: "backend-wasmgc",
+          owner: "3518-coordinator",
+          nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+        },
+        sourcePin: {
+          path: "src/codegen/host-carrier-to-primitive.ts",
+          bytes: 14025,
+          sha256: "6f74bd8c4b97789a1dbfe92dc18dd6e71e11860b0e8efd913c523bca032ce504",
+        },
+        rawSpan: {
+          beforeOffset: 239710,
+          afterOffset: 239710,
+          before:
+            '    {\n      "path": "src/codegen/host-fnctor-method-driver.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n',
+          after:
+            '    {\n      "path": "src/codegen/host-carrier-to-primitive.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n    {\n      "path": "src/codegen/host-fnctor-method-driver.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n',
+          beforeSha256: "3e551509901b9201393becb318e31b2c40e5a8be0d17fa97975556e33dda6bdc",
+          afterSha256: "84ec8fc955578c6b77c59141a048c9233b0be087e2e45d3f5a11eb2e275a36db",
+        },
+      },
+    ],
+    spans: [
+      {
+        beforeOffset: 239710,
+        afterOffset: 239710,
+        before:
+          '    {\n      "path": "src/codegen/host-fnctor-method-driver.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n',
+        after:
+          '    {\n      "path": "src/codegen/host-carrier-to-primitive.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n    {\n      "path": "src/codegen/host-fnctor-method-driver.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n',
+        beforeSha256: "3e551509901b9201393becb318e31b2c40e5a8be0d17fa97975556e33dda6bdc",
+        afterSha256: "84ec8fc955578c6b77c59141a048c9233b0be087e2e45d3f5a11eb2e275a36db",
+      },
+    ],
+    runtimeLayer: null,
+    fileAppend: null,
+    activationAppend: null,
+    api: captureHostCarrierPredecessorPolicySource,
+    full: beforeHostCarrierInventoryPolicySource,
+  },
+  {
+    name: "dynamic",
+    receiptPath: "tests/helpers/ir-runtime-program-policy-dynamic-code.json",
+    before: {
+      source: {
+        bytes: 567465,
+        sha256: "92d653aff02d823339071f24721b803d88da4f31bdbd721859b0ac48b6c9c7f7",
+        gitBlob: "70b280c7cf2a56cbd5cbfa88b484b57414d2ef7c",
+      },
+      dataSha256: "28ae111b7b9f0f6eda144d5d57beaf76fd5c7617b474846d39409a56cc196e08",
+      fileCount: 1776,
+      filesSha256: "ca4d9d7d5c999a4e742abd7773d847f1652ca8fe995a491a594fca1e5cf37a1a",
+      activationCount: 101,
+      activationHistorySha256: "9629c457a160096e70c35fc3a986abbd8eca145ac4eb688995194d6c29c83650",
+      layersSha256: "3f66bbff64c157092a04740c644ae17d476d7d168faa1bd23629f97492e0c4f7",
+      allowedEdgesSha256: "efe7e7ed8dee1a009d2bef3ff36dba80df1a805cd3f5b7b472e62ec6dcff64c7",
+    },
+    current: {
+      source: {
+        bytes: 567908,
+        sha256: "5c1c4a16928b421c112eb81180a315d31e116ff442a40375e8c6efb4f220c685",
+        gitBlob: "59bdd78821afa174b9273c100a03ec79713249b4",
+      },
+      dataSha256: "65b382b173594abd15ffdef1a51f96daf017f4d91bd60e47f6308da434ab97b3",
+      fileCount: 1778,
+      filesSha256: "c306548d8e3f44695a102d10ef8a9503860e39ef6168719f88f874f616563f54",
+      activationCount: 101,
+      activationHistorySha256: "9629c457a160096e70c35fc3a986abbd8eca145ac4eb688995194d6c29c83650",
+      layersSha256: "3f66bbff64c157092a04740c644ae17d476d7d168faa1bd23629f97492e0c4f7",
+      allowedEdgesSha256: "efe7e7ed8dee1a009d2bef3ff36dba80df1a805cd3f5b7b472e62ec6dcff64c7",
+    },
+    additions: [
+      {
+        fileIndex: 202,
+        beforeIndex: 202,
+        row: {
+          path: "src/codegen/array-method-arg-order.ts",
+          state: "unmigrated",
+          layer: "mixed-needs-split",
+          destination: "backend-wasmgc",
+          owner: "3518-coordinator",
+          nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+        },
+        previous: {
+          path: "src/codegen/array-literal-any-carrier.ts",
+          state: "unmigrated",
+          layer: "mixed-needs-split",
+          destination: "backend-wasmgc",
+          owner: "3518-coordinator",
+          nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+        },
+        next: {
+          path: "src/codegen/array-method-host.ts",
+          state: "unmigrated",
+          layer: "mixed-needs-split",
+          destination: "backend-wasmgc",
+          owner: "3518-coordinator",
+          nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+        },
+        sourcePin: {
+          path: "src/codegen/array-method-arg-order.ts",
+          bytes: 6032,
+          sha256: "9a4527970fd0fd12f7f0fc7210e92a63f64872b143c4d5bc5931ea0f8be03f0b",
+        },
+        rawSpan: {
+          beforeOffset: 109891,
+          afterOffset: 109891,
+          before:
+            '    {\n      "path": "src/codegen/array-method-host.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n',
+          after:
+            '    {\n      "path": "src/codegen/array-method-arg-order.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n    {\n      "path": "src/codegen/array-method-host.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n',
+          beforeSha256: "4cf17df2ddb36ff6c0a270a0c0f4542cccca6806d155c1f8720027ed04030a22",
+          afterSha256: "c1c44f40e1731fe2ae2adef0e0ee5d357fcdf8388d9f311bf2ca20982ccf2cb1",
+        },
+      },
+      {
+        fileIndex: 1404,
+        beforeIndex: 1403,
+        row: {
+          path: "src/runtime/dynamic-code-policy.ts",
+          state: "unmigrated",
+          layer: "legacy-host",
+        },
+        previous: {
+          path: "src/runtime/dom-capability-adapter.ts",
+          state: "unmigrated",
+          layer: "legacy-host",
+        },
+        next: {
+          path: "src/runtime/dynamic-function-import.ts",
+          state: "unmigrated",
+          layer: "legacy-host",
+        },
+        sourcePin: {
+          path: "src/runtime/dynamic-code-policy.ts",
+          bytes: 3863,
+          sha256: "afad7fbda3469347671a99f6564de57d45e135c0dee989da5b6f0c1d249ad5af",
+        },
+        rawSpan: {
+          beforeOffset: 488814,
+          afterOffset: 489134,
+          before:
+            '    {\n      "path": "src/runtime/dynamic-function-import.ts",\n      "state": "unmigrated",\n      "layer": "legacy-host"\n    },\n',
+          after:
+            '    {\n      "path": "src/runtime/dynamic-code-policy.ts",\n      "state": "unmigrated",\n      "layer": "legacy-host"\n    },\n    {\n      "path": "src/runtime/dynamic-function-import.ts",\n      "state": "unmigrated",\n      "layer": "legacy-host"\n    },\n',
+          beforeSha256: "8705064bdfb67310ae65cb3203cc2d97840244bcf27f229d71e2f3707e5ed240",
+          afterSha256: "254eeb01645faa832948ed42ca47120523a67c845ac23da752f1d129971fced1",
+        },
+      },
+    ],
+    spans: [
+      {
+        beforeOffset: 109891,
+        afterOffset: 109891,
+        before:
+          '    {\n      "path": "src/codegen/array-method-host.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n',
+        after:
+          '    {\n      "path": "src/codegen/array-method-arg-order.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n    {\n      "path": "src/codegen/array-method-host.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."\n    },\n',
+        beforeSha256: "4cf17df2ddb36ff6c0a270a0c0f4542cccca6806d155c1f8720027ed04030a22",
+        afterSha256: "c1c44f40e1731fe2ae2adef0e0ee5d357fcdf8388d9f311bf2ca20982ccf2cb1",
+      },
+      {
+        beforeOffset: 488814,
+        afterOffset: 489134,
+        before:
+          '    {\n      "path": "src/runtime/dynamic-function-import.ts",\n      "state": "unmigrated",\n      "layer": "legacy-host"\n    },\n',
+        after:
+          '    {\n      "path": "src/runtime/dynamic-code-policy.ts",\n      "state": "unmigrated",\n      "layer": "legacy-host"\n    },\n    {\n      "path": "src/runtime/dynamic-function-import.ts",\n      "state": "unmigrated",\n      "layer": "legacy-host"\n    },\n',
+        beforeSha256: "8705064bdfb67310ae65cb3203cc2d97840244bcf27f229d71e2f3707e5ed240",
+        afterSha256: "254eeb01645faa832948ed42ca47120523a67c845ac23da752f1d129971fced1",
+      },
+    ],
+    runtimeLayer: null,
+    fileAppend: null,
+    activationAppend: null,
+    api: captureDynamicCodePredecessorPolicySource,
+    full: beforeDynamicCodeInventoryPolicySource,
+  },
+  {
+    name: "C2a",
+    receiptPath: "tests/helpers/ir-runtime-program-policy-runtime-preparation.json",
+    before: {
+      source: {
+        bytes: 567166,
+        sha256: "8213f6d2d3bf112544ca2aa50b68e585f4ba2c1f9795acc240c9e8495712e7df",
+        gitBlob: "0d90f336925232fd22c98c438121b93e7e5bcf52",
+      },
+      dataSha256: "5dea4a676b8ddbc6fc50c7c77446e799ee4db12f4113c1fdf4edff33de848b21",
+      fileCount: 1775,
+      filesSha256: "82448a8b5bf6373b7ef203924f3ac4f0d33e69ca1df77b322812b63613fe8bec",
+      activationCount: 100,
+      activationHistorySha256: "f6716a46656b3e4e7292e6d6c2cfdb5681becc9fb0e688ebad01a49c48d044ab",
+      layersSha256: "ab456c917964e4e4d51c7110ce854e8c8648827a72eb4e6e61e2d74dc7f08a05",
+      allowedEdgesSha256: "efe7e7ed8dee1a009d2bef3ff36dba80df1a805cd3f5b7b472e62ec6dcff64c7",
+    },
+    current: {
+      source: {
+        bytes: 567465,
+        sha256: "92d653aff02d823339071f24721b803d88da4f31bdbd721859b0ac48b6c9c7f7",
+        gitBlob: "70b280c7cf2a56cbd5cbfa88b484b57414d2ef7c",
+      },
+      dataSha256: "28ae111b7b9f0f6eda144d5d57beaf76fd5c7617b474846d39409a56cc196e08",
+      fileCount: 1776,
+      filesSha256: "ca4d9d7d5c999a4e742abd7773d847f1652ca8fe995a491a594fca1e5cf37a1a",
+      activationCount: 101,
+      activationHistorySha256: "9629c457a160096e70c35fc3a986abbd8eca145ac4eb688995194d6c29c83650",
+      layersSha256: "3f66bbff64c157092a04740c644ae17d476d7d168faa1bd23629f97492e0c4f7",
+      allowedEdgesSha256: "efe7e7ed8dee1a009d2bef3ff36dba80df1a805cd3f5b7b472e62ec6dcff64c7",
+    },
+    additions: [],
+    spans: [
+      {
+        role: "runtime-layer-tail",
+        beforeOffset: 6444,
+        afterOffset: 6444,
+        before: '        "src/ir/runtime/generator-support.ts"\n      ],\n      "minModules": 19\n',
+        after:
+          '        "src/ir/runtime/generator-support.ts",\n        "src/ir/runtime/intrinsic-preparation.ts"\n      ],\n      "minModules": 20\n',
+        beforeSha256: "30d6b3d2844adec2c20019162f41b792554a8318ffaf593562dfe64a9b2984db",
+        afterSha256: "0fb91016dca1d3ba652a1e1c1622f4a486292e82384be2e46a08a01dfc86d058",
+      },
+      {
+        role: "activation-history-tail",
+        beforeOffset: 65731,
+        afterOffset: 65782,
+        before:
+          '        "src/runtime/wasmgc/values/bigint-to-number-body.ts",\n        "src/runtime/wasmgc/values/number-from-value-body.ts"\n      ],\n      "minModules": 2\n    },\n    {\n      "layer": "backend-wasmgc",\n      "entries": [\n        "src/backend/wasmgc/resources/native-bigint-number.ts",\n        "src/backend/wasmgc/resources/native-number-primitive-classifier.ts"\n      ],\n      "minModules": 2\n',
+        after:
+          '        "src/runtime/wasmgc/values/bigint-to-number-body.ts",\n        "src/runtime/wasmgc/values/number-from-value-body.ts"\n      ],\n      "minModules": 2\n    },\n    {\n      "layer": "backend-wasmgc",\n      "entries": [\n        "src/backend/wasmgc/resources/native-bigint-number.ts",\n        "src/backend/wasmgc/resources/native-number-primitive-classifier.ts"\n      ],\n      "minModules": 2\n    },\n    {\n      "layer": "ir-runtime",\n      "entries": ["src/ir/runtime/intrinsic-preparation.ts"],\n      "minModules": 1\n',
+        beforeSha256: "0e51cdca0a46e556233d7346ebbcbe9d8c6013789926f4392698734146ecc610",
+        afterSha256: "a014b410b320473b7b40780c7b6b88ecd10c39bdbdfaf1fffb89af040add274f",
+      },
+      {
+        role: "files-tail",
+        beforeOffset: 566806,
+        afterOffset: 566983,
+        before:
+          '      "state": "clean",\n      "layer": "native-runtime"\n    },\n    {\n      "path": "src/backend/wasmgc/resources/native-bigint-number.ts",\n      "state": "clean",\n      "layer": "backend-wasmgc"\n    },\n    {\n      "path": "src/backend/wasmgc/resources/native-number-primitive-classifier.ts",\n      "state": "clean",\n      "layer": "backend-wasmgc"\n',
+        after:
+          '      "state": "clean",\n      "layer": "native-runtime"\n    },\n    {\n      "path": "src/backend/wasmgc/resources/native-bigint-number.ts",\n      "state": "clean",\n      "layer": "backend-wasmgc"\n    },\n    {\n      "path": "src/backend/wasmgc/resources/native-number-primitive-classifier.ts",\n      "state": "clean",\n      "layer": "backend-wasmgc"\n    },\n    {\n      "path": "src/ir/runtime/intrinsic-preparation.ts",\n      "state": "clean",\n      "layer": "ir-runtime"\n',
+        beforeSha256: "690dc5485a5f7cabaf4cc1cbdca969dfafd96a79976728b6e4a1eacbddfb244c",
+        afterSha256: "5b58f77c2d14008613ef192e5ed99eda9e3c4d414e6f8b9cb7f2a9e9e0ccfd4c",
+      },
+    ],
+    runtimeLayer: {
+      index: 8,
+      id: "ir-runtime",
+      beforeEntries: 19,
+      currentEntries: 20,
+      beforeMinModules: 19,
+      currentMinModules: 20,
+      beforeClassified: 19,
+      currentClassified: 20,
+    },
+    fileAppend: {
+      path: "src/ir/runtime/intrinsic-preparation.ts",
+      state: "clean",
+      layer: "ir-runtime",
+    },
+    activationAppend: {
+      layer: "ir-runtime",
+      entries: ["src/ir/runtime/intrinsic-preparation.ts"],
+      minModules: 1,
+    },
+    api: captureRuntimePreparationPredecessorPolicySource,
+    full: beforeRuntimePreparationPolicySource,
+  },
+] as const;
+const fourStageCaptureFaultPaths = [
+  "tests/helpers/ir-runtime-program-policy-generator-eager-refusal.json",
+  "tests/helpers/ir-runtime-program-policy-host-carrier.json",
+  "tests/helpers/ir-runtime-program-policy-dynamic-code.json",
+  "tests/helpers/ir-runtime-program-policy-runtime-preparation.json",
+  "tests/helpers/ir-runtime-program-policy-evolution.ts",
+];
+/** Synchronous, checkout-exclusive real faults; retain recovery bytes/lock on any unsafe restore. */
+function fourStageCaptureWithFault(path: string, kind: "mutation" | "missing", action: () => void, byte: 0 = 0): void {
+  if (!fourStageCaptureFaultPaths.includes(path)) throw new Error("unapproved current-main authority fault: " + path);
+  if (
+    ![0].includes(byte) ||
+    (byte !== 0 && (path !== "tests/helpers/ir-runtime-program-policy-evolution.ts" || kind !== "mutation"))
+  )
+    throw new Error("unapproved current-main authority fault byte");
+  const target = fixtureCapturePhysical(path);
+  const scratch = resolve(import.meta.dirname, "../.tmp/c1-main-epoch/number-two-stage-capture-authority-faults");
+  mkdirSync(scratch, { recursive: true });
+  const lock = fixtureCaptureJoin(scratch, "checkout.lock");
+  // Exclusive creation fails closed if another operation owns this checkout.
+  const descriptor = openSync(lock, "wx", 0o600);
+  closeSync(descriptor);
+  let backupDirectory: string | undefined;
+  let backup: string | undefined;
+  let restored = true;
+  const failures: unknown[] = [];
+  const cleanupRestoredFault = (): void => {
+    if (backup) {
+      // Missing-input restoration renames the sole original out of this operation directory.
+      try {
+        lstatSync(backup);
+        unlinkSync(backup);
+      } catch (error) {
+        if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error;
+      }
+    }
+    if (backupDirectory) rmdirSync(backupDirectory);
+    unlinkSync(lock);
+  };
+  try {
+    const initial = lstatSync(target);
+    if (!initial.isFile() || initial.isSymbolicLink())
+      throw new Error("authority target must be a regular non-symlink file: " + target);
+    const original = readFileSync(target);
+    const mode = initial.mode & 0o7777;
+    const mutated = Buffer.from(original);
+    if (mutated.length === 0) throw new Error("empty authority target: " + target);
+    if (byte >= mutated.length) throw new Error("authority fault byte outside target");
+    mutated[byte] = mutated[byte]! ^ 1;
+    backupDirectory = mkdtempSync(fixtureCaptureJoin(scratch, "operation-"));
+    backup = fixtureCaptureJoin(backupDirectory, "original");
+    const recovery = backup;
+    writeFileSync(lock, JSON.stringify({ path, kind, backup }) + "\n", {
+      flag: "r+",
+    });
+    const verifyTarget = (bytes: Buffer): void => {
+      const stat = lstatSync(target);
+      if (
+        !stat.isFile() ||
+        stat.isSymbolicLink() ||
+        stat.ino !== initial.ino ||
+        stat.dev !== initial.dev ||
+        (stat.mode & 0o7777) !== mode ||
+        !readFileSync(target).equals(bytes)
+      )
+        throw new Error("unexpected authority edit; refusing to overwrite: " + target);
+    };
+    const restoreFault = (): void => {
+      const saved = lstatSync(recovery);
+      if (
+        !saved.isFile() ||
+        saved.isSymbolicLink() ||
+        (saved.mode & 0o7777) !== mode ||
+        !readFileSync(recovery).equals(original)
+      )
+        throw new Error("recovery copy differs from captured authority");
+      if (kind === "mutation") {
+        verifyTarget(mutated);
+        writeFileSync(target, original);
+        chmodSync(target, mode);
+      } else {
+        fixtureCaptureExpectMissing(() => {
+          lstatSync(target);
+        }, path);
+        if (saved.ino !== initial.ino || saved.dev !== initial.dev)
+          throw new Error("renamed authority identity changed");
+        renameSync(recovery, target);
+        chmodSync(target, mode);
+      }
+      verifyTarget(original);
+      restored = true;
+    };
+    verifyTarget(original);
+    if (kind === "mutation") {
+      writeFileSync(recovery, original, { flag: "wx", mode });
+      chmodSync(recovery, mode);
+    }
+    restored = false;
+    try {
+      if (kind === "mutation") {
+        writeFileSync(target, mutated);
+        chmodSync(target, mode);
+        verifyTarget(mutated);
+        if (byte === 0) {
+          expect(mutated[0]).not.toBe(original[0]);
+          expect(mutated.subarray(1).equals(original.subarray(1))).toBe(true);
+        } else {
+          expect(mutated[byte]).not.toBe(original[byte]);
+          expect(mutated.subarray(0, byte).equals(original.subarray(0, byte))).toBe(true);
+          expect(mutated.subarray(byte + 1).equals(original.subarray(byte + 1))).toBe(true);
+        }
+      } else {
+        renameSync(target, recovery);
+        fixtureCaptureExpectMissing(() => {
+          readFileSync(target);
+        }, path);
+        expect(() => lstatSync(target)).toThrow(/ENOENT/);
+      }
+      action();
+    } catch (error) {
+      failures.push(error);
+    } finally {
+      try {
+        restoreFault();
+      } catch (error) {
+        failures.push(
+          new Error(
+            "authority restoration failed; recovery retained at " + backup + "; checkout lock retained at " + lock,
+            { cause: error },
+          ),
+        );
+      }
+    }
+  } catch (error) {
+    failures.push(error);
+  } finally {
+    if (restored) {
+      try {
+        cleanupRestoredFault();
+      } catch (error) {
+        failures.push(
+          new Error("authority cleanup failed; checkout lock/recovery retained at " + lock + " / " + backup, {
+            cause: error,
+          }),
+        );
+      }
+    }
+  }
+  // Propagate only after every safe restoration/cleanup path has completed.
+  if (failures.length > 1) throw new AggregateError(failures, "authority operation and recovery failures: " + target);
+  if (failures.length === 1) throw failures[0];
+}
+
+function fourStageCaptureInput(epoch: (typeof fourStageCaptureEpochs)[number]): string {
+  let source = captureCurrentMainInventoryPredecessorPolicySource(
+    captureCanonical3c6PredecessorPolicySource(
+      captureCanonical489dPredecessorPolicySource(fixtureCaptureRead("scripts/compiler-boundaries.json")),
+    ),
+  );
+  if (epoch.name !== "generator") source = captureGeneratorPredecessorPolicySource(source);
+  if (epoch.name === "dynamic" || epoch.name === "C2a") source = captureHostCarrierPredecessorPolicySource(source);
+  if (epoch.name === "C2a") source = captureDynamicCodePredecessorPolicySource(source);
+  expect(fixtureCapturePin(source)).toEqual(epoch.current.source);
+  return source;
+}
+function fourStageCaptureIndependentRaw(
+  raw: string,
+  epoch: (typeof fourStageCaptureEpochs)[number],
+  forward: boolean,
+): string {
+  const bytes = Buffer.from(raw, "utf8");
+  expect(fixtureCapturePin(raw)).toEqual(forward ? epoch.before.source : epoch.current.source);
+  const pieces: Buffer[] = [];
+  let consumed = 0;
+  for (const span of epoch.spans) {
+    const at = forward ? span.beforeOffset : span.afterOffset;
+    const from = forward ? span.before : span.after;
+    const to = forward ? span.after : span.before;
+    const fragment = Buffer.from(from, "utf8");
+    expect(at).toBeGreaterThanOrEqual(consumed);
+    expect(Buffer.byteLength(raw.slice(0, at))).toBe(at);
+    expect(bytes.subarray(at, at + fragment.length).equals(fragment)).toBe(true);
+    expect(raw.indexOf(from)).toBe(at);
+    expect(raw.lastIndexOf(from)).toBe(at);
+    expect(fixtureCaptureSha(from)).toBe(forward ? span.beforeSha256 : span.afterSha256);
+    pieces.push(bytes.subarray(consumed, at), Buffer.from(to, "utf8"));
+    consumed = at + fragment.length;
+  }
+  pieces.push(bytes.subarray(consumed));
+  const output = Buffer.concat(pieces).toString("utf8");
+  expect(fixtureCapturePin(output)).toEqual(forward ? epoch.current.source : epoch.before.source);
+  return output;
+}
+function fourStageCaptureSpanMutation(
+  raw: string,
+  epoch: (typeof fourStageCaptureEpochs)[number],
+  kind: "omission" | "duplication" | "valid reorder",
+): string {
+  const span = epoch.spans[0]!;
+  expect(raw.slice(span.afterOffset, span.afterOffset + span.after.length)).toBe(span.after);
+  let replacement: string;
+  if (kind === "omission") replacement = span.before;
+  else if (epoch.name === "C2a") {
+    const previous = '        "src/ir/runtime/generator-support.ts"';
+    const added = '        "src/ir/runtime/intrinsic-preparation.ts"';
+    const pair = previous + ",\n" + added;
+    expect(span.after.split(pair)).toHaveLength(2);
+    replacement = span.after.replace(pair, kind === "duplication" ? pair + ",\n" + added : added + ",\n" + previous);
+  } else {
+    expect(span.after.endsWith(span.before)).toBe(true);
+    const added = span.after.slice(0, span.after.length - span.before.length);
+    expect(added.length).toBeGreaterThan(0);
+    replacement = kind === "duplication" ? added + span.after : span.before + added;
+  }
+  const changed = raw.slice(0, span.afterOffset) + replacement + raw.slice(span.afterOffset + span.after.length);
+  expect(changed).not.toBe(raw);
+  expect(() => JSON.parse(changed)).not.toThrow();
+  return changed;
+}
+describe("#3518 four-stage runtime policy fixture capture", () => {
+  for (const epoch of fourStageCaptureEpochs) {
+    it(`${epoch.name} independently proves fixed full profiles, local inverse and original full API`, () => {
+      const input = fourStageCaptureInput(epoch);
+      const output = epoch.api(input);
+      expect(fixtureCapturePin(output)).toEqual(epoch.before.source);
+      expect(output).toBe(epoch.full(input));
+      expect(output).toBe(fourStageCaptureIndependentRaw(input, epoch, false));
+      expect(fourStageCaptureIndependentRaw(output, epoch, true)).toBe(input);
+      const current = JSON.parse(input);
+      const before = JSON.parse(input);
+      if (epoch.name === "C2a") {
+        expect(current.files.slice(1775)).toEqual([epoch.fileAppend]);
+        expect(current.activationHistory.slice(100)).toEqual([epoch.activationAppend]);
+        expect(current.files.filter((row: { layer: string }) => row.layer === "ir-runtime")).toHaveLength(20);
+        const layer = before.layers[8];
+        expect(layer.id).toBe("ir-runtime");
+        expect(layer.status).toBe("active");
+        expect(layer.required).toBe(true);
+        expect(layer.roots).toEqual(["src/ir/runtime"]);
+        expect(layer.entries).toHaveLength(20);
+        expect(layer.entries.slice(19)).toEqual([epoch.fileAppend.path]);
+        expect(layer.minModules).toBe(20);
+        before.files.length = 1775;
+        before.activationHistory.length = 100;
+        layer.entries.length = 19;
+        layer.minModules = 19;
+      } else {
+        for (const addition of epoch.additions) {
+          expect(Object.keys(current.files[addition.fileIndex])).toEqual(Object.keys(addition.row));
+          expect(current.files[addition.fileIndex - 1]).toEqual(addition.previous);
+          expect(current.files[addition.fileIndex]).toEqual(addition.row);
+          expect(current.files[addition.fileIndex + 1]).toEqual(addition.next);
+          expect(current.files.filter((row: { path: string }) => row.path === addition.row.path)).toHaveLength(1);
+        }
+        for (const addition of [...epoch.additions].reverse()) before.files.splice(addition.fileIndex, 1);
+      }
+      expect(JSON.parse(output)).toEqual(before);
+      expect(before.files).toHaveLength(epoch.before.fileCount);
+      expect(before.activationHistory).toHaveLength(epoch.before.activationCount);
+      expect(fixtureCaptureSha(JSON.stringify(before))).toBe(epoch.before.dataSha256);
+      for (const [key, expected] of [
+        ["files", epoch.before.filesSha256],
+        ["activationHistory", epoch.before.activationHistorySha256],
+        ["layers", epoch.before.layersSha256],
+        ["allowedEdges", epoch.before.allowedEdgesSha256],
+      ] as const)
+        expect(fixtureCaptureSha(JSON.stringify(before[key]))).toBe(expected);
+      const replay = JSON.parse(JSON.stringify(before));
+      if (epoch.name === "C2a") {
+        expect(replay.files).toHaveLength(1775);
+        expect(replay.activationHistory).toHaveLength(100);
+        expect(replay.layers[8].entries).toHaveLength(19);
+        expect(replay.layers[8].minModules).toBe(19);
+        replay.files.push(epoch.fileAppend);
+        replay.activationHistory.push(epoch.activationAppend);
+        replay.layers[8].entries.push(epoch.fileAppend.path);
+        replay.layers[8].minModules = 20;
+      } else {
+        // Both dynamic predecessor neighbor pairs are checked before any insertion.
+        for (const addition of epoch.additions) {
+          expect(replay.files[addition.beforeIndex - 1]).toEqual(addition.previous);
+          expect(replay.files[addition.beforeIndex]).toEqual(addition.next);
+        }
+        for (const [inserted, addition] of epoch.additions.entries())
+          replay.files.splice(addition.beforeIndex + inserted, 0, addition.row);
+      }
+      expect(replay).toEqual(current);
+      expect(fixtureCaptureSha(JSON.stringify(replay))).toBe(epoch.current.dataSha256);
+    });
+    it(`${epoch.name} refuses boxed string before missing receipt witness`, () => {
+      const input = fourStageCaptureInput(epoch);
+      fourStageCaptureWithFault(epoch.receiptPath, "missing", () => {
+        expect(() => epoch.api(new String(input) as unknown as string)).toThrow(/raw input must be a primitive string/);
+      });
+      expect(fixtureCapturePin(epoch.api(input))).toEqual(epoch.before.source);
+    });
+    it(`${epoch.name} refuses stale predecessor`, () => {
+      const input = fourStageCaptureInput(epoch);
+      const stale = epoch.api(input);
+      expect(() => epoch.api(stale)).toThrow(/complete raw source profile mismatch/);
+    });
+    it(`${epoch.name} refuses valid JSON retained row mutation`, () => {
+      const input = fourStageCaptureInput(epoch);
+      const value = JSON.parse(input);
+      value.files[0].path += "-four-stage-mutant";
+      const changed = JSON.stringify(value);
+      expect(changed).not.toBe(input);
+      expect(() => epoch.api(changed)).toThrow(/complete raw source profile mismatch/);
+    });
+    it(`${epoch.name} refuses raw whitespace mutation`, () => {
+      const input = fourStageCaptureInput(epoch);
+      expect(() => epoch.api(input + "\n")).toThrow(/complete raw source profile mismatch/);
+    });
+    for (const kind of ["omission", "duplication", "valid reorder"] as const)
+      it(`${epoch.name} refuses fixed raw span ${kind}`, () => {
+        const input = fourStageCaptureInput(epoch);
+        const changed = fourStageCaptureSpanMutation(input, epoch, kind);
+        expect(() => epoch.api(changed)).toThrow(/complete raw source profile mismatch/);
+      });
+    for (const path of [epoch.receiptPath, "tests/helpers/ir-runtime-program-policy-evolution.ts"])
+      for (const kind of ["missing", "mutation"] as const)
+        it(`${epoch.name} freshly refuses ${kind} physical ${path} after success`, () => {
+          const input = fourStageCaptureInput(epoch);
+          expect(fixtureCapturePin(epoch.api(input))).toEqual(epoch.before.source);
+          fourStageCaptureWithFault(path, kind, () => {
+            if (kind === "missing") fixtureCaptureExpectMissing(() => epoch.api(input), path);
+            else
+              expect(() => epoch.api(input)).toThrow(
+                path === epoch.receiptPath
+                  ? /receipt digest mismatch/
+                  : /full-file pin changed: tests\/helpers\/ir-runtime-program-policy-evolution\.ts/,
               );
           });
           expect(fixtureCapturePin(epoch.api(input))).toEqual(epoch.before.source);

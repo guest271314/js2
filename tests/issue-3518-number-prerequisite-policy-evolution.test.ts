@@ -4,6 +4,10 @@ import { readFileSync } from "node:fs";
 import { setImmediate } from "node:timers/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  captureGeneratorPredecessorPolicySource,
+  captureHostCarrierPredecessorPolicySource,
+  captureDynamicCodePredecessorPolicySource,
+  captureRuntimePreparationPredecessorPolicySource,
   captureCanonical489dPredecessorPolicySource,
   captureCanonical3c6PredecessorPolicySource,
   authenticateGeneratorInventoryPolicyEvolution,
@@ -87,10 +91,10 @@ const digest = (value: unknown): string => sha(JSON.stringify(value));
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 // The original Number historical input is derived from the outer actual C2a policy.
 const raw = (): string =>
-  beforeRuntimePreparationPolicySource(
-    beforeDynamicCodeInventoryPolicySource(
-      beforeHostCarrierInventoryPolicySource(
-        beforeGeneratorInventoryPolicySource(
+  captureRuntimePreparationPredecessorPolicySource(
+    captureDynamicCodePredecessorPolicySource(
+      captureHostCarrierPredecessorPolicySource(
+        captureGeneratorPredecessorPolicySource(
           captureCurrentMainInventoryPredecessorPolicySource(
             captureCanonical3c6PredecessorPolicySource(
               captureCanonical489dPredecessorPolicySource(read("scripts/compiler-boundaries.json")),
@@ -908,9 +912,9 @@ describe("Number prerequisite exact successor of genuine WKS, C1 and B", () => {
 describe("C2a exact runtime preparation policy successor", () => {
   const path = "src/ir/runtime/intrinsic-preparation.ts";
   const currentRaw = (): string =>
-    beforeDynamicCodeInventoryPolicySource(
-      beforeHostCarrierInventoryPolicySource(
-        beforeGeneratorInventoryPolicySource(
+    captureDynamicCodePredecessorPolicySource(
+      captureHostCarrierPredecessorPolicySource(
+        captureGeneratorPredecessorPolicySource(
           captureCurrentMainInventoryPredecessorPolicySource(
             captureCanonical3c6PredecessorPolicySource(
               captureCanonical489dPredecessorPolicySource(read("scripts/compiler-boundaries.json")),
@@ -1305,8 +1309,8 @@ describe("C2a exact runtime preparation policy successor", () => {
 // Exact external-main inventory input; these controls never reuse the historical raw readers.
 describe("dynamic-code inventory successor preserves the C2a policy proof", () => {
   const latestRaw = (): string =>
-    beforeHostCarrierInventoryPolicySource(
-      beforeGeneratorInventoryPolicySource(
+    captureHostCarrierPredecessorPolicySource(
+      captureGeneratorPredecessorPolicySource(
         captureCurrentMainInventoryPredecessorPolicySource(
           captureCanonical3c6PredecessorPolicySource(
             captureCanonical489dPredecessorPolicySource(read("scripts/compiler-boundaries.json")),
@@ -1826,7 +1830,7 @@ describe("dynamic-code inventory successor preserves the C2a policy proof", () =
 // Direct current-main controls; earlier Number/C2a/two-row readers keep their exact domains.
 describe("host-carrier current-main inventory successor", () => {
   const hostRaw = (): string =>
-    beforeGeneratorInventoryPolicySource(
+    captureGeneratorPredecessorPolicySource(
       captureCurrentMainInventoryPredecessorPolicySource(
         captureCanonical3c6PredecessorPolicySource(
           captureCanonical489dPredecessorPolicySource(read("scripts/compiler-boundaries.json")),

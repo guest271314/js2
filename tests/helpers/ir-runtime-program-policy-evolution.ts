@@ -4773,3 +4773,214 @@ export function captureCurrentMainInventoryPredecessorPolicySource(raw: string):
     currentMainInventoryFail("raw and semantic reciprocal proof disagree");
   return predecessor;
 }
+
+// Fixed authenticated initial-capture inverses for the four retained policy stages.
+// Each invocation runs its original fresh authority once; local semantic and raw replay remain independent.
+
+function captureGeneratorSemantic(
+  value: unknown,
+  freshlyVerifiedReceipt: GeneratorInventoryPolicyReceipt,
+): { current: MutableIrRuntimeProgramPolicy; predecessor: MutableIrRuntimeProgramPolicy } {
+  // Descriptor-safe capture precedes authority I/O, caller reads and serialization.
+  const current = capture(value) as MutableIrRuntimeProgramPolicy;
+  const receipt = freshlyVerifiedReceipt;
+  generatorInventorySemanticProfile(current, receipt.current);
+  const addition = receipt.addition;
+  if (
+    !same(Object.keys(current), wksTopKeys) ||
+    current.layers.length !== 20 ||
+    !same(Object.keys(current.files[1615]!), Object.keys(addition.row)) ||
+    !same(current.files[1614], addition.previous) ||
+    !same(current.files[1615], addition.row) ||
+    !same(current.files[1616], addition.next) ||
+    current.files.filter((row) => row.path === addition.row.path).length !== 1
+  )
+    generatorInventoryFail("fixed file row schema/order or neighbors mismatch");
+  const predecessor = capture(current) as MutableIrRuntimeProgramPolicy;
+  predecessor.files.splice(1615, 1);
+  generatorInventorySemanticProfile(predecessor, receipt.before);
+  const replay = capture(predecessor) as MutableIrRuntimeProgramPolicy;
+  if (!same(replay.files[1614], addition.previous) || !same(replay.files[1615], addition.next))
+    generatorInventoryFail("predecessor replay neighbors mismatch");
+  replay.files.splice(1615, 0, capture(addition.row) as MutableIrRuntimeProgramPolicy["files"][number]);
+  generatorInventorySemanticProfile(replay, receipt.current);
+  if (!same(replay, current)) generatorInventoryFail("complete independent reciprocal replay mismatch");
+  return { current, predecessor };
+}
+
+/** Fresh fixed-profile initial capture; direct controls retain the full predecessor guards. */
+export function captureGeneratorPredecessorPolicySource(raw: string): string {
+  if (typeof raw !== "string") generatorInventoryFail("raw input must be a primitive string");
+  const receipt = authenticateGeneratorInventoryPolicyEvolution();
+  const predecessor = applyGeneratorInventoryRaw(raw, receipt, false);
+  const semantic = captureGeneratorSemantic(JSON.parse(raw), receipt);
+  const parsed = JSON.parse(predecessor) as MutableIrRuntimeProgramPolicy;
+  generatorInventorySemanticProfile(parsed, receipt.before);
+  if (!same(parsed, semantic.predecessor) || applyGeneratorInventoryRaw(predecessor, receipt, true) !== raw)
+    generatorInventoryFail("raw and semantic reciprocal proof disagree");
+  return predecessor;
+}
+
+function captureHostCarrierSemantic(
+  value: unknown,
+  freshlyVerifiedReceipt: HostCarrierPolicyReceipt,
+): { current: MutableIrRuntimeProgramPolicy; predecessor: MutableIrRuntimeProgramPolicy } {
+  // Descriptor-safe capture precedes authority I/O, caller reads and serialization.
+  const current = capture(value) as MutableIrRuntimeProgramPolicy;
+  const receipt = freshlyVerifiedReceipt;
+  hostCarrierSemanticProfile(current, receipt.current);
+  const addition = receipt.addition;
+  if (
+    !same(Object.keys(current), wksTopKeys) ||
+    current.layers.length !== 20 ||
+    !same(Object.keys(current.files[605]!), Object.keys(addition.row)) ||
+    !same(current.files[604], addition.previous) ||
+    !same(current.files[605], addition.row) ||
+    !same(current.files[606], addition.next) ||
+    current.files.filter((row) => row.path === addition.row.path).length !== 1
+  )
+    hostCarrierFail("fixed file row schema/order or neighbors mismatch");
+  const predecessor = capture(current) as MutableIrRuntimeProgramPolicy;
+  predecessor.files.splice(605, 1);
+  hostCarrierSemanticProfile(predecessor, receipt.before);
+  const replay = capture(predecessor) as MutableIrRuntimeProgramPolicy;
+  if (!same(replay.files[604], addition.previous) || !same(replay.files[605], addition.next))
+    hostCarrierFail("predecessor replay neighbors mismatch");
+  replay.files.splice(605, 0, capture(addition.row) as MutableIrRuntimeProgramPolicy["files"][number]);
+  hostCarrierSemanticProfile(replay, receipt.current);
+  if (!same(replay, current)) hostCarrierFail("complete independent reciprocal replay mismatch");
+  return { current, predecessor };
+}
+
+/** Fresh fixed-profile initial capture; direct controls retain the full predecessor guards. */
+export function captureHostCarrierPredecessorPolicySource(raw: string): string {
+  if (typeof raw !== "string") hostCarrierFail("raw input must be a primitive string");
+  const receipt = authenticateHostCarrierPolicyEvolution();
+  const predecessor = applyHostCarrierInventoryRaw(raw, receipt, false);
+  const semantic = captureHostCarrierSemantic(JSON.parse(raw), receipt);
+  const parsed = JSON.parse(predecessor) as MutableIrRuntimeProgramPolicy;
+  hostCarrierSemanticProfile(parsed, receipt.before);
+  if (!same(parsed, semantic.predecessor) || applyHostCarrierInventoryRaw(predecessor, receipt, true) !== raw)
+    hostCarrierFail("raw and semantic reciprocal proof disagree");
+  return predecessor;
+}
+
+function captureDynamicCodeSemantic(
+  value: unknown,
+  freshlyVerifiedReceipt: DynamicCodePolicyReceipt,
+): { current: MutableIrRuntimeProgramPolicy; predecessor: MutableIrRuntimeProgramPolicy } {
+  // Descriptor capture must precede authority I/O and any caller property read.
+  const current = capture(value) as MutableIrRuntimeProgramPolicy;
+  const receipt = freshlyVerifiedReceipt;
+  dynamicSemanticProfile(current, receipt.current);
+  if (
+    !same(Object.keys(current), wksTopKeys) ||
+    current.layers.length !== 20 ||
+    current.files.filter((row) => row.layer === "legacy-host").length !== 55
+  )
+    dynamicFail("fixed inventory population mismatch");
+  // Validate both rows against the untouched current array before removing either.
+  for (const addition of receipt.additions) {
+    if (
+      !same(Object.keys(current.files[addition.fileIndex]!), Object.keys(addition.row)) ||
+      !same(current.files[addition.fileIndex - 1], addition.previous) ||
+      !same(current.files[addition.fileIndex], addition.row) ||
+      !same(current.files[addition.fileIndex + 1], addition.next) ||
+      current.files.filter((row) => row.path === addition.row.path).length !== 1
+    )
+      dynamicFail("fixed file row schema/order or neighbors mismatch");
+  }
+  const predecessor = capture(current) as MutableIrRuntimeProgramPolicy;
+  for (const addition of [...receipt.additions].reverse()) predecessor.files.splice(addition.fileIndex, 1);
+  dynamicSemanticProfile(predecessor, receipt.before);
+  const replay = capture(predecessor) as MutableIrRuntimeProgramPolicy;
+  // Validate all predecessor neighbors before replay inserts either fixed row.
+  for (const addition of receipt.additions)
+    if (
+      !same(replay.files[addition.beforeIndex - 1], addition.previous) ||
+      !same(replay.files[addition.beforeIndex], addition.next)
+    )
+      dynamicFail("predecessor replay neighbors mismatch");
+  for (const [index, addition] of receipt.additions.entries())
+    replay.files.splice(
+      addition.beforeIndex + index,
+      0,
+      capture(addition.row) as MutableIrRuntimeProgramPolicy["files"][number],
+    );
+  dynamicSemanticProfile(replay, receipt.current);
+  if (!same(replay, current)) dynamicFail("complete independent reciprocal replay mismatch");
+  return { current, predecessor };
+}
+
+/** Fresh fixed-profile initial capture; direct controls retain the full predecessor guards. */
+export function captureDynamicCodePredecessorPolicySource(raw: string): string {
+  if (typeof raw !== "string") dynamicFail("raw input must be a primitive string");
+  const receipt = authenticateDynamicCodePolicyEvolution();
+  const predecessor = applyDynamicCodeInventoryRaw(raw, receipt, false);
+  const semantic = captureDynamicCodeSemantic(JSON.parse(raw), receipt);
+  const parsed = JSON.parse(predecessor) as MutableIrRuntimeProgramPolicy;
+  dynamicSemanticProfile(parsed, receipt.before);
+  if (!same(parsed, semantic.predecessor) || applyDynamicCodeInventoryRaw(predecessor, receipt, true) !== raw)
+    dynamicFail("raw and semantic reciprocal proof disagree");
+  return predecessor;
+}
+
+function captureRuntimePreparationSemantic(
+  value: unknown,
+  freshlyVerifiedReceipt: RuntimePreparationPolicyReceipt,
+): { current: MutableIrRuntimeProgramPolicy; before: MutableIrRuntimeProgramPolicy } {
+  const current = capture(value) as MutableIrRuntimeProgramPolicy;
+  const receipt = freshlyVerifiedReceipt;
+  preparationSemanticProfile(current, receipt.current);
+  if (
+    !same(Object.keys(current), wksTopKeys) ||
+    current.layers.length !== 20 ||
+    digest(current.allowedEdges) !== edges ||
+    digest(current.files.slice(0, 1775)) !== preparationBeforeProfile.filesSha256 ||
+    digest(current.activationHistory.slice(0, 100)) !== preparationBeforeProfile.activationHistorySha256 ||
+    !same(current.files.slice(1775), [preparationFile]) ||
+    !same(current.activationHistory.slice(100), [preparationActivation]) ||
+    current.files.filter((row) => row.layer === "ir-runtime").length !== 20
+  )
+    preparationFail("ordered current prefix or suffix mismatch");
+  const before = capture(current) as MutableIrRuntimeProgramPolicy;
+  const layer = before.layers[8]!;
+  if (
+    layer.id !== "ir-runtime" ||
+    layer.status !== "active" ||
+    layer.required !== true ||
+    !same(layer.roots, ["src/ir/runtime"]) ||
+    layer.entries?.length !== 20 ||
+    layer.minModules !== 20 ||
+    !same(layer.entries.slice(19), [preparationFile.path])
+  )
+    preparationFail("exact layer delta mismatch");
+  before.files.length = 1775;
+  before.activationHistory.length = 100;
+  layer.entries.length = 19;
+  layer.minModules = 19;
+  preparationSemanticProfile(before, receipt.before);
+  const replay = capture(before) as MutableIrRuntimeProgramPolicy;
+  replay.files.push(capture(preparationFile) as MutableIrRuntimeProgramPolicy["files"][number]);
+  replay.activationHistory.push(
+    capture(preparationActivation) as MutableIrRuntimeProgramPolicy["activationHistory"][number],
+  );
+  replay.layers[8]!.entries!.push(preparationFile.path);
+  replay.layers[8]!.minModules = 20;
+  preparationSemanticProfile(replay, receipt.current);
+  if (!same(replay, current)) preparationFail("complete independent reciprocal replay mismatch");
+  return { current, before };
+}
+
+/** Fresh fixed-profile initial capture; direct controls retain the full predecessor guards. */
+export function captureRuntimePreparationPredecessorPolicySource(raw: string): string {
+  if (typeof raw !== "string") preparationFail("raw input must be a primitive string");
+  const receipt = authenticateRuntimePreparationPolicyEvolution();
+  const predecessor = applyRuntimePreparationRaw(raw, receipt, false);
+  const semantic = captureRuntimePreparationSemantic(JSON.parse(raw), receipt);
+  const parsed = JSON.parse(predecessor) as MutableIrRuntimeProgramPolicy;
+  preparationSemanticProfile(parsed, receipt.before);
+  if (!same(parsed, semantic.before) || applyRuntimePreparationRaw(predecessor, receipt, true) !== raw)
+    preparationFail("raw and semantic reciprocal proof disagree");
+  return predecessor;
+}

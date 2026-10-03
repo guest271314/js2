@@ -678,3 +678,86 @@ Fresh user-triggered CI snapshot37078359214 still shows published5b2 Number11107
 
 
 Normal final-assembly gates completed before commit: native TypeScript7 typecheck, uncapped lint6792files, full TypeScript format check and issue integrity each exited0 with all27 input bytes/modes exact before/after every command; native aggregate SHA13dda026cae14bc2ebef14f57b961be2999cc978d68ce6a80fadb4d05004b911. LOC/function/coercion/oracle/dead-export ratchets all exited0 against verified canonical250e069e, preserving all27 input pins and eight incoming entries. Canonical3518:c1-main-epoch-20261002 claim remains held by this owner. Normal signed hooks and exact committed-tree verification follow; publication still waits for original live CI terminal evidence.
+
+
+### 2026-10-03 — published Number job terminal, remaining CPU delivery blocker
+
+The original published5b2 CI37078359214 is now completed/cancelled. Number111073682652 ran from23:38:19Z to00:18:35Z; its command began23:38:44Z and ended with “The operation was canceled” at00:18:33Z. This is consistent with the unchanged40-minute job budget; the raw log does not explicitly state the cancellation cause. No manual cancellation/restart was performed. There is no terminal Number assertion count or passing CI credit. Raw30694B SHA f99ff2b76644899615583893e0d27c6e59ad24bdd662103d1f8fd2471b8b1a2b retained under repair-407-assembly/resumed-ci-terminal. Fatal aggregate111082853771 genuinely exited1 because changed jobs received cancelled instead of success for all15 selected files; raw6524B SHA b47af87ea013d12dc5649641c4a86f02d9f326f2ee332f66b1746160631ee73c. All prior reporter/RPC failures and the new ordinary-clean407+2 local repair acceptance remain separate.
+
+Signed local e023b7b7 stays preserved, unpublished; its awaited hooks solve the two completed RPC failures but do not establish Number CI budget acceptance. Continue only scoped delivery-blocker CPU diagnosis/specification, preserving every456 original test body/assertion, fresh read/order/count, source/history guard, reciprocal recipe, public API, fixture and failure. No cache, guard weakening, timeout/heap/concurrency/selector-cap or error-policy change. AstraHigh specifies the hard task and implementation plan before Sol6.1Medium implementation; Sol may first measure unmodified existing operations in isolated scratch. Root alone integrates authority and owns Git/claim/publication. Fresh canonical main must be rechecked after the resumed external interval; downstream6426 and new migration scope remain paused. Legacy retained, full IR objective unfinished.
+
+
+Astra High bounded four-stage capture measurement plan14041/SHA8267d86974642af871ebc4713cb65f5d707212155a335bcde70d95f35fb70e90 imported into3518 BEFORE Sol6.1Medium scratch prototype authorization. Root reviewed the full plan: phase1 only, four capture contracts, complete five fixture operations and exact original one-row callback diagnostic; physical source inputs and full control APIs unchanged. No tracked helper/Number edit or reseal before complete parity/negative controls and material measured thresholds. Required conditional final881=147reporter+278authority+456unfiltered, then actual unchanged40-minute CI.
+
+
+### 2026-10-03 — four-stage complete-operation screen accepted before conditional implementation
+
+Root launched only the independently reviewed corrected freeze3be6d3561d6cc0854bc2972d55f2fe4c196ea11e151335baba94bb1f04a033b0. Actual outer27914 and owned driver both exited0; elapsed180.820709s, no600s external bound/interruption. All18 records (one warm+five balanced pairs per each of primary/batch/complete original callback) completed;16 negative comparisons yielded32 actual equal refusals. All33 input bytes/modes remained exact. Twelve ordinary Vitest subprocesses each passed the same original Number raw-span1 duplicate callback with no RPC/unhandled/pending/errors and unchanged35s deadline. These are repeated1/456 diagnostics with455 not executed, never full456 or CI credit. Original bodies/full API bindings/prefixes remain exact.
+
+Both independent runtime reviewers recomputed paired median reductions primary84.78185533%, five-fixture batch81.63769120%, complete callback80.92141220%, five/five positive pairs each. Complete callback median8072.871→1526.367ms; setup median7853.739→1291.492ms, remaining unchanged control work215.399→231.790ms: measured gain lies in setup. This passed the predeclared30%/20% selection thresholds. Node24.4.1/Darwin host-only; original inherited worker heap1024MB, caller4096MB; do not describe it as a measured4GB fork or extrapolate to UbuntuNode22. Actual final ordinary worker settings and unchanged40-minute CI remain mandatory. Runtime review hashes Astra213845200ee23964c7a558c9fc74126f58e71ebff1c0bfc6a2998e8120a353c0 and Sol57005a51317a614c0077381682f4b16f32330aec94ebe8c3426bf968e173eafe; raw custody in repair-407-assembly/resumed-ci-terminal/four-stage-capture-diagnostic.
+
+Conditional implementation is now authorized in isolated scratch: H1 owns append-only helper four captures/pure local inverses plus exactlyfour Number imports/ten fixture call replacements; H2 owns appended48 independently expected capture/refusal/warm physical controls in the existing reporter, preserving all99 original source/controls/hook. Root sole integration/reseal/Git; no root helper/Number/authority edits before candidate review. Full881 planned147+278+456 unfiltered and actual exact-head CI required; no cache/guard thinning/read suppression/counter changes, source/history prefix weakening, timeout/heap/concurrency/cap/workflow changes or legacy retirement. No downstream scope; existing held PR6405 remains published5b2.
+
+### 2026-10-03 — four-stage capture implementation reviewed, final validation pending
+
+Astra independently approved the formatted Sol6.1 Medium helper/Number candidates
+(freeze `08d4e0ea78bdd27111b96cc767215d7cb6a1201fc39ee22aa077bc11a727173a`)
+and 48-control reporter append
+(freeze `24aa485fce3ed6f6b19b8fbee211b06c14eddeebac0d2337713183acde783ac4`).
+The whole 216744-byte helper prefix, original Number callbacks/assertions/mutants,
+and original 134288-byte reporter source remain byte-recoverable. Only four
+imports and ten Number fixture capture call identifiers change. The new reporter
+controls use literal immutable receipts, independent complete raw/semantic replay,
+and the existing exclusive physical fault recovery semantics (bytes, modes, inode).
+No original full API, authority read guard, test deadline, worker configuration,
+workflow, acceptance threshold, or legacy runtime implementation changes.
+
+Root's independently reviewed scratch reseal recomputes the complete original-to-final
+helper and Number recipes; all ten historical before-pins/inverse/replay records,
+other ten instrument pins/eight recipes, graph yield repair, immutable authorities,
+artifacts, and remaining manifest fields stay exact. The unique current-source
+`independentFreeze` scalar binds the new manifest and anchor outside instrument
+membership. Final assembly review and ordinary 147 + 278 + unfiltered 456 = 881
+assertions, exact original registration census, byte/mode restoration, native gates,
+and exact-head Ubuntu CI remain required. Static approval and the host diagnostic
+provide no new full-suite/CI passing credit. PR delivery and downstream scope remain
+held until protected canonical-main delivery is verified; legacy code is retained.
+
+### 2026-10-03 — final reporter controls passed; full Number validation running
+
+The installed four-stage candidate collected exactly 881 registrations: all original
+99 reporter names followed by the 48 new names, all original 278 authority names,
+and all original 456 Number names, unchanged and ordered. The reporter completed
+147/147 in 65.291 seconds with numerical process exit 0, no failed/pending tests,
+no ordinary RPC/unhandled errors, and all 34 input bytes/modes/inodes restored.
+The next authority278 and unfiltered Number456 runs are still pending; this is
+147-control evidence only, not full881 or exact-head CI/queue delivery.
+
+### 2026-10-03 — final four-stage local acceptance: 881/881 ordinary-clean
+
+The exact reviewed/resealed candidate completed all unfiltered final populations:
+reporter **147/147** in 65.291s; current-source **278/278** in 38.246s;
+Number **456/456** in 476.030s (7m56s). Each actual child exited 0, and the root-owned
+outer executor exited 0. There were no failed/pending/todo assertions, ordinary
+RPC/unhandled errors, or assertion/suite failure messages. All original 99 reporter
+names, all original 278 authority names, and all original 456 Number names remained
+ordered and exact; 48 new reporter controls supply the additional denominator.
+All 34 frozen inputs retained exact bytes/SHA256, modes, inodes, and device identities
+before and after collection and each suite. The six installed changes preserve every
+original full API and guard, the complete 216744-byte helper prefix, all historical
+before-pins, all ten full inverse/replay recipes, and the existing initial-graph fix.
+
+This is measured local Node24 evidence for the final input domain. It does not
+establish Ubuntu Node22 execution, the unchanged 40-minute CI job budget, new-head
+initial-graph129/fatal aggregate acceptance, protected queue admission, or main
+delivery. Native repository gates, five ratchets, normal signed hooks, publication
+to the existing ready PR, and exact-head CI remain the next steps. Downstream
+PR6426 and new migration scope remain paused; legacy implementation remains.
+
+Final native TS7, uncapped Biome lint, full TypeScript formatting, issue integrity,
+and the unchanged LOC/function/coercion/oracle/dead-export ratchets all exited 0;
+each retained all 34 frozen input bytes/modes/inodes. Canonical main was freshly
+verified as `250e069e3e53d291a3d747d6b4068b9171ee5d67`, already integrated in e023.
+Independent Sol6.1 Medium review accepted all 881 actual terminal rows and input
+restoration, with no defect. Normal signed commit/push hooks and new-head CI still
+remain separate required evidence; the existing ready PR stays held.
