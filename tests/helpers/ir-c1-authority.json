@@ -224,9 +224,9 @@
     {
       "path": "tests/issue-3518-program-initial-graph-evolution.test.ts",
       "pin": {
-        "bytes": 24726,
-        "sha256": "90d7d907209b13bb28841412bd005010b6b213c4ea990fe479ac1d2bbcad1f20",
-        "gitBlob": "39382050ecc299aada3506684ff6fbf2c94a3050"
+        "bytes": 24928,
+        "sha256": "da15f0a27d68b1e4019919758dfeb3e0a06b78e353253c34b7babbc116fabdba",
+        "gitBlob": "6e24f513fb0f5261320707fd80964b8f62a2b03b"
       }
     },
     {
@@ -544,32 +544,44 @@
         "gitBlob": "b776f75396a99c2b0a4b94b1c989b9c85a298c14"
       },
       "afterPin": {
-        "bytes": 24726,
-        "sha256": "90d7d907209b13bb28841412bd005010b6b213c4ea990fe479ac1d2bbcad1f20",
-        "gitBlob": "39382050ecc299aada3506684ff6fbf2c94a3050"
+        "bytes": 24928,
+        "sha256": "da15f0a27d68b1e4019919758dfeb3e0a06b78e353253c34b7babbc116fabdba",
+        "gitBlob": "6e24f513fb0f5261320707fd80964b8f62a2b03b"
       },
       "spans": [
         {
+          "beforeOffset": 84,
+          "afterOffset": 84,
+          "before": "",
+          "after": "import { setImmediate } from \"node:timers/promises\";\n"
+        },
+        {
+          "beforeOffset": 113,
+          "afterOffset": 166,
+          "before": "import { describe, expect, it } from \"vitest\";\n",
+          "after": "import { afterEach, describe, expect, it } from \"vitest\";\n"
+        },
+        {
           "beforeOffset": 855,
-          "afterOffset": 855,
+          "afterOffset": 919,
           "before": "  reconstructRuntimeProgramRelocationSources,\n",
           "after": ""
         },
         {
           "beforeOffset": 1069,
-          "afterOffset": 1023,
+          "afterOffset": 1087,
           "before": "",
-          "after": "import { beforeCanonicalInstructionsSource, reconstructC1CurrentSources } from \"./helpers/ir-c1-current-source.js\";\n"
+          "after": "import { beforeCanonicalInstructionsSource, reconstructC1CurrentSources } from \"./helpers/ir-c1-current-source.js\";\n\nafterEach(async () => {\n  // Yield between synchronous source proofs so Vitest can process task-update RPCs.\n  await setImmediate();\n});\n"
         },
         {
           "beforeOffset": 1186,
-          "afterOffset": 1256,
+          "afterOffset": 1458,
           "before": "  const sources = reconstructRuntimeProgramRelocationSources((path) => {\n",
           "after": "  const sources = reconstructC1CurrentSources((path) => {\n"
         },
         {
           "beforeOffset": 1609,
-          "afterOffset": 1664,
+          "afterOffset": 1866,
           "before": "    return readLive(path);\n",
           "after": "    const source = readLive(path);\n    return path === \"src/wasm/model/instructions.ts\" ? beforeCanonicalInstructionsSource(source) : source;\n"
         }

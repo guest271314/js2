@@ -13,8 +13,9 @@ import {
 } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, relative, resolve, sep } from "node:path";
+import { setImmediate } from "node:timers/promises";
 import ts from "typescript";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   beforeCanonicalInstructionsSource,
   captureC1CurrentPopulation,
@@ -30,10 +31,15 @@ import {
   runtimeProgramRelocationReceiptPath,
 } from "./helpers/ir-runtime-program-relocation.js";
 
+afterEach(async () => {
+  // Yield between synchronous source proofs so Vitest can process task-update RPCs.
+  await setImmediate();
+});
+
 // Root replaces this ONE external assertion root after final instrument formatting/manifest assembly.
 // A missing freeze is a hard failure, never an alternate accepted manifest.
 const independentFreeze: string =
-  '{"manifestSha256":"40df3a1b7479403c914af6581f5ce8d723ec1264b0eeb8ee112ee58c56575804","anchorSource":"// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.\\n\\nexport const c1AuthorityManifestSha256 = \\"40df3a1b7479403c914af6581f5ce8d723ec1264b0eeb8ee112ee58c56575804\\";\\n","anchorPin":{"bytes":194,"sha256":"129f1163ed308be7fc476d6bd59c1ba8f050725c84e9c1d8836bb3aaae110f02","gitBlob":"26f870ef220f023a715ec7f19d4a50fbe8f8e2d1"},"declarationPin":{"bytes":1633,"sha256":"5294c0fce2be6c6974b61a3686c05e60aa66d5bb4599fc97cb315ee53cab71be","gitBlob":"8c594e598e0d946ed92fd658cbe2efe3063ca2c4"}}';
+  '{"manifestSha256":"5e311dda5403456650fecf1bfa85a25704ea6731d9bb569199081c3b92d67c13","anchorSource":"// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.\\n\\nexport const c1AuthorityManifestSha256 = \\"5e311dda5403456650fecf1bfa85a25704ea6731d9bb569199081c3b92d67c13\\";\\n","anchorPin":{"bytes":194,"sha256":"648587061bf9ed733580f1974c5f616b427434f0358848337f95a8bdf836b3f4","gitBlob":"801ec66bf7dee47e482a49e22906b2ba9f9a4286"},"declarationPin":{"bytes":1633,"sha256":"5294c0fce2be6c6974b61a3686c05e60aa66d5bb4599fc97cb315ee53cab71be","gitBlob":"8c594e598e0d946ed92fd658cbe2efe3063ca2c4"}}';
 const root = resolve(import.meta.dirname, "..");
 const manifestPath = "tests/helpers/ir-c1-authority.json";
 const anchorPath = "tests/helpers/ir-c1-authority-root.ts";

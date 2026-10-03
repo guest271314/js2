@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import { setImmediate } from "node:timers/promises";
 import ts from "typescript";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   assertProgramInitialGraphPin,
   assertProgramInitialGraphRecipe,
@@ -26,6 +27,11 @@ import {
   runtimeProgramRelocationReceiptPath,
 } from "./helpers/ir-runtime-program-relocation.js";
 import { beforeCanonicalInstructionsSource, reconstructC1CurrentSources } from "./helpers/ir-c1-current-source.js";
+
+afterEach(async () => {
+  // Yield between synchronous source proofs so Vitest can process task-update RPCs.
+  await setImmediate();
+});
 
 function beforeC1(readLive: (path: string) => string = actual, captureCalls?: string[]): (path: string) => string {
   const sources = reconstructC1CurrentSources((path) => {
