@@ -5481,3 +5481,154 @@ Evidence: `.tmp/nested-owner/resume-main-f710-20261003/` contains final executio
 On the human continuation, root freshly read existing held PR #6426, “refactor(ir): move nested stackification into analysis,” and verified canonical main directly as912f672f318a49ee54eb968fcbdc5a1f0f38a28d. Main advanced fromf710 only by six npm-compat benchmark JSON artifacts and their website mirrors. AstraHigh independently compared the full Git trees: no source, test, policy, receipt, configuration or workflow delta. Therefore no successor receipt, historical repin, recipe edit or source-specific rerun is justified by this artifact-only merge. The clean normal merge preserves all six incoming artifacts exactly and all41 previously validated input bytes; root retains custody evidence in .tmp/nested-owner/resume-main-912f-20261003/merged-custody.json. Normal hooks and exact-new-head CI/protected delivery remain required.
 
 The former published headd2d4 has actual independently audited CI2146/2300 selected assertions: prior824 plus current-main142, boundary105, validation63, Number456, runtime204 and semantic352. Each additional completed log has actual TEST_OUTCOME success and no observed RPC/unhandled errors. At the fresh snapshot, WKS154 and quality remained in progress; this is neither full CI acceptance nor evidence for the forthcoming new head. The actual prior tested preview remainsef103b (parentsf710,d2d4), distinct from main912f. Claims remain held by the existing D1 integration/proof owners. Root remains the sole integration owner; AstraHigh reviews/specifies, Sol6.1Medium audits. Legacy stays; full IR equality and retirement are incomplete.
+
+
+### D1 exact-head CI cancellation blocker — 2026-10-03
+
+Human resumed delivery. Fresh existing PR6426 head remains e7b8ee0d1a0e7eb14be316adc68bdbac3b5f9528; direct canonical main remains912f672f318a49ee54eb968fcbdc5a1f0f38a28d. Actual CI run37122137660 is terminal: quality and13 changed suites report success, WKS job111200483138 is cancelled, fatal issue-tests aggregate111206759992 exits1 because14 selected jobs require success. WKS job spans2415s, its test step2381s; log contains Vitest RUN then cancellation and no completed assertion count. Therefore no WKS154 passing credit. Timing is consistent with the unchanged40-minute workflow deadline, but the available job/raw records do not explicitly establish the cancellation initiator or CPU/OOM/deadlock cause. Preserve that uncertainty and original logs.
+
+AstraHigh owns a scoped implementation plan before source changes; Sol6.1Medium is measuring WKS initial-fixture construction and auditing actual terminal logs. The initial six full recursive fixture projections are a concrete code lead, not a measured full-suite root-cause conclusion. Existing delivered fresh capture projections may eliminate incidental repeated predecessor proofs only during initial fixture construction; full APIs, all old assertions/control closures, fresh physical authority reads, source ownership and timeouts/workflow remain unchanged. Root owns integration, authority reseal and exclusive ordinary execution. Protected queue stays held until exact repaired-head acceptance; no manual CI cancellation/restart or new downstream scope.
+
+
+## Implementation plan: D1 WKS fixture capture repair — 2026-10-03
+
+Exact AstraHigh plan recorded before implementation; SHA2561cd1bb5891ae78bade2b08eed3d4b5a35147b6c24e8494b9cf5f80752362c5c8.
+
+
+## Implementation Plan — PR6426 WKS154 CI cancellation: reuse delivered initial captures
+
+Astra High specifies/reviews; Sol6.1 Medium implements only after root records this plan and accepts the bounded diagnostic. Root owns integration, authority assembly, execution and publication. This is delivery repair for issue3518; full IR remains incomplete and legacy remains.
+
+### Actual failure and immutable input
+
+CI37122137660 on published e7b8ee0d1a0e7eb14be316adc68bdbac3b5f9528 ran WKS job111200483138 on merge preview bb5f2a7… into912f672f. Saved metadata reports completed/cancelled,12:14:47–12:55:02. Raw log31982B/SHA25651bc23572ae1aad3ee952cc181c300acfc02c4799dd2f65ad322824d3ef374fe contains Vitest3.2.7/Node25.9.0 start12:15:20 and generic operation-cancelled12:55:00, with no terminal assertion totals. The unchanged40-minute budget is consistent with termination; the log does not explicitly name a timeout cause. No154 acceptance is inferred.
+
+Actual WKS source27315B/90535f3b1761a6fa70612b90dbe935c0d9ac6b4ec21562b321ca1ac16ae52cc4; helper254018B/5130184ffe112a67a58081ed9074e5f2097ad9400279390ab8f9a825b4952bbe. Current manifest236461B/6cdcc25f233cf5a3adc4e50d309d711fad4a22ab56b03c57a0deedd761c769d4. Bind diagnostics/candidate to these actual bytes and the complete current root authority vector; moving source requires a new explicit freeze.
+
+### Concrete mechanism and scope
+
+In tests/issue-3518-well-known-symbol-policy-evolution.test.ts, raw() at51–65 repeatedly reconstructs the historical WKS operand. Six setup calls still invoke full recursive predecessor proof APIs. The helper already exports separately reviewed initial-capture APIs at4754–4988, used by Number setup and covered by the delivered reporter controls. Each authenticates its stage freshly, proves exact current and predecessor semantic/raw profiles, schema/neighbors, inverse/replay, and agreement. Full APIs additionally traverse predecessor policy proofs which subsequent setup stages perform again. D1 capture itself is a fresh local inverse and needs no change.
+
+Replace exactly these six identifier bindings in the named import and their sole calls inside raw():
+
+| Existing full setup API | Existing initial-capture API |
+| --- | --- |
+| beforeCanonical3c6InventoryPolicySource | captureCanonical3c6PredecessorPolicySource |
+| beforeCurrentMainInventoryPolicySource | captureCurrentMainInventoryPredecessorPolicySource |
+| beforeGeneratorInventoryPolicySource | captureGeneratorPredecessorPolicySource |
+| beforeHostCarrierInventoryPolicySource | captureHostCarrierPredecessorPolicySource |
+| beforeDynamicCodeInventoryPolicySource | captureDynamicCodePredecessorPolicySource |
+| beforeRuntimePreparationPolicySource | captureRuntimePreparationPredecessorPolicySource |
+
+Retain raw() nesting/order, the initial physical policy read, D1 and489d captures, and the final full beforeNumberPrerequisitePolicySource. The resulting operand must remain565875B/SHA451258b5feed7669d08553de966cb654a88f134a1d197fb9768fa97607843e59, Gitblob74dc1b073145713d122e28a0b45f34c0cc41a066 and dataSHA462b8a9a6047378eed5913e51441761734663ff8c53cbb804106368ff1a33be7 (1771files/98activations/20layers).
+
+Only this one existing test file is the implementer source scope. No helper/receipt/source/policy/config/workflow edits or new APIs/tests. Preserve every154 registration occurrence, callback, assertion, negative mutant, historical physical reader, afterEach yield, timeout and error policy. In particular rawRefused(), refused(), accepted(), receipt() and all direct full WKS/C1/B API calls remain byte-identical. Full inverse of the twelve identifier substitutions, plus any formatting-only import layout, must recover the entire frozen27315-byte source.
+
+Freshness contract disclosure: this change deliberately lowers incidental repeated setup authentication traversals. It does not promise identical aggregate setup read counts. Each selected exported capture still performs all of its existing fresh physical receipt/source/helper/H1 authority reads in original order on every invocation; no read is cached or suppressed inside an API. Every original full API retains its entire implementation/read topology and all direct controls. No cached receipt, reused accepted capture, generic projector, global reader interception or prior-operation authority is permitted. Root explicitly confirmed this initial-only interpretation: prohibited changes are suppressed reads inside APIs, cached approval or a reduced physical authority domain; fewer incidental recursive setup traversals are permitted only with measured complete output parity and source-exact retained full controls.
+
+### Bounded complete-operation diagnostic before selection
+
+H2 owns isolated scratch diagnostic only; no root changes or reseal before evidence review. Freeze actual helper/WKS/config/authority/source input pins and modes, scratch scripts, exact copied raw()/rawRefused()/receipt() and representative callback. Use original root exports for both sides: baseline has original six full APIs; candidate changes exactly the six identifiers above. Fresh policy read and fresh original exported authenticators on every action; do not supply receipts or pre-read expected authority.
+
+The root-authorized H2 screen already uses a bounded concrete method: exact copied `rejects raw span 1 duplicate` callback plus raw()/rawRefused() and actual root exported functions; one warm pair then three balanced old/new pairs. Each callback performs three fresh policy reads and27 named stage invocations. A test-local scratch assertion adapter implements only the actual used scalar matchers (Object.is equality/inequality) and toThrow with an explicit caught boolean, recording error name/message/type. This is a complete copied-callback diagnostic, not a Vitest execution or154 acceptance. Independent review must verify those copied source slices and matcher equivalence for this exact callback; undefined thrown values cannot count as success. The final ordinary suite remains mandatory.
+
+Record each complete callback duration and all stage durations separately, all27 stage output byte lengths/SHA256s per callback, actual single full-WKS refusal and healthy final full-WKS follow-up. Pairwise output-pin equality authenticates the same intermediate profiles because both sides invoke unchanged fixed-profile root exports; do not claim literal full-buffer comparisons unless separately recorded. No prior pair output may replace a fresh read. Launcher checks all41 current input files' whole bytes/mode/inode/device before/after; stage count27 and refusal count1 per callback are mandatory. Root runs without competing physical-fault suites/heavyworkers.
+
+This actual screen uses a180s external owned-process-group bound, not a changed test/CI deadline. Preserve terminal/group cleanup and pre/post input evidence. Do not introduce a second diagnostic solely to replace this already-authorized shape with more pairs. Existing APIs' independent primitive/descriptor/stale/raw/physical refusal controls already remain source-exact; the scratch screen's one real duplicate refusal is additional complete-operation parity evidence, not coverage of all those controls.
+
+Select only after actual stage-output/refusal parity, all input pins hold, every copied callback completes, all three measured complete-callback savings are positive, and median complete-callback improvement is material (target at least20%, not a tiny isolated-kernel gain). Report setup-stage and whole-callback savings separately; no CI or full-suite speed extrapolation. If the screen fails or is noisy, retain it and stop; no speculative helper redesign or exhaustive rerun.
+
+### Root-owned one-instrument authority reseal
+
+Only WKS is one of the twelve current instruments. After candidate review, root updates that instrument's full pin and its complete original→final reciprocal recipe. Preserve original WKS beforePin25860B/a93174185368356b0be2527e3f253fc49cc31e01cd8bbd4ba6cb2431bb66e831. Build the new recipe from the immutable full original, not a delta applied to a prior afterPin; UTF8 byte offsets, exact inverse and forward replay. Independently prove all ten complete recipes; retain nine other recipes and eleven other instrument pins byte-for-byte. Every immutable authority, seven historical artifacts, source/config/resolver/declaration/currentBase and historicalBase remains unchanged.
+
+Root alone owns tests/helpers/ir-c1-authority.json, tests/helpers/ir-c1-authority-root.ts and the unique independentFreeze literal in tests/issue-3518-c1-current-source.test.ts. Format manifest before final digest, bind anchor and independent literal, and recover all278 source outside the literal exactly. No helper historical-prefix or receipt update and no source epoch. Four final changed proof files: WKS test plus this root-owned trio (tracking docs separate).
+
+### Meaningful final acceptance
+
+Collect exact unchanged154 ordered registrations including duplicates and execute ordinary unfiltered154. Root explicitly requires the final five-file1088 acceptance set: WKS154 + current-source278 + reporter147 + Number456 + new D1 policy53. Keep physical-fault suites exclusive and verify complete frozen input restoration. Current-source native type probe/literal/anchor/historical reconstruction/current-instrument checks must genuinely execute; Number456 is unfiltered. These are root-required final acceptance populations, not an extrapolation from the scratch callback or a claim that a reseal necessarily changes all bodies. Preserve all old evidence and failures separately.
+
+No new physical fault harness is needed: original154 physical reader/control assertions and delivered capture APIs remain unchanged; full278 covers authority integrity. Final root native typecheck, uncapped lint/format, normal hooks and applicable unchanged selected-file CI remain required. On publication, require actual154 completion/error-clean outcome at the new composed head within the unchanged40-minute CI job, plus the rest of mandatory CI/aggregate/protected queue/main content checks. Current cancelled run remains evidence; no automatic restart/cancellation, cap/concurrency/heap/deadline increase or advisory-policy change.
+
+Diagnostic evidence is pending at plan authorship. Source candidate implementation is conditional, not runtime approval.
+
+
+
+### Measured plan finalization before candidate implementation
+
+Initial exact plan1cd1bb58 was recorded before Sol dispatch. The measured three-pair diagnostic completed before that dispatch. Astra then finalized the measured-plan text as9f1789610996dfad1f89b463efd4b236c9ba1b4aaf8b339585b968f968af6eef. Sol custody guard stopped on that plan-pin change before producing a candidate; root now records the final exact plan before permitting candidate implementation. Both versions and original diagnostic are retained; no history rewrite. Final plan follows in full.
+
+
+## Implementation Plan — PR6426 WKS154 CI cancellation: reuse delivered initial captures
+
+Astra High specifies/reviews; Sol6.1 Medium implements only after root records this plan and accepts the bounded diagnostic. Root owns integration, authority assembly, execution and publication. This is delivery repair for issue3518; full IR remains incomplete and legacy remains.
+
+### Actual failure and immutable input
+
+CI37122137660 on published e7b8ee0d1a0e7eb14be316adc68bdbac3b5f9528 ran WKS job111200483138 on merge preview bb5f2a7… into912f672f. Saved metadata reports completed/cancelled,12:14:47–12:55:02. Raw log31982B/SHA25651bc23572ae1aad3ee952cc181c300acfc02c4799dd2f65ad322824d3ef374fe contains Vitest3.2.7/Node25.9.0 start12:15:20 and generic operation-cancelled12:55:00, with no terminal assertion totals. The unchanged40-minute budget is consistent with termination; the log does not explicitly name a timeout cause. No154 acceptance is inferred.
+
+Actual WKS source27315B/90535f3b1761a6fa70612b90dbe935c0d9ac6b4ec21562b321ca1ac16ae52cc4; helper254018B/5130184ffe112a67a58081ed9074e5f2097ad9400279390ab8f9a825b4952bbe. Current manifest236461B/6cdcc25f233cf5a3adc4e50d309d711fad4a22ab56b03c57a0deedd761c769d4. Bind diagnostics/candidate to these actual bytes and the complete current root authority vector; moving source requires a new explicit freeze.
+
+### Concrete mechanism and scope
+
+In tests/issue-3518-well-known-symbol-policy-evolution.test.ts, raw() at51–65 repeatedly reconstructs the historical WKS operand. Six setup calls still invoke full recursive predecessor proof APIs. The helper already exports separately reviewed initial-capture APIs at4754–4988, used by Number setup and covered by the delivered reporter controls. Each authenticates its stage freshly, proves exact current and predecessor semantic/raw profiles, schema/neighbors, inverse/replay, and agreement. Full APIs additionally traverse predecessor policy proofs which subsequent setup stages perform again. D1 capture itself is a fresh local inverse and needs no change.
+
+Replace exactly these six identifier bindings in the named import and their sole calls inside raw():
+
+| Existing full setup API | Existing initial-capture API |
+| --- | --- |
+| beforeCanonical3c6InventoryPolicySource | captureCanonical3c6PredecessorPolicySource |
+| beforeCurrentMainInventoryPolicySource | captureCurrentMainInventoryPredecessorPolicySource |
+| beforeGeneratorInventoryPolicySource | captureGeneratorPredecessorPolicySource |
+| beforeHostCarrierInventoryPolicySource | captureHostCarrierPredecessorPolicySource |
+| beforeDynamicCodeInventoryPolicySource | captureDynamicCodePredecessorPolicySource |
+| beforeRuntimePreparationPolicySource | captureRuntimePreparationPredecessorPolicySource |
+
+Retain raw() nesting/order, the initial physical policy read, D1 and489d captures, and the final full beforeNumberPrerequisitePolicySource. The resulting operand must remain565875B/SHA451258b5feed7669d08553de966cb654a88f134a1d197fb9768fa97607843e59, Gitblob74dc1b073145713d122e28a0b45f34c0cc41a066 and dataSHA462b8a9a6047378eed5913e51441761734663ff8c53cbb804106368ff1a33be7 (1771files/98activations/20layers).
+
+Only this one existing test file is the implementer source scope. No helper/receipt/source/policy/config/workflow edits or new APIs/tests. Preserve every154 registration occurrence, callback, assertion, negative mutant, historical physical reader, afterEach yield, timeout and error policy. In particular rawRefused(), refused(), accepted(), receipt() and all direct full WKS/C1/B API calls remain byte-identical. Full inverse of the twelve identifier substitutions, plus any formatting-only import layout, must recover the entire frozen27315-byte source.
+
+Freshness contract disclosure: this change deliberately lowers incidental repeated setup authentication traversals. It does not promise identical aggregate setup read counts. Each selected exported capture still performs all of its existing fresh physical receipt/source/helper/H1 authority reads in original order on every invocation; no read is cached or suppressed inside an API. Every original full API retains its entire implementation/read topology and all direct controls. No cached receipt, reused accepted capture, generic projector, global reader interception or prior-operation authority is permitted. Root explicitly confirmed this initial-only interpretation: prohibited changes are suppressed reads inside APIs, cached approval or a reduced physical authority domain; fewer incidental recursive setup traversals are permitted only with measured complete output parity and source-exact retained full controls.
+
+### Bounded complete-operation diagnostic before selection
+
+H2 owns isolated scratch diagnostic only; no root changes or reseal before evidence review. Freeze actual helper/WKS/config/authority/source input pins and modes, scratch scripts, exact copied raw()/rawRefused()/receipt() and representative callback. Use original root exports for both sides: baseline has original six full APIs; candidate changes exactly the six identifiers above. Fresh policy read and fresh original exported authenticators on every action; do not supply receipts or pre-read expected authority.
+
+The root-authorized H2 screen already uses a bounded concrete method: exact copied `rejects raw span 1 duplicate` callback plus raw()/rawRefused() and actual root exported functions; one warm pair then three balanced old/new pairs. Each callback performs three fresh policy reads and27 named stage invocations. A test-local scratch assertion adapter implements only the actual used scalar matchers (Object.is equality/inequality) and toThrow with an explicit caught boolean, recording error name/message/type. This is a complete copied-callback diagnostic, not a Vitest execution or154 acceptance. Independent review must verify those copied source slices and matcher equivalence for this exact callback; undefined thrown values cannot count as success. The final ordinary suite remains mandatory.
+
+Record each complete callback duration and all stage durations separately, all27 stage output byte lengths/SHA256s per callback, actual single full-WKS refusal and healthy final full-WKS follow-up. Pairwise output-pin equality authenticates the same intermediate profiles because both sides invoke unchanged fixed-profile root exports; do not claim literal full-buffer comparisons unless separately recorded. No prior pair output may replace a fresh read. Launcher checks all41 current input files' whole bytes/mode/inode/device before/after; stage count27 and refusal count1 per callback are mandatory. Root runs without competing physical-fault suites/heavyworkers.
+
+This actual screen uses a180s external owned-process-group bound, not a changed test/CI deadline. Preserve terminal/group cleanup and pre/post input evidence. Do not introduce a second diagnostic solely to replace this already-authorized shape with more pairs. Existing APIs' independent primitive/descriptor/stale/raw/physical refusal controls already remain source-exact; the scratch screen's one real duplicate refusal is additional complete-operation parity evidence, not coverage of all those controls.
+
+Select only after actual stage-output/refusal parity, all input pins hold, every copied callback completes, all three measured complete-callback savings are positive, and median complete-callback improvement is material (target at least20%, not a tiny isolated-kernel gain). Report setup-stage and whole-callback savings separately; no CI or full-suite speed extrapolation. If the screen fails or is noisy, retain it and stop; no speculative helper redesign or exhaustive rerun.
+
+### Root-owned one-instrument authority reseal
+
+Only WKS is one of the twelve current instruments. After candidate review, root updates that instrument's full pin and its complete original→final reciprocal recipe. Preserve original WKS beforePin25860B/a93174185368356b0be2527e3f253fc49cc31e01cd8bbd4ba6cb2431bb66e831. Build the new recipe from the immutable full original, not a delta applied to a prior afterPin; UTF8 byte offsets, exact inverse and forward replay. Independently prove all ten complete recipes; retain nine other recipes and eleven other instrument pins byte-for-byte. Every immutable authority, seven historical artifacts, source/config/resolver/declaration/currentBase and historicalBase remains unchanged.
+
+Root alone owns tests/helpers/ir-c1-authority.json, tests/helpers/ir-c1-authority-root.ts and the unique independentFreeze literal in tests/issue-3518-c1-current-source.test.ts. Format manifest before final digest, bind anchor and independent literal, and recover all278 source outside the literal exactly. No helper historical-prefix or receipt update and no source epoch. Four final changed proof files: WKS test plus this root-owned trio (tracking docs separate).
+
+### Meaningful final acceptance
+
+Collect exact unchanged154 ordered registrations including duplicates and execute ordinary unfiltered154. Root explicitly requires the final five-file1088 acceptance set: WKS154 + current-source278 + reporter147 + Number456 + new D1 policy53. Keep physical-fault suites exclusive and verify complete frozen input restoration. Current-source native type probe/literal/anchor/historical reconstruction/current-instrument checks must genuinely execute; Number456 is unfiltered. These are root-required final acceptance populations, not an extrapolation from the scratch callback or a claim that a reseal necessarily changes all bodies. Preserve all old evidence and failures separately.
+
+No new physical fault harness is needed: original154 physical reader/control assertions and delivered capture APIs remain unchanged; full278 covers authority integrity. Final root native typecheck, uncapped lint/format, normal hooks and applicable unchanged selected-file CI remain required. On publication, require actual154 completion/error-clean outcome at the new composed head within the unchanged40-minute CI job, plus the rest of mandatory CI/aggregate/protected queue/main content checks. Current cancelled run remains evidence; no automatic restart/cancellation, cap/concurrency/heap/deadline increase or advisory-policy change.
+
+### Actual bounded screen selection (before source implementation)
+
+H2 terminal0,77.107701s host process; eight copied complete callbacks (warm pair+three balanced pairs) and216 stage calls completed. All41 byte/mode/inode/device input observations match before/after. All27 stage output length/SHA pairs match in each pair and all eight actual duplicate mutants refuse with the same full-WKS complete-raw-profile error. Exact original raw(), rawRefused() and callback segments are present unchanged in source/driver. Three baseline/candidate callback pairs (ms):16931.837→2066.940,17235.352→2069.145,17295.079→2058.413. Independently recomputed paired median saving87.994765%,3/3positive. This meets the material-selection criterion.
+
+Evidence: own diagnostic review d1-wks154-diagnostic-review.json; H2 results.json SHA3f2c6a79c544cb884fa381002704c1c6b033940652e194af77fda27c01c5c48f; terminal.json SHA7d9d10acfb82a67f33af3cddde3924d6abc1dda5bab2beaeb00fb7d520fadfd1. Node24.4.1 host-only scratch diagnostic; no ordinary Vitest or154/CI acceptance and no full-buffer equality claim beyond authenticated stage output pins. The minimal source retarget is justified for implementation; final1088 and unchanged40-minute actual CI requirements remain.
+
+
+
+
+### D1 WKS repair final ordinary acceptance — 2026-10-03
+
+Later terminal check-run annotations explicitly resolve the previously recorded cancellation uncertainty: WKS exceeded the actual40m0s job deadline. Original raw audit remains retained; independent deadline addendum7049e025 records the stronger evidence. No completed WKS count is inferred from the cancelled run and no CPU/OOM/deadlock attribution is invented.
+
+Sol6.1Medium implemented exactly6 setup import/call retargets. Candidate27387/a4abb5a3 passed Astra868235 review; every154 callback/assertion/registration and all bytes after raw() remain exact, full helper254018/513018 unchanged. Root resealed exactlyone current instrument and its complete original25860→27387/33-span recipe; all10 whole UTF8 inverses/replays passed root and independent579b review. Other11 pins/other9 recipes/all10 historical beforepins/immutable11/artifacts7/allremainingmanifestfields exact. Manifest239953/0e964ff7, anchor194/952423c2, external current-source75022/8225a06e. No configuration/workflow/deadline/selector/error-policy change, historical repin, cache, suppressed read inside a full API or legacy retirement. Incidental repeated recursive setup proofs are removed as expressly planned; aggregate setup read multiplicity is not claimed identical.
+
+Root actual ordinary final1088/1088, five child exits0 and unified executor85546 actual terminal0: WKS154/214.241s, D1policy53/7.188s, current-source278/37.119s, reporter147/72.224s, Number456/560.188s. Every runtime name/order/duplicate occurrence matches prior full collection; zero skipped/failed/pending/todo. Each child restored all41 byte/mode/inode/device inputs; root final independently rehashed the complete vector. SolH1 audited485 raw cases abd5fb1f, SolH2 audited603 c45ee826; ordinary RPC/unhandled/timeout/error channels clean. Node24.4.1/Vitest3.2.7, unchanged fork/heap/test timeout. Current1088 evidence is distinct from previous2309 on the preceding policy epoch and from the bounded scratch diagnostic; no full-suite or CI timing extrapolation.
+
+Native TS7, pinned format, uncapped lint and all5 exact912f ratchets plus issue checks passed. No newly added path/test changes the existing14-file CI population. Precommit freshly reverified canonical912f, fork e7b8, existing ready held PR6426 and own canonical proof claim. Normal signed commit/push hooks, exact successor-head CI, protected queue and main ancestry/content delivery remain outstanding at this record. Full IR equality and retirement remain open.

@@ -248,9 +248,9 @@
     {
       "path": "tests/issue-3518-well-known-symbol-policy-evolution.test.ts",
       "pin": {
-        "bytes": 27315,
-        "sha256": "90535f3b1761a6fa70612b90dbe935c0d9ac6b4ec21562b321ca1ac16ae52cc4",
-        "gitBlob": "c67085df5d4ca68a973c6a3d5cb5bebc3039cc66"
+        "bytes": 27387,
+        "sha256": "a4abb5a3459989c78116892024e030dd3fe1696ed26286b7263130a8bdca4aa7",
+        "gitBlob": "8bf16b5f2055fafa5e182bbd6955c2b5b7b0e109"
       }
     },
     {
@@ -727,46 +727,208 @@
         "gitBlob": "65873b916d8cfd49804377d0e5045f2e77ee5fe9"
       },
       "afterPin": {
-        "bytes": 27315,
-        "sha256": "90535f3b1761a6fa70612b90dbe935c0d9ac6b4ec21562b321ca1ac16ae52cc4",
-        "gitBlob": "c67085df5d4ca68a973c6a3d5cb5bebc3039cc66"
+        "bytes": 27387,
+        "sha256": "a4abb5a3459989c78116892024e030dd3fe1696ed26286b7263130a8bdca4aa7",
+        "gitBlob": "8bf16b5f2055fafa5e182bbd6955c2b5b7b0e109"
       },
       "spans": [
         {
-          "beforeOffset": 286,
-          "afterOffset": 286,
+          "beforeOffset": 288,
+          "afterOffset": 288,
           "before": "",
-          "after": "  captureNestedStackificationPredecessorPolicySource,\n  captureCanonical489dPredecessorPolicySource,\n  beforeCanonical3c6InventoryPolicySource,\n"
+          "after": "captureNestedStackificationPredecessorPolicySource,\n  captureCanonical489dPredecessorPolicySource,\n  captureCanonical3c6PredecessorPolicySource,\n  "
+        },
+        {
+          "beforeOffset": 402,
+          "afterOffset": 549,
+          "before": "befo",
+          "after": "captu"
+        },
+        {
+          "beforeOffset": 417,
+          "afterOffset": 565,
+          "before": "Inv",
+          "after": "Pr"
+        },
+        {
+          "beforeOffset": 421,
+          "afterOffset": 568,
+          "before": "nt",
+          "after": "decess"
+        },
+        {
+          "beforeOffset": 425,
+          "afterOffset": 576,
+          "before": "y",
+          "after": ""
+        },
+        {
+          "beforeOffset": 442,
+          "afterOffset": 592,
+          "before": "befo",
+          "after": "captu"
+        },
+        {
+          "beforeOffset": 459,
+          "afterOffset": 610,
+          "before": "Inv",
+          "after": "Pr"
+        },
+        {
+          "beforeOffset": 463,
+          "afterOffset": 613,
+          "before": "nt",
+          "after": "decess"
+        },
+        {
+          "beforeOffset": 467,
+          "afterOffset": 621,
+          "before": "y",
+          "after": ""
+        },
+        {
+          "beforeOffset": 484,
+          "afterOffset": 637,
+          "before": "befo",
+          "after": "captu"
+        },
+        {
+          "beforeOffset": 501,
+          "afterOffset": 655,
+          "before": "Inv",
+          "after": "Pr"
+        },
+        {
+          "beforeOffset": 505,
+          "afterOffset": 658,
+          "before": "nt",
+          "after": "decess"
+        },
+        {
+          "beforeOffset": 509,
+          "afterOffset": 666,
+          "before": "y",
+          "after": ""
+        },
+        {
+          "beforeOffset": 526,
+          "afterOffset": 682,
+          "before": "befo",
+          "after": "captu"
+        },
+        {
+          "beforeOffset": 550,
+          "afterOffset": 707,
+          "before": "",
+          "after": "Predecessor"
         },
         {
           "beforeOffset": 879,
-          "afterOffset": 1023,
+          "afterOffset": 1047,
           "before": "",
-          "after": "  beforeCurrentMainInventoryPolicySource,\n"
+          "after": "  captureCurrentMainInventoryPredecessorPolicySource,\n"
         },
         {
           "beforeOffset": 1169,
-          "afterOffset": 1355,
+          "afterOffset": 1391,
           "before": "",
           "after": "import { c1HistoricalArtifactPath, type C1HistoricalLogicalPath } from \"./helpers/ir-c1-historical-authority.js\";\n\n"
         },
         {
-          "beforeOffset": 1270,
-          "afterOffset": 1571,
+          "beforeOffset": 1267,
+          "afterOffset": 1604,
           "before": "",
-          "after": "const historicalPolicyOperandPaths: readonly string[] = [\n  \"tests/issue-3518-runtime-program-relocation.test.ts\",\n  \"tests/issue-3518-program-data-contract-seam.test.ts\",\n  \"tests/issue-3518-program-ownership-runtime-seam.test.ts\",\n  \"tests/issue-3518-program-pre-a-evolution.test.ts\",\n  \"tests/issue-3518-program-initial-graph-evolution.test.ts\",\n  \"tests/helpers/ir-runtime-program-policy-evolution.ts\",\n];\nconst historicalPolicyPhysicalPath = (path: string): string =>\n  historicalPolicyOperandPaths.includes(path) ? c1HistoricalArtifactPath(path as C1HistoricalLogicalPath) : path;\n// Raw physical operand reads let the original mutation assertions inspect corruption before the guard rejects it.\nconst readHistoricalPolicyOperand = (path: string): string => read(historicalPolicyPhysicalPath(path));\n"
+          "after": ");\nconst historicalPolicyOperandPaths: readonly string[] = [\n  \"tests/issue-3518-runtime-program-relocation.test.ts\",\n  \"tests/issue-3518-program-data-contract-seam.test.ts\",\n  \"tests/issue-3518-program-ownership-runtime-seam.test.ts\",\n  \"tests/issue-3518-program-pre-a-evolution.test.ts\",\n  \"tests/issue-3518-program-initial-graph-evolution.test.ts\",\n  \"tests/helpers/ir-runtime-program-policy-evolution.ts\",\n];\nconst historicalPolicyPhysicalPath = (path: string): string =>\n  historicalPolicyOperandPaths.includes(path) ? c1HistoricalArtifactPath(path as C1HistoricalLogicalPath) : path;\n// Raw physical operand reads let the original mutation assertions inspect corruption before the guard rejects it.\nconst readHistoricalPolicyOperand = (path: string): string => read(historicalPolicyPhysicalPath(path)"
         },
         {
-          "beforeOffset": 1704,
-          "afterOffset": 2811,
-          "before": "          beforeGeneratorInventoryPolicySource(read(\"scripts/compiler-boundaries.json\")),\n",
-          "after": "          beforeGeneratorInventoryPolicySource(\n            beforeCurrentMainInventoryPolicySource(\n              beforeCanonical3c6InventoryPolicySource(\n                captureCanonical489dPredecessorPolicySource(\n                  captureNestedStackificationPredecessorPolicySource(read(\"scripts/compiler-boundaries.json\")),\n                ),\n              ),\n            ),\n          ),\n"
+          "beforeOffset": 1572,
+          "afterOffset": 2715,
+          "before": "befo",
+          "after": "captu"
         },
         {
-          "beforeOffset": 5907,
-          "afterOffset": 7316,
+          "beforeOffset": 1597,
+          "afterOffset": 2741,
           "before": "",
-          "after": "    const read = readHistoricalPolicyOperand;\n"
+          "after": "redecessorP"
+        },
+        {
+          "beforeOffset": 1616,
+          "afterOffset": 2771,
+          "before": "befo",
+          "after": "captu"
+        },
+        {
+          "beforeOffset": 1633,
+          "afterOffset": 2789,
+          "before": "Inv",
+          "after": "Pr"
+        },
+        {
+          "beforeOffset": 1637,
+          "afterOffset": 2792,
+          "before": "nt",
+          "after": "decess"
+        },
+        {
+          "beforeOffset": 1641,
+          "afterOffset": 2800,
+          "before": "y",
+          "after": ""
+        },
+        {
+          "beforeOffset": 1664,
+          "afterOffset": 2822,
+          "before": "befo",
+          "after": "captu"
+        },
+        {
+          "beforeOffset": 1681,
+          "afterOffset": 2840,
+          "before": "Inv",
+          "after": "Pr"
+        },
+        {
+          "beforeOffset": 1685,
+          "afterOffset": 2843,
+          "before": "nt",
+          "after": "decess"
+        },
+        {
+          "beforeOffset": 1689,
+          "afterOffset": 2851,
+          "before": "y",
+          "after": ""
+        },
+        {
+          "beforeOffset": 1714,
+          "afterOffset": 2875,
+          "before": "befo",
+          "after": "captu"
+        },
+        {
+          "beforeOffset": 1729,
+          "afterOffset": 2891,
+          "before": "",
+          "after": "PredecessorPolicySource(\n            captureCurrentMain"
+        },
+        {
+          "beforeOffset": 1738,
+          "afterOffset": 2955,
+          "before": "",
+          "after": "PredecessorPolicySource(\n              captureCanonical3c6PredecessorPolicySource(\n                captureCanonical489dPredecessorPolicySource(\n                  captureNestedStackificationPredecessor"
+        },
+        {
+          "beforeOffset": 1791,
+          "afterOffset": 3208,
+          "before": "",
+          "after": "),\n                ),\n              ),\n            ),\n          "
+        },
+        {
+          "beforeOffset": 5906,
+          "afterOffset": 7387,
+          "before": "",
+          "after": "\n    const read = readHistoricalPolicyOperand;"
         }
       ]
     },
