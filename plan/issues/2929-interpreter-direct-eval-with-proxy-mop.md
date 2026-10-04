@@ -1709,9 +1709,11 @@ The completed MD4016 audit and separate Script P2 appendix remain frozen.
 No source, fixture, runtime, build, provider, claim, dependency, publication
 or GitHub-state action was taken. This is not source GO or an issue closure.
 
-The evidence was found through the COMPLETE branch handoff
-`plan/issues/6810-executable-native-eval-ci-contract.md` in read-only
-`/Users/thomas/.codex/worktrees/es6-native-eval-ci/js2`, head
+The evidence was found through the COMPLETE external branch handoff
+`6810-executable-native-eval-ci-contract.md` in the donor's `plan/issues`
+directory, not present on current main; see the immutable
+[donor commit](https://github.com/loopdive/js2/commit/16120f29f62e5748f8d9fec795695fca302a4a8a)
+and read-only `/Users/thomas/.codex/worktrees/es6-native-eval-ci/js2`, head
 `16120f29f62e5748f8d9fec795695fca302a4a8a`. Its historical production
 baseline is `1f1b0ad61cbc74d0bde3a326e8b7e2e02b7add99`, NOT current main.
 The durable directory `/private/tmp/js2-6810-native-provider.xz1tZR/` exists:
