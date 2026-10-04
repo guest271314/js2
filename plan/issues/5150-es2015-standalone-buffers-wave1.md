@@ -1497,3 +1497,69 @@ Thomas author configuration was verified unchanged before publication steps.
 Only the six owned paths will be staged. Full normal commit/pre-push hooks and
 latest-main integration followed by new bundles/provider/canaries and original9,
 focused9/classifier31 remain pending; no publication success is asserted here.
+
+### 2026-10-05 — integrated source and final finite validation
+
+Candidate commit `cd5bd0f492a06a340da650efa1db0f257431426c` completed normal
+unskipped hooks (handle 25129, true terminal 36ccd2 exit 0). Author/committer are
+Thomas Tränkler; Codex coauthor and actual GPT-6.1 Sol High attribution are present.
+Lint-staged formatting/lint, LOC/function gates, both changed-root fixtures
+(nine plus 31 assertions) and oracle gate passed; all six staged images stayed
+byte-identical. Terminal log SHA-256 is
+`a0d87fe7ab4738ebbb088f4faba8ddebf7077594dd53706d36264eb440fd9e34`.
+
+Normal fetch followed by conflict-free normal merge preserved current upstream
+main `27b18d375f0c446fcd5662056a35261db9881f7b`, including IR analysis relocation
+and exact policy changes. Integrated HEAD is
+`8c69820fa251c64130913e859e087ffb2bb56763`. Actual parsed policy equals upstream
+except the one approved new debt record; the other five owned file images equal
+the candidate commit exactly. Branch diff against main contains only six owned
+paths. No primary checkout, foreign protocol, layer activation or IR source was
+edited by this implementation.
+
+New V5 freeze includes all 1,827 actual source files and 2,301 total inputs,
+797 tools, unchanged original9/harness3/focused9/classifier31 contracts. SHA-256
+`12d900baf399613c33edbf25050896002c7c9510dd2382a500974e5b7c661da7`
+is distinct from retained V2/V3/V4 historical freezes. Ordinary maintained bundle
+commands and provider/canary build plus require-cache verification completed all
+four commands at exit 0 (61008, true terminal 943952). The three pinned native
+artifact bytes were copied only into a fresh exclusive own staging directory;
+all donor bytes and all source/tool bytes stayed unchanged. Fresh compiler key
+`271f317460104faa`, native key `04a9abfac8350642`, adapter key `f36ed7826c560624`
+were verified by normal adapter MISS/build/canaries and subsequent required HIT.
+No key override, metadata edit, install, provider fallback or skipped gate occurred.
+Actual bundles are SHA-256
+`7d936f304fb7b530ebaeb20f7b1f52be4da2c36a7cb0fd67e1113db7f8c02ce3`
+and `cedd07a11f29e25314a0c33459d0c95794af614dc2b192f27b7b8a397b314e91`.
+Actual native/adapter bytes retain 95333826... / fa105724... hashes; actual
+imports/exports and full provenance/tool receipts are in
+`.tmp/5150-integrated-build.6BFkXb/postflight.json`, SHA-256
+`158262f9fbee3e300e9a9ff0937c7249702e6cb725427f4d16e141e46360a798`.
+
+Integrated authoritative nine-original run (91090, true terminal 836a31 exit 0)
+passed all nine physical identities: target and all eight positive controls.
+Every row has honest oracle14/auto, default both-strict policy and reached_test;
+all 16 durable shard completions account for nine registered/settled callbacks,
+zero exclusions/skips and completeness exit 0. The approved passWithNoTests flag
+only permits empty shards; positive nine-row and 16-completion floors still gate.
+All 2,301 inputs, tools, corpus and six artifact hashes remained unchanged.
+Full raw rows/maps are retained in `.tmp/5150-integrated-originals.iUuHXd/`,
+receipt SHA-256
+`1d5bccc3a68d97cfbe82947dea84c26af9bae5740c57d5ede1808a2ad1322bac`.
+
+Integrated classifier31/focused9 and all nine normal gates completed exit 0
+(36726, true terminal 50e06a): LOC, function, oracle, import cycles, flat directory,
+compiler inventory, full lint, TypeScript7 and issues/retirement. Forty unique
+assertions passed, zero pending/skipped. Every source/tool/artifact byte stayed
+pinned through every boundary. Actual Vitest JSON SHA-256 is
+`5d9dbb80dc446c23181c648eaeb43e76da613f5b3fa8716a30f4ffc1182c5d7f`;
+full finite-chain receipt under `.tmp/5150-integrated-verification.rx39WO/` is
+`85269e53d52b465768a14a8243f8874c6eea093e1df55c5a0168a3965ec9daa9`.
+
+The prior baseline/candidate/removal/restored attribution remains one original
+gain, not another gain for structural extraction or policy bookkeeping. No new
+full census, rate, buffers-wave completion or held constructor/TypedArray/helper
+protocol result is claimed. Historical LOC/inventory, quoted-title instrument
+failure and pre-child restoration-format failure remain intact. This checkpoint
+is documentation-only after final semantic validation. Normal final commit and
+pre-push/public PR outcomes remain pending until their actual terminal receipts.
