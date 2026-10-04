@@ -2175,3 +2175,51 @@ and authorized a message-only NORMAL retry with ALL skip variables UNSET and
 the complete slow tier. No push/publication may precede that actual full result.
 No manual stash/reset/cleanup was used: reported backup was lint-staged's normal
 unchanged implementation. Source/artifact acceptance snapshots remain stable.
+
+### Actual full normal publication gates and P1 pull request
+
+The message-only corrected normal commit handle58575/start586af3/terminal1375bc
+exits0 and creates17fd13bcc798705f0cd364a5d83445d4686f1d80. All skip/HUSKY
+variables were removed (none inherited); canonicalNode24/1024 and the existing
+package tools were used with Corepack network acquisition disabled. Full normal
+Prettier/Biome/LOC/function gates, changed-root MOCK24 and oracle slow tier pass.
+Commit terminal SHA256f2f0feb8febca25619eb2501bf62931f5c0181493118488dba486c7157cbe0a5.
+Thomas Tränkler is both author and committer; actual trailers are
+`Model: Codex GPT-6.1 Sol High` and `Co-authored-by: Codex <codex@openai.com>`.
+All fifteen owned paths and no generated artifact/unrelated path are committed.
+Actual979870 verifies all thirteen working and committed-source digests; extra
+committed issue integrity34779/cd07fc passes4742/4742. Unrelated Acorn bytes
+remain unchanged and were not staged. No source expectation/provenance repair,
+manual stash/reset, signing override or hook/config modification was needed.
+
+Normal fork push handle59722/startff9c41/terminal666fff exits0 without skips or
+HUSKY bypass. Full typecheck/lint, changed-file format check, oracle/coercion
+ratchets, numeric-local parity18/18 and issue integrity pass. Full push terminal
+SHA256575ac2a6d5853204a01dbc3952e76fe4523770542f80f904863ad7e72a6d194d.
+Actual remote verification22861/a874e0/77d2dd exits0: own fork branch is exactly
+17fd13bcc798705f0cd364a5d83445d4686f1d80 and upstream main remains
+1787b1af4a2f010f51ca1f45fc68fa540bfa4673. All thirteen source receipts still
+match and working status is clean before this documentation-only checkpoint.
+The intrinsic unified-diff context-space cached-check exit2 remains historical;
+normal hooks passed without stripping patch data or adding a whitespace waiver.
+
+Non-draft P1 PR https://github.com/loopdive/js2/pull/6476 created by normal
+gh create51532/f93e43 exit0 and attached to the Codex task. One-shot actual
+view/API89889/d9dba2/fe7563 verifies OPEN, head17fd13bcc798705f0cd364a5d83445d4686f1d80
+in ttraenkler/js2, base1787b1af4a2f010f51ca1f45fc68fa540bfa4673/main in
+loopdive/js2, fifteen changed files/one commit, mergeable=true, merge-state
+blocked and no review decision. Initial CI/quality/native artifact/CLA checks
+are in progress; baseline admission and relevance detection succeeded. Initial
+sharded provider/census jobs were skipped, not measured conformance evidence.
+No queue change, foreign PR takeover or CLA acceptance was performed. CLA box
+remains unchecked. Submitted body SHA256
+7f714a6373a8a186ffc31704128560861035e65ec2449f5a9c152278aea28fee
+records actual normal-gate passes and the known6246 document-history overlap.
+
+Current finite P1 acceptance remains shipped42/42, fault7/7 plus two separately
+reported cleanup diagnostics, MOCK24/24 and matched old11/new11 compatibility,
+with the frozen source/artifact receipts above. Producer is INACTIVE; original
+43 diagnostics/17 compiled controls, P2/native-instantiation and consumer
+integration/census remain open. Root accepted publication and released heavy
+lease at actual push terminal; this append is source-only until a later normal
+documentation commit/push lease. No extra runtime/build/watch was started.
