@@ -28,15 +28,25 @@ GPT-6.1 Sol High owns compiler integration and delivery. Canonical child claims:
 `3525:prepared-presentation-tests-20261004`. Historical claims and work remain.
 
 Integration branch: `codex/3525-prepared-pipeline-presentation-20261004`.
-Normal signed commits and protected ready-PR delivery are required. Dependency
-PR 6475, “refactor(ir): give linear layout contracts and backend legality
-canonical owners”, has immutable head
-`650cb1b0a08df7976662c721e0da884b109fbfe0`. At the last genuine release decision
-all 63 head checks were green/skipped and protected admission reported already
-queued. Neither this statement nor a test merge SHA proves main delivery.
-Verify fresh canonical main, exact ancestry/content and actual merge-group
-conformance before completing delivery claims. Do not poll or change the armed
-head. Broader provider/carrier/layout/options/target coverage remains open.
+Normal signed checkpoint `75308922465e52880270fb1ec7e231aee61342b4`
+completed all 18 normal selected suites: 2,690/2,690 tests passed, with all five
+reviewed file contents exact. Independent ordinary 44/44 evidence remains
+separate from the hook's inherited ignored-unhandled-error policy.
+
+Dependency PR 6475, “refactor(ir): give linear layout contracts and backend
+legality canonical owners”, is delivered as
+`7755320d74de1b52eafedbf6cc5cd37d57c6a081`. Fresh canonical main
+`27b18d375f0c446fcd5662056a35261db9881f7b` contains the merge and all 31
+owned paths exactly. Its 102 merge-group conformance shards, final regression
+gate and differential run succeeded. Each retained conformance lane contains
+48,735 unique rows with original failures preserved; this is not whole-IR
+acceptance. CI was cancelled, with two issue-test jobs cancelled and the
+aggregate issue-test job failed; do not call all merge-group CI green.
+The cancellation cause is unverified. Local current-root normal hooks separately
+completed both affected suites. The presentation checkpoint's protected main
+delivery remains pending. All 33 freshly reviewed incoming main paths are
+preserved during normal composition. Broader provider/carrier/layout/options/
+target coverage remains open.
 
 Issue 6837, “Modular IR analysis and optimization pipeline with measured
 performance parity”, remains prepared but unaccepted. Attempt four actually
