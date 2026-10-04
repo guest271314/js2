@@ -4,7 +4,7 @@ title: "IR-only R5: whole-program single- and multi-source Prepared ownership"
 status: in-progress
 sprint: current
 created: 2026-07-21
-updated: 2026-09-05
+updated: 2026-10-04
 assignee: ttraenkler/codex
 branch: codex/3525-m1a3-same-spelling-callables
 priority: critical
@@ -46,9 +46,15 @@ files:
   - src/codegen/multi-prepared-program.ts
   - src/codegen/program-abi-module-init-planning.ts
   - src/compiler.ts
+  - src/compiler/ir-program-presentation.ts
+  - tests/issue-3525-prepared-pipeline-presentation.test.ts
   - tests/issue-3525-multi-prepared-module-init.test.ts
   - tests/issue-3525-ir-whole-program-multi-source.test.ts
 loc-budget-allow:
+  # Internal prepared-presentation checkpoint only: 1976 -> 2097 LOC (+121),
+  # compiler 0244548a; private finalizer/context/entry and explicit artifact projection.
+  # All source/ABI/resource joins remain in the new leaf; no total/baseline grant.
+  - src/compiler.ts
   - src/codegen/context/types.ts
   - src/codegen/declarations.ts
   - src/codegen/index.ts
@@ -3018,3 +3024,179 @@ Publish a non-draft checkpoint with exact moved call sites and poison/runtime
 controls. Do not add a public alternative compiler mode, edit package C, or
 silently narrow supported behavior. Hand back any missing provider/layout or
 source producer as a located failing fixture to its existing owner.
+
+
+## Internal prepared output implementation and ownership release — 2026-10-04
+
+Root resumes the historical A/output interface within this sole IR session. All old branches and held claims remain preserved. This bounded continuation writes only the three paths below and this issue; A/C producers, driver, providers, public routing and legacy retirement remain consume-only. Canonical claim effects are authenticated in the integration receipt; no forced transfer was used. Root owns compiler.ts and integration, Sol GPT-6.1 Medium owns the new presentation leaf, and a separate Sol GPT-6.1 Medium owns the new execution test suite. Astra High wrote the hard implementation specification below. Existing open compiler PR option/diagnostic hunks stay intact; PR6341 allocation-owner insertion after C ABI and before widening is absent in the current base and remains a future preservation obligation.
+
+Base is exact650cb1b0; its PR6475 main delivery is still unverified. This private source increment can be developed now, but publication must integrate freshly verified main and preserve the queued head. Legacy remains until full IR path parity. The benchmark quiet window ended at actual driver exit1, with four of eight reports and143 of240 pairs retained: no performance acceptance, automatic retry, or threshold change.
+
+<!-- Astra source executable-numeric-bridge-amendment.md SHA256 a5ec87eab43d15240cf055a69ec2716eb3341639b615750892a795bdbe199099 -->
+
+
+### Required executable R5 checkpoint — genuine numeric prepared program to finalized binary (2026-10-04)
+
+This strengthens the earlier14316-byte contract: merely narrowing context and returning gaps for every input is **not** the delivered checkpoint. The released implementation must finalize and execute the existing real numeric and two-source prepared fixtures. Missing families remain explicit gaps; neither public routing nor C/provider implementation is opened by this bounded internal path. Held A/output/routing acknowledgement remains a source-release prerequisite.
+
+#### Smallest productive path and source association
+
+Keep proposed ownership `src/compiler.ts`, NEW `src/compiler/ir-program-presentation.ts`, and NEW `tests/issue-3525-prepared-pipeline-presentation.test.ts`; current driver/result, C consumer/provider and object/linker files remain consume-only. The new internal compiler entry is not exported from `src/index.ts` and introduces no public option. It receives the existing complete analyzed input, captures frontend presentation/normalized options once, invokes the actual `runIrProgramDriver` once, joins that returned program/emission to the local capture, and calls the existing finalizer once. Do not accept a caller-supplied emitted result or `metadataComplete` flag at this entry. A private synchronous transaction closure associates capture, exact driver options, result and module; there is no separately reusable approval token or second registry. Before observers can run, snapshot data-only target/output options just as the driver already does. Never clone or substitute the authentic program/emission.
+
+The first accepted domain is real synchronous numeric function programs at wasmgc/host with ordinary ABI, sourceMap false and no requested optimization/C header or object output. Use the existing fixture in `tests/issue-3525-public-prepared-driver.test.ts:15` (`calculate(value:number) => value*3+2`) and its actual two-source callable dependency at108–123. This domain is defined by authentic source/ABI/resource conditions, not fixture filenames or special-cased source hashes. Additional targets/families must prove their own complete contracts; their present rejection is an internal `presentation-unsupported`/named-gap result before output artifacts, not a false language Unsupported or successful empty CompileResult. Preserve preparation/acceptance Unsupported and invariant exceptions exactly as the driver already returns/throws them.
+
+Capture per-function source filename/declaration span, parameter/result numeric classification and async/modifier facts from the original analyzed source graph/checker once. Match to `program.inventory.sources[].originalFileName` and terminal declarationStart/declarationEnd, using exact source identity to obtain the real unit ID. Join the ABI callable's `plan.intent.unitId` (or exact canonical alias target when admitted) and `contract`, then each ABI export contract's target binding, then the actual `emittedProgramBindingIndex(emission, bindingId)` function-space result. Check the actual physical export name/index and signature, including arity, against that join. Never identify a unit by display name alone or infer an ID by splitting text. Reject missing/ambiguous source spans, unmatched exports, wrong slot space or contradictory primitive signatures. Original source AST may remain local for DTS/WIT rendering; it never reaches C, physical body lowering, the prepared packet or its codec.
+
+#### Existing facts sufficient for the numeric positive path
+
+- **Boundary signature absence is real semantics.** `src/codegen/declarations.ts:384–443::recordExportSignature` returns without recording a signature when every param/result is `other`. It does not create all-other rows. For this checkpoint, use the frontend checker's actual numeric declaration classification and the corresponding primitive prepared callable contracts to prove that exact case for every physical function export. Preserve `module.exportSignatures === undefined` when that is the established legacy result; do not manufacture `{}` or all-other entries. A string/dynamic/promise/typed-array/aggregate source classification must refuse this narrow path even if a physical representation happens to resemble a number. No call into the legacy codegen context or generation algorithm is needed for this finite numeric proof.
+- **Async zero has a producer.** Require captured declarations to be synchronous, genuine ABI callable contracts to have no promise contract, and actual prepared IR/runtime support to contain no async demand for admitted exports/bodies. These checks justify the existing empty `module.asyncFunctions` only for this complete input. A matching empty Set alone does not. Do not allocate a replacement Set or erase discovered runtime work. DTS is generated from the original entry AST and the genuine module.
+- **Startup false has a complete source.** Examine all actual `program.startup` rows (`program/startup.ts`): retain source population/order, and require no executable evaluation, live initializer seed or unresolved gap, with the corresponding invocation policy. Cross-check genuine emission support/startup receipts and absence of a physical startup function/export for this admitted zero-demand case. Empty source/declaration rows remain in the inventory; do not remove them. This proves the existing `hasTopLevelStatements === true` expression returns false legitimately. Any live initializer takes an explicit startup-gap result for this first cut. `hasMain` still comes from the actual function export.
+- **Imports and provider absence are observed, not filled.** Use the selected genuine runtime projection/declarations plus completed C emission to establish no live external import/capability/string-boundary resource demand. Inspect the actual module imports (all kinds), string pool/literal and extern/JSX metadata, resources and support receipts. Numeric intra-program calls are joined through ABI slots, not treated as host imports. Require an actual zero-import module for this first cut; never clear imports/maps or pass an empty synthetic manifest. Then the unchanged import/capability/adapter helper builders run on that genuine module and derive their own empty results. Existing `reserveString` remains the real string-pool producer for broader future inputs.
+- **Options are one transaction.** Resolve public target profile once and retain actual driver backend/target/moduleName/shared-tag/utf8/sourceMap values; no later mutable caller bag chooses a different profile. The host numeric path requests no C ABI, source maps or optimization, so missing C header/maps are explicit request semantics. `emitWatOutput` remains the real resolved flag; WAT false suppresses only WAT. For the first required positive, WIT is unrequested; a later WIT positive can use the existing entry AST renderer without changing C.
+- **Physical mutations must be absent, not handwaved.** C ABI is not requested. Prove admitted actual physical types/signatures/locals/globals/imports do not require the finalizer's nondefaultable-ref widening. Capture complete physical state before finalization and independently prove that numeric finalization leaves the authentic function/ABI/resource population unchanged, while still running the unchanged finalizer order. Do not treat pre-mutation receipts as validation of a changed physical program. A real widening demand refuses this initial domain; a broader producer repair belongs to C, as the historical plan specifies.
+
+Together these conditions allow a genuine nonempty numeric module to reach binary emission, optional WAT, DTS, actual import/capability/adapter helper building and normal engine validation without any C/provider changes. This is a source-grounded implementation feasibility statement, **not** a newly executed result. If the actual authentic fixture reveals an unaccounted field or resource, hand back its exact field/producer and raw failure; do not weaken checks or convert the checkpoint into an all-refusal delivery.
+
+#### Artifacts and telemetry are distinct products
+
+Current driver returns exact program/emission but does not supply the legacy public `FailureTelemetry`/route-audit population. The internal checkpoint must return real binary/output artifacts plus those exact program/emission references and the independently verified binding/demand joins. It must explicitly leave public route telemetry unavailable; do not publish `EMPTY_FAILURE_TELEMETRY`, a copied legacy audit, guessed zero direct counters or fabricated original outcomes as successful prepared evidence.
+
+A narrow implementation option is to allow the existing private finalizer's telemetry parameter to be `Partial<FailureTelemetry> | undefined`: legacy callers continue to supply the identical real telemetry; internal output uses undefined and returns a typed artifact projection with the six legacy telemetry keys absent. JavaScript spreading undefined is empty, so no fabricated bag is required. Preserve failure helper default behavior and all existing finalizer diagnostics/order. The internal result type must clearly distinguish this artifact checkpoint from a complete public compile result/retirement certificate. Real emittedUnitIds and program IDs remain available as genuine receipt evidence; test-only legacy-generator poison/call counts independently prove nonentry on these cases. Root can instead choose an equally small artifact/telemetry split if it proves the legacy whole-body behavior unchanged; no separate output compiler or generic reporting framework.
+
+#### Required executable acceptance, beyond refusal controls
+
+1. Actual scalar bridge binary instantiates with the required real imports and returns23 for7 and35 for11. Actual two-source main returns42; add a nonconstant cross-source argument control and source-qualified same-spelling negative join so name-only matching cannot pass. Require nonzero binary/function populations, exact original/derived emitted-unit census and real module identity. No body interpreter or mocked emitted packet.
+2. Capture independent ordinary legacy results for the same fixtures as equality oracles, and compare public-facing artifacts relevant to this domain: actual exports/values, DTS bytes, adapter/helper manifests and boundary absence, imports, string pool, startup flags and validation result. Binary byte identity is not presumed between different emitters; preserve actual semantic/metadata equality and report any byte difference honestly. Poison all four legacy generator entries only on the new bridge arm, with a healthy legacy arm proving the poison detector attaches.
+3. Paired zero-demand controls prove why numeric undefined signatures/empty async/import/startup state are legitimate. Contradict one real source classification, ABI binding, actual export index, source span, runtime import, startup evaluation or option association at a time; require the specific gap/failure and no final artifact. Use production-private seams only as existing test mocks permit; do not add a public producer bypass.
+4. Prepare/accept/emit exactly once; same source capture and options survive an observer mutating the original caller bag. Each output finalization is one-shot within the transaction. Preserve real Unsupported, invariant and backend error channels; no fallbacks or partial successful artifacts. Actual binary engine-validation failure retains the existing finalizer's failed-result semantics and bytes and is never counted as bridge success.
+5. Run focused ordinary new and existing driver/public-output tests after implementation release, including known source-map/object failures with accurate baseline attribution. Collect actual names/counts; no runtime denominator is asserted by this spec. The old private-phase publisher repair is an independent public-certification dependency, not a blocker to this genuine artifact test, which uses real C identities/receipts and actual executed output rather than trusting events.
+
+This is a required useful increment toward the real IR path. A successful internal numeric checkpoint still does not satisfy complete frontend parity, full target coverage, public routing, C ABI/provider metadata or legacy retirement. The held source scopes and unchanged6837 measurement criteria remain intact.
+
+<!-- Astra source dual-host-startup-dispatch-amendment.md SHA256 0c69fdc951a73bf97fbc2195e2d4195730a058a95e04397f67d776a165e9f9be -->
+
+
+### R5 dispatch contract — two genuine host outputs and observable startup (2026-10-04)
+
+This is an append-only refinement of executable checkpoint a5ec87ea. It specifies three disjoint writer paths and startup obligations; it does not open A, C, providers, public routing, legacy retirement or a multi-backend framework. Source facts below are from immutable 650cb1b0a08df7976662c721e0da884b109fbfe0. No new compiler or runtime execution was performed for this amendment. Existing6837 measurement remains separate and its exclusive CPU window remains in force.
+
+**Resolved dual-backend boundary.** Follow the integration owner's latest bounded instruction: the required internal artifact entry handles one resolved backend per call. Run it on the identical genuine source graph for wasmgc:host and linear:host, with matching frozen source census, options and semantic outputs. Each call invokes the existing `runIrProgramDriver` once; these are two genuine preparations, and tests must not assert or report reference identity between them. Separately retain an actual shared-packet positive using the existing COMMON_SUBSET producer pattern in `issue-3518-program-codec-replay.test.ts`: one authentic preparation with both runtime policies, then two real C acceptances/emissions of that exact program. Assert same program/ABI/IR identity there and execute both outputs. This separate witness does not pretend the new artifact entry already reuses one packet across calls. A future reusable presentation-capture join for dual artifact emission remains explicit work; no driver API mutation is needed for this checkpoint. Do not call runIrProgramDriver twice and label that one preparation.
+
+#### Fixed interface and file-disjoint dispatch
+
+1. **Root only: `src/compiler.ts`.** Own the existing finalizer signature/context projection and the new internal exported function `runPreparedIrPipelinePresentation(input: PipelineInput): PreparedIrPipelinePresentationResult`. This is an internal module export for compiler composition/testing, not a `src/index.ts` export or public option. Keep PipelineInput's existing field meanings and existing public/legacy routes unchanged. Introduce the erased internal alias `PipelineOutputContext = Pick<PipelineInput, "errors" | "options" | "entryAst" | "diagnosticAnchor" | "sourcesContent"> & { readonly codegenOptions: Pick<CodegenOptions, "link"> }` for the finalizer. Link collection identity is preserved, not recomputed. Legacy calls remain structurally assignable and delegate to the original whole finalizer, in its original order. Root owns resolving the actual target profile and constructing existing PreparedIrBackendOptions, projecting the complete analyzed source/checker input into IrWholeProgramPreparationInput, and calling the new leaf. Original frontend diagnostics cannot be bypassed by treating an arbitrary bag as validated: the internal input precondition and real ordinary fixtures must retain the same analyzed graph and pre-generation diagnostics; no public success is issued for erroneous input.
+2. **Sol source only: NEW `src/compiler/ir-program-presentation.ts`.** Export the erased types `IrProgramPresentationRequest`, `IrProgramPresentationResult`, `PreparedIrPipelinePresentationResult`, and the function `prepareIrProgramPresentation(request: IrProgramPresentationRequest): IrProgramPresentationResult`. The request has exactly `preparation: IrWholeProgramPreparationInput`, `backendOptions: PreparedIrBackendOptions`, and `output: PipelineOutputContext` (type-only import from compiler.ts). It has no callback, emitted module/program argument, authority token, completion boolean, fixture ID or test hook. Root is its production caller. Check that output entry/checker/source identities are those of preparation, and that resolved backend/host/options/defer semantics agree; contradictory association is a located presentation gap. Capture frontend primitive boundary/declaration/resource facts and data-only options once before calling the real driver, retain the same authentic AST/checker for rendering, then join returned genuine inventory, ABI/export slots and physical evidence to that capture. No legacy body generator, second preparation or user-supplied emitted result is allowed. Runtime imports flow compiler→leaf→existing driver/C facts; leaf→compiler is erased only, preventing a new value cycle.
+3. **Sol tests only: NEW `tests/issue-3525-prepared-pipeline-presentation.test.ts`.** Consume these exact exports and genuine analyzer/preparation/C APIs. Do not add production injection seams, import a sibling worktree, edit original tests, or independently change either writer's source. Use existing Vitest module spies only for refusal/legacy nonentry witnesses, with real successful unmocked output first. Root alone integrates the three files and records final claims/source pins.
+
+The leaf result is a finite discriminated union:
+- `{kind:"prepared-presentation", program, emission, output, startup}` with genuine exact returned PreparedIrProgram/EmittedPreparedIrProgram references, captured PipelineOutputContext, and the startup disposition below;
+- existing driver `{kind:"unsupported", phase:"preparation"|"acceptance", failure}` unchanged, preserving the original located failure object;
+- `{kind:"presentation-unsupported", gaps}` where each nonempty gap records a stable field/code/detail and its actual source/unit/binding association where available. This is not a fabricated language Unsupported. Invariants and emission exceptions retain original throws and causes.
+
+Root calls the original finalizer once only for `prepared-presentation`. The internal entry's result is `{kind:"artifacts", program, emission, startup, artifacts}` on actual finalizer success, `{kind:"output-failed", errors}` on actual failed finalization, or the unchanged unsupported/presentation-unsupported arms. `artifacts` is an explicit Pick of existing CompileResult output fields actually produced, excluding legacy route/fallback telemetry; do not spread a whole legacy-shaped result and fill missing counters. Retain the original diagnostic objects, warning/error severity, and real failed-result semantics; any emitted bytes retained on failure are diagnostic evidence, not a successful artifact. Root may use the prior minimal optional telemetry parameter, leaving legacy callers' real telemetry identical. There is no test-only alternative finalizer or completion shortcut.
+
+Freeze these discriminants before parallel code dispatch. Exact imported existing types, rather than copied structural replacements, own program/emission/backend types. Runtime startup records contain no AST and no mutable approval Map. Do not grow this contract into generic pass/plugin scheduling.
+
+#### Startup: actual producer and the missing presentation join
+
+`program/startup.ts` records source ID, unit ID, executable evaluations, bindings/seeds, gaps and invocation policy. `program-physical-plan.ts::planPhysicalStartup` derives the actual ordered executable unit population and adapter kind; `program-consumer.ts::fillStartupAdapter` emits their ordered calls. C reserves the adapter under the identity `physical:startup-adapter`; its display name is not authority. `module-reservations.ts::defineStart` validates a real zero-argument/zero-result callable and sets its physical index. `emittedStartupAdapterIndex` must be used only after genuine emission authentication (including actual completed support receipts); undefined alone is not an authenticity check.
+
+The concrete missing bridge join is **authenticated prepared startup units/policy plus actual C adapter index → output startup disposition/hasTopLevelStatements**. C does not assign the legacy presentation field `module.hasTopLevelStatements`. Do not mutate C's physical program or infer this flag from an export spelling. Root's finalizer output context may gain one internal optional `preparedStartup` value produced by the leaf; the returned hasTopLevelStatements uses that authenticated boolean only for the new internal route, otherwise the existing `mod.hasTopLevelStatements === true` expression remains unchanged. Physical functions, exports, start index, globals and C receipts must remain exact before/after finalization.
+
+Use the finite disposition `{kind:"none", hasTopLevelStatements:false}` for independently proved zero demand; `{kind:"wasm-start", hasTopLevelStatements:true, adapterIndex, unitIds}` when exact actual start index matches the authenticated adapter and ordered program units; or `{kind:"deferred-export", hasTopLevelStatements:true, adapterIndex, unitIds, exportName:"__module_init"}` when that actual export index equals the adapter, module.startFuncIdx is absent and real policy is deferred. A nonempty unresolved startup gap cannot yield any success arm. No expression `exports.__module_init != null` may replace these joins.
+
+A user function named `__module_init` can coexist with automatic Wasm start. It must retain its own different function index/body and must never be invoked as the adapter by output code. Conversely the current physical planner refuses a deferred startup export collision with a program export of that name: retain that exact located refusal, without dropping/renaming the user export or adapter.
+
+#### Required observable, non-idempotent startup proof
+
+The existing `answer=42` and dependency-order examples alone cannot detect duplicate startup because declarations can reseed their storage. The new suite must have a real scalar state witness that distinguishes zero, one and two evaluations on BOTH host backends. Start with this genuine source candidate (not a special-cased eligibility rule):
+
+```ts
+export var visits: number = (visits > 0 ? visits : 0) + 1;
+export function read(): number { return visits; }
+```
+
+It reads the prior global before writing its initialized value. First complete evaluation must yield1 and deliberate second evaluation must yield2. Actual preparation, emission, engine validation and calls decide acceptance; this spec does not claim this previously unexecuted candidate is already supported. Do not substitute `var visits;` plus assignments: `from-ast.ts:3559` explicitly rejects a declaration without an initializer. Do not replace the witness with an initializer that always assigns0/1/42, inject a handcrafted IR/global, patch emitted Wasm, or weaken the second-evaluation expectation.
+
+For each backend, prepare and emit the deferred variant with actual deferTopLevelInit=true: before invoking the authenticated exported adapter, independently read the initial state; then call the real adapter once and require1, and deliberately call it again in a fresh negative/control experiment and require2. Use a separately instantiated module for every independent scenario. This proves the witness is non-idempotent, not that C makes its adapter idempotent (it does not). For automatic startup, the matching source with defer=false must expose read()==1 immediately after instantiation and remain1 through helper setInstance/wiring; it must not be manually initialized a second time.
+
+Add an automatic-start variant with the genuine user function `export function __module_init(): number { visits = visits * 10 + 7; return visits; }`. Before explicitly calling that user API read()==1; the deliberate user call returns17 and read()==17. Test the distinct physical user and adapter indices. If output code calls the user function merely because of its name, the pre-call expectation fails. The deferred collision form must preserve the existing planner refusal.
+
+The source candidate's self-read/global binding route is a genuine admission question. If A cannot lower it, preserve the precise refusal/field and the actual module-init plan/IR evidence. The bounded missing producer is then a supported self-reading var-initializer/global-binding startup witness (not permission to edit from-ast, A or C under this claim). Productive no-startup numeric artifacts still must execute; however **startup acceptance stays incomplete and this entire requested startup checkpoint must not be reported complete**. Root must decide any separately scoped producer follow-up using that concrete failure. An all-refusal metadata framework is not an alternative delivery.
+
+#### Generated helpers, manual startup and limitations
+
+`compiler/output.ts::generateImportsHelper` calls instantiateWasm and then setInstance; it does not call __module_init. `runtime/instance-lifecycle-adapter.ts::setInstance` wires exports and drains deferred operations, also without that call. Therefore the automatic-start positive must exercise the actual generated helper path as well as direct native instantiation; it must not pretend the helper performs deferred startup. For deferred artifacts, the internal disposition explicitly requires the caller to wire imports then invoke the authenticated adapter once. The test owns that explicit call and proves its count using the non-idempotent state, not a fake counter. No new public helper or provider behavior is claimed.
+
+The import runtime currently catches a failed native-builtins instantiation and retries with polyfills. Throwing/effectful startup could therefore be attempted twice; this is a static pre-existing limitation, not a newly measured defect. The narrow nonthrowing scalar witness must succeed without relying on that fallback. Preserve actual thrown-start errors as an explicit unproved family; do not alter runtime retry logic here. Existing linked-provider initExport and public manual harnesses still use names; their broad reconciliation is not implied by this internal output transaction. `CompileResult.hasTopLevelStatements` means actual executable top-level work, not “manual call required”; adapter mode provides the latter distinction.
+
+#### Acceptance and release sequencing
+
+Require real binary execution for calculate(7)=23/calculate(11)=35, two-source main42 and a nonconstant cross-source/loop control under both host backends; exact source/census association and real primitive export boundary/async/import zero-demand witnesses; original legacy semantic/artifact controls; the separate shared-packet A+C positive; and the non-idempotent startup/user-name/refusal controls above. Preserve literal expected values and existing source-qualified join/poison/refusal/error controls. Full names/counts are collected only after implementation; none are guessed here. Distinguish static feasibility, runtime assertions and artifacts actually returned. No full-target, public-route, fullIR-parity or efficiency claim follows from this checkpoint.
+
+Root handles canonical ownership. Request fresh bounded keys `3525:internal-presentation-bridge-source`, `3525:internal-presentation-bridge-tests`, and `3525:internal-presentation-finalizer-context` (exact spelling is proposed, not a claimed effect), respectively for the new leaf, new suite, and the compiler.ts subsection above. Root records narrow same-session continuation of the historical A/output planning interface while retaining the old branches and claim records; this is not another user-approval prerequisite. Existing authoritative-preparation, driver-output-planning, production-routing and C/provider source scopes remain consume-only. Historical private-observation-origin repair is separately owned, not bundled here. The one known PR6341 finalizer overlap is its future stampAllocationOwners insertion after C ABI/before widening; it is absent650 and must neither be inserted gratuitously nor erased when eventually integrating fresh main. Other compiler option/early-error hunks are excluded.
+
+Root may release source/test writers after it reads this exact contract, authenticates claim effects and the original benchmark has actually terminated. Root integrates their three disjoint paths; no duplicate edits to compiler.ts, old tests, driver or C. This supersedes the earlier single-writer3-path allocation and blanket historical-A acknowledgement wording only. All earlier substantive source/metadata/invariant safeguards, public-cutover holds and unchanged benchmark criteria remain in force.
+
+
+### Prepared output checkpoint — measured evidence (2026-10-04)
+
+This bounded internal checkpoint keeps public legacy routes in place. The actual
+whole-program producer and authenticated consumer emit before the original
+output finalizer runs; no arbitrary module, caller callback, forged receipt or
+invented legacy telemetry enters the transaction. Sol GPT-6.1 Medium implemented
+the separate presentation leaf and new tests; Astra High reviewed the contracts;
+Codex GPT-6.1 Sol High integrates and delivers. Canonical scoped claims are
+`3518:output-finalizer-context-20261004`,
+`3525:prepared-presentation-internal-20261004` and
+`3525:prepared-presentation-tests-20261004`. Existing historical claims remain.
+
+The full new suite passed **44/44**, ordinary Node 24.4.1 execution with zero
+pending/todo tests and empty unhandled-error channels, actual child exit 0.
+Both host backends execute numeric single-/multi-source fixtures, genuine
+same-packet projections and non-idempotent automatic/deferred initialization.
+Deferred startup is observed as 0 → 1 → 2; automatic startup is 1. The actual
+user export named `__module_init` remains separate from the constructed adapter.
+Both actual generated helpers execute independently. Linear artifact comparisons
+are exact; WasmGC legacy symbol-bookkeeping strings produce an explicitly tested
+pool/manifest/helper difference. All remaining compared fields are exact. This
+is field-qualified compatibility, **not** a claim of full artifact parity.
+Four post-emission corruptions fail at the authentic completed physical
+reservation guard; they do not claim later leaf-gap coverage. Engine validation
+retains failed bytes and asserts actual line/column/no-file diagnostics.
+
+Initial new-suite attempts remain recorded: 12/42 (fixture source-content keys
+mismatched analyzed filenames), then 36/44 (eight exact oracle mismatches). Their
+raw failures were preserved; neither production gates nor existing fixtures were
+weakened. Final test SHA-256 is
+`8db9925b90b3422dfb052205dfedddb7b409a0d79cb2821eaf98d87b644c5e60`;
+ordinary runtime audit SHA-256 is
+`6a89cb47a2fb2c7b9475a0f2ee5baa171d432a85c07179ec7393314159fbbc1b`.
+
+Existing ordinary suites: public prepared driver 16/16, shared pipeline 10/10,
+safe mode 14/14, validation-by-default 7/7 and emitted-binary validation 5/5.
+The six-row multi-finalizer suite remains 4 passed / 2 failed. All six ordered
+rows and full failure texts match clean commit
+`650cb1b0a08df7976662c721e0da884b109fbfe0`, allowing only absolute worktree
+path replacement. The thenable host-drain and exnref failures are measured
+baseline failures, **not** passing coverage. Baseline-comparison SHA-256 is
+`fa9c7ca5188926e4d74940e66063b67f595703ffa1028367192369d7c0317e96`.
+Early-error tests initially failed twice because this fresh worktree lacked
+harness files. Only pinned Test262 `assert.js` and `sta.js` Git blobs were added
+as resources; full rerun passed 13/13. This supplies that fixture's bounded
+resource closure, not a full local corpus or conformance proof.
+
+Root full typecheck, scoped lint/format and oracle ratchet passed. The native LOC
+gate passed using this issue's finite +121 compiler glue grant; no baseline or
+global threshold changed. Source leaf SHA-256 is
+`9587f036bcef0f09f175b8a1b8d3aa1ebd82272849caa71988209f3373fdd135`;
+compiler source SHA-256 is
+`0244548a33020e60db74c3d5be145bdaf805e48eac2e28b1a5641cc7d7824e46`.
+
+This is not whole R5 acceptance or legacy retirement. Broader runtime providers,
+carrier/layout coverage, public route ownership/observations, full options and
+targets, optimization/performance equality and protected main delivery remain
+separate requirements. Existing PR 6475, “refactor(ir): give linear layout
+contracts and backend legality canonical owners”, remains a dependency until its
+exact content and merge-group evidence are verified on main.
