@@ -2553,3 +2553,570 @@ This preflight itself did not merge even the safe benchmark delta, run hooks,
 stage files or open that PR. Preserve both docs leaf claims and all previous
 append-only history. If another docs PR appears before actual publication,
 coordinate the existing vehicle rather than using this dated absence forever.
+
+## 2026-10-04 — isolated N0 native guard observation preparation (Sol)
+
+Root grants evidence-only preparation in
+`/Users/thomas/Code/js2/.codex-worktrees/2929-native-guard-n0-observation`,
+branch `codex/2929-native-guard-n0-observation`, exact upstream production
+base `1787b1af4a2f010f51ca1f45fc68fa540bfa4673`. Normal worktree creation
+40717/e35172 exits0. No production source, fixture, renderer, worker, provider
+or shared ABI edit is granted. Full accepted Astra plan/dispatch packet was
+read directly in `4016-split-residual-plan` MD2929 lines1699–2335; that
+unpublished appendix remains owned and preserved for a coordinated single
+documentation vehicle, not replaced by this execution record or a second PR.
+
+Exact maintained observation leaf2929:native-guard-n0-observation check40545/
+8b71f8 exits0 positively UNASSIGNED; claim10641/11519f exits0 positively
+verifies ttraenkler/script_plan_p1_sol on upstream issue-assignments. Reserved
+umbrella2929 and held fixture/4307/4308/4245/4637/4647/4540/4542/4544
+contracts remain unchanged; narrow observation ownership is not source release.
+Full refreshed REST pagination32469/72a0a1 exits0 at
+2026-10-04T21:20:25.136Z:18 open PRs/1439 unique paths, every count matches
+actual detail.changed_files, no MD2929 path match. This is not clearance to
+edit native protocol paths. Known unpublished Astra MD overlap is preserved.
+
+All six frozen fixture hashes match the accepted packet, as do the three
+historical6810 guard/build receipts. All six fixtures and all67 historical
+actual assertion rows were read completely: historical60PASS/7FAIL at
+production1f1b0ad61c, not a current score. The obsolete NaN negative assertion
+is unchanged in this N0 arm. Eleven original runScript bodies plus the tier
+assertion remain distinct from67 total identities; artifact observations do
+not add tests or conformance credit. Current results are NOT_RUN.
+
+Existing dependency links point only to canonical primary node_modules and
+pinned corpus b363f29d3c43c626dc852744ad64a0b48a003693. No install, config
+repair or config-writing provision script ran. The ordinary worktree's Acorn
+LFS payload SHA2562a15807615450606f15c52535c67a70d779da265d6447d5cf4a7ce4245c41309
+is preserved and will not be staged/reset. Heavy bundle/provider preparation,
+all67 execution and eleven artifact observations await a reviewed frozen
+collection contract and root's separate exclusive lease. No live exception
+replay, provider import wrapping, hidden tag export or core-worker instrument
+is included. If raw response plus exact Wasm/WAT cannot separate stages, STOP
+with named alternatives and request a finite owner-scoped observation grant.
+
+### Frozen N0 source contract and source-only assembly receipts
+
+Own ignored collector `.tmp/2929-n0/collector.mts` initial132-line SHA256
+285881a61fe8897a025091f15ad38563526c009e045c78271ae33d0ac7d72bfa
+passed canonical syntax check and root full read. Approved STATIC --freeze
+274c72 exits0, no compiler/provider/pool imports, producing
+`.tmp/2929-n0/frozen-contract-v1/contract.json`, SHA256
+3e497933bbeffffd6123cefcc4348d0b38d60b81f8e51d48f74ea53e030f6a42.
+It freezes all67 historical file/full-name identities and eleven byte-exact
+raw/wrapped source bodies; all actual body/wrapped hashes equal Astra packet.
+Its1847 maintained input hashes include1824 src files; every after-read matches,
+whole input-table SHA256dc8f954fa2eda685d7b30f10494ffd6d74b5e302433f640d5cd42eba3045770d.
+The first tiny static invocation omitted explicit1024 heap environment; actual
+Node24/tsx had NODE_OPTIONS unset. No bounded-heap claim is made for it and no
+compile/native execution occurred. Subsequent syntax/assembly checks explicitly
+set1024. Preserve this invocation distinction instead of rewriting its receipt.
+
+Root approved the exact separate --assemble source-only mode, current collector
+SHA256ecb2a22ed2780671cf647d497945ea1b070501fbe6cda6d34546d1d2d154a12d.
+Actual80429/start82312b/terminalc73aa2 exits0 at canonicalNode24/1024. Only the
+maintained assembleOriginalHarness and parseMeta exports are called; no pool,
+provider selector, worker, compile, module instantiation or native run occurs.
+Exactly eleven full wrapped/assembled sources are retained in
+`.tmp/2929-n0/source-assemblies-v1/{01..11}.{wrapped,assembled}.js` and the
+complete assembly/metadata JSON has SHA256
+f174d2f6c6a28fe13119f239a309b1bbeecf16b08a9ba1e3d3053764e4e3e356.
+Contract bytes equal3e497933, all1847 input hashes still match. All eleven are
+noStrict, primary.strict=false, async=false, no strict rerun. These are source
+assembly facts only; current67 native guards and eleven artifact observations
+remain NOT_RUN. Their expected pass/fail contracts were not changed.
+
+Future preparation is exactly the accepted ordinary compiler-bundle command,
+ordinary esbuild runtime-bundle command and full native provider builder, then
+its --require-full-cache canary verification. Builder/worker heap3072, engine
+interpreter and TEST262_FULL_RUNTIME_EVAL=1 are explicit; inherited bundle/key,
+provider-disable, harness-mode and compiler-pool overrides must be scrubbed.
+No refusal-only shortcut, cache purge, install, altered compiler option or
+shared/canonical artifact write is authorized. Build only in own fresh worktree
+and stop at actual terminal for root's pin/key/source/binary/canary inspection.
+The six unchanged files run serially once under the fixed67 identity contract;
+eleven sidecar observations use pool(1,"unified"), originalHarness=true,
+assembly.async, inferModuleStrictArguments=false, target standalone, original
+label,30000ms timeout, adding only unique wasmPath/metaPath. Full raw returned
+fields/own-key presence persist before fixture conversion. Any missing/zero
+Wasm, invalid success metadata, unmatched bundle identity or row omission is
+instrumentation incomplete, not semantic scoring. Matched ordinary/artifact
+row statuses must agree; neither11 extra observations nor historical60/7 totals
+are new test identities or a current score. Exact retained Wasm/WAT inspection
+uses existing Binaryen132 wasm-dis (tool SHA256
+98201a639713272269fd0883fd8b07a4029f7a80e59b6540495e992e1472d99d).
+Unavailable live tags/payloads/native renderers remain explicitly unavailable.
+No inference from the text undefined releases a held producer/reader contract.
+
+Root approved source-only provenance hardening before collection: actual worker
+test262CompilerBundleHash is sha16 of compiler-bundle bytes; it is distinct
+from the native provider's source+lock+bundle compiler key and native source/
+option/provider key. Collector172-line SHA256
+139c47ae31f4c8036c03fb6546b7a37c4245d433c3c8c68a0b768889428d0455
+now records all three prepared binary byte/SHA receipts and both identities,
+requires saved metadata.bundle_hash EQUAL the actual maintained worker hash,
+and checks binary receipts after collection. All1847 source hashes remain
+unchanged; this is provenance validation, not altered result expectations.
+
+Future BUILD-ONLY recipe `.tmp/2929-n0/prepare.mjs`109-line SHA256
+eb0ab4672afa94e0daac9ad11534250ad96bca5bea0269230e76822399f2cbc3
+contains the exact ordinary commands/environment above and freezes its own/
+collector hashes before and after, preserving all failed command terminals
+without retries. Canonical syntax88b0f3 exits0 at explicit1024. It has NEVER
+executed: native provider imports/exports, canary results, bytes and keys will
+be actual evidence only after a separate approved preparation terminal.
+No guard67, eleven artifact observations or live replay has been run.
+
+### Actual current native BUILD-ONLY preparation terminal
+
+Root granted the exact frozen recipe after the other lane's actual normal-hook
+terminal. Own preparation handle75678/start35f74c/terminal27e7e6 exits0, no
+live handle; exclusive build lease released. All four ordinary commands exit0:
+compiler bundle, runtime bundle, full native builder, --require-full-cache.
+CanonicalNode24/per-child3072, explicit interpreter/full selection, Corepack
+network0 and inherited override scrub are recorded in actual command manifest.
+Only inherited GIT_PAGER was removed. No lock/config repair, install, cache
+purge, donor/canonical artifact write, adaptive retry or semantic fixture edit.
+
+Fresh full native provider cache MISS compiled in74319ms to6249189 bytes,
+key2e63998eab8a98ff. The standard five builder canaries passed; the separate
+required-cache arm HIT those exact bytes and reverified canaries. The separate
+refusal control was ordinarily built/canary-verified first (242185bytes,
+key769f74e542dcd6ab), but was NOT the selected full provider. Actual native
+selection announces INTERPRETER/full1; module has ZERO imports, all five
+linkable runtime entry functions and actual renderer/tag exports. Namespace
+renderer/tag availability is still NOT granted: N0 retains the five-function
+maintained namespace and does not expose or call private observation exports.
+
+Actual own binary receipts:
+
+- compiler bundle21263424bytes, SHA256
+  07fb2a4389fd4630ca98cec471c8bc686eeaf38825c624be9d1822d6f4f79d9a;
+- runtime bundle20979259bytes, SHA256
+  fa23d62605e42bef4bcfce7261095a54ded5c8d7be8c730dfbf59f6802ff8be6;
+- full native provider6249189bytes, SHA256
+  3edc9b58208d806e55b411f4e9a8b0fbb7283d02ae750292a763cc7fcc9c8325.
+
+Native compiler source+lock+bundle keyff97d4c71ce3b003 is distinct from actual
+worker compiler-bundle identity07fb2a4389fd4630. Read-only aftercheck394256
+exits0: all1847 source inputs match, all three exact own binaries are regular
+non-symlink files with matching byte/SHA receipts, recipeeb0ab and collector
+139c47 are unchanged. Full metadata/exports/environment retained under
+`.tmp/2929-n0/preparation-v1/`; no truncated summary substitutes for it.
+Receipt hashes: preparation-contract.json
+e6e9f715282bf74cc1db1e210f96b7cbf26a0ae7e2cc19707a944cdc90960edb;
+commands-terminal.json
+2bb54965782b93706eb3880a9132d4e56f5174745772180bf6415fc2461fe038;
+prepared-artifacts.json
+2ecf7f015e4a8d217471fb6c5d3d44b1a04a7840f5044ff766caa8c5419d614d;
+full preparation terminal
+6ac9582bf71158a9464b83304302a264bb5a84a8d109b095ed6ce2cf54526245.
+
+Current matched native build feasibility is measured, not67 semantic acceptance
+or11 artifact observations: both remain NOT_RUN, awaiting root's actual-artifact
+review and a separate finite runtime GO. Historical60/7 remains historical;
+no original Test262 or P1 producer-conformance gain is attributed to canaries.
+
+### Actual unchanged finite native guard67 terminal
+
+Root accepted the matched preparation artifacts and separately granted only
+the exact six-fixture ordinary guard run. Own handle17519/start401df0/
+terminal6f5704 exits1, signal=null, no live handle; the exclusive runtime lease
+is released. This is a complete semantic-failure receipt, not an OOM, missing
+report or interrupted instrument. No rerun, refusal fallback or expectation
+change occurred. The eleven artifact observations remain NOT_RUN pending
+root's full guard-row review and another finite lease.
+
+The command preserves dispatch order1102/2928/2929/2960/4197/4242,
+`--pool=forks --maxWorkers=1 --no-file-parallelism --reporter=json`, writing
+only new `.tmp/2929-n0/guards-v1/guards.json`. CanonicalNode24 parent3072,
+Vitest fork3072 via the maintained VITEST_FORK_MAX_OLD_SPACE_SIZE option,
+CompilerPool worker3072, interpreter/full1 and Corepack network0 are explicit
+in inputs-before.json. Inherited Git/test/provider/skip/tsx/Vitest overrides
+were scrubbed; no config or `.git/config.lock` mutation occurred. The worker
+announced INTERPRETER key2e63998eab8a98ff with TEST262_FULL_RUNTIME_EVAL=1.
+
+Independent complete identity comparison ea3b26 exits0: six actual files,
+67 unique file/fullName identities,60PASS/7FAIL, zero pending/skipped/missing.
+All67 identities and statuses match the historical receipt, zero changes;
+this is newly measured preservation, not a historical-total assumption. The
+unchanged seven failed identities are the six bucket-C materialization cases
+(new direct var, new direct function, indirect var, existing script var,
+Annex B primitive replacement/call and deletion severing), each reporting
+`fail: undefined`, and the obsolete NaN negative reporting that NaN is now a
+global own property. The assignment-only and three non-extensible-global
+positive controls pass, as do all60 historical PASS identities. Undefined
+serialized error text is not a diagnosis of the live exception tag/payload.
+No obsolete NaN assertion repair or native/protocol/source edit is included.
+
+All1847 actual source inputs and three prepared binary bytes/SHA256 values,
+plus collector139c47 and recipeeb0ab, match before/after. Raw67 rows and full
+errors are retained without fixture-level summary loss:
+
+- guards.json SHA25647dba208bb2a484b19903084a5fd6a4da13c0beb2d9242363887681cacf5df0b.
+- identity-comparison.json SHA2568f352d183816341d20ac5698418deb2d31c0c8ca209e8590610cc4afd40cd978.
+- inputs-before.json SHA256d2c29cb51d19f5bc8c803c48b5c8d183b0776b1653d9b7dfd4b75155531cc140.
+- inputs-after.json SHA2562a216cf8674012b2ed0d4b326363e943bb2c619bbe4f00b85b194374eeee4dff.
+- terminal.json SHA256ee52f1c9e07e7ad2eeacedbd234f506d30693f7dd92be9863f180b9463a001b0.
+- full guards-v1-terminal.log SHA2566e06f6733286aae3301c22cafbd5383269e057b26ae8526cb895537ff23c4f2b.
+
+These67 diagnostic assertions are not the original Test262 corpus, the P1
+producer fixtures, or completion of2929. Six materialization losses and the
+separate stale NaN expectation remain open; first-loss localization awaits
+the separately approved eleven original-body artifact observations.
+
+### Actual eleven original-body artifact observations and bounded handoff
+
+After root's complete67-row review, root separately granted the frozen
+collector139c47 --collect, eleven bodies only. Own handle63840/start5c9309/
+terminaladb857 exits0, signal=null, no live handle; heavy lease released.
+CanonicalNode24 --import tsx, parent/poolworker3072, explicit interpreter/full1,
+Corepack network0 and scrubbed inherited overrides are retained in the separate
+collection-v1-run launch receipts. Original PATH remains intact with canonical
+Node prepended. No native build, guard rerun, source/fixture/provider/config
+edit, live replay, namespace wrapping or hidden-export call occurred.
+
+All eleven original label/body/wrapped/assembled identities match the frozen
+contract3e497933 and source-only assembly receipts. Each saved Wasm is nonzero,
+metadata.ok=true and metadata.bundle_hash=07fb2a4389fd4630 equals the actual
+worker compiler bundle identity. Metadata sourceMap version3 sourcesContent
+contains its exact saved assembled source in every row. The entire returned
+response and own-key list persist before fixture-level conversion; no response
+field is inferred from a simplified assertion string. All11 report
+reachedTest=true; this establishes execution reaching the maintained test
+region, not an exact user-statement/throw origin. The actual rows are:
+
+- cd/direct-var-new: FAIL, isException=true, error literal string `undefined`.
+- cd/direct-func-new: FAIL, isException=true, error literal string `undefined`.
+- cd/indirect-var-new: FAIL, isException=true, error literal string `undefined`.
+- cd/existing: FAIL, isException=true, error literal string `undefined`.
+- cd/annexb-existing-primitive-call: FAIL, isException=true, error literal string `undefined`; both original direct/indirect subcases remain in the body.
+- cd/delete-severs: FAIL, isException=true, error literal string `undefined`.
+- cd/assign-only: PASS, ret=1, error/isException fields absent.
+- d/direct-var: PASS, ret=1, error/isException fields absent.
+- d/indirect-var: PASS, ret=1, error/isException fields absent.
+- d/indirect-func: PASS, ret=1, error/isException fields absent.
+- gap/nan-not-own: FAIL, isException=true, explicit `Error: NaN IS now a global own property — revisit the two non-definable-global-function/generator files`.
+
+Thus4PASS/7FAIL agrees with the eleven corresponding ordinary guard statuses,
+without adding assertions or gain. Eleven artifactComplete=true values mean
+complete instrument outputs, not semantic acceptance. For every bucket-C row,
+actual WebAssembly.Module imports are native apply_interpreted+indirect_eval;
+direct-D imports apply_interpreted+direct_eval; indirect-D imports
+apply_interpreted+indirect_eval; assignment-only and NaN rows have zero imports.
+All names are in js2wasm:runtime-eval. Saved metadata.imports=[] differs from
+these actual maps and is retained as recorded, never substituted as import
+proof. Actual full export maps are retained independently (233/124/224/125
+entries depending on the row). Provider selection remains native2e63998eab8a98ff,
+native compiler keyff97d4c71ce3b003, distinct worker hash07fb2a4389fd4630.
+
+Read-only validation e18a23 exits0 for all artifact/assembly/response receipts;
+its excessive full metadata stdout was truncated and is not claimed as a full
+output read. Bounded a8a521 retains all eleven complete response fields, actual
+imports and metadata shape;3f2cdf exits0 for all eleven source-map content
+comparisons. Seventy collection files retain full sources, Wasm, metadata,
+responses, observations, provenance and selection. Receipt SHA256 values:
+
+- collection-v1/observations.json c0f6b5845d9d8e943b58a44f298b0c704d230fd3dfebe4db24a7bdda870910fb.
+- collection-v1/selection.json 71049caa3a8b67d30960a425b0755b9723ec84039702eb50dbe4100dcd984548.
+- collection-v1/build-provenance.json 84c5add82320799b314c82b9371bdcf0cd4352ab05bac043e37f26b40cabe194.
+- collection-v1-run/artifact-inventory.json 74d0db865c34266b76a48fdf513ac3b7d45a485974c73909a6df834831f30f1a.
+- collection-v1-run/source-map-validation.json c777f601d41bbcf97d44c00d08212111a443e1f3d740f2bf1806e42a271ba762.
+- collection-v1-run/inputs-before.json 56f312bef67e9b55ed96b648b564df2ccf176155531bc749fa41a94436013eea.
+- collection-v1-run/inputs-after.json 74583bf85cb73246b553625f85acccb4f00483a909402a0bcc68c62b82ccd59d.
+- collection-v1-run/terminal.json faa81da09baa65a64e8cdc2f2340ac43cbe06a10f78d941bc9969478ef63d28a.
+- full collection-v1-terminal.log ae38b6a760f7abcaa53bca79bc7359cef303db4a3a6e30827637676eac4b14a5.
+
+All1847 maintained source inputs, three prepared binary SHA256/byte receipts,
+collector139c47 and recipeeb0ab match before/after. Compilation succeeds and
+the maintained worker returns exception-classified failures, but no live tag,
+payload or native renderer is exposed through this maintained pool response.
+The six opaque failures therefore remain unlocalized among initialization,
+eval/provider callback, property operation and exception-rendering stages;
+`undefined` alone cannot choose one. No live replay or instrumentation grant
+is inferred. A finite static Wasm/WAT/source inspection is a possible next
+read-only step; any new live-boundary observation needs a separately reviewed
+owner-scoped grant. The stale NaN negative remains a distinct fixture issue,
+not evidence that native NaN installation is wrong. N0 is evidence-only,
+not completion of2929, P2, original Test262 census or any semantic protocol leaf.
+
+### Finite source-only routing inspection for the N1 planner
+
+Root subsequently granted only maintained compiler routing inspection against
+the exact saved sources/maps. No compile, instantiation, replay, import wrapper,
+provider call, build or source edit ran. Map owns the heavy lease. Current
+production source explains the observed import difference without changing
+eval syntax classification or concluding that this routing is defective:
+
+- src/codegen/expressions/calls.ts:3739 classifies a bare global `eval` as
+  direct, `(0,eval)` as indirect. Lines7888–7891 attempt literal inlining first.
+  Lines7893–7902 deliberately lower a direct call through the indirect global
+  entry when directEvalRunsAtScriptGlobal returns true.
+- src/codegen/direct-eval-environment.ts:77–98 returns true on reaching the
+  SourceFile, but false when a Block or another lexical/function stopping node
+  intervenes. Parser-only TypeScript createSourceFile inspection of all eleven
+  exact original bodies (no Program/checker/compiler) verifies each C eval path
+  ExpressionStatement→SourceFile. The Ddirect path is
+  ExpressionStatement→Block→TryStatement→SourceFile. Hence its try block causes
+  the direct-entry arm, while the C calls use the global indirect-entry arm.
+  Annex-B's original direct and indirect eval subcases are both retained.
+- src/codegen/expressions/eval-inline.ts:1175–1182 declines the splice for
+  standalone sloppy global-varEnv eval with var/function declarations. The
+  Annex-B block-function collision fallback is lines1132–1145; the fixture's
+  original primitive script vars collide with those block-function names.
+  Assignment-only has no declaration and does not trigger that predicate,
+  consistent with its zero actual runtime-provider imports and PASS control.
+- src/codegen/expressions/eval-inline.ts:2063–2078 registers the exact actual
+  indirect import, with source/global externref arguments, then unwraps the
+  result. src/codegen/expressions/runtime-eval-provider.ts:657–702 pulls global
+  state, decodes the envelope payload and rethrows a false-ok result through
+  the caller's exception tag. These are static operation-order facts, not a
+  measurement identifying which operation produced the six failures.
+- scripts/test262-worker.mjs:1691–1711 compiles the whole original JavaScript
+  assembly (test.js/allowJs/sourceMap/deferred init); line2170 forwards
+  msg.scriptGoal===true. That explicit flag is false for every original fixture
+  call here, since it is absent from its options. It was not added in this arm.
+  All eleven options are identical except labels and saved artifact paths:
+  originalHarness=true, inferModuleStrictArguments=false, target=standalone,
+  asyncTest=false. Thus no C/D compiler-goal or option difference was observed.
+
+The AST receipt is collection-v1-run/source-routing-ast.json, SHA256
+090223baa66040472a27bc7b9a8a0b26cdb97f04fc2bdfbf0b61cb3fb3cacf0d;
+actual parser-only e9d280 exits0. Exact function/line facts were sent to root
+and Astra's N1 planner, with routing-as-fact separated from unresolved live
+failure origin. All1847 production inputs, three prepared binaries and both
+sidecars still hash-match after source inspection. No conformance credit or
+native/protocol implementation permission follows from this routing explanation.
+
+### 2026-10-04: N0 evidence transfer into the existing docs checkpoint
+
+Root reviewed the complete 334-line N0 donor appendix before authorizing this
+lossless transfer. Its read-only donor worktree is
+`/Users/thomas/Code/js2/.codex-worktrees/2929-native-guard-n0-observation`;
+the donor uses this issue file's same repository-relative pathname. The donor
+is 2032 lines, SHA256
+19c3199b9ecd7d93d5147cd9d55bdf948a2ec4fe58bca875343bdc023ce500e3.
+Its original 1698-line prefix is SHA256
+874f9194b5de9b3ea0f49931a91e79a0083d9e8b0abda596cf2ca50637423fc5.
+Only donor lines1699–2032 were appended, byte-for-byte, at destination
+lines2556–2889; those 334 lines have SHA256
+e2cfef03638c5261406604240920f533552fad087e5008cea05bb59519d3248d.
+
+The published destination prefix remains all2555 lines, SHA256
+1ee04474229db2d4348f400df83c984e3abce945db51020b80040da2b797904c.
+The earlier shorthand2553 omitted the two-line, already-published external
+donor citation repair; those lines are preserved too. No donor prefix,
+frontmatter, foreign history, source file or fixture was replaced. Historical
+NOT_RUN statements remain dated history before the later actual terminals.
+
+The actual unchanged guard67 is60PASS/7FAIL; the finite eleven artifact
+observations are4PASS/7FAIL, with all outputs complete. Six serialized error
+strings say undefined; no live exception payload is thereby established.
+The C/D import difference has a source-supported intentional routing
+explanation, not a diagnosed routing bug. Neither diagnostic denominator is
+an original Test262 gain. The separate NaN fixture question and six opaque
+failure origins remain open; no N1 instrumentation/source plan is included.
+
+Publication remains the existing docs PR6477, together with the accepted Map
+planning checkpoint; no new PR or production ownership is requested. Root
+must read this transfer manifest and the short Map25 handoff before granting
+normal hooks/publication. This preparation ran no tests, builds, hooks,
+commit, push, queue operation, provider call or trace instrumentation.
+
+## Astra N1: finite exception-boundary observation, not a semantic repair
+
+2026-10-04, source-only proposal after the frozen checkpoint. Preserve the
+preceding2924 lines, SHA256
+b8b03bc65634e91016567188ab2c08135f327dbb9f952f3511c41188fd570baa.
+This appendix is private/unpublished and must not be pushed over queued6477.
+No worker, provider, source, fixture, claim, runtime or publication change was
+made. Root must read this whole proposal and grant exact instrumentation
+hunks before a Sol implementer prepares a patch in a new isolated worktree.
+
+### Evidence floor and the question the existing response cannot answer
+
+N0's current native guard67 remains60PASS/7FAIL; its exact eleven original
+bodies yield4PASS/7FAIL. All six C failures have isException=true,
+reachedTest=true and error equal to the STRING undefined. Their complete
+response lacks instantiateError; that absence is retained as an observation,
+not proof of a specific native instruction. N0 binary/provider/input pins,
+sources, originalHarness/noStrict options and all expectations stay fixed.
+The assignment-only and three D positives plus explicit NaN Error remain
+controls. Intentional Script-root direct-to-indirect lowering is explained
+above; changing that route is neither a diagnosis nor part of N1.
+
+Read-only anchors below were checked in the exact N0 donor worktree, not a
+new bundle. scripts/test262-worker.mjs:2438 builds ordinary imports;
+2456 invokes instantiateTest262Module;2498–2512 classifies instantiate
+throws;2534–2555 invokes the existing __module_init once and classifies its
+throw. Original-harness synchronous success returns at2558–2638 without
+calling the synthetic test export. Its deferred-init order MUST remain so.
+The generic exported-test catch2763 and outer catch2788 are distinct sites;
+a diagnostic must record the actual site, not label all isException rows
+as test-export failures. reachedTest is metadata, not a live program counter.
+
+The actual reader is extractWasmExceptionMessage at1761, not merely the
+similarly named shared original-harness renderer. It tries the consumer tag,
+then Error/primitive/native rendering. For a successfully extracted nullish
+payload it emits a fixed TypeError label, whereas a non-null native carrier
+may render the text undefined; the non-Wasm fallback can also stringify a
+value to that text. These are competing source-supported possibilities,
+not an observed tag or payload classification. Failed getArg is currently
+swallowed. scripts/lib/wasm-exn-render.mjs::exceptionPayload92 independently
+collapses absence and a real undefined return, so its return alone is not
+a diagnostic discriminator either. Preserve the maintained verdict policy.
+
+instantiateRuntimeEvalNamespace (scripts/runtime-eval-provider.mjs:832–857)
+creates one native instance and returns only five unwrapped entry functions.
+Its tag/renderer exports exist in N0's binary but are absent from that public
+namespace. attachConditionalImportNamespaces (scripts/test262-import-object.mjs:
+135–152) attaches that exact namespace; instantiateTest262Module230–339 owns
+the ordinary module-first lifecycle. currentLinkedPeers covers linked harness
+providers, not automatic access to this native eval instance. Do not add it
+to that registry, invent a second provider, or substitute a custom importer.
+
+### Smallest proposed instrumentation surface: three scripts, no src hunks
+
+Proposed leaf2929:native-exception-observation is NOT claimed by this plan.
+An implementer needs fresh maintained exact-leaf/path checks and root patch
+review; retained positive holds below are not released. Prepare only:
+
+1. A private diagnostic leaf under scripts/lib, provisionally
+   native-eval-boundary-observation.mjs. Built-in/leaf-only imports; no compiler,
+   runtime or provider back-import cycle. It owns a WeakMap keyed by the actual
+   namespace object and a per-row bounded primitive-record accumulator. It
+   never exports raw GC handles or mutates namespace/instance exports. An
+   explicit process-local observation flag defaults off; a strict manifest
+   allow-list limits records to the eleven accepted labels. No new pool option
+   is needed: CompilerPool.runTest uses an explicit option allow-list, so a
+   casually added option would silently disappear. Clear row state on each
+   request and before recycling; cap events and mark overflow INCOMPLETE.
+2. ONLY the native WebAssembly.Module arm of instantiateRuntimeEvalNamespace:
+   assign the existing five-entry literal to a local namespace, register its
+   already-created instance in that WeakMap when enabled, return the same
+   namespace. No new enumerable property, wrapper function, start call or ABI
+   entry; every function reference is exactly instance.exports[name]. The
+   QuickJS bundle arm returns as before and is not registered. Failure before
+   successful instance construction remains provider-instance UNAVAILABLE;
+   no substitute instance or manual initialization is allowed.
+3. Worker-local capture in extractWasmExceptionMessage and its existing
+   instantiate/deferred-init/export/outer catch call sites. Pass an optional
+   local observation recorder, preserving call order and existing return text.
+   Record catch-site, whether a consumer instance exists, actual
+   WebAssembly.Exception discrimination, selected tag availability, getArg
+   success/throw, and safe payload category only after successful extraction.
+   Undefined/null/string/number/boolean/bigint/symbol/object/function are
+   distinct; extraction failure is NOT undefined. Do not inspect arbitrary
+   payload.name/message/constructor or stringify a GC object just to trace it.
+
+Use values already obtained by the existing reader: capture its selected
+tag/getArg result once, and each existing native-render attempt's returned
+string or null once. Record which consumer/linked-peer/fallback branch
+actually supplied the canonical text; do not rerun those renderers to fill
+a trace. A null tryNativeExnRender result remains explicitly ambiguous among
+missing export, empty/invalid length and caught rendering throw. No changes
+to scripts/lib/wasm-exn-render.mjs policy/body are needed for this first pass.
+sendResult3288 already spreads arbitrary payload fields to process.send;
+attach only one serializable diagnostic field to the existing result. Keep
+status/error/ret/negative verdict and own-key absence otherwise unchanged.
+No raw exception, tag, payload, instance or function crosses IPC.
+
+After canonical text/verdict is frozen, an optional terminal-only peer probe
+may test the SAME caught exception against the stored native-provider tag,
+recording missing/mismatch/extracted separately. Consumer and provider tags
+are instance-specific; caller rethrow can match the consumer tag while its
+payload originated in the provider. Tag ownership never proves payload origin.
+Only after a successful extraction may the existing shared
+tryNativeExnRender be used with the actual retained provider exports, once,
+as a separately labelled diagnostic. This can execute native conversion and
+potentially user conversion hooks: it is NOT part of the verdict and must run
+only after this row's execution ends, with no resumed user code or subsequent
+row sharing its instance. Root must explicitly include this observer call in
+the grant; the tag-only pass is the default if it is not granted. Never invoke
+runtime_eval entry functions, hidden field projectors or __module_init again.
+
+Observation failures have their own captureError/INCOMPLETE status and never
+replace the original failure. The observation-off branch must produce the
+same result shape as N0. scripts/test262-import-object.mjs is a read-only
+consumer: retrieve the existing attached namespace after its ordinary call,
+including inside the catch, without changing attachment or init scheduling.
+No CompilerPool type/IPC routing, compiler, core runtime, shared decoder,
+property access or eval-result envelope edit belongs to these three groups.
+
+### Protocol holds and exact carve-out questions
+
+The accepted maintained-book snapshot pins upstream8ed0193 and legacy3d6bc324.
+4245 remains positively held by ttraenkler/opus-membrane on
+issue-4245-membrane-slice1 (write3673-cuhch2hj);4307 by
+ttraenkler/opus-senior on issue-4307-closure-carrier-wrap (2644-9ek9n79y);
+4308 by ttraenkler/senior-dev on issue-4308-slice-a-error-identity
+(30953-9t03z4oe). These are retained records, not a fresh claim scan or inferred
+release from done frontmatter. Their current MD scope passages were read.
+
+MD4245 explicitly excludes interpreter implementation; native-only namespace
+instance observation is distinct from its QuickJS membrane hunks. Its shared
+carrier/identity/envelope contract remains held. MD4307 positively owns
+callable wrapping/inverse emitRuntimeEvalCarrierUnwrapAny and crossing guards.
+MD4308 owns declaration/cell/error identity and global-versus-activation
+routing. N1 does not modify any of them. Ask the owners/root exactly whether
+private non-wrapping native-instance retention plus terminal tag/renderer
+observation is permitted without changing these contracts; separately obtain
+the worker/instrumentation owner grant for the exact catch/reader hooks.
+Do not call an unreviewed scripts hunk clear merely because it is outside src.
+
+The source first-loss candidates stay separate: native indirect wrapper
+PROVIDER_EXPORT_WRAPPER248 calls executeIndirectEval, lexical exposure,
+exposeRuntimeEvalObject, then result wrapping; its catch repeats exposure
+before wrapping the error, so exposure can itself throw. Caller
+emitRuntimeEvalResultUnwrap657 calls global pull BEFORE decoding envelope
+field1 and testing field0. Pull543 performs Get, shared-value unwrap,
+interpreted-callable adaptation and coercion. These exact native/caller
+functions are READ-ONLY hypotheses, not patches requested by this first pass.
+If outer capture cannot distinguish an envelope failure from pull/Get/unwrap,
+report that limit and request only the demonstrated next seam with4307/4308
+clearance. No wrapper-entry JS trampoline or provider instrumentation is
+smuggled into the three-script observation proposal.
+
+### Finite preparation, controls, runtime gates and stopping rule
+
+Before execution root must read the exact three-script diff and an eleven-row
+manifest copied from N0, including original source/options hashes and provider
+provenance. Pure source validation first: namespace's five names/references
+unchanged; no QuickJS selection or native-source string change; normal import
+graph has no added cycle; collector can represent unavailable/mismatch states.
+No source metadata, oracle version or verdict baseline is changed for a trace.
+
+Provider-cache feasibility is source-backed: computeCompilerBundleHash595
+covers src/lock/bundle, while runtimeEvalProviderCacheKey607 includes assembled
+provider source/options. The proposed script-only observation leaves those
+inputs untouched; verify their actual keys and binary hashes, do not override
+them. If ordinary selection misses or changes key, STOP—no provider rebuild,
+TEST262_BUNDLE_HASH spoof, refusal fallback, stale-key bypass or cache repair.
+The existing matched N0 compiler/runtime/provider artifacts must be supplied
+by an explicitly reviewed own-worktree preparation, never rebuilt implicitly.
+
+Four observer-unit controls can use host-created WebAssembly.Tag/Exception
+objects without compiling fixture programs: successful extraction of actual
+undefined; successful extraction of a known string; mismatched tag reporting
+extraction failure; non-Wasm thrown undefined reporting that separate branch.
+These are synthetic instrumentation controls, not native conformance cases.
+They require their own frozen source/expected records and later runtime GO.
+Do not manufacture private GC objects to make the native renderer succeed.
+
+Then the same eleven original bodies run observation-off once and observation-on
+once, serial canonicalNode24/3072 under separate approved finite leases,
+pool1/originalHarness unchanged, no manual start or fixture catches. Preserve
+all4 positive outcomes, explicit NaN Error and6 opaque failures; changes in
+canonical outcomes mean an instrument perturbation, not semantic improvement.
+Record complete result/diagnostic fields before fixture conversion, all
+binary/source/namespace/function-identity provenance, terminal and survivor
+checks. All phase records must have an explicit observation-complete flag.
+
+If tag extraction plus the existing consumer rendering explains the text,
+stop at that evidence; do not automatically execute the optional provider
+render. If provider rendering is separately granted and exposes a meaningful
+message, keep canonical undefined alongside it, not in place of it. If tags
+are unavailable or both render paths remain opaque, retain UNRESOLVED and
+name the smallest next held seam. This finite N1 supplies first-loss evidence,
+not a promise of full internal stage tracing, six fixes,67/67, P2 completion
+or original Test262 gain. No repair or wider tracing follows automatically.
