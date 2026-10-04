@@ -3120,3 +3120,907 @@ are unavailable or both render paths remain opaque, retain UNRESOLVED and
 name the smallest next held seam. This finite N1 supplies first-loss evidence,
 not a promise of full internal stage tracing, six fixes,67/67, P2 completion
 or original Test262 gain. No repair or wider tracing follows automatically.
+
+## Astra N1 revision: observe only the existing consumer catch and reader
+
+2026-10-05. This supersedes the earlier proposed N1 instrumentation surface,
+not its historical evidence. Preserve the preceding 3122 lines and their
+SHA256 2536366a46504ea62d6f502dc975e3dfae7429e3f86d01c9b5a33d1d8e4c5bde.
+This is a source-only plan, not instrumentation or runtime permission.
+
+### Decision and limits
+
+Use only a private bounded record accumulator plus hooks in the EXISTING
+worker exception reader and its call sites. Exclude native-provider namespace
+retention, WeakMaps of instances, provider-tag probing, new renderer calls,
+import-object changes, wrapper instrumentation, pull/unwrap changes, and
+runtime-eval provider exports. Do not modify wasm-exn-render.mjs at all.
+
+This can answer which consumer catch supplied the failure, whether its
+existing getArg succeeded, which safe payload category it returned, and which
+EXISTING rendering branch supplied the canonical text. It cannot identify
+the provider's internal failing instruction, distinguish exposure from pull
+or envelope decoding, prove payload origin, or recover a message that none
+of the existing readers produced. Those limits are acceptable stop outcomes.
+
+Six C rows contain the serialized STRING undefined; they do not prove that
+the thrown value, extracted payload, or provider return was undefined.
+Script-root direct-to-indirect routing remains intentional. All eleven
+original bodies/options remain fixed; no replacement probe becomes a gain.
+
+### Exact proposed source hunks and their invariant
+
+Source anchors were read in the N0 donor at 1787b1af4a2f010f51ca1f45fc68fa540bfa4673.
+Implementation must compare these bodies with its fresh base before editing.
+
+1. New private scripts/lib/native-eval-boundary-observation.mjs: a leaf with
+   built-in-only dependencies; stores only primitive records. Explicit opt-in
+   process environment plus a frozen eleven-source digest allow-list, default
+   off. No new CompilerPool option and no compiler/provider imports. A row
+   record starts/reset in the existing process message handler (around2067)
+   before compilation; match the actual source digest, not a label substring.
+   Unlisted sources get no observer. Bound events/strings and mark overflow
+   INCOMPLETE rather than truncate silently. Never retain exception/payload,
+   tag, instance, exports or function references in this accumulator.
+2. scripts/test262-worker.mjs::extractWasmExceptionMessage (1761–1825):
+   optional local record target. Add constant branch events around operations
+   ALREADY present, preserving their order and number. In the existing
+   WebAssembly.Exception branch, record that fact; do not repeat instanceof
+   to classify it. At the existing tag lookup record selected __exn_tag,
+   fallback __tag, no-tag or no-instance using the already-read values.
+   Do not read either export twice. Around the existing single getArg call,
+   distinguish success from caught failure. Record successful undefined and
+   null separately; a failed extraction has no payload category. Do not call
+   err.is(tag), getArg again, or inspect caught-error properties for tracing.
+3. In that same reader, record branch outcomes from existing values:
+   payload-Error; consumer-native returned string/null; each already-visited
+   linked-peer ordinal returned string/null; generic/native fallback chosen;
+   payload safe-stringification; Wasm nullish label; host Error; non-Wasm
+   fallback. Reuse existing native/viaPeer/generic locals and existing final
+   result text. Where a return expression must become a local for recording,
+   evaluate it exactly once at the same position. Preserve the special
+   [object Object] policy and peer loop early returns verbatim. A null native
+   render remains ambiguous: unavailable export, bad length, or caught throw.
+   Do not add inspection or tracing inside the shared renderer to split it.
+4. Worker reader CALL SITES only: attach constant context labels at the
+   instantiate catch (2506), deferred __module_init catch (2548), exported
+   test catch (2759), outer-Wasm catch (2794), and existing async-drain text
+   path (2616). The existing originalHarnessExceptionMatches (1927) may call
+   the reader too: label it negative-match and preserve its existing call
+   count; do not merge its observation with a later formatting invocation.
+   Increment an invocation ordinal so repeated legitimate reads are visible.
+   Keep matching, source-map annotation, status and return logic unchanged.
+5. Worker sendResult (3288): snapshot the bounded primitive diagnostic before
+   existing cleanup; append one diagnostic-only own field when enabled for
+   the allow-listed row. Default-off retains EXACT existing own-key absence.
+   Canonical status/error/ret/reachedTest/negative fields are untouched. Do
+   not modify pool transport/schema or verdict consumers. Existing sendResult
+   already spreads payload through process.send; prove the ordinary parent
+   collector retains the new field rather than assuming it does. If it drops
+   it, STOP and request a separate exact transport observation hunk.
+
+Safe category means only null comparison and typeof of an already obtained
+value, or a branch the reader already entered. No payload.name/message reads,
+String(payload), Object.keys, prototype inspection, JSON serialization of the
+payload, or function invocation is added for observation. Existing behavior
+may already do some of these; preserve that behavior but do not duplicate it.
+All recorder errors are swallowed into a separate incomplete marker; they
+never replace the test exception or run cleanup early. Reset at each message,
+including errors/compile-only requests; no result inherits a prior row trace.
+
+### Fresh ownership adjudication, not whole-file clearance
+
+Maintained read completed with ref_read=ok at
+5e15f033483955c0c6724223715b13e4a51951f9 (2663 records,1045 held).
+The first sandbox attempt failed DNS; its failure was UNKNOWN, not unassigned.
+The successful normal maintained read is tool receipt35bce2, exit0.
+Our docs leaf2929:native-guard-plan-shepherd-docs and Sol's N0 observation
+leaf remain separate; this plan claims neither implementation nor a worker.
+
+Positive owners retained:3613 senior-dev-harness, branch
+issue-3613-harness-vacuity-tests;6723 opus-6723-d4-rest, branch
+issue-6723-d4-rest;4245 opus-membrane;4307 opus-senior;4308 senior-dev.
+Their current scope passages were read, not inferred from done frontmatter.
+3613 owns shared thrown-text/verdict parity;6723 owns the linked-peer generic
+render fallback. The proposed hooks touch that worker reader's control flow
+physically but do NOT change either policy, evaluation count, or ordering.
+Request root's exact observation-only carve-out for the five groups above,
+with the actual diff reviewed before source GO. If implementing them requires
+changing those invariants, owner consent for that protocol is required first.
+
+4245's QuickJS membrane,4307's callable carrier and4308's declaration/error
+identity protocols are not written or re-entered. The earlier provider
+WeakMap/terminal-render proposal is withdrawn for this pass; there is no
+request to retain a native instance or observe hidden provider namespaces.
+Do not call an entire script clear. A new implementation leaf, if approved,
+needs its exact maintained check/claim and current open-patch collision check
+before edits; no such claim or all-PR patch clearance is asserted here.
+
+### Finite preparation and acceptance before any measured classification
+
+Root first reads a source-only diff limited to the leaf, listed worker hooks,
+and isolated observer tests. No src, provider/import-object, shared renderer,
+cache policy, fixture, registry, oracle or result-verdict change is permitted.
+Freeze six synthetic instrumentation controls: actual undefined payload,
+null payload, known string payload, mismatched tag, missing consumer instance,
+and non-Wasm thrown undefined. Add event-count controls around fake EXISTING
+renderer functions to prove observer on/off has identical calls/order and
+canonical output, including generic consumer plus successful linked peer.
+These synthetic controls are not original Test262 evidence and need a lease.
+
+Observer-off then observer-on run the SAME N0 eleven bodies, sources/options,
+ordinary worker/pool lifecycle, canonical Node24 and matched native provider.
+No manual init/replay, extra catches in fixtures, provider rebuild, key spoof,
+stale bundle override, or compiler rebuild follows from this plan. Verify
+actual compiler/provider/cache hashes; a changed key is a STOP, not a reason
+to repair the cache. Retain all4 positives, six C opaque failures, and the
+explicit NaN Error. Compare canonical response fields after stripping only
+the new observation field and ordinary timing fields. Any verdict/text/route
+or execution-count change rejects the observer, even if a row now passes.
+
+The observer passes only with complete eleven-row provenance, no record
+overflow, correct positive/mismatch controls, and unchanged canonical results.
+Classify EACH C row independently: catch site, extraction status/category,
+existing renderer route and final text. A non-null extraction would be new
+measurement, not a conclusion imported from the old string. Failed getArg
+does not prove tag mismatch without a separate approved test. No-consumer
+and no-tag remain distinct from extraction-failed. Unresolved provider stage
+stays UNRESOLVED. Stop after this one consumer-only pass and propose any next
+held seam from the actual rows; do not expand instrumentation adaptively.
+
+### Root decision after full review, 2026-10-05
+
+Root read all147 revision lines3123–3269 (receipt df1a31) and granted the
+exact observation-only carve-out for the five groups above, CONDITIONAL on
+literal default-off behavior and unchanged getArg/render call counts, order,
+canonical values and verdict. This is not provider, shared-renderer, transport
+policy, pull/unwrap, identity or semantic-protocol authority. Sol must first
+use a fresh isolated worktree, maintained exact implementation claim and
+complete open-patch collision check. Root must read the actual source diff
+before execution. No runtime/heavy lease, source edit, instrumentation result
+or semantic gain is supplied by this docs grant.
+
+## 2026-10-05 — consumer-only N1 observation preparation (Sol6.1)
+
+Own managed worktree:
+`/Users/thomas/.codex/worktrees/2929-consumer-exception-observer/js2`.
+Branch `codex/2929-consumer-exception-observer`, fresh upstream production
+base `719dfc865ad051facd01f2ebf41626598db9fabd`, verified with a server read.
+The dirty root checkout was read only. Its older Documents memory path is
+absent; the complete local MEMORY.md and relevant coordination/test262
+memories supplied the operating context.
+
+### Scope, ownership and collision floor
+
+Maintained leaf `2929:native-consumer-exception-observer` was unassigned
+before claiming, then the actual record was verified at book tip
+`24cb2feeee24039939d3708cbdf8fe20d4c9adc8` (2664 records,1046 held).
+Owner `ttraenkler/codex-sol61-native-consumer-observer`, matching this branch.
+Positive holds3613/6723/4245/4307/4308 remain unchanged. Shared thrown-text,
+linked-peer, carrier, declaration and identity policies are outside this leaf.
+
+Complete paginated paths were read for all16 open PRs:
+6468,6436,6435,6383,6341,6288,6246,6234,6206,6195,5942,5911,5883,5784,
+5753,5748. Only6468 changes the worker. Its actual patch changes the fixture
+graph import/helper and entrySelfImportGraph/fixtureGraph block; it does not
+change the exception reader, reader call sites or sendResult. The new reset
+sits immediately at handler entry, before existing reset statements, outside
+that fixtureGraph block. No open PR changes this leaf or MD2929. This is exact
+hunk clearance, not a blanket release of scripts/test262-worker.mjs.
+
+The current reader, listed call sites, sendResult, runtime-eval provider and
+shared renderer compare byte-identically with N0's1787b1af source anchors.
+The accepted159-line revision above was copied exactly from the private
+Astra checkpoint, appendSHA256
+`cbb96b6d88c49ba5a46632991328956d0a8b0446aedcb46ffa06f1ecfeafe780`.
+The fresh base's3122-line issue history is preserved before that copy.
+
+### Prepared implementation and frozen controls — NOT_RUN
+
+Only a built-in-only private primitive accumulator, the five approved worker
+hook groups, this MD and an isolated Node control file are prepared.
+Opt-in `JS2WASM_NATIVE_EVAL_BOUNDARY_OBSERVATION=1` admits only the eleven
+literal assembled-source SHA256 values from N0. Missing flag, other values
+and nonmatching digests admit no observer and add no result own key.
+Records are bounded to128 events and1024 characters per string; overflow or
+invalid capture is INCOMPLETE with an explicit reason. No raw Wasm value,
+exception, tag, exports, instance or function enters a record.
+
+The worker uses the existing tag/getArg/render operations once, retaining
+their short-circuit order and canonical text. It labels instantiate,
+deferred-module-init, exported-test, outer-wasm, async-drain and negative-match
+reader invocations independently, including repeated-reader ordinals.
+The result snapshot precedes existing cleanup and adds one diagnostic field.
+The ordinary pool already resolves the whole received message
+(scripts/compiler-pool.ts:162 and372); no transport edit is included.
+Actual on/off pool retention still requires the finite runtime pass.
+
+Six synthetic controls are frozen: actual undefined payload, actual null
+payload, known string payload, mismatched consumer tag, missing consumer
+instance, non-Wasm thrown undefined. Additional controls pin consumer/linked
+peer calls and early returns, generic/safe fallbacks, fallback-tag read count,
+repeated invocation ordinals, default-off/source rejection, explicit overflow,
+and sendResult own-key absence/reset. Their sources execute the actual worker
+reader/sendResult in an isolated host VM without importing compiler bundles
+or executing the original fixture. These are instrumentation controls, not
+original Test262 acceptance or semantic gain.
+
+Source syntax and diff-whitespace checks pass. No prepared control, worker
+execution, provider selection, native compile, build or hook has run. Root
+must fully read the actual source/test diff before execution. Runtime work
+also requires the exclusive serialized heavy lease.
+
+### Current-source drift and future normal preparation gate
+
+Fresh719df changes four IR source paths relative to N0's1787b1af:
+new src/ir/analysis/backend-legality.ts and
+src/ir/analysis/contracts/linear-memory-layout.ts, changed
+src/ir/analysis/linear-memory-plan.ts and src/ir/backend/legality.ts.
+Changed existing input hashes:
+- linear-memory-plan: N0
+  `382cb4acee2de86904da1c0162ecc8b9de4250f9f9cb49dcba57b1a056c1cc3c`;
+  current `5f2f5ded3a788e2cc1b70dceb01afe97d249e0e5407e555ced11c5aedb0dbc52`.
+- backend/legality: N0
+  `6a64764b2691d6b2994258a966afabdac0b981fc036f611be5d8969032a3db98`;
+  current `5b67993fe312a0f5a52f9ef816c76a10cd32470f7e2a53819dec736764f45878`.
+
+These unrelated upstream changes are read only; no IR edit belongs to N1.
+Normal compiler identity includes the src tree, lock and built bundle, so
+N0's native compiler keyff97d4c71ce3b003 and provider key2e63998eab8a98ff
+cannot be assumed current. Its67 rows60PASS/7FAIL and eleven rows4PASS/7FAIL
+remain historical. Fresh off/on results have not been measured.
+
+A separately reviewed normal preparation may provision ordinary dependencies,
+build the current compiler/runtime bundles with the repository commands,
+build the full native provider with the ordinary maintained builder, and
+check --require-full-cache once. No stale bundle, TEST262_BUNDLE_HASH override,
+cache-key override, implicit provider rebuild, custom namespace, manual init,
+replay or original-body change is allowed. Actual binaries, keys and source
+hashes must be frozen before observer-off then observer-on run the identical
+eleven original bodies under Node24/3072, pool1/unified/originalHarness.
+Any unexpected key/byte change between arms is a STOP. Canonical response
+comparison strips only this diagnostic field and ordinary timing fields;
+any verdict/text/route/call-count change rejects the observer. Each row must
+have complete original-source/options/artifact provenance and a complete
+bounded record; failed getArg is not proof of a mismatched tag.
+
+After that one consumer-only pass classify the six C rows independently and
+stop. Provider-internal stage and payload origin may remain UNRESOLVED.
+No semantic repair, original Test262 pass credit, provider/shared-renderer
+instrumentation, or follow-up seam authority is implied.
+
+### 2026-10-05 — actual isolated observer controls terminal
+
+Root fully read the worker delta, private leaf, isolated controls and issue
+appendix before granting this finite built-in-only control lease (root receipts
+111f0a/05fb32). Ordinary canonical node_modules and26 non-.git test262 entry
+links were prepared in the own managed worktree; no install, Git/config/hook
+or provision-script execution occurred. Canonical corpus HEAD remains
+b363f29d3c43c626dc852744ad64a0b48a003693; worktree .git was untouched.
+
+Actual canonical Node v24.19.0, NODE_OPTIONS=--max-old-space-size=1024,
+original inherited PATH, isolated node --test:11/11PASS,0FAIL,0SKIP,
+0CANCELLED,0TODO. The default reporter command completed at22:52:18 UTC
+2026-10-04 (77.004542ms reported by Node, exit0, receipt9bc933). Node emitted
+the spec reporter by default; the same finite11 controls then ran once with
+--test-reporter=tap to retain the required actual TAP (64.847ms, exit0,
+receiptff565d). No original body, compiler, provider or native build ran.
+The heavy lease was yielded immediately after these controls.
+
+Complete actual TAP: .tmp/2929-n1/controls-v1.tap, SHA256
+865bf27a738bd6f19079add4cb6dd60d6fe21388184ac5e64203af040026d0fe.
+Terminal and complete before/after input pins:
+.tmp/2929-n1/controls-v1-terminal.json, SHA256
+67c9b3ce8e3fcc2b4743008005c2da333723f494b4162d443872c94725cce5ec.
+All six file hashes are unchanged before/after both reporter runs:
+
+- worker:360cd3b5ef4655bd9b1156faa87e85bcd94cea1c24c97362e1c66ed1a55e51cc.
+- observer:afb1240a903c2fc8109556ba53565416d76783c809fbd6c4798acda518d9be6d.
+- controls:0a1dc9e06bedcb70226829147a38ae9a0653886386d432d4102ed1360a1e3705.
+- runtime shim:38803c267321eb785fca237c58e5fdb7f160e133108ab21a2fb03eee12b65d43.
+- assert.js:206e274ca325eb8a652e3911c3fbd090e2480d11ed7579dc17a5d17a2360ed48.
+- sta.js:1930c54af79455c484799f43e9a28e2b2f15c40d0917c9941ca54e26db243f35.
+
+These measurements validate the instrumentation controls only. Native guard67
+and fresh observer-off/on eleven-row runs remain NOT_RUN; original Test262
+conformance credit is zero. Root independently read the exact eleven TAP rows
+and terminal pins (receipt906176) and accepted that bounded result.
+
+### Frozen future normal current build recipe — NOT_RUN
+
+Own .tmp/2929-n1/prepare-current.mjs is129 lines, SHA256
+4a5344c85ae8aa8a4014283b2ae583769927a399cb73ed92dc5708d5845c135e;
+node --check passes. Root must read the complete recipe before a separately
+authorized serialized build. It freezes current tracked src files plus normal
+compiler/runtime/harness inputs once, checks the reviewed worker/leaf/control
+and provider/lock hashes, asserts exact current package build commands, and
+never copies old artifacts or cache metadata. The full maintained native
+builder was read, including its normal refusal-first build, full-provider MISS
+verification of five canaries and the namespace, and --require-full-cache
+verification of the actual cached full-provider bytes.
+
+Exactly four sequential commands are proposed: pnpm run build:compiler-bundle;
+pnpm run build:runtime-bundle; canonical Node24
+scripts/build-runtime-eval-provider.mjs; canonical Node24 with that same script
+--require-full-cache. Actual build children use3072, original inherited PATH,
+JS2WASM_EVAL_ENGINE=interpreter, TEST262_FULL_RUNTIME_EVAL=1,
+TEST262_WORKER_MAX_OLD_SPACE_SIZE=3072 and ordinary existing dependencies.
+No TEST262_BUNDLE_HASH, stale compiler key, provider-key override, alternative
+namespace or manual initialization is admitted. Any command failure stops;
+there is no fallback/retry. It records exact command terminals, normal current
+compiler/provider keys, current assembled-provider source/options, all three
+binary hashes, native zero imports and five entry-function exports, then
+verifies the frozen inputs remain unchanged. It does not run guard67 or the
+eleven original bodies. No full-native build lease is granted by this record.
+
+After this normal preparation is reviewed and executed, one separately
+reviewed ordinary matched observer-off eleven-row pass followed by observer-on
+eleven-row pass remains the entire measurement scope. Literal source digests,
+options and originals stay fixed; fresh off outcomes are measured rather than
+assumed from N0. The consumer-only stopping rule and all held protocols remain.
+
+### 2026-10-05 — actual current normal BUILD-ONLY terminal
+
+The reviewed recipe's initial override preflight saw only injected GIT_PAGER
+(display setting), not a semantic/IR/cache override. Receipt0119ad exited2.
+The orchestration still entered the recipe, whose own strict GIT_* assertion
+refused before any child command or output/cache directory was created
+(fbc546, exit1). This was an orchestration mistake with zero build children;
+the actual refusal is retained at .tmp/2929-n1/build-preflight-refusal-v1.json,
+SHA256 0a98042be56adc670bf431d1fa159b050536d4c90bf85c7b9f53c08ba8b3078d.
+No timeout/restart or cache recovery followed that refusal.
+
+Root authorized the exact one-line assertion exception for GIT_PAGER while
+retaining rejection of every other GIT_* setting. The source correction was
+read back; corrected129-line recipe SHA256
+e1ac41cb14ecb9ccf26ae20ccabacc0e4da9088a71c7581c60c104cdfdaf14ce.
+The fixed orchestration checks actual preflight exit code before launching
+the recipe. Actual preflight72bfa7 passed with zero semantic/IR/cache/Git
+overrides; original PATH remained unchanged.
+
+Exactly the four reviewed normal commands then completed once, all exit0,
+same session37126, receipts95ec74/963d06/54a909,22:57:31.105–22:58:55.875 UTC
+2026-10-04. Canonical Node v24.19.0/3072, original PATH, native interpreter
+selection, FULL_RUNTIME_EVAL=1 and WORKER_MAX_OLD_SPACE_SIZE=3072 were used.
+Normal full provider was a MISS, compiled in78799ms,6249189bytes, then the
+maintained --require-full-cache command re-verified the actual cached bytes
+and canaries. The normal refusal-first builder also verified its ordinary
+floor canary. No provider function was manually invoked by this recipe.
+
+Actual current provenance:
+
+- native compiler key:a821fdc2f3d4671f; provider key:2dd35d72b70e8940;
+  worker bundle:d0d456fe73351a58. N0's old keys were not reused.
+- compiler bundle:21263464bytes, SHA256
+  d0d456fe73351a58b374cb04acdf1eec44fdd5c58f4671f3df459f94f72b3b46.
+- runtime bundle:20979299bytes, SHA256
+  a4bf85b1bbc86274ccbbbe92897b8315441e6b92508c8528eacb121bbe52b768.
+- full native provider:6249189bytes, SHA256
+  3edc9b58208d806e55b411f4e9a8b0fbb7283d02ae750292a763cc7fcc9c8325.
+- provider source SHA256:
+  fe8db0fcf0c934bda24d54d1496d9daed4c27ab19e697d82db79370bed31339e.
+  Maintained provider compile options are unchanged:experimentalIR=false,
+  fileName=runtime-eval-provider.ts,skipSemanticDiagnostics=true,
+  target=standalone. No ambient IR/cache override was introduced.
+-1852 input files, including1826 current source files, frozen before/after;
+  allInputsAfterMatch=true. Input-manifest SHA256:
+  f0a3f31fa58df62bb19ed3cb6e61a8d5c40e0d764978334f36505b08ad433c3a.
+- actual native zero imports and all five ordinary entry-function exports
+  were verified from the normally selected current module.
+
+Complete receipts under .tmp/2929-n1/preparation-current-v1:
+preparation-contract.json SHA256
+dfcd8f267f778350b7417772451e3fea1f914752583d6599beeab3b508e898c1;
+commands-terminal.json SHA256
+88856f2b5107235fc813d22b3eb08a6b9fd6714bb867d4480b00da6d71af6fd4;
+prepared-artifacts.json SHA256
+a6010f860fd14fc46f7a9fb028cce08b5cca3af56a878549c7973101d375fa94.
+Worker, observer and controls remain byte-identical to the reviewed hashes.
+The build-only heavy lease was yielded immediately on the true terminal.
+No guard67, observer-off eleven or observer-on eleven original body ran.
+No native semantics or original Test262 credit is supplied by this build.
+
+### Prepared identical-source ordinary off/on recipe — NOT_RUN
+
+Own .tmp/2929-n1/observe-off-on.mts is146 lines, SHA256
+cdcdc0800e2ede0e4ea0aad8c5210ff96f603d992e6aa0a919cd3197b649bac2;
+syntax check passes. Root must read it completely and grant the separate
+finite runtime lease. It reads the actual current build/input receipts,
+rechecks their hashes and normal selected keys, extracts exactly eleven
+unchanged literal runScript bodies from the existing fixture, and uses the
+maintained assembleOriginalHarness/parseMeta. All assembled digests must
+match the frozen eleven-source allow-list and exact labels before any run.
+
+Only ordinary pool1/unified runs are proposed:off11 then on11, timeout30000ms,
+originalHarness=true,inferModuleStrictArguments=false,target=standalone,
+asyncTest=false, with normal own wasm/meta artifact paths. No new pool option,
+body change, provider/private instance, manual init/replay, extra renderer
+call or semantic modification is introduced. Full returned own fields are
+retained before conversion. Missing parent-retained diagnostic is an immediate
+STOP, not permission to change transport. Every on row requires a complete
+bounded record with the actual source digest/label; all rows require actual
+complete runtime/artifact responses, unchanged bundle identity and input/
+binary hashes. Canonical responses strip only the diagnostic and normal
+compileMs/execMs fields; any mismatch or binary/source change rejects the
+observer. Actual fresh off outcomes are measured rather than assumed.
+
+The final six C-row classifications retain canonical outcomes and complete
+diagnostics independently. Provider internal stage and payload origin remain
+UNRESOLVED unless this consumer-only evidence supports more; no next tracing
+seam is entered. The whole scope stops after this one matched off/on pass.
+
+### 2026-10-05 — actual matched consumer-only off/on terminal and classification
+
+Root fully read the146-line recipe and four actual build terminals (e4ac5d),
+then independently rehashed all1852 input files and all three binaries and
+checked actual native imports0/exports43/five-entry floor (4b8b44). The finite
+runtime lease authorized only ordinary pool1/unified off11 followed by on11,
+the exact original bodies/options, native interpreter/FULL tier and3072.
+Actual override preflight66c929 passed; no inherited semantic/IR/cache override
+was present. Canonical Node24 with the maintained --import tsx path ran the
+exact recipe, same session36565, receipts42b1a6/49e22e/14f744/5fb5dc, exit0.
+No source or issue edit occurred while either arm was live.
+
+Actual fresh observer-off:eleven complete rows,4PASS/7FAIL.
+Actual observer-on:eleven complete rows,4PASS/7FAIL, every row retaining the
+complete bounded diagnostic through the ordinary unchanged parent collector.
+All eleven canonical response pairs are identical after stripping only the
+diagnostic field and compileMs/execMs. All eleven assembled-source and emitted
+Wasm pairs are byte-identical; all1852 input files and all three prepared
+binaries match their frozen hashes before/after. A separate read-only
+post-terminal rehash again measured1852inputs+3binaries with0mismatches.
+Default-off has no diagnostic own key. There was no overflow/capture error,
+timeout, compile failure, route change or missing transport field.
+
+Four original positive controls remain positive:cd/assign-only,d/direct-var,
+d/indirect-var,d/indirect-func. The explicit gap/nan-not-own Error remains
+unchanged. Six C failures keep the canonical STRING undefined. These are
+current matched measurements, not assumed N0 outcomes; no original Test262
+conformance gain or67-row rerun is claimed. The heavy lease was yielded on
+the true terminal before these read-only classifications and this MD append.
+
+Each actual C response and its nine primitive diagnostic events was read
+independently. All six have exactly one reader invocation, complete=true,
+captureError=null and this observed route:deferred-module-init catch;
+consumer instance present;actual WebAssembly.Exception;selected consumer
+__exn_tag;existing getArg succeeded;safe extracted payload category object;
+existing consumer-native renderer returned the STRING undefined and supplied
+the canonical reader text. The actual per-row records are:
+
+-01 cd/direct-var-new:deferred-module-init,getArg success,object,
+  consumer-native STRING undefined;1invocation/9events.
+-02 cd/direct-func-new:deferred-module-init,getArg success,object,
+  consumer-native STRING undefined;1invocation/9events.
+-03 cd/indirect-var-new:deferred-module-init,getArg success,object,
+  consumer-native STRING undefined;1invocation/9events.
+-04 cd/existing:deferred-module-init,getArg success,object,
+  consumer-native STRING undefined;1invocation/9events.
+-05 cd/annexb-existing-primitive-call:deferred-module-init,getArg success,object,
+  consumer-native STRING undefined;1invocation/9events.
+-06 cd/delete-severs:deferred-module-init,getArg success,object,
+  consumer-native STRING undefined;1invocation/9events.
+
+The extracted category is demonstrably non-null object, not undefined/null
+or failed extraction. The existing consumer render's non-generic string
+return took the early return, so no linked peer was visited. No payload
+properties, object identity, internal instruction or provider tag was inspected.
+The canonical text is an actual consumer-rendered string; it does not prove
+that the original thrown/provider value was undefined. The observed catch is
+the deferred __module_init catch, not an inferred exported-test failure from
+reachedTest metadata. Provider internal stage, whether exposure/pull/envelope
+decoding failed, and payload origin remain UNRESOLVED for every C row.
+
+Complete own retained receipts under .tmp/2929-n1/observation-current-v1:
+terminal.json SHA256
+b47699dfcd1060c9e72f319a4be66001d949120f9822b016ecede96440e5ef2f;
+manifest.json SHA256
+93d714ffd94487fcbbafa5f411a0914b722bcecda3c505a21cd33003a59c8ef7;
+off/rows.json SHA256
+b23105074589e81489c78e07dee884ab40e821596d942e92099ad9bfbabc2475;
+on/rows.json SHA256
+edadea5305513c25d2836383d3b1701021ceae84d9ffafea6101b7a18cdac8f9.
+Each arm also retains all eleven full response/own-key files, unchanged
+assembled sources, normal Wasm/meta artifacts and per-row provenance.
+
+N1 stops here with its consumer-boundary question answered. No native provider,
+shared renderer, transport, identity, declaration, pull/unwrap or semantic
+repair follows. Any next internal seam requires its own exact owner-scoped
+plan/grant and cannot borrow this observation authority. Publication gates
+and root review remain separate from this completed finite observation batch.
+
+### 2026-10-05 — bounded observer handoff and publication preflight plan
+
+Root independently read all six diagnostics (1d93eb), all twenty-two raw
+responses, all canonical pairs and all twenty-two Wasm rehashes (ae388a).
+The instrumentation component is verified without semantic gain: six
+non-null object payloads became the consumer-native STRING undefined.
+Payload origin, brand, provider internal stage and producing instruction
+remain UNRESOLVED. Existing worker policy accepts a non-null native rendering
+other than [object Object] immediately; STRING undefined therefore prevents
+the existing linked-peer route from being visited. This describes current
+policy, not evidence that any peer would recognize the payload.
+
+Next-owner handoff request: the maintained owners of shared rendering (3613)
+and peer fallback (6723) should independently assess the producer/consumer
+payload contract and native-render recognition, under their existing held
+claims and a separately reviewed bounded plan. Neither a generic
+undefined-as-not-mine fallback nor treating this text as proof of thrown
+undefined is justified: legitimate thrown undefined and the string undefined
+must retain their valid rendering behavior. This observer does not inspect
+payload properties or identity and authorizes no new rendering, extraction,
+provider tracing or runtime capture. The provider-stage question remains
+open; no ownership transfer or change to either held policy is made here.
+
+Publication is a separate future finite batch, not authorized by this plan:
+
+1. Read the actual current server main and complete current open-PR path list,
+   then refresh exact worker-hunk collision clearance and verify the maintained
+   2929:native-consumer-exception-observer claim. Integrate current main only
+   in this private worktree using normal Git operations, preserving all own
+   and peer changes. Stop on a positive exact-hunk collision for root review.
+   Root must read the resulting full actual diff before executing gates.
+2. Keep the publication diff to the worker, private observation leaf, isolated
+   builtin control test and this existing issue MD. No src/runtime/provider,
+   shared renderer, transport, cache fixture or protocol changes; no generated
+   binaries, dependency links or ignored .tmp receipts enter the commit.
+   Preserve default-off response own keys, the eleven-source admission floor,
+   original read/render call order and count, canonical text and verdicts.
+3. Under a root-issued serialized lease, run the eleven builtin controls with
+   zero skips and retain actual TAP plus before/after source and harness pins.
+   On the integrated tree, freeze actual compiler/runtime/native inputs and
+   use the maintained normal builder if current provenance requires rebuilding;
+   never reuse stale keys or override cache metadata. Run exactly the reviewed
+   ordinary eleven off/on pairs with unchanged literal bodies/options and
+   fresh actual off outcomes. Require all twenty-two complete rows, default-off
+   field absence, all on diagnostics retained, canonical/source/Wasm parity
+   and unchanged frozen inputs. Any timeout, compile error, missing field or
+   mismatch is a real failure, not permission to restart or change policy.
+4. Run normal repository LOC/function budgets, issue/spec/integrity, import
+   cycle, orphaned-script and quality checks applicable to the four-file diff.
+   Explicitly include all three .mjs files in the normal Prettier/Biome checks:
+   lint-staged includes mjs although the package's default format glob is TS.
+   Read resulting formatter changes as real diffs; semantic changes need root
+   approval and invalidate affected frozen validation. No budget relaxation,
+   issue status inflation, hook bypass or configuration override is proposed.
+   The ordinary commit hook includes lint-staged and LOC/function gates; the
+   ordinary push hook includes typecheck/lint, changed-file formatting, oracle
+   and coercion ratchets, numeric-local IR regression, conformance-doc sync
+   and committed/working issue integrity. Retain actual gate terminals.
+5. Only after explicit root publication authorization and successful normal
+   gates, verify Thomas Tränkler <git@thomas.traenkler.com> attribution, make
+   the scoped commit with Codex co-author and Model: Codex GPT-6.1 Sol High,
+   and push the owned branch to the user fork. Verify the actual remote ref
+   even if a hook reports failure. Create and attach a separate upstream PR
+   with the correct Description and unchecked CLA box, without GitHub issue
+   writes or changes to unready semantic PR 6435 or another owner's branch.
+
+The scoped PR describes observation only: eleven isolated controls passed;
+fresh matched eleven off/on outcomes were 4 PASS / 7 FAIL and canonically
+identical; six failures exposed non-null object payloads rendered to STRING
+undefined by the consumer. It must disclose UNRESOLVED provider stage/origin,
+zero original conformance credit and no guard-67 rerun under this component.
+Do not close the broader 2929 issue, claim a semantic fix, mask the seven
+original failures, or mark the whole native-eval goal ready. PR readiness
+requires actual mergeability and all required checks, not merely this plan.
+
+No publication gate, commit, push, additional runtime or tracing was executed
+while preparing this handoff. The completed consumer-only batch is stopped;
+the agent slot is yielded with the dedicated Astra shepherd left resumable.
+
+### 2026-10-05 — read-only publication refresh and exact pending gates
+
+Actual server main is 27b18d375f0c446fcd5662056a35261db9881f7b, exactly one
+commit ahead of this worktree's unchanged 719dfc865ad051facd01f2ebf41626598db9fabd.
+The new commit changes nine benchmark result paths only, no observer file or
+compiler/runtime/native input. No fetch, merge, staging, commit or push occurred.
+After a separate root grant, fetch upstream main normally, verify the actual
+server SHA still matches the reviewed snapshot, then use git merge --ff-only
+upstream/main in this private worktree. The present nine-path update is disjoint
+from all four owned dirty/new files; no stash/reset or foreign worktree edit is
+needed. If main moves again, reread its actual delta before integrating it.
+
+All seventeen actual open PR file lists were read with complete pagination:
+6480, 6468, 6436, 6435, 6383, 6341, 6288, 6246, 6234, 6206, 6195, 5942,
+5911, 5883, 5784, 5753 and 5748. New 6480 changes six benchmark/website JSON
+files only. The sole owned-path intersection remains 6468's worker patch:
+fixture-graph import, helper, comment and graph-selection additions. Its full
+patch SHA256 is 04f231a1e759baf7057f7c9d6332e5a6c21b6834e814e4795b79b945d5a681a8.
+None touches the actual exception reader, reader-context arguments, handler
+entry reset or sendResult hooks. Shared import context is not a positive
+changed-line collision. No other PR intersects either new leaf or this MD.
+
+The upstream maintained claim tip is 97869591ba727ff9aadd7dfc08c8f79736869b5d
+(2670 record blobs). Actual 2929-native-consumer-exception-observer.json,
+blob 5ba2732babef75035af0d7a75b6d52377471382a, remains in-progress with this
+agent's exact holder and branch. The legacy fork tip is
+3d6bc324711e54f4b4d41f71910ee228cc8ed6ac (894 record blobs), read because the
+maintained reader explicitly unions the legacy book. Actual upstream 6723
+remains opus-6723-d4-rest; actual legacy 3613 remains senior-dev-harness;
+4245 opus-membrane, 4307 opus-senior and 4308 senior-dev remain held. No claim,
+status, ownership or rendering policy was mutated.
+
+Source-only anticipated gate finding: the required verdict-oracle checker
+explicitly matches expectedErrorType in changed mixed-worker lines. The
+observation argument addition to originalHarnessExceptionMatches's existing
+extractWasmExceptionMessage(...).includes(expectedErrorType) return therefore
+matches that pattern despite unchanged verdict policy and the accepted matched
+twenty-two responses. This is a static finding, not an executed gate failure.
+STOP for root-specific resolution before declaring gates ready. Do not bump
+the oracle, edit shared verdict files, weaken the gate, add a generic exemption
+or treat instrumentation evidence as an original conformance improvement.
+The checker documents an in-diff no-verdict-change comment mechanism; any
+proposed precise explanatory comment requires root review before editing and
+fresh validation of the final source pins. No such comment was added here.
+
+Pending finite execution sequence, subject to the next explicit root lease:
+
+1. Integrate the reviewed current main as above; perform normal scoped
+   formatting before freezing final sources, and have root read all real
+   formatter/comment changes. Explicit normal commands include pnpm exec
+   prettier --check and pnpm exec biome lint for scripts/test262-worker.mjs,
+   scripts/lib/native-eval-boundary-observation.mjs and its .test.mjs sibling.
+   Formatter fixes use the maintained formatter and are not hidden in a hook.
+2. Run canonical Node v24.19.0 with NODE_OPTIONS=--max-old-space-size=1024,
+   --test --test-reporter=tap on the isolated .test.mjs file. Require exactly
+   eleven top-level tests, zero skips and all source/harness before-after pins.
+3. Reread all current preparation inputs and actual three binary hashes, using
+   ordinary native selection/provenance. The benchmark-only main update alone
+   does not change compiler/provider inputs, but final worker/leaf formatting
+   changes require a new exact input contract. Prepare root-reviewed copies
+   of the already accepted build/off-on recipes with only the new actual base,
+   actual source pins and fresh exclusive receipt locations; preserve old
+   receipts. If a normal rebuild is needed, run the same four normal commands
+   once: build:compiler-bundle, build:runtime-bundle, maintained provider builder,
+   then its --require-full-cache verification. Use canonical Node/3072 and
+   original PATH, interpreter/FULL, no inherited semantic/IR/cache overrides.
+4. Execute the unchanged ordinary pool1/unified eleven off then eleven on
+   recipe with timeout 30000 and the frozen literal original bodies/options.
+   Measure the new off outcomes; never assume historical 4 PASS / 7 FAIL.
+   Require twenty-two retained complete responses, all default-off own keys
+   unchanged, complete on diagnostics, canonical/source/Wasm parity and all
+   current inputs/binaries matched. Stop on true failure without timeout retry,
+   provider tracing, alternate replay or semantic repair. No guard-67 batch.
+5. Normal explicit local gates include typecheck, lint, format:check,
+   check:loc-budget, check:func-budget, check:import-cycles,
+   check:orphaned-scripts, check:tracked-ignored, check:oracle-ratchet,
+   check:coercion-sites, check:issues and the current CI quality gates applicable
+   to this source change. The orphan checker considers only top-level scripts;
+   both new files are private scripts/lib leaves, not new top-level candidates.
+   No LOC/function baseline or allowance changes are proposed.
+6. After authorized normal staging/commit with the standard hooks, run the
+   committed-tree checks against the actual upstream base: check:issue-ids
+   --against-main and --against-open-prs, check:issue-spec-coverage --base,
+   check-verdict-oracle-bump.mjs --base, check-committed-issue-integrity.mjs HEAD
+   and check-merged-issue-integrity.mjs upstream/main HEAD. These checks inspect
+   committed diffs; running them before the owned files are committed would
+   not validate this component. Do not present an empty precommit diff as proof.
+   Any failure stops publication for root review, without bypass or unrelated
+   issue/source edits. Ordinary commit/push hooks still execute normally.
+
+Actual main ruleset 16700772 requires strict current-base checks: cheap gate
+(main-ancestor + lint), merge shard reports, quality, equivalence-gate,
+check for test262 regressions and cla-check. Its merge queue is enforced.
+The legacy branch-protection endpoint returned 404; this does not erase the
+actual ruleset requirements independently read from rules/branches/main.
+This scripts change triggers normal code/test/build CI classification, not
+docs-only or benchmark-only skips. A future observer PR is ready only after
+its actual current tip is mergeable and every required check is satisfied;
+unchecked CLA stays unchecked until the authorized human agrees to it.
+
+The correct-template draft body is retained locally at
+.tmp/2929-n1/observer-pr-body.md. Before actual publication, replace its explicit
+pre-integration validation qualifier with the actual integrated-tip receipts;
+never promote pending gates to PASS. The publication diff remains exactly four
+owned files and stays separate from unready semantic PR 6435. No new runtime,
+semantic trace, executable gate, Git mutation or external write was performed
+during this read-only/source-only refresh. DataView retains the heavy lease.
+
+### 2026-10-05 — source-only negative-match default binding (v2, not yet run)
+
+Root fully read the actual worker diff, publication appendix and draft body,
+and authorized only a genuine narrow structure change, not an oracle bump or
+exemption. Full caller inspection found six reader calls total: one unchanged
+negative matcher and five explicit contexts (instantiate, deferred-module-init,
+async-drain, exported-test, outer-wasm). There is no seventh omitted caller.
+
+The worker now supplies the optional negative-match observation as the third
+parameter's default expression. originalHarnessExceptionMatches is restored
+BYTE-EXACT to the original HEAD function, including its original two-argument
+return. A source-only comparison of the complete original/current matcher
+confirmed byte equality (6da463). The other five caller expressions and reader
+body are unchanged from the reviewed v1. No extraction, renderer, provider,
+payload read, verdict token or policy change was introduced.
+
+When enabled, explicit contexts return their existing callback so the default
+is not evaluated; omitted third selects negative-match before the first reader
+body event. Its ordinal/context placement is unchanged. When disabled, all
+explicit expressions and the default resolve to undefined from the own null
+accumulator. The default may perform that own null lookup again, never an
+exception/export/provider read. The reader's JavaScript function length becomes
+two; this private function is neither exported nor passed as a callable, and
+the complete worker/test references contain no function-length consumer.
+
+The isolated VM honestly requires the worker accumulator's lexical binding.
+makeReader now creates the same let binding from a test-only accumulator,
+defaulting to null. Existing fallback-tag/ordinal control now invokes the
+omitted-third reader with an enabled accumulator, then the explicit
+deferred-module-init reader. All original call-count, tag, text, context and
+ordinal assertions remain; the control additionally asserts the byte-exact
+original negative-match return is present. All eleven top-level controls remain
+in place. No assertion, admission rule, body or expected result was weakened.
+
+The complete old worker/control source bytes were reconstructed and retained
+under .tmp/2929-n1/source-v1/*.mjs.txt; their original SHA256 values were
+independently verified as 360cd3b5ef4655bd9b1156faa87e85bcd94cea1c24c97362e1c66ed1a55e51cc
+and 0a1dc9e06bedcb70226829147a38ae9a0653886386d432d4102ed1360a1e3705.
+All previous build/runtime/TAP receipts remain immutable v1 evidence. They
+must not be presented as validation of these new source bytes.
+
+Actual pending v2 freeze: worker SHA256
+be06c73b7ef501985d39313d3c52691d90d5067899225dbc1431e11858e4a233;
+unchanged observation leaf afb1240a903c2fc8109556ba53565416d76783c809fbd6c4798acda518d9be6d;
+control source 1e1df03e66a2224e0da7522e2e89bbc0519e04e9d645f6c02e36019ed3652df3.
+Source-only recipe copies prepare-publication-v2.mjs (129 lines) and
+observe-publication-v2.mts (146 lines) retain the exact accepted normal commands,
+options, admission, provenance checks and stopping rules. Only the reviewed
+future integrated base 27b18d375f0c446fcd5662056a35261db9881f7b, actual new
+worker/control pins, preparation receipt reference and fresh exclusive v2
+output paths changed. Their SHA256 values are respectively
+4bb22879127abbb2e0e8fe67b5eccd1928a0fd4b50c90fe7635029ee1c55ecf1
+and bb3f0d4e53d9cbcc90404b273d35d5a4d6ba1a39988ef27b2fade1977e0fe0e3.
+Own HEAD remains 719dfc865ad051facd01f2ebf41626598db9fabd; the future-base
+assertion intentionally prevents premature execution before authorized
+integration. Any fresh-main movement or formatter change requires actual new
+pins and root review, not key overrides or historical receipt substitution.
+
+Root must fully read the exact v1-to-v2 source/recipe differences before the
+finite controls/gates/build grant. No oracle exemption/bump, source-scope
+expansion, Git mutation, executable test/gate, runtime or trace was performed.
+The previous anticipated verdict-signal line is removed structurally, not
+waived; the real committed-diff verdict gate remains pending. Q0 owns its
+separate finite cheap lease. Publication and semantic PR 6435 remain distinct.
+
+### 2026-10-05 — actual disjoint main integration and maintained format freeze
+
+Root authorized normal private-worktree main integration and scoped maintained
+formatting, but retained the serialized heavy lease with DataView. Actual
+server main reread 0745a1 remained 27b18d375f0c446fcd5662056a35261db9881f7b.
+Normal fetch 541330 succeeded; actual delta inspection ec89c4 confirmed only
+the reviewed nine benchmark paths and zero src/scripts/test/owned-MD changes.
+Normal git merge --ff-only upstream/main then succeeded (b8939b). Own branch
+and all four owned dirty/new files remain preserved. No other worktree, IR,
+semantic source, status, claim, configuration or remote branch was changed.
+
+The initial maintained formatter command encountered filesystem EPERM because
+this managed worktree lives outside the sandbox's primary writable root
+(446842); it did not write either leaf. The identical formatter was run with
+normal filesystem approval, not a configuration/hook bypass, and succeeded
+(a632b2). The maintained .prettierignore explicitly ignores test262-worker.mjs;
+its source stays be06c73b7ef501985d39313d3c52691d90d5067899225dbc1431e11858e4a233.
+The two new private leaves were formatted normally. Changes are whitespace,
+line wrapping and equivalent identifier-key quoting only, with all controls,
+literal sources, admission keys, bounds and observation logic retained.
+Their actual hashes are f4e842b98f6f4a37ac57aa12702a93769c3978f97efa89ae9c6c978274f48461
+and 6aed93f55345804a19fe23569418d53bca64994ef569cfcf8e325ce4b3d1d235.
+Existing Biome include globs are TS-only; neither normal configuration was
+overridden to manufacture lint coverage. Actual normal lint/gate outcomes
+remain pending and must disclose that maintained coverage accurately.
+
+Read-only freeze 521572 rehashed all 1852 prior preparation inputs on integrated
+HEAD. Only the worker and two owned leaves differ from v1; all other inputs,
+including all 1826 src files and harness texts, retain their old hashes. The
+current input manifest SHA256 is
+c0d6204ae290a7218794b9b7048df92fa5320a26df5eb003afc998c1d08a6a24.
+Preparation/off-on recipe v3 copies change only these two formatter hashes
+and fresh exclusive preparation/observation receipt directory references.
+Actual source-only recipe SHA256 values are
+24059561e31fe191b86d5f9f429177ab67be754adeb8555cf3cd8f09967b4b14
+and d93b6a9aafb2e315b3c6e4be3cc63c6893aa036a2869ebac0c28e57ff9b9271c.
+All old receipts/recipes remain preserved. No asserted cache identity or stale
+provider metadata is substituted for actual normal builder selection.
+
+No builtin control, native preparation, matched runtime pair, gate, hook,
+staging, commit, push or PR was run under this source-only permission. DataView
+must explicitly yield its heavy lease before the root-authorized finite
+validation/publication sequence starts. Final-source v3 validation is pending;
+earlier v1 controls/pairs remain historical evidence, not current-source credit.
+
+### 2026-10-05 — actual final-source controls and supplemental matched pairs
+
+DataView explicitly yielded its heavy publication lease after publishing
+separate component PR 6483. Root granted this observer's finite normal
+validation/publication sequence. Fresh server/main audit a29c80/d9ce0c/81921d
+confirmed f41a11059ccc7f646ae907d6b992b7dc50509938 differs from the previously
+integrated base only in six benchmark JSON files. Private normal FF be56c4
+preserved all source and harness pins. Nineteen complete paginated current PR
+file lists (26d951/6a34e5) still have no positive observer-hunk collision;
+6468's sole worker intersection remains the unchanged fixture-graph patch.
+The actual maintained held leaf still identifies this exact owner/branch.
+Actual commit.gpgsign and user.signingkey are unset; author remains Thomas
+Tränkler <git@thomas.traenkler.com>. No signing/config override was introduced.
+
+Important population clarification: these eleven pinned assemblies are
+SUPPLEMENTAL DIAGNOSTIC SOURCES from the existing issue fixture, not physical
+Test262 original files. Prior history's unchanged/original bodies means the
+literal pre-existing fixture bodies were preserved; it must not be read as
+eleven original Test262 conformance cases. No original pass or conformance
+gain, sixty-seven-row rerun or promotion of semantic PR 6435 is claimed.
+
+Canonical Node v24.19.0 / 1024 builtin controls actually completed 2a77d7:
+eleven top-level tests, eleven PASS, zero FAIL/skip/cancel/todo, 100.834875ms.
+All worker/leaf/test and three harness before-after hashes matched (5bc6cb).
+Retained actual TAP .tmp/2929-n1/controls-publication-v4.tap has SHA256
+fd02f8ad015584244a49a0aa0ddda8f6664509823301096b707dea8a8827e795.
+This validates the final default-argument/VM lexical binding and formatting,
+not merely the earlier v1 implementation.
+
+Normal four-command preparation ran once in session 15680 (338280/9f0688),
+2026-10-04 23:32:03.011–23:32:05.771 UTC, all exits zero. Compiler/runtime
+bundles were built normally. The maintained refusal-first/native builder
+measured cache HIT under current actual provenance, then --require-full-cache
+performed real canary verification. Actual compiler key a821fdc2f3d4671f,
+provider key 2dd35d72b70e8940, worker bundle d0d456fe73351a58 and all three
+binary SHA256 values remain unchanged; all 1852 preparation inputs matched
+afterward. No key assertion, stale metadata override, provider tracing or
+manual init/replay was used. V4 recipe copies changed only actual main and
+exclusive output paths; their hashes are cbad0f5549197454de30421ed173d2e69832d19a6934cdb89b36057cdd13218f
+and f2e3a0941959186e3b91e86809bc66d42acd0a9ca0c395d26646eefb1e347eb6.
+
+Ordinary fixed pool1/unified matched supplemental off11 then on11 ran once
+in session 42135 (e277e9/2a977b), interpreter/FULL, canonical Node/3072,
+unchanged literal fixture bodies/options and 30000ms timeout. True terminal
+exit zero: twenty-two complete actual responses; fresh off = 4 PASS / 7 FAIL,
+fresh on = 4 PASS / 7 FAIL; eleven canonical pairs and eleven source/Wasm pairs
+identical; all eleven complete observer fields retained through the ordinary
+parent; diagnostic own key absent on all off rows; all input/binary pins match.
+A separate read-only comparison (e3c55b) rechecked all twenty-two raw response
+rows, all canonical pairs and all twenty-two Wasm artifact hashes.
+
+Each six-C diagnostic was read independently again: deferred-module-init,
+consumer instance, actual Wasm exception, __exn_tag, successful existing getArg,
+non-null object payload, consumer-native STRING undefined and canonical
+consumer-native text; one invocation/nine events each. No peer was visited.
+Provider stage/instruction, payload origin/brand remain UNRESOLVED. Neither
+primitive undefined nor tag-read failure is inferred from that rendered text.
+
+Retained v4 preparation contract/command terminals/prepared artifact receipts
+have SHA256 bfb2abf8ad81efcedb2dc00bbeec4d6e1d41da6e5ec4e49e37968d589cdbd219,
+05bc4b5773e53bec99c9c339d0bbdbcba737146432ae5b7eecb56a742b639b2e and
+a6010f860fd14fc46f7a9fb028cce08b5cca3af56a878549c7973101d375fa94.
+Matched v4 terminal/manifest/off rows/on rows have SHA256
+b47699dfcd1060c9e72f319a4be66001d949120f9822b016ecede96440e5ef2f,
+b980961147a748744adae5569eeecd7d52e349453fb380445d880878d6865d3e,
+6d1ac832649bc81e0e6bba6aad033802f3b9d5214f8c3f26645397032fba36e9 and
+4a3ee46ccdabd7dd9c5b3bdca1f166f879e23c81752a5c0687035cf40c65feef.
+All old evidence remains preserved. The runtime batch has stopped; normal
+publication gates/hooks and committed-diff checks are separate and still
+pending at this dated receipt, without semantic source/scope expansion.
+
+### 2026-10-05 — actual normal local publication gate terminal
+
+The finite serial local gate batch used canonical Node v24.19.0 / 3072,
+original PATH and actual integrated f41a11059ccc7f646ae907d6b992b7dc50509938
+in session 93076 (c614f4/27bd07/20d182). All fourteen commands exited zero,
+2026-10-04 23:35:09.505–23:36:54.280 UTC: scoped maintained Prettier,
+scoped maintained Biome, typecheck, lint, whole-tree format:check,
+LOC/function budgets, import cycles, orphaned scripts, tracked-ignored,
+oracle/coercion ratchets, issues (including IR optimization retirement) and
+conformance-doc synchronization. The final three source pins match unchanged.
+All actual stdout/stderr and per-command terminals are retained under
+.tmp/2929-n1/gates-publication-v4, including its complete terminal.json.
+
+Coverage is explicit: maintained Prettier ignores the worker but checks both
+formatted private leaves; maintained Biome's TS-only include matches zero
+scoped mjs files. Its zero exit is not mjs lint coverage. The separate eleven
+builtin controls and actual matched supplemental runtime responses are the
+executed coverage for this component. No configuration/ignore override was
+used, and all ordinary hooks remain enabled. Full CI quality/runtime jobs
+remain separate from this finite local gate batch, not claimed as already green.
+
+Normal staging/commit, standard commit/push hooks and the real committed-diff
+issue/verdict/integrity checks follow only under the existing publication grant.
+No empty precommit diff is substituted for those checks. Root's original-source
+and semantic restrictions remain: four owned files only; no oracle exemption
+or bump; supplemental diagnostic inputs rather than physical Test262 originals;
+zero original conformance credit; unresolved provider stage/origin; no guard-67
+rerun or semantic PR 6435 promotion. The broader issue stays in-progress.
