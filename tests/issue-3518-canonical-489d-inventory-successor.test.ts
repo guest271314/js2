@@ -1,5 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import {
+  capturePresentationClassificationPredecessorPolicySource,
   captureLoweringAnalysisPredecessorPolicySource,
   captureWasmGcHelperPredecessorPolicySource,
 } from "./helpers/ir-runtime-program-policy-evolution.js";
@@ -361,7 +362,9 @@ const raw = (): string => {
   const text = captureNestedStackificationPredecessorPolicySource(
     captureProgramValidatorPredecessorPolicySource(
       captureWasmGcHelperPredecessorPolicySource(
-        captureLoweringAnalysisPredecessorPolicySource(read("scripts/compiler-boundaries.json")),
+        captureLoweringAnalysisPredecessorPolicySource(
+          capturePresentationClassificationPredecessorPolicySource(read("scripts/compiler-boundaries.json")),
+        ),
       ),
     ),
   );

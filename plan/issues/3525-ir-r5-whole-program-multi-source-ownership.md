@@ -4,7 +4,7 @@ title: "IR-only R5: whole-program single- and multi-source Prepared ownership"
 status: in-progress
 sprint: current
 created: 2026-07-21
-updated: 2026-10-04
+updated: 2026-10-05
 assignee: ttraenkler/codex
 branch: codex/3525-m1a3-same-spelling-callables
 priority: critical
@@ -3222,3 +3222,105 @@ A final independent private-pipeline diagnostic completed six transactions (scal
 
 
 Delivery preparation: signed checkpoint `75308922465e52880270fb1ec7e231aee61342b4` completed normal hooks with all 18 selected suites passing (2,690/2,690). Five committed paths retain their reviewed bytes. The hook uses its existing ignored-unhandled-error flag; independent ordinary 44/44 evidence remains separate. Canonical main `27b18d375f0c446fcd5662056a35261db9881f7b` was read freshly for composition; all 33 incoming paths are preserved exactly. PR publication and protected delivery of this checkpoint remain pending.
+
+
+## Implementation Plan — repair private presentation inventory classification before allocation composition
+
+Architect: Codex GPT-6 Astra High, 2026-10-05. This is the bounded repair for the actual PR6481 quality job111554847774 failure, not an IR retirement or source-algorithm change. The raw job log reports only `unclassified-module` and `unclassified-target` for `src/compiler/ir-program-presentation.ts` at lines476–479. The actual command is unchanged `node --max-old-space-size=2048 scripts/check-compiler-boundaries.mjs --mode inventory --base HEAD^1`. Root handles the normal merge of canonical f41a11059ccc7f646ae907d6b992b7dc50509938; its reported six benchmark-mirror paths remain intact. The failed job stays recorded and does not become a pass until the repaired exact head is verified.
+
+### Truthful minimal policy delta
+
+The leaf imports the genuine frontend wrapper `src/ts-api.ts`, the compiler driver, compiler/index types and physical emitted-program support. It combines AST declaration capture with prepared-program output association. It is not a compatibility facade, pure IR analysis, or nonmodule. The current schema allows only states `unmigrated`, `clean`, `compatibility-adapter`; there is no `frontend-boundary` state. The compiler layer is planned, with root `src/compiler` and entry `src/compiler/ir-program-driver.ts`. The frontend-ts layer is active and would incorrectly enforce this leaf's complete closure as clean. Therefore append precisely this row, using the existing migration-debt mechanism:
+
+```json
+{
+  "path": "src/compiler/ir-program-presentation.ts",
+  "state": "unmigrated",
+  "layer": "mixed-needs-split",
+  "destination": "compiler",
+  "owner": "3525-prepared-presentation",
+  "nextBoundary": "Separate AST declaration capture and finalizer presentation from prepared-program output association before compiler-layer activation."
+}
+```
+
+Append at `files[1824]`, after the existing clean backend-legality row; 1824→1825 file rows. Preserve the complete old file prefix, all 104 activation records, 12 moves, every layer/root/entry/minimum, allowedEdges, frontendWrapper=`src/ts-api.ts`, nonModules, resolver options, evidence and external package/asset policy. No activation, move, root addition, compiler clean certification, or new edge permission is justified. The row's owner is this finite issue's presentation boundary, not an assertion of broader source custody.
+
+The unchanged scanner validates the row's destination/owner/nextBoundary (`buildPolicyIndex`, lines145–153), resolves and classifies actual imports, retains every forbidden edge, and still forbids clean/active origins from reaching debt (`enforced`/`forbidden`, lines487–492). Its frontend-wrapper restriction at559 is unchanged. Existing mixed compiler neighbors are similarly recorded debt. This fixes complete inventory, not architecture completeness: new retained debt/forbidden paths are reported and inspected, not silently called IR-clean. Any unexpected enforced clean-origin violation is a genuine blocker; do not add permissions to hide it.
+
+### Authenticated predecessor and finite reciprocal receipt
+
+Preparation input is immutable5a633bf93ec0e7b9d2992334d00f1279c7bd2c25: policy583986/SHA0cbff25993c92150c6c7cd45934b25552b315266833adc84301f49287d3982ee; policy helper356816/SHAf195d0c432429bfb43c3f8a65617c886ef176e24fa81c2c6539845575fc01a54; D1 lowering-analysis receipt13393/SHA72db51a0e892a4fa8a2d9762042eacc8d88609ccd0ae1ac80f9f548852e04f9b; current C1 manifest349785/SHA464789d00ab368042da0ed874b9e44d5311ef5dc054002d1ec02ac888397abcb. Root must confirm these exact relevant streams after the normal main merge before releasing final receipt values. The preparation commit is not relabelled delivered main.
+
+Root owns new `tests/helpers/ir-runtime-program-policy-presentation-classification.json`. Freeze exact schema/kind, explicit preparation provenance, complete helper prefix pin, D1 predecessor receipt path/fullpin, top-level key order, complete before/current source SHA/byte/blob pins and ordered semantic profiles (including files, layers, allowedEdges, activationHistory and moves count/digest), final-row index/literal/previous neighbor and one complete raw UTF8 edit. Whole before/current profile equality to D1 receipt.current is mandatory. This is a fixed row-classification proof, not a generic policy upgrade facility.
+
+The architect's unformatted provisional row-only projection is 584358 bytes/SHAb1693461855cc60546bb29bee370c02ad3cf21e17e539d521c8f2b6598b0e411; one tail-region span begins at UTF8 byte583862, replacing 118 bytes with 490. This is a static recipe proposal only. Root runs the actual pinned formatter with the real repository stdin filepath and `--ignore-path /dev/null`, saves its output/terminal, then derives and independently verifies the final full inverse/replay from those exact formatted bytes. If formatting adds unrelated changes, isolate/justify them before release; do not widen the recipe silently. No before data or historical source hash is repinned.
+
+Do NOT pin the numeric leaf's entire27514/9587 body in this classification receipt. The already-reviewed Boolean leaf29833/9eba legitimately changes its algorithm while its classification remains the same migration debt. This receipt asserts only an exact policy row and preserves the immutable policy predecessor; actual inventory discovers the live module/import graph. A source-body pin here would assert an unrelated immutable implementation contract and create a false Boolean failure. Normal source review, compiler tests and actual native inventory retain responsibility for implementation/edges. Do not add a separate executable proof helper or a new C1 source domain merely to classify this row.
+
+### New outer APIs and helper ownership
+
+One writer owns only an append to `tests/helpers/ir-runtime-program-policy-evolution.ts` and new `tests/issue-3525-presentation-classification-policy.test.ts`. Preserve the entire356816-byte predecessor helper exactly. Add the explicitly named APIs:
+
+- `capturePresentationClassificationPredecessorPolicy(value: unknown): MutableIrRuntimeProgramPolicy`;
+- `capturePresentationClassificationPredecessorPolicySource(raw: string): string`.
+
+These return the authentic D1 current policy, suitable as the unchanged input to the existing lowering-analysis inverse. Reuse established pure capture/freeze/digest support without editing any old API. Descriptor/own-data validation for semantic input and primitive-string refusal for raw input happen before any I/O/coercion. Each healthy invocation freshly reads the exact fixed new receipt, actual complete predecessor helper prefix, and old D1 receipt, then executes the unchanged fresh C1 authority authentication. The authenticated current C1 instrument must include the new full policy-helper bytes, so the new suffix itself is covered before an accepted result; it is not self-approved by a module cache. Preserve the concrete read order and prove it in new controls. No global cache, captured approval, fallback, recursive historical chain, or hash-selected epoch is allowed.
+
+Require exact fixed receipt object/schema/fullpin, complete old receipt.current equality, full current raw/semantic profiles, one unique added row at1824 with exact key order and predecessor neighbor, and unchanged every other ordered field. Semantic inverse removes only that row; replay inserts it back at that position. Raw inverse/replay uses validated safe-integer/nonoverlap/range UTF8 byte coordinates and exact span text, including surrounding separator. Authenticate the complete output raw pin and cross-check semantic/raw inverses. Wrong path/state/layer/destination/owner/nextBoundary, reorder/duplicate/missing rows, altered history/moves/roots/edges, and semantic-equivalent whitespace must refuse. Count/hash moves using the actual fixed12 profile; do not import stale7 literals or change historical7 checks.
+
+The new suite must use root-supplied literal profiles and one independently computed row-only inverse/replay, not expected outputs obtained from the helper under test. Require both genuine positives and their authentic full predecessor source/data pins; paired primitive/accessor/symbol/hidden-field priorities against missing new receipt; genuine before-domain refusal; valid-JSON full row-content/order/neighbor/history/edge faults; raw same-length/span/whitespace faults; and fresh physical missing/corrupt receipt, predecessor receipt and helper-file tests, healthy before/after with byte/mode/inode/device restoration, persistent backup/lock and unswallowed operation/restoration errors. Reuse the reviewed restoration pattern. A mutated helper may fail the earlier complete-prefix or C1 fullpin guard; assert the genuine first guard rather than pretending to reach a later one. Collect the actual new denominator before bodies; no number is claimed by this plan.
+
+### Exact caller adaptations and priority preservation
+
+The second writer owns exactly the following existing14 files, independently from the helper/test writer. The first13 contain19 D1 initial operands:15 raw and4 semantic. Add only the required import and new outer projection immediately before the unchanged `captureLoweringAnalysisPredecessorPolicy[Source]` initial operand. The final file needs the special application preparation described below.
+
+```
+tests/issue-3518-canonical-3c6-inventory-successor.test.ts
+tests/issue-3518-canonical-489d-inventory-successor.test.ts
+tests/issue-3518-current-main-inventory-successor.test.ts
+tests/issue-3518-nested-stackification-policy-evolution.test.ts
+tests/issue-3518-number-prerequisite-policy-evolution.test.ts
+tests/issue-3518-program-data-contract-boundary.test.ts
+tests/issue-3518-program-validator-policy-evolution.test.ts
+tests/issue-3518-runtime-data-contract-seam.test.ts
+tests/issue-3518-runtime-program-policy-evolution.test.ts
+tests/issue-3518-semantic-provider-boundary.test.ts
+tests/issue-3518-validation-policy-evolution.test.ts
+tests/issue-3518-wasmgc-helper-policy-evolution.test.ts
+tests/issue-3518-well-known-symbol-policy-evolution.test.ts
+tests/issue-3518-lowering-analysis-preservation.test.ts
+```
+
+In the D1 preservation suite, keep its47 registrations/full direct API/error/primitive/descriptor controls. Its `applicationInput` at692 freshly reads the new policy, proves the outer projection BEFORE any fault, then checks the unchanged authentic D1 current pin. Leave `normalApplication` old raw/semantic calls727–728 and direct hostile-input calls848/870 unchanged. Preload child807 receives the per-action proved operand as literal data prepared before fault; it still imports and invokes the original normal application under the actual changed/missing implementation condition. Never call the new outer capture inside that corrupted-helper child: doing so would intercept the old guard and destroy its proof. Preserve healthy-before/after, missing-helper witness, actual zero getter/coercion and both child channels. No canned policy bytes or helper-body precheck replaces the actual application.
+
+The six delivered hostile-factory preparations in the old wasmgc suite stay exact. All original names/order, assertion operands, full APIs, mutants and fault bodies remain unchanged except explicitly reviewed initial setup/preload data preparation. Produce complete14-file byte inverses/replays and AST registration/assertion comparisons against the authentic selected predecessor. The currently frozen allocation14-reader packet1c78f2c remains a separate original5a preparation: use its reviewed mechanical shape if helpful, not its outer API or policy epoch. Do not overwrite that work or claim its static checks validate this new classification packet.
+
+### Root C1 assembly, Boolean dependency and allocation sequencing
+
+Root alone owns policy/new receipt, current-source binding test, manifest and anchor, issue/handoff and integration. For the numeric PR repair, keep the numeric real type closure/H1/H2 exactly current; do not inadvertently include pending Boolean APIs or C1 overrides. Exactly five of the12 current instrument paths change from caller/helper edits: policy helper, program-data-contract-boundary, runtime-program-policy, well-known-symbol and Number. Their five complete original-to-current recipes must be rebuilt from authentic historical originals; the other five recipe objects and seven instrument pins remain exact. Independently reconstruct/replay/invert ALL10 full recipes against current frozen files, preserving every old before pin, 11 immutable authorities, seven artifacts, resolver/config/bases/declaration meanings and read domains. Bind the final manifest SHA, anchor and unique external current-source scalar last. Preserve all current292 numeric C1 registrations; do not replace them with stale278 content or opportunistically copy Boolean306 content.
+
+The pending signed Boolean71ecd796772814f6bb37c4b5fda214d109852ce3 remains preserved. After this corrected numeric dependency is selected, root composes its already-reviewed types/H1/H2/14 new current-source controls onto the corrected manifest rather than copying the stale Boolean full C1 trio over the repair. Boolean changes the actual types closure/H1/H2 pins; it does not undo the new five policy/caller pins or historical recipes. Run appropriate final Boolean C1 evidence on the resulting exact epoch; previous1297 is correctly attributed to the older Boolean manifest44a7 and is not final composed acceptance.
+
+Allocation classification comes after this repaired presentation row. If no intervening metadata changes occur, its root remains index13, but its added row shifts1824→1825 (total1826); predecessor neighbor becomes the new presentation debt row and its helper prefix/predecessor receipt become this exact new classification epoch. Its prepared599118e3 receipt and allocation helper/14-reader drafts remain private prior-epoch artifacts. Rebuild their fixed successor from the root-authenticated final predecessor, not by changing a broad accepted digest set. This fixes the dependency ordering before expensive final C1 work, without losing source3/typed controls or partial benchmark evidence. No allocation performance retry is included.
+
+### Required acceptance and release limits
+
+Freeze the complete correction vector first. Before normal hooks, execute actual inventory with the same immutable-first-parent semantics as CI, save full nonempty modules/edges/debt and require both original unclassified diagnostics absent while retaining all debt/forbidden evidence. Require no new unknown/unresolved or enforced clean-origin violations; explain actual changes from resolved formerly-unclassified edges, never accept a tally alone. Run unchanged layering/cycle/native type/lint/format/LOC/function checks appropriate to metadata and helper changes. No scanner flag, baseline ceiling, ignore entry, timeout, clean-edge rule or workflow is weakened.
+
+Run the new fixed policy suite and the entire affected old caller population with collection/runtime name reconciliation, error/RPC audit and full input custody in isolated physical copies or exclusive sequence. Existing predecessor evidence is2254 old13 callers plus47 D1 preservation and292 numeric current-source controls; verify those names/counts against the selected current sources before claiming actual new totals. The new suite's actual count is separate. Complete old immutable/inverse contracts must remain admitted, not merely the new positive row. Root may partition file-disjoint physical checkouts to avoid serial waits, but must preserve complete pins and exact final epoch attribution. The old numeric44 remains finite source acceptance; policy repair adds no compiler semantics or runtime performance claim. Finish ordinary normal hooks, exact-head quality/required checks and protected delivery on existing PR6481; no duplicate PR or legacy retirement.
+
+
+## PR6481 inventory repair integration checkpoint (2026-10-05)
+
+The original quality job111554847774 failed unchanged compiler inventory on the new presentation leaf. The failure is preserved. Root merged canonical f41a11059ccc7f646ae907d6b992b7dc50509938 without conflicts; its six benchmark/mirror changes remain staged. This scoped correction records the leaf as unmigrated mixed compiler debt, not clean IR, and does not change the reviewed compiler/presentation algorithm or public legacy entry points.
+
+The actual pinned formatter accepted the exact one-row policy584358/b169346 and fixed receipt4227/dd0273b. Native inventory exited0 on the CI command:1825 modules,12 leaf incident edges,13 retained unenforced leaf forbidden reasons,13388 retained forbidden rows,4 predecessor-identical dynamic unknowns,0 unresolved or enforced transitive violations. Inventory is valid; architecture and graph completeness remain false. Native source typecheck, IR layering, import cycles, LOC/function budgets and oracle ratchet each exited0.
+
+Sol6.1Medium supplied an append preserving the complete356816/f195 predecessor helper (freeze49101c), a new classification suite (45 static controls, actual collection/runtime still pending here), and14 reader adaptations (freeze8d949). The complete14-file inverses/replays and original registration/assertion ASTs are preserved, including the original47 physical-fault controls. AstraHigh independently reviewed the minimal debt row, fixed receipt,14 readers and actual inventory. Root's bounded assembly defects were corrected before execution; the unsuccessful scaffolds and reviews remain recorded.
+
+The exact final numeric C1 manifest is364386/a42e073b066a92eb867e7794b2dca8101b8c70d0c766a27fce206e3ddedf667b. All10 complete original-to-current recipes reconstruct and replay; exactly five current policy/caller recipes and five instrument pins change. Seven other instrument pins, five other recipes,11 immutable authorities, seven artifacts and resolver/bases/declaration meanings stay exact. The actual unique TypeScript external scalar is decoded and bound to the manifest and anchor; the rest of its292-case suite is byte-exact. All three candidate files passed the real formatter before installation, and captured bytes/identity/modes were rechecked. Runtime and normal hook results must be read from the actual exact-epoch receipts, not inferred from this static checkpoint.
+
+Existing PR6481 is the delivery target; no duplicate PR or retirement is authorized by this repair. Signed Boolean71ecd796772814f6bb37c4b5fda214d109852ce3 and all original6837 source/proof/reader preparations are preserved. Their old runtime/benchmark receipts are not acceptance for this composed epoch. Boolean must retain the five new policy/caller C1 pins when composed; allocation follows the new classification row. Neither pending work nor queue submission counts as a verified main merge.
+
+
+The additional strict14-test typing profile exited1 with41 existing-body diagnostics. Authentic git archive5a under the identical profile reproduces every message/code/column/order, with only the reviewed inserted source-line mapping; both failures and complete attribution3a02d8 are preserved. Native production typecheck and new helper/test focused typing exit0. No casts, exclusions or old-body repairs were added. Astra final static review80a8fb4f independently authenticates the entire helper prefix, all10 historical Git originals, exact5 C1 changes and unique external binding; it approves ordinary runtime, not publication or retirement. Separate ordinary14-reader2301 and new45-control executors were launched once in regular private worktrees on exact a42e073b. Results remain pending in this pre-hook record.

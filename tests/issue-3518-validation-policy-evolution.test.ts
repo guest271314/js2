@@ -1,5 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import {
+  capturePresentationClassificationPredecessorPolicy,
   captureLoweringAnalysisPredecessorPolicy,
   captureWasmGcHelperPredecessorPolicy,
 } from "./helpers/ir-runtime-program-policy-evolution.js";
@@ -61,7 +62,9 @@ function actual(): MutablePolicy {
                         captureProgramValidatorPredecessorPolicy(
                           captureWasmGcHelperPredecessorPolicy(
                             captureLoweringAnalysisPredecessorPolicy(
-                              JSON.parse(read("scripts/compiler-boundaries.json")),
+                              capturePresentationClassificationPredecessorPolicy(
+                                JSON.parse(read("scripts/compiler-boundaries.json")),
+                              ),
                             ),
                           ),
                         ),

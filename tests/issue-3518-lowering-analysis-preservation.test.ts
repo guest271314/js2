@@ -22,6 +22,7 @@ import { describe, expect, it } from "vitest";
 import { createRequire } from "node:module";
 import { captureC1CurrentPopulation } from "./helpers/ir-c1-current-source.js";
 import {
+  capturePresentationClassificationPredecessorPolicySource,
   captureLoweringAnalysisPredecessorPolicy,
   captureLoweringAnalysisPredecessorPolicySource,
 } from "./helpers/ir-runtime-program-policy-evolution.js";
@@ -691,7 +692,11 @@ const policyBeforePin = {
 const policyBeforeDataSha256 = "f7ed5862d447d03557ed0e2a61060d143fcc9f2036e02120ac56839829082a83";
 function applicationInput(entry: ApplicationEntry): string | undefined {
   if (entry === "h2") return undefined;
-  const bytes = readFileSync(join(root, "scripts/compiler-boundaries.json"));
+  const bytes = Buffer.from(
+    capturePresentationClassificationPredecessorPolicySource(
+      readFileSync(join(root, "scripts/compiler-boundaries.json"), "utf8"),
+    ),
+  );
   pin(bytes, policyCurrentPin);
   return bytes.toString("utf8");
 }
@@ -804,7 +809,7 @@ describe("D1 real guarded application implementation authority", () => {
             ? `out=hashes(Buffer.from(m.captureLoweringAnalysisPredecessorPolicySource(raw)));`
             : `const b=m.captureLoweringAnalysisPredecessorPolicy(JSON.parse(raw));out={dataSha256:sha(Buffer.from(JSON.stringify(b))),files:b.files.length,activationHistory:b.activationHistory.length,moves:b.moves.length};`;
       // No helper-body precheck or local wrapper: import and invoke the NORMAL application module.
-      const script = `import{createHash}from'node:crypto';import{readFileSync}from'node:fs';const sha=b=>createHash('sha256').update(b).digest('hex');const hashes=b=>({bytes:b.length,sha256:sha(b),gitBlob:createHash('sha1').update(Buffer.from('blob '+b.length+'\\0')).update(b).digest('hex')});try{const m=await import(${JSON.stringify(moduleUrl)});const raw=${entry === "h2" ? "undefined" : `readFileSync(new URL(${JSON.stringify(new URL("../scripts/compiler-boundaries.json", import.meta.url).href)}),'utf8')`};let out;${body}console.log(JSON.stringify(out));}catch(error){console.error(error instanceof Error?error.message:String(error));process.exitCode=1;}`;
+      const script = `import{createHash}from'node:crypto';import{readFileSync}from'node:fs';const sha=b=>createHash('sha256').update(b).digest('hex');const hashes=b=>({bytes:b.length,sha256:sha(b),gitBlob:createHash('sha1').update(Buffer.from('blob '+b.length+'\\0')).update(b).digest('hex')});try{const m=await import(${JSON.stringify(moduleUrl)});const raw=${JSON.stringify(input)};let out;${body}console.log(JSON.stringify(out));}catch(error){console.error(error instanceof Error?error.message:String(error));process.exitCode=1;}`;
       const invoke = () =>
         spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script], {
           cwd: root,

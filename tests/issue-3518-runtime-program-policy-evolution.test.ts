@@ -1,6 +1,8 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import {
   captureLoweringAnalysisPredecessorPolicySource,
+  capturePresentationClassificationPredecessorPolicy,
+  capturePresentationClassificationPredecessorPolicySource,
   captureLoweringAnalysisPredecessorPolicy,
   captureWasmGcHelperPredecessorPolicy,
   captureWasmGcHelperPredecessorPolicySource,
@@ -83,7 +85,9 @@ function actual(): Policy {
                       captureProgramValidatorPredecessorPolicy(
                         captureWasmGcHelperPredecessorPolicy(
                           captureLoweringAnalysisPredecessorPolicy(
-                            JSON.parse(read("scripts/compiler-boundaries.json")),
+                            capturePresentationClassificationPredecessorPolicy(
+                              JSON.parse(read("scripts/compiler-boundaries.json")),
+                            ),
                           ),
                         ),
                       ),
@@ -156,7 +160,11 @@ describe("C1 exact policy inverse and reciprocal B proof", () => {
                         captureNestedStackificationPredecessorPolicySource(
                           captureProgramValidatorPredecessorPolicySource(
                             captureWasmGcHelperPredecessorPolicySource(
-                              captureLoweringAnalysisPredecessorPolicySource(read("scripts/compiler-boundaries.json")),
+                              captureLoweringAnalysisPredecessorPolicySource(
+                                capturePresentationClassificationPredecessorPolicySource(
+                                  read("scripts/compiler-boundaries.json"),
+                                ),
+                              ),
                             ),
                           ),
                         ),

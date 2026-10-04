@@ -7772,3 +7772,275 @@ export function captureLoweringAnalysisPredecessorPolicySource(raw: string): str
     loweringAnalysisFail("raw/semantic reciprocal proof disagree");
   return before;
 }
+
+// Fixed outer policy step for the private prepared-presentation classification.
+const presentationClassificationExpected = {
+  schema: 1,
+  kind: "fixed-prepared-presentation-classification-policy-evolution",
+  provenance: {
+    preparationCommit: "5a633bf93ec0e7b9d2992334d00f1279c7bd2c25",
+    planSha256: "1d332bd357bb3867a187f8841308f82e3f0518e400eb684c2b7f71b5567d89b1",
+    legacyRetained: true,
+  },
+  helperPrefix: {
+    path: "tests/helpers/ir-runtime-program-policy-evolution.ts",
+    bytes: 356816,
+    sha256: "f195d0c432429bfb43c3f8a65617c886ef176e24fa81c2c6539845575fc01a54",
+    gitBlob: "ea6cef6bbd168ab0f68f412ae3bc270184fd8e9c",
+  },
+  predecessorReceipt: {
+    path: "tests/helpers/ir-runtime-program-policy-lowering-analysis.json",
+    bytes: 13393,
+    sha256: "72db51a0e892a4fa8a2d9762042eacc8d88609ccd0ae1ac80f9f548852e04f9b",
+    gitBlob: "3c7ce06a7075d66f786e01b79d44527e86ae0f3f",
+  },
+  topLevelKeys: [
+    "schema",
+    "description",
+    "sourceRoot",
+    "tsconfig",
+    "requireGitProvenance",
+    "externalAssets",
+    "frontendWrapper",
+    "moduleExtensions",
+    "layers",
+    "allowedEdges",
+    "externalPackages",
+    "activationHistory",
+    "nonModules",
+    "moves",
+    "evidence",
+    "files",
+  ],
+  before: {
+    source: {
+      bytes: 583986,
+      sha256: "0cbff25993c92150c6c7cd45934b25552b315266833adc84301f49287d3982ee",
+      gitBlob: "37d83315305278b25047fa4ed6b38af24b3cf9ce",
+    },
+    dataSha256: "2d3c02197bd25875755aa64a0d7f9f8cdaba6f08f2394448e2e70870e327e738",
+    fileCount: 1824,
+    filesSha256: "04e5d8f08098f2f3f0d30813353c3521762c2f2f266b777083796549c3654156",
+    activationCount: 104,
+    activationHistorySha256: "27cbdad6be8299ff447e8407b2d04adbb44a28e11999c3dd56d75948f47b44ab",
+    layersSha256: "45c79ff9c27d08c74dfab859be8cec1ef6a85acbc1cae121e096c0ca35026eeb",
+    allowedEdgesSha256: "efe7e7ed8dee1a009d2bef3ff36dba80df1a805cd3f5b7b472e62ec6dcff64c7",
+    moveCount: 12,
+    movesSha256: "050fb62b7369179b0b3bd81193ec9bc275a77db1ebb45ac5fdef1a136ab037f2",
+  },
+  current: {
+    source: {
+      bytes: 584358,
+      sha256: "b1693461855cc60546bb29bee370c02ad3cf21e17e539d521c8f2b6598b0e411",
+      gitBlob: "b77bcc4a76f1a959bc77db8c37cf8ef48ad2da0f",
+    },
+    dataSha256: "475ebcec73e71dddd9b3cca9ec1e8c36c9e345436b3e2a7173e13da29c09427a",
+    fileCount: 1825,
+    filesSha256: "2155c33a508f2f0177541878b0b50e4b11b5f7ccba4aceb762e90877023203a0",
+    activationCount: 104,
+    activationHistorySha256: "27cbdad6be8299ff447e8407b2d04adbb44a28e11999c3dd56d75948f47b44ab",
+    layersSha256: "45c79ff9c27d08c74dfab859be8cec1ef6a85acbc1cae121e096c0ca35026eeb",
+    allowedEdgesSha256: "efe7e7ed8dee1a009d2bef3ff36dba80df1a805cd3f5b7b472e62ec6dcff64c7",
+    moveCount: 12,
+    movesSha256: "050fb62b7369179b0b3bd81193ec9bc275a77db1ebb45ac5fdef1a136ab037f2",
+  },
+  delta: {
+    addedRowIndex: 1824,
+    addedRow: {
+      path: "src/compiler/ir-program-presentation.ts",
+      state: "unmigrated",
+      layer: "mixed-needs-split",
+      destination: "compiler",
+      owner: "3525-prepared-presentation",
+      nextBoundary:
+        "Separate AST declaration capture and finalizer presentation from prepared-program output association before compiler-layer activation.",
+    },
+    previousRow: {
+      path: "src/ir/analysis/backend-legality.ts",
+      state: "clean",
+      layer: "ir-analysis",
+    },
+    activationHistoryUnchanged: true,
+    movesUnchanged: true,
+  },
+  rawSpans: [
+    {
+      beforeOffset: 583862,
+      afterOffset: 583862,
+      before:
+        '    {\n      "path": "src/ir/analysis/backend-legality.ts",\n      "state": "clean",\n      "layer": "ir-analysis"\n    }\n',
+      after:
+        '    {\n      "path": "src/ir/analysis/backend-legality.ts",\n      "state": "clean",\n      "layer": "ir-analysis"\n    },\n    {\n      "path": "src/compiler/ir-program-presentation.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "compiler",\n      "owner": "3525-prepared-presentation",\n      "nextBoundary": "Separate AST declaration capture and finalizer presentation from prepared-program output association before compiler-layer activation."\n    }\n',
+    },
+  ],
+} as const;
+const presentationClassificationReceiptPin = {
+  bytes: 4227,
+  sha256: "dd0273b99eb2f96ed66e033bec6a4365b65137359d3a9b7fc2e3b0e7b4b80dee",
+  gitBlob: "c65ce4a7a6c60f6c28ac01977fca8f6262e9584b",
+} as const;
+type PresentationClassificationReceipt = typeof presentationClassificationExpected;
+const presentationClassificationReceiptPath =
+  "tests/helpers/ir-runtime-program-policy-presentation-classification.json";
+function presentationClassificationFail(detail: string): never {
+  throw new Error("presentation classification policy evolution: " + detail);
+}
+function presentationClassificationPin(
+  bytes: Buffer,
+  expected: { readonly bytes: number; readonly sha256: string; readonly gitBlob: string },
+  detail: string,
+): void {
+  if (
+    bytes.length !== expected.bytes ||
+    createHash("sha256").update(bytes).digest("hex") !== expected.sha256 ||
+    createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex") !== expected.gitBlob
+  )
+    presentationClassificationFail(detail);
+}
+function authenticatePresentationClassification(): PresentationClassificationReceipt {
+  const bytes = readFileSync(new URL(`../../${presentationClassificationReceiptPath}`, import.meta.url));
+  presentationClassificationPin(bytes, presentationClassificationReceiptPin, "receipt digest mismatch");
+  const receipt = JSON.parse(bytes.toString("utf8")) as PresentationClassificationReceipt;
+  if (!same(receipt, presentationClassificationExpected))
+    presentationClassificationFail("fixed receipt schema mismatch");
+  presentationClassificationPin(
+    readFileSync(new URL("./ir-runtime-program-policy-evolution.ts", import.meta.url)).subarray(0, 356816),
+    receipt.helperPrefix,
+    "complete predecessor helper prefix changed",
+  );
+  const predecessorBytes = readFileSync(new URL(`../../${receipt.predecessorReceipt.path}`, import.meta.url));
+  presentationClassificationPin(predecessorBytes, receipt.predecessorReceipt, "predecessor receipt changed");
+  const predecessor = JSON.parse(predecessorBytes.toString("utf8")) as LoweringAnalysisReceipt;
+  if (!same(predecessor.current, receipt.before)) presentationClassificationFail("predecessor profile mismatch");
+  captureC1HistoricalAuthority();
+  let beforeEnd = 0,
+    afterEnd = 0,
+    delta = 0;
+  for (const span of receipt.rawSpans) {
+    if (
+      ![span.beforeOffset, span.afterOffset].every(Number.isSafeInteger) ||
+      span.beforeOffset < beforeEnd ||
+      span.afterOffset < afterEnd ||
+      span.afterOffset !== span.beforeOffset + delta
+    )
+      presentationClassificationFail("raw span order/coordinate mismatch");
+    beforeEnd = span.beforeOffset + Buffer.byteLength(span.before);
+    afterEnd = span.afterOffset + Buffer.byteLength(span.after);
+    delta += Buffer.byteLength(span.after) - Buffer.byteLength(span.before);
+    if (beforeEnd > receipt.before.source.bytes || afterEnd > receipt.current.source.bytes)
+      presentationClassificationFail("raw span range mismatch");
+  }
+  if (receipt.rawSpans.length !== 1 || receipt.before.source.bytes + delta !== receipt.current.source.bytes)
+    presentationClassificationFail("raw span population mismatch");
+  return freeze(receipt);
+}
+function presentationClassificationProfile(
+  policy: MutableIrRuntimeProgramPolicy,
+  expected: PresentationClassificationReceipt["before"] | PresentationClassificationReceipt["current"],
+): void {
+  if (
+    digest(policy) !== expected.dataSha256 ||
+    policy.files.length !== expected.fileCount ||
+    digest(policy.files) !== expected.filesSha256 ||
+    policy.activationHistory.length !== expected.activationCount ||
+    digest(policy.activationHistory) !== expected.activationHistorySha256 ||
+    digest(policy.layers) !== expected.layersSha256 ||
+    digest(policy.allowedEdges) !== expected.allowedEdgesSha256 ||
+    !Array.isArray(policy.moves) ||
+    policy.moves.length !== expected.moveCount ||
+    digest(policy.moves) !== expected.movesSha256
+  )
+    presentationClassificationFail("complete policy profile mismatch");
+}
+function presentationClassificationRows(
+  policy: MutableIrRuntimeProgramPolicy,
+  receipt: PresentationClassificationReceipt,
+  current: boolean,
+): void {
+  const d = receipt.delta;
+  if (
+    !same(Object.keys(policy), receipt.topLevelKeys) ||
+    !same(policy.files[d.addedRowIndex - 1], d.previousRow) ||
+    policy.files.length !== d.addedRowIndex + (current ? 1 : 0) ||
+    policy.files.filter((row) => row.path === d.addedRow.path).length !== (current ? 1 : 0) ||
+    (current &&
+      (!same(policy.files[d.addedRowIndex], d.addedRow) ||
+        !same(Object.keys(policy.files[d.addedRowIndex]!), Object.keys(d.addedRow))))
+  )
+    presentationClassificationFail("fixed row/schema/neighbors mismatch");
+}
+function capturePresentationClassificationOperand(
+  current: MutableIrRuntimeProgramPolicy,
+  receipt: PresentationClassificationReceipt,
+): MutableIrRuntimeProgramPolicy {
+  presentationClassificationProfile(current, receipt.current);
+  presentationClassificationRows(current, receipt, true);
+  const before = capture(current) as MutableIrRuntimeProgramPolicy;
+  before.files.splice(receipt.delta.addedRowIndex, 1);
+  presentationClassificationProfile(before, receipt.before);
+  presentationClassificationRows(before, receipt, false);
+  const replay = capture(before) as MutableIrRuntimeProgramPolicy;
+  replay.files.splice(receipt.delta.addedRowIndex, 0, capture(receipt.delta.addedRow) as Record<string, string>);
+  presentationClassificationProfile(replay, receipt.current);
+  presentationClassificationRows(replay, receipt, true);
+  if (
+    !same(replay, current) ||
+    !same(before.activationHistory, current.activationHistory) ||
+    !same(before.moves, current.moves) ||
+    !same(before.layers, current.layers) ||
+    !same(before.allowedEdges, current.allowedEdges)
+  )
+    presentationClassificationFail("semantic inverse/replay/retained fields mismatch");
+  return before;
+}
+export function capturePresentationClassificationPredecessorPolicy(value: unknown): MutableIrRuntimeProgramPolicy {
+  const current = capture(value) as MutableIrRuntimeProgramPolicy;
+  if (current === null || typeof current !== "object" || Array.isArray(current))
+    presentationClassificationFail("policy input must be a plain object");
+  return capturePresentationClassificationOperand(current, authenticatePresentationClassification());
+}
+function presentationClassificationRaw(
+  raw: string,
+  receipt: PresentationClassificationReceipt,
+  forward: boolean,
+): string {
+  const bytes = Buffer.from(raw, "utf8");
+  presentationClassificationPin(
+    bytes,
+    forward ? receipt.before.source : receipt.current.source,
+    "complete raw source profile mismatch",
+  );
+  const pieces: Buffer[] = [];
+  let consumed = 0;
+  for (const span of receipt.rawSpans) {
+    const at = forward ? span.beforeOffset : span.afterOffset,
+      from = Buffer.from(forward ? span.before : span.after),
+      to = Buffer.from(forward ? span.after : span.before);
+    if (at < consumed || at + from.length > bytes.length || !bytes.subarray(at, at + from.length).equals(from))
+      presentationClassificationFail("fixed raw span mismatch");
+    pieces.push(bytes.subarray(consumed, at), to);
+    consumed = at + from.length;
+  }
+  pieces.push(bytes.subarray(consumed));
+  const result = Buffer.concat(pieces);
+  presentationClassificationPin(
+    result,
+    forward ? receipt.current.source : receipt.before.source,
+    "reciprocal raw source profile mismatch",
+  );
+  return result.toString("utf8");
+}
+export function capturePresentationClassificationPredecessorPolicySource(raw: string): string {
+  if (typeof raw !== "string") presentationClassificationFail("raw input must be a primitive string");
+  const receipt = authenticatePresentationClassification();
+  const before = presentationClassificationRaw(raw, receipt, false);
+  const semantic = capturePresentationClassificationOperand(
+    capture(JSON.parse(raw)) as MutableIrRuntimeProgramPolicy,
+    receipt,
+  );
+  const parsed = JSON.parse(before) as MutableIrRuntimeProgramPolicy;
+  presentationClassificationProfile(parsed, receipt.before);
+  if (!same(parsed, semantic) || presentationClassificationRaw(before, receipt, true) !== raw)
+    presentationClassificationFail("raw/semantic reciprocal proof disagree");
+  return before;
+}

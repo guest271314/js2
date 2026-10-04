@@ -58,3 +58,11 @@ metadata only after the dependency lands and input equivalence is verified.
 Retirement remains a later decision requiring the complete IR path to be tested
 and equal. The dirty primary worktree, old worktrees, unrelated fixes and
 original failures must remain intact.
+
+
+### Existing PR6481 compiler-inventory correction
+
+The exact quality failure is preserved and is corrected by one truthful unmigrated compiler inventory row. Native inventory1825/modules, source types, layering, cycles, budgets and oracle pass on the prepared correction; graph/architecture completeness remains false. Newfixedreceipt dd0273b, helperfreeze49101c,14-readerfreeze8d949 and numericmanifest a42e073b compose byte-exact reciprocal proofs without changing the reviewed compiler algorithm or legacy routes. Strict ordinary isolated tests and normal17-file commit hook are the next concrete gates; no runtime success or merge is claimed in this pre-execution entry. Boolean71ecd and old6837 private drafts remain intact.
+
+
+The additional strict14-test typing profile exited1 with41 existing-body diagnostics. Authentic git archive5a under the identical profile reproduces every message/code/column/order, with only the reviewed inserted source-line mapping; both failures and complete attribution3a02d8 are preserved. Native production typecheck and new helper/test focused typing exit0. No casts, exclusions or old-body repairs were added. Astra final static review80a8fb4f independently authenticates the entire helper prefix, all10 historical Git originals, exact5 C1 changes and unique external binding; it approves ordinary runtime, not publication or retirement. Separate ordinary14-reader2301 and new45-control executors were launched once in regular private worktrees on exact a42e073b. Results remain pending in this pre-hook record.

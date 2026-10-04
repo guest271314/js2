@@ -1,5 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import {
+  capturePresentationClassificationPredecessorPolicySource,
   captureLoweringAnalysisPredecessorPolicySource,
   captureWasmGcHelperPredecessorPolicySource,
 } from "./helpers/ir-runtime-program-policy-evolution.js";
@@ -2660,7 +2661,11 @@ function fixtureCaptureInput(epoch: (typeof fixtureCaptureEpochs)[number]): stri
     captureNestedStackificationPredecessorPolicySource(
       captureProgramValidatorPredecessorPolicySource(
         captureWasmGcHelperPredecessorPolicySource(
-          captureLoweringAnalysisPredecessorPolicySource(fixtureCaptureRead("scripts/compiler-boundaries.json")),
+          captureLoweringAnalysisPredecessorPolicySource(
+            capturePresentationClassificationPredecessorPolicySource(
+              fixtureCaptureRead("scripts/compiler-boundaries.json"),
+            ),
+          ),
         ),
       ),
     ),
@@ -3372,7 +3377,11 @@ function fourStageCaptureInput(epoch: (typeof fourStageCaptureEpochs)[number]): 
         captureNestedStackificationPredecessorPolicySource(
           captureProgramValidatorPredecessorPolicySource(
             captureWasmGcHelperPredecessorPolicySource(
-              captureLoweringAnalysisPredecessorPolicySource(fixtureCaptureRead("scripts/compiler-boundaries.json")),
+              captureLoweringAnalysisPredecessorPolicySource(
+                capturePresentationClassificationPredecessorPolicySource(
+                  fixtureCaptureRead("scripts/compiler-boundaries.json"),
+                ),
+              ),
             ),
           ),
         ),
