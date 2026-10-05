@@ -1,7 +1,7 @@
 {
   "generated": "2026-10-05",
   "threshold": 1500,
-  "totalCeiling": 997755,
+  "totalCeiling": 997810,
   "files": {
     "src/codegen-linear/index.ts": 5791,
     "src/codegen-linear/runtime.ts": 4444,
@@ -31,7 +31,7 @@
     "src/codegen/expressions/assignment.ts": 6641,
     "src/codegen/expressions/builtins.ts": 3884,
     "src/codegen/expressions/call-builtin-static.ts": 4755,
-    "src/codegen/expressions/call-identifier.ts": 4458,
+    "src/codegen/expressions/call-identifier.ts": 4465,
     "src/codegen/expressions/call-namespace-static.ts": 4540,
     "src/codegen/expressions/call-receiver-method.ts": 4921,
     "src/codegen/expressions/call-tail-dispatch.ts": 2350,
@@ -103,6 +103,7 @@
     "src/ir/lower-generic.ts": 4200,
     "src/ir/module-bindings.ts": 2666,
     "src/ir/prepared-component-dependencies.ts": 1778,
+    "src/ir/program-consumer.ts": 1501,
     "src/ir/propagate.ts": 1667,
     "src/ir/runtime/manifest.ts": 2406,
     "src/ir/runtime/verify.ts": 2868,
