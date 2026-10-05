@@ -16,15 +16,15 @@ area: codegen, runtime
 language_feature: closures, objects
 goal: npm-library-support
 related: [3996, 3995, 4370, 4456]
-# 2026-10-05 (wave-10 slice) — the mechanisms live in three NEW leaf modules
-# (expressions/apply-dynamic-arglist.ts, runtime-key-open-object.ts,
-# runtime/vec-array-proto-read.ts); what lands in the god-files is the wiring:
+# 2026-10-05 (wave-10 slice) — the mechanisms live in two NEW leaf modules
+# (expressions/apply-dynamic-arglist.ts, object-model/runtime-key-open-object.ts)
+# plus one allowlist entry in runtime/wasm-vec-prototype.ts; src/runtime.ts is
+# untouched (#4401 ceiling). What lands in the god-files is the wiring:
 # calls.ts +9 (Case-1 registry/dynamic-apply gate), closures.ts +6 (callback
 # capture boxing — the decision must be made in compileArrowAsCallback's own
 # capture loop), index.ts +4 (one resolveWasmType arm, lockstep with the
-# literal's host path), object-ops.ts +4 (same predicate for Object.keys),
-# runtime.ts +6 (import + the read in BOTH __extern_get bindings, by-name and
-# intent), import-resolver.ts +24 (setImmediate/clearImmediate timer shim —
+# literal's host path), object-ops.ts +5 (same predicate for Object.keys),
+# import-resolver.ts +24 (setImmediate/clearImmediate timer shim —
 # the shim table lives there), calls-closures.ts +3 (`includes` joins the
 # existing String∩Array refusal list in tryExternClassMethodOnAny).
 loc-budget-allow:
@@ -32,13 +32,11 @@ loc-budget-allow:
   - src/codegen/closures.ts
   - src/codegen/index.ts
   - src/codegen/object-ops.ts
-  - src/runtime.ts
   - src/import-resolver.ts
   - src/codegen/expressions/calls-closures.ts
 func-budget-allow:
   - src/codegen/expressions/calls.ts::compileCallExpression
   - src/codegen/closures.ts::compileArrowAsCallback
-  - src/runtime.ts::resolveImport
   - src/codegen/index.ts::resolveWasmType
   - src/codegen/object-ops.ts::compileObjectKeysOrValues
   - src/codegen/expressions/calls-closures.ts::tryExternClassMethodOnAny
@@ -207,13 +205,16 @@ Fix plan (A–E, generic, no Redux-specific code):
   (no new host import).
 - C: `compileArrowAsCallback` adds the same initializer-store rule as
   `planClosureCaptures`.
-- D: `runtime-key-open-object.ts` — `resolveWasmType` (and `Object.keys`'s
+- D: `object-model/runtime-key-open-object.ts` — `resolveWasmType` (and `Object.keys`'s
   static fold) treat an object-literal type whose literal took the
   runtime-key path as externref, in lockstep with the value side.
-- E: `runtime/vec-array-proto-read.ts` — after every own/sidecar read misses,
-  a compiled vec answers inherited members with the realm's
-  `Array.prototype` member (never for `arguments` objects, never `length`);
-  and `includes` joins the `tryExternClassMethodOnAny` String∩Array
+- E: `runtime/wasm-vec-prototype.ts` — the JS-host vec prototype bridge
+  (deliberately limited to reflective `slice` by an earlier Moment fix, so
+  native search/mutating methods do not bypass compiled sidecar properties)
+  admits `includes` as its second member; measured host `--isolate` on
+  `built-ins/Array/prototype/{includes,slice}` (101 rows, including the
+  `[].includes.call(<object>)` length rows): 82/19 before and after, identical
+  rows. And `includes` joins the `tryExternClassMethodOnAny` String∩Array
   ambiguity refusals (`indexOf`, `slice`, …) so an `any` receiver dispatches
   on its runtime shape.
 

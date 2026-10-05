@@ -20,18 +20,25 @@
 // declared mixed index types are untouched: only an anonymous object-literal
 // type whose declaring literal really took the runtime-key path qualifies.
 
-import { ts } from "../ts-api.js";
-import type { CodegenContext } from "./context/types.js";
-import { _hasRuntimeComputedKey } from "./literals.js";
+import { ts } from "../../ts-api.js";
+import type { CodegenContext } from "../context/types.js";
 
-export function typeIsRuntimeKeyedObjectLiteral(ctx: CodegenContext, tsType: ts.Type): boolean {
+/** `literals.ts`'s `_hasRuntimeComputedKey`, injected by the caller: importing
+ *  it here would pull this leaf into the codegen import cycle (#6797). */
+export type RuntimeComputedKeyProbe = (ctx: CodegenContext, expr: ts.ObjectLiteralExpression) => boolean;
+
+export function typeIsRuntimeKeyedObjectLiteral(
+  ctx: CodegenContext,
+  tsType: ts.Type,
+  hasRuntimeComputedKey: RuntimeComputedKeyProbe,
+): boolean {
   const symbol = tsType.symbol;
   if (!symbol || (symbol.flags & ts.SymbolFlags.ObjectLiteral) === 0) return false;
   // The runtime key surfaces as an index signature (string or number, by the
   // checker's reading of the key expression's type).
   if (tsType.getStringIndexType() === undefined && tsType.getNumberIndexType() === undefined) return false;
   for (const declaration of symbol.declarations ?? []) {
-    if (ts.isObjectLiteralExpression(declaration) && _hasRuntimeComputedKey(ctx, declaration)) return true;
+    if (ts.isObjectLiteralExpression(declaration) && hasRuntimeComputedKey(ctx, declaration)) return true;
   }
   return false;
 }

@@ -63,7 +63,8 @@ import { isDescriptorTranscribableStruct } from "./property-descriptor-shape.js"
 import { isDirectProxyBinding } from "./proxy-value-provenance.js"; // (#5268 step 2 / review F1+F2)
 import { superWriteMayAddKey } from "./super-write-grown-keys.js"; // (#5350 r2)
 import { inOwnKeyOrder } from "./object-model/object-own-key-order.js"; // (#6770 S3)
-import { typeIsRuntimeKeyedObjectLiteral } from "./runtime-key-open-object.js"; // (#4526)
+import { typeIsRuntimeKeyedObjectLiteral } from "./object-model/runtime-key-open-object.js"; // (#4526)
+import { _hasRuntimeComputedKey } from "./literals.js"; // (#4526) injected probe
 import {
   descriptorFieldName,
   inheritedTrueDescriptorFlags,
@@ -4485,7 +4486,8 @@ export function compileObjectKeysOrValues(
   // (#4526) …and likewise a literal with a runtime computed key: it is an
   // open object whose runtime key the struct field list cannot name.
   const argIsHostObjectVar =
-    (ts.isIdentifier(arg) && ctx.externrefAccessorVars.has(arg.text)) || typeIsRuntimeKeyedObjectLiteral(ctx, argType);
+    (ts.isIdentifier(arg) && ctx.externrefAccessorVars.has(arg.text)) ||
+    typeIsRuntimeKeyedObjectLiteral(ctx, argType, _hasRuntimeComputedKey);
   // Resolve struct name from the argument type
   const structName = argIsHostObjectVar ? undefined : resolveStructName(ctx, argType);
   if (!structName) {

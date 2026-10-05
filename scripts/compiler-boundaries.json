@@ -1999,11 +1999,6 @@
       "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."
     },
     {
-      "path": "src/runtime/vec-array-proto-read.ts",
-      "state": "unmigrated",
-      "layer": "legacy-host"
-    },
-    {
       "path": "src/runtime/wasmgc/values/string-create-body.ts",
       "state": "clean",
       "layer": "native-runtime"
@@ -7609,7 +7604,7 @@
       "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."
     },
     {
-      "path": "src/codegen/runtime-key-open-object.ts",
+      "path": "src/codegen/object-model/runtime-key-open-object.ts",
       "state": "unmigrated",
       "layer": "mixed-needs-split",
       "destination": "backend-wasmgc",
