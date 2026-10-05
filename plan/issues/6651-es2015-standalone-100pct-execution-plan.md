@@ -1997,6 +1997,117 @@ readable (repo hygiene, #6796). Headings, in order:
 Owners still append new cluster records at the end of this file. The
 2026-09-28 session wrap-up handoff and everything after it stay below.
 
+### 2026-10-05 — Uncovered slice U1
+
+Slice U1 of the uncovered-residue census (G1, plus #5151 H's four
+`{Map,Set,WeakMap,WeakSet}/proto-from-ctor-realm` rows). Senior-dev lane, branch
+`issue-6651-u1-getproto` off `origin/main` @ `f7ab45d2fe`. Standalone measurements
+use `JS2WASM_EVAL_ENGINE=quickjs npx tsx scripts/run-test262-paths.mts <list> --standalone --isolate`
+with one runner at a time; base and branch were both measured locally, never against
+the CI artifact alone.
+
+**What changed (three parts):**
+
+1. `src/codegen/native-carrier-get-prototype.ts` (new) adds `__getPrototypeOf` arms for
+   every native carrier R1 did not cover. Covered: `$Error_struct` (exact builtin tag,
+   `$userClassId == -1` only); `$Map` (Map/Set/WeakMap/WeakSet by the `kind` field);
+   `__Date`; `$Promise`; `__StandaloneRegExp`; and the boxed-primitive wrapper `$Object`
+   (null `$proto`, no `OBJ_FLAG_NULL_PROTO`, `FLAG_INTERNAL` `[[PrimitiveValue]]` slot).
+   The wrapper case answered `%Object.prototype%` before, where §10.4.3 says
+   String/Number/Boolean.prototype.
+   - The arms are prepended at finalize from `fillArrayProtoSingleton`.
+   - They answer only a brand whose `$NativeProto` global the module already
+     materialised, so the module's own `X.prototype` read stays the same `ref.eq`
+     identity. A module that never names the intrinsic is byte-identical.
+   - Spec: §20.1.2.12 / §28.1.8 → `O.[[GetPrototypeOf]]()` on an ordinary object
+     created by §10.1.13 with §10.1.14 step 4's intrinsic default.
+2. `src/codegen/standalone-global-object-carriers.ts`: in a runtime-eval module, the
+   realm-global seeds now also install `String Boolean Number Date RegExp Map Set WeakMap
+   WeakSet`. Every test262 module is a runtime-eval module.
+   - These names are appended after the existing four eval-safe names, so a non-eval
+     module's seed order and bytes are unchanged.
+   - `Function` stays behind the gate.
+3. `scripts/test262-fyi-runtime.js`: `createRealm().global` now also forwards `Boolean
+   DataView Map Number Object Promise RegExp Set String WeakMap WeakSet`.
+   - The 2026-08-23 `Object` landmine note is replaced. The row it named
+     (`dynamic-import/assignment-expression/import-meta.js`) is in the gc control
+     below.
+
+**Before → after (standalone, per path, local base vs local branch):**
+
+| set | base pass | branch pass |
+| --- | ---: | ---: |
+| G1 (30) + #5151 H (4), 33 unique rows | 0 | **14** |
+| collateral: G2 `Array/prototype/{concat,filter,map,slice}/create-proto-from-ctor-realm-non-array` | 0 | **4** |
+| probe p02 (7 checks) | 0/7 | 7/7 |
+
+Rows that flipped: `{Boolean,DataView,Map,Number,Object,Promise,RegExp,Set,String,WeakMap,WeakSet}/proto-from-ctor-realm`
+and `Date/proto-from-ctor-realm-{one,two,zero}`. These 14 plus G2's four are +18.
+
+**Controls:**
+
+- Standalone status control over 493 rows. The rows: a seeded random 300 from the
+  2026-10-05 standalone baseline, every non-staging `createRealm` file (193), and G1.
+  Branch vs the CI artifact showed 28 pass→non-pass rows.
+  - 27 are `built-ins/Temporal/**` (Temporal provider absent locally).
+  - 1 is `RegExp/regexp-modifiers/remove-ignoreCase-affects-characterEscapes.js`
+    (local Node rejects the regex).
+  - All 28 fail identically on the local base. **Local base vs local branch: 0
+    pass→non-pass, 18 fail→pass, 2 fail→compile_error** (see residuals).
+- gc control: see the receipt line appended below.
+- Compile-only byte differential: playground examples, `examples/`, and
+  `benchmarks/suites` × {gc, wasi, standalone} are byte-identical. The one exception is
+  `examples/native-messaging/nm_js2wasm_node_process.ts` standalone, which gains the
+  Error arm. Its tests (`issue-2834`, `issue-2735`, `issue-2807`) pass.
+  - A test262 byte differential is not selective for this change. The shim and the
+    eval-module seeds change every test262 module on both targets, so status controls
+    stand in for it.
+- Pin: `tests/issue-6651-u1-native-carrier-getproto.test.ts`, with no eval. Five
+  RED-on-base witnesses and two guards (green on both): ordinary / explicit-null /
+  re-parented wrapper answers unchanged, and a `class E extends Error` instance is not
+  claimed.
+
+**Residuals (19 of the 33 still fail):**
+
+- **Unreachable without a distinct realm: 7 rows.**
+  `Error/proto-from-ctor-realm` and `NativeErrors/*/proto-from-ctor-realm` (6) now
+  answer the right intrinsic (`«Error»` vs `«[object Object]»`). They compare against
+  `other.<Err>.prototype`, and the shim deliberately mints DISTINCT error constructors
+  (`mkerr`, #4634), so `other.Error.prototype !== Error.prototype` by construction.
+  These are G7, not G1.
+- **`%Function%` sub-step, split out: 4 rows.** `new other.Function(src)` still answers
+  `undefined` (p11).
+  - Affected: `Function/proto-from-ctor-realm{,-prototype}`,
+    `Function/call-bind-this-realm-value`, and
+    `RegExp/prototype/Symbol.split/splitter-proto-from-ctor-realm`.
+  - `Function` stays behind the eval gate (X1's parity hazard).
+- **`other.eval` / QuickJS boundary: 2 rows.** `GeneratorFunction/proto-from-ctor-realm{,-prototype}`
+  read `other.eval('(0, function* () {})')`, which is G8.
+- **GetPrototypeFromConstructor in the construct ROUTES, not the reader: 5 rows.**
+  - Affected: `Function/prototype/bind/proto-from-ctor-realm`,
+    `language/expressions/super/realm`,
+    `Proxy/construct/trap-is-undefined-proto-from-newtarget-realm`, and
+    `Array/{from,of}/proto-from-ctor-realm`. The last two (`Array.from.call(C, …)`) build
+    an Array instead of constructing `C`.
+  - Measured without any realm, `Reflect.construct(<bound|derived class|empty fn>, [], NT)`
+    with `NT.prototype = null` answers `null` instead of `%Object.prototype%`.
+  - The empty-function shortcut in `call-namespace-static.ts` (`isEmptyOrdinaryFunction`
+    → `__object_create(null)`) and the native construct driver (a null supplied proto
+    means "use `callee.prototype`") are the two sites.
+- **`Function/internals/Construct/base-ctor-revoked-proxy-realm`: 1 row.** `new` of a
+  revoked `other.Proxy` throws nothing. Unchanged.
+- **New host-import leak, already recorded by S1: `env::Object_new`.**
+  `new realmB.Object()` lowers through the extern-class path. Two G7 rows,
+  `Error/prototype/stack/{getter,setter}-cross-realm`, move fail → compile_error.
+  This is not a pass loss, but it is a #2961 leak a follow-up should close: route a
+  non-identifier `ObjectConstructor`-typed callee to the dynamic construct path in
+  standalone.
+- **Arm residual.** A native carrier has no prototype slot, so these keep the intrinsic
+  default where they answered `null` before:
+  - a `class M extends Map/Date/RegExp/Promise` instance;
+  - `Object.setPrototypeOf(<native carrier>, p)`;
+  - `Reflect.construct(Map, [], NT)` with an object `NT.prototype`.
+
 ## Handoff — 2026-09-28, session wrap-up (D6, D7, H1 landed; I7 in this PR)
 
 Written at the user's "wrap up, handoff, open pr" (about 22:10 UTC). The goal
