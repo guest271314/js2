@@ -27,6 +27,7 @@ import { buildCompiledImports } from "../src/runtime.js";
 
 const ENTRY = fileURLToPath(new URL("./fixtures/issue-6450/entry.js", import.meta.url));
 const SOLO = fileURLToPath(new URL("./fixtures/issue-6450/solo.js", import.meta.url));
+const NAMED_CRYPTO = fileURLToPath(new URL("./fixtures/issue-6450/named-crypto/entry.js", import.meta.url));
 
 /** The native oracle every Wasm digest below is compared against. */
 const NATIVE_SHA256_A = nodeCreateHash("sha256").update("a").digest("hex");
@@ -101,5 +102,19 @@ describe("#6450 — calling a node-builtin named import", () => {
     // The single-file `compile()` lane lowers the name to a raw `env.createHash`
     // import with no classifier entry. The project lane must never do that.
     expect(compiled.importNames).not.toContain("createHash");
+  });
+
+  // hono's real shape: the sibling async module is itself NAMED `crypto.js`, and
+  // the checker's resolved signature for the builtin call lands on its async
+  // arrow — so the async-call repair wrapped the builtin's Hash in
+  // `Promise_resolve`. Parent (with the call routing above): still
+  // `update is not a function`.
+  it("does not async-wrap the builtin call when a graph module named `crypto.js` exports an async `createHash`", async () => {
+    const compiled = await compile(NAMED_CRYPTO);
+    expect((compiled.exports.hex as () => string)()).toBe(NATIVE_SHA256_A);
+    // Anti-vacuity: the library's own async function is still async.
+    await expect((compiled.exports.viaLib as (data: string) => Promise<string>)("abc")).resolves.toBe(
+      "lib:SHA-256:abc",
+    );
   });
 });

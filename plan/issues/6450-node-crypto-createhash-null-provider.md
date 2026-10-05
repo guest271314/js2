@@ -17,8 +17,11 @@ goal: correctness
 # resolution ladder — it has to run after `calleeBindingDecl` is known and
 # before the bare-name closureMap/funcMap arms. The lowering itself is in
 # expressions/node-builtin-member-call.ts.
+# The async-call repair's bare-name check in `isAsyncCallExpression`
+# (expressions.ts) gets one early return for the same import shape.
 loc-budget-allow:
   - src/codegen/expressions/call-identifier.ts
+  - src/codegen/expressions.ts
 func-budget-allow:
   - src/codegen/expressions/call-identifier.ts::compileBoundIdentifierCall
 ---
@@ -116,10 +119,21 @@ builtin. It sits in `compileBoundIdentifierCall` right after
 `tests/issue-6450-node-builtin-named-call.test.ts` (4 of 5 rows fail on the
 parent; the same-named-graph-function control passes on both).
 
-AC1/AC2 met. **AC3 not met by this fix alone**: hono `crypto.test.ts` stays
-3/4 — `createHash('sha256')` now resolves to the builtin (the
-`update is not a function` message is gone), but the row then fails on
-`expect(await sha256(…))`, because its LAST line holds two awaits and the
-whole test body declines to the synchronous pass-through. Filed as
+Measuring on the real hono lane exposed a SECOND wrong turn the plan did
+not predict: the hono dist module is itself named `utils/crypto.js`, and the
+checker's resolved signature for the test's builtin `createHash('sha256')`
+lands on hono's ASYNC arrow, so `isAsyncCallExpression` (expressions.ts)
+wrapped the builtin's Hash in `Promise_resolve` — still
+`update is not a function`, even with the call routed correctly. Fixed by an
+early `return false` in `isAsyncCallExpression` for a callee that
+`isNodeBuiltinNamedImportCallee` (a host builtin is never the async-call
+repair's business). Fixture `tests/fixtures/issue-6450/named-crypto/`
+reproduces it (the row throws `update is not a function` without that line).
+
+AC1/AC2 met; hono `buffer.test.ts` "negative" now passes (6 -> 7).
+**AC3 not met by this issue alone**: hono `crypto.test.ts` stays 3/4 — the
+builtin call is now right, but the row fails on `expect(await sha256(…))`
+because its LAST line holds two awaits and the whole test body declines to the
+synchronous pass-through. Filed as
 [#6863](https://js2wasm.loopdive.com/dashboard/issue.html?slug=6863-async-two-awaits-in-one-statement).
 

@@ -1,10 +1,11 @@
 ---
 id: 6848
 title: "host lane: `Object.entries(o).forEach(cb)` whose callback captures an `any` binding is silently DROPPED — the callback never runs (hono `parseBody({ dot: true })`)"
-status: in-progress
+status: done
 sprint: current
 created: 2026-10-05
 updated: 2026-10-05
+completed: 2026-10-05
 priority: high
 horizon: s
 feasibility: easy
@@ -67,3 +68,18 @@ Acceptance: the reductions above match node; regression test (base-failing
 `forEach`/`filter`/`some` rows, plus an anti-vacuity row whose callback is
 lane-safe and must keep the native lowering — no `__extern_method_call` for
 it); hono `body.test.ts` 27/37 → 37/37.
+
+## Resolution
+
+Implemented as planned (`isDeclinedVecCallbackMethod` in
+`src/codegen/expressions/vec-callback-method-host-delegation.ts`, one extra
+disjunct in the #3201 arm). The `forEach` / `filter` / `some` / `every` /
+`reduce` reductions match node; the lane-safe control keeps the native
+lowering (no `__extern_method_call` import). Regression test
+`tests/issue-6848-vec-callback-method-host-delegation.test.ts`. hono
+`body.test.ts` 27/37 -> 37/37. Full A/B in
+[#6846](https://js2wasm.loopdive.com/dashboard/issue.html?slug=6846-async-nested-leading-await-replay).
+
+Not covered (pre-existing, unchanged): a callback that WRITES into the tuple
+element it receives (`pairs.forEach((p) => { p[1] = ... })`) -- the host sees
+the mirrored element, so the write does not reach the Wasm tuple.

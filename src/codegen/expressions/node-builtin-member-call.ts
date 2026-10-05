@@ -76,6 +76,21 @@ function bindingIsNodeBuiltinNamedImport(decl: ts.Declaration | undefined): bool
 }
 
 /**
+ * Is `callee` (a call's identifier callee) bound to a node-builtin named
+ * import? `isAsyncCallExpression`'s bare-name `ctx.asyncFunctions` check would
+ * otherwise wrap `createHash('sha256')` in `Promise_resolve` whenever ANY
+ * module of the graph declares an async `createHash` (hono's
+ * `src/utils/crypto.ts`), turning the builtin's Hash into a Promise.
+ */
+export function isNodeBuiltinNamedImportCallee(ctx: CodegenContext, callee: ts.Identifier): boolean {
+  return (
+    !ctx.wasi &&
+    ctx.nodeBuiltinGlobals.has(callee.text) &&
+    bindingIsNodeBuiltinNamedImport(ctx.oracle.valueDeclarationOf(callee))
+  );
+}
+
+/**
  * Compile `member(args)` where `member` is a named import of a node builtin.
  *
  * Returns `undefined` when this is not that shape (the caller keeps its own

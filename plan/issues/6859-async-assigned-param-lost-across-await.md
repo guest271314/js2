@@ -1,10 +1,11 @@
 ---
 id: 6859
 title: "async: an identifier parameter assigned before an `await` reads its ARGUMENT after it — the param frame field is an immutable activation snapshot"
-status: in-progress
+status: done
 sprint: current
 created: 2026-10-05
 updated: 2026-10-05
+completed: 2026-10-05
 priority: high
 horizon: s
 feasibility: medium
@@ -54,3 +55,13 @@ spill (or its cell). Async generators are excluded (their own discipline).
 
 Acceptance: the three rows match node; regression test failing on the parent
 with a read-only-parameter anti-vacuity row; standalone test262 async scope flat.
+
+## Resolution
+
+Implemented as planned (`collectDerivedPatternParams` in
+`src/codegen/async-frame.ts`). All three rows match node; regression test
+`tests/issue-6859-async-assigned-param-across-await.test.ts` (parent:
+`1,undefined,-1,8`). No hono movement on its own: `concurrent.test.ts` needs
+[#6860](https://js2wasm.loopdive.com/dashboard/issue.html?slug=6860-inline-async-arrow-destructured-param-sync-passthrough)
+as well. Standalone test262 async scope identical; full A/B in
+[#6846](https://js2wasm.loopdive.com/dashboard/issue.html?slug=6846-async-nested-leading-await-replay).

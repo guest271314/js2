@@ -1,10 +1,11 @@
 ---
 id: 6847
 title: "async for-of over an awaiting body: `continue` guards, for-of-only bodies and destructured heads all miscompile — hono `parseSigned` answers `false` for valid signatures"
-status: in-progress
+status: done
 sprint: current
 created: 2026-10-05
 updated: 2026-10-05
+completed: 2026-10-05
 priority: high
 horizon: m
 feasibility: medium
@@ -77,3 +78,15 @@ Acceptance: the three reductions match node; regression test with a
 base-failing row per defect and an anti-vacuity row (the wrong-signature row
 still answers `false`); hono `cookie.test.ts` 27/35 → 35/35; standalone
 test262 async scope flat.
+
+## Resolution
+
+Implemented as planned (`src/codegen/async-for-of-region.ts`;
+`lowerRegionBody(..., inLoopBody)`, the for-of admission in
+`analyzeTryCatchAsync`, `releaseForOfHeadTdzFlags` in the for-of
+`bindElement` step). All three reductions match node; regression test
+`tests/issue-6847-async-for-of-continue-destructuring.test.ts`. hono
+`cookie.test.ts` 27/35 -> 35/35, which closes
+[#6449](https://js2wasm.loopdive.com/dashboard/issue.html?slug=6449-hono-signed-cookie-verify-returns-false).
+Standalone test262 async scope (429 rows) identical before/after; full A/B in
+[#6846](https://js2wasm.loopdive.com/dashboard/issue.html?slug=6846-async-nested-leading-await-replay).

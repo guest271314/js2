@@ -1,10 +1,11 @@
 ---
 id: 6846
 title: "async: a nested `await` that is its statement's first observable step falls to the synchronous pass-through — `f(await p)`, `const [a, b] = await p`, `{ body: await p }` see the Promise"
-status: in-progress
+status: done
 sprint: current
 created: 2026-10-05
 updated: 2026-10-05
+completed: 2026-10-05
 priority: high
 horizon: m
 feasibility: medium
@@ -84,3 +85,37 @@ Acceptance: the table above matches node; regression test with a base-failing
 row per shape plus a decline control (`let` operand before the await keeps the
 pre-change behaviour); hono `request.test.ts` "clones consumed request object"
 passes; standalone test262 async scope flat.
+
+## Resolution
+
+Implemented as planned (`src/codegen/async-leading-await-replay.ts`,
+`replayLeadingAwait` in `async-cps.ts`). Every row of the table above now
+matches node, including the settled-operand row that used to be a hard
+compile error. The `f(count(), await p)` control still declines (count runs
+once). Regression test `tests/issue-6846-nested-leading-await-replay.test.ts`.
+
+Measured with the sibling fixes of this PR at one HEAD (base sources from
+`c3e3fab33d` vs the branch's sources), all suites sequential:
+
+| suite | base | fix |
+| --- | --- | --- |
+| hono | 271/324 | **292/324** (293 with the final #6450 async-wrap line; node-lane suites hono/axios/jest/lodash/uuid re-run on it: 293 / 210 / 336 / 59 / 75) |
+| axios | 208/231 | **210/231** |
+| marked | 16/30 | **18/30** |
+| prettier | 75/151 | 75/151 |
+| redux | 67/82 | 67/82 |
+| lodash | 59/62 | 59/62 |
+| jest | 336/356 | 336/356 |
+| uuid | 75/75 | 75/75 |
+| clsx | 32/32 | 32/32 |
+| cookie | 63740/63740 | 63740/63740 |
+| moment | 10/10 | 10/10 |
+| test262 standalone, 429 async rows (`language/{expressions,statements}/async-*`, `await`, async methods, async for-of) | 360 pass / 50 fail / 19 CE | identical non-pass set |
+
+hono "clones consumed request object" is this issue's `{ body: await … }`
+shape. The other movers outside cookie/body — hono `request.test.ts` +1,
+`buffer.test.ts` +1, axios `canceledError` / `AxiosError` +2, marked `Hooks`
++2 — moved with the PR as a whole; which fix moved each was not isolated. Out
+of scope and filed:
+[#6863](https://js2wasm.loopdive.com/dashboard/issue.html?slug=6863-async-two-awaits-in-one-statement)
+(two awaits in one statement).
