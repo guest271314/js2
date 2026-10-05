@@ -16,8 +16,10 @@ language_feature: host-imports
 goal: standalone
 requested_by: ttraenkler/wave9-jest
 related: [1491, 6735, 6659, 6664, 6675, 6691, 2961]
-# 2026-10-05: +2 lines — the two-line dispatch into the subsystem module at the
-# head of the #1491 branch; the lowering itself lives in node-fs-binding-identity.ts.
+# 2026-10-05: +7 lines — the six-line throw lowering at the head of the #1491
+# branch. The predicate and message live in node-fs-binding-identity.ts; the
+# emission stays in call-identifier.ts because moving it there pulled that module
+# into the codegen value-import SCC (#6797 ratchet, 697 → 698).
 loc-budget-allow:
   - src/codegen/expressions/call-identifier.ts
 func-budget-allow:
@@ -112,9 +114,11 @@ Scoped, standalone-only throwing lowering:
    dependency fixture is byte-identical (the change is standalone-gated).
 4. Measure jest `standalone-dynamic` before/after; record the next blocker.
 
-   Step 2 as shipped: the lowering lives in `node-fs-binding-identity.ts`
-   (`tryEmitStandaloneDependencyNodeFsCall`); call-identifier.ts only
-   dispatches (+2 lines). A package-linker provider build (#5247,
+   As shipped: `node-fs-binding-identity.ts` exports
+   `standaloneDependencyNodeFsThrowMessage` (predicate + message, no new value
+   imports); call-identifier.ts emits `compileDiscardedArgument` per argument
+   (spread arguments are iterated, as the ArgumentList requires) and the
+   `Error` throw. A package-linker provider build (#5247,
    `ctx.exportsConsumedByWasm`) also counts as dependency code — it compiles
    one dependency package with package-relative file keys, so its paths carry
    no `node_modules` segment.

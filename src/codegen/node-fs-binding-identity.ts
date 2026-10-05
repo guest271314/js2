@@ -1,9 +1,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { ts } from "../ts-api.js";
 import { hasDeclareModifier } from "./ast-modifiers.js";
-import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { buildThrowJsErrorInstrs } from "./js-errors.js";
-import { compileExpression, type InnerResult, VOID_RESULT } from "./shared.js";
+import type { CodegenContext } from "./context/types.js";
 
 /**
  * Whether an identifier is the binding created by an unaliased node:fs named
@@ -53,22 +51,18 @@ function isStandaloneDependencyNodeFsCall(ctx: CodegenContext, expr: ts.CallExpr
 }
 
 /**
- * (#6840) Lower such a call: evaluate the arguments (the ArgumentList is
- * evaluated before the callee runs), then throw a catchable `Error` — the
- * shape Node's permission model uses for a denied fs call. Returns `undefined`
+ * (#6840) The message of the catchable `Error` such a call throws once its
+ * arguments are evaluated (the ArgumentList runs before the callee) — the
+ * shape Node's permission model uses for a denied fs call — or `undefined`
  * when the call is not a standalone dependency call (the #1491 path applies).
+ * The caller emits the lowering, so this module stays out of the codegen
+ * value-import cycle (#6797).
  */
-export function tryEmitStandaloneDependencyNodeFsCall(
+export function standaloneDependencyNodeFsThrowMessage(
   ctx: CodegenContext,
-  fctx: FunctionContext,
   expr: ts.CallExpression,
   fnName: string,
-): InnerResult | undefined {
+): string | undefined {
   if (!isStandaloneDependencyNodeFsCall(ctx, expr)) return undefined;
-  for (const arg of expr.arguments) {
-    if (compileExpression(ctx, fctx, arg)) fctx.body.push({ op: "drop" });
-  }
-  const message = `node:fs.${fnName} is not available in a standalone module: there is no filesystem (#6840)`;
-  fctx.body.push(...buildThrowJsErrorInstrs(ctx, "Error", message, { flush: fctx }));
-  return fnName === "writeFileSync" ? VOID_RESULT : { kind: "externref" };
+  return `node:fs.${fnName} is not available in a standalone module: there is no filesystem (#6840)`;
 }
