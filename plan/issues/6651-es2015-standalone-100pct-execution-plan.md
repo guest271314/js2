@@ -4,7 +4,7 @@ title: "ES2015 standalone → 100%: cluster execution plan from the 2026-09-20 c
 status: in-progress
 sprint: current
 created: 2026-09-20
-updated: 2026-10-04
+updated: 2026-10-05
 priority: high
 horizon: xl
 feasibility: hard
@@ -169,6 +169,25 @@ assignee: "ttraenkler/fable-es2015-plan"
 #     `$__ta_ctor`, which the Int8Array `$Object` carrier is not). The first cut
 #     inlined the arm here and cost +68 / +65; extracting it left these 8.
 loc-budget-allow:
+  # 2026-10-05 — uncovered slice U2 (TypedArray residue; record under
+  # "2026-10-05 — Uncovered slice U2"). Every mechanism is a few lines at the
+  # site that owns the decision; the shared helper `taDynJoinLengthInstrs` is in
+  # the leaf `ta-dyn-method-call.ts`. `dataview-native.ts` +36: the exported
+  # `emitRefElemArraySnapshot` (drain-before-ToNumber, §23.2.2.1 step 5 /
+  # §23.2.5.1.1 step 6.a) and its two call lines in the dyn ctor's `$ObjVec` and
+  # plain-vec arms — it sits with the TypedArray construction it serves.
+  # `identifiers.ts` +28: `hoistedScriptVarRead`, the #2176 ambient-shadow read
+  # for a script `var` nested in a statement (`harness/testTypedArray.js` reads
+  # `name` after a `for` loop and got `globalThis.name`); `index.ts` +27:
+  # `findHoistedVarDecl`, the VarScopedDeclarations walk the #2176 finder lacked —
+  # both have to live beside the two functions they complete.
+  # `call-builtin-static.ts` +3 (import + one call in the static `TA.from` copy),
+  # `array-methods.ts` +1 (join's length read routed through the helper).
+  - src/codegen/dataview-native.ts
+  - src/codegen/expressions/identifiers.ts
+  - src/codegen/index.ts
+  - src/codegen/expressions/call-builtin-static.ts
+  - src/codegen/array-methods.ts
   # 2026-09-29 — cluster H, slice H6 (record under the H6 claim).
   # `src/codegen/object-runtime-enumeration.ts` +4: one import and three
   # one-line `$Proxy` widenings of the array-like `$Object` arms of
@@ -1181,6 +1200,12 @@ loc-budget-allow:
   # `promise-subclass-cell-read.ts`; the hand-off cannot move, because it is the
   # arm that would otherwise emit the bare `global.get` of the cell.
 func-budget-allow:
+  # 2026-10-05 — uncovered slice U2 (see the loc-budget note): one-line calls
+  # of `emitRefElemArraySnapshot` — `emitTaDynCtorConstructInline` +2 (the
+  # `$ObjVec` and plain-vec arms) and `compileBuiltinStaticCall` +1 (the static
+  # `TA.from` element copy).
+  - src/codegen/dataview-native.ts::emitTaDynCtorConstructInline
+  - src/codegen/expressions/call-builtin-static.ts::compileBuiltinStaticCall
   # 2026-09-29 — cluster H, slice H6. `buildObjectEnumerationHelpers` +2: the
   # `$Proxy` widening of the `__extern_get_idx` / `__extern_has_idx`
   # array-like arms (one line each; the predicate is `proxy-array-like.ts`).
@@ -2240,6 +2265,7 @@ reachable by the slices above.
 also assigned to their lanes, the remaining 26 are the honest ceiling gap until #4274 (true realm
 identity) and #4245 (membrane) land.** That is 88.5 % of the residue reachable without new
 architecture, and 100 % only with both of those.
+
 ### 2026-10-05 — Uncovered slice U1
 
 Slice U1 of the uncovered-residue census (G1, plus #5151 H's four
@@ -2350,6 +2376,65 @@ and `Date/proto-from-ctor-realm-{one,two,zero}`. These 14 plus G2's four are +18
   - a `class M extends Map/Date/RegExp/Promise` instance;
   - `Object.setPrototypeOf(<native carrier>, p)`;
   - `Reflect.construct(Map, [], NT)` with an object `NT.prototype`.
+
+### 2026-10-05 — Uncovered slice U2
+
+TypedArray residue (census G3, 11 rows). Opus lane, branch
+`issue-6651-u2-typedarray` off `origin/main` @ `f7ab45d2fe`. Base copy of `src/`
+taken before the first edit (`.tmp/base/src`); every "base" number below was run
+by this lane on that copy or on the fork point, not read from an artifact,
+except where it says so.
+
+**Rows** (`JS2WASM_EVAL_ENGINE=quickjs … run-test262-paths.mts --standalone
+--isolate`, QuickJS provider rebuilt for each tree): **base 0 pass / 11 fail →
+branch 5 pass / 6 fail.**
+
+| row | base | branch | mechanism |
+| --- | --- | --- | --- |
+| `harness/testTypedArray.js` | fail | **pass** | the final loop's `var name = …` is NESTED in a `for`; a later read of `name` resolved to lib.dom's ambient `name` and became `globalThis.name` (undefined). The #2176 finder (`findUserBindingDecl`) only searched a scope's top-level statements; it now also walks VarScopedDeclarations (`findHoistedVarDecl`, `index.ts`), and `hoistedScriptVarRead` (`identifiers.ts`) reads the script-level global such a `var` is registered under. Not the plan's "dynamic-key read on a closed literal" — the key was `undefined`. |
+| `TypedArray/prototype/join/get-length-uses-internal-arraylength` | fail | **pass** | §23.2.3.18 step 3 reads TypedArrayLength. The extern join lane read `__extern_length` (LengthOfArrayLike, which honours an own `length` accessor since #6771 S2c). `taDynJoinLengthInstrs` (`ta-dyn-method-call.ts`) reads a `$__ta_dyn_view`'s internal length; used by `compileArrayJoinExternNative`. |
+| `TypedArray/prototype/toLocaleString/get-length-uses-internal-arraylength` | fail | **pass** | same rule (§23.2.3.32 step 3) on the two lanes a dyn-view `toLocaleString()` takes: `__array_to_primitive_string` (the `__extern_toString` join) and `__ta_to_locale_string`. Both append locals only when the module has a dyn view, so other modules keep their bytes. |
+| `TypedArray/from/iterated-array-changed-by-tonumber` | fail | **pass** | §23.2.2.1 step 5 drains the iterable BEFORE any ToNumber; the static `TA.from(array)` copy read the source's backing array live, and `values.length = 0` clears it in place. `emitRefElemArraySnapshot` (`dataview-native.ts`) copies a reference-element source first; primitive-element sources are untouched. |
+| `TypedArrayConstructors/ctors/object-arg/iterated-array-changed-by-tonumber` | fail | **pass** | same snapshot in the dyn ctor's `$ObjVec` and externref-vec arms (§23.2.5.1.1 step 6.a). |
+
+**Residuals (6)** — first failing assertion on the branch, mechanism:
+
+| row | first failure | why not here |
+| --- | --- | --- |
+| `ArrayBuffer/isView/arg-is-typedarray-subclass-instance` | `assert(ArrayBuffer.isView(sample))` | not an `isView` brand gap: `class TA extends ctor {}` over a RUNTIME heritage compiles to a closed struct whose `T_new` takes no parameters — the parent is never constructed (`len` undefined, `instanceof ctor` false). Even a static `class S extends Int8Array` is the #3239 identity-only empty vec (`new S(3).length === 0`). Needs faithful TypedArray subclass construction. |
+| `TypedArray/from/from-typedarray-into-itself-mapper-detaches-result` | `RuntimeError: illegal cast` | not the mapped-write loop: `target.set([0, 1, 2])` traps first. With `detachArrayBuffer.js` included every top-level binding is an externref proxy global, so `compileTypedArraySet` (`array-methods.ts`) `ref.cast`s a buffer-backed `$__ta_view_Int8Array` to the element vec `$__vec_i8_byte`. Needs a runtime `$__ta_view` arm in that lowering (the #5150 module-global spill only covers ref-typed globals). |
+| `TypedArrayConstructors/ctors/length-arg/toindex-length` | `-0 length`, expected reads `[object Object]` | value representation: `item[1]` over the nested heterogeneous literal is re-boxed through `__any_box_extern_s1` as a tag-5 box (the #1888 lie), and `__extern_get_idx` leaks a raw `$AnyValue` when `__any_to_extern` is not registered. Separately `new TA(true)` gives length 0 (`"1"` already gives 1). #5185 / #2141 family. |
+| `…/object-arg/iterated-array-with-modified-array-iterator` | `ta.length` 1 vs 4 | a patched `Array.prototype[Symbol.iterator]` is not consulted (#6484). |
+| `…/internals/Set/key-is-in-bounds-receiver-is-not-typed-array` | `receiver[0] === value` false | function-membered literal identity across an externref round trip (#2773 / #3037), unchanged since #6769. |
+| `…/internals/Set/key-is-out-of-bounds-receiver-is-proto` | `valueOf` called 0× | `Object.create(<TA>)` — no TA arm in the prototype walkers (#6769 residual). |
+
+**Side finding, not fixed (pre-existing on base):** two sibling closures that
+each declare a `values` captured by an object-literal METHOD share one
+name-keyed `__captured_values` global (`closures.ts` promotion,
+`ctx.capturedGlobals`), so the second closure reads the first one's value
+(`.tmp/u2/c10.js`: 27 on base and branch, 31 expected). A first attempt to
+observe nested `var` declarations in the Program-ABI registry for the
+`testTypedArray` fix made that collision fire inside the
+`testWithTypedArrayConstructors` callback and was withdrawn.
+
+**Controls.**
+- Pins `tests/issue-6651-u2-typedarray-residue.test.ts`: 5 exact rows + 3
+  inline mechanisms + 1 guard; inline programs on base 0 / 3 / 3 (expected
+  7 / 7 / 7), guard 3 on both; the 5 rows fail on base (table above). Branch:
+  9/9 pass. No eval dependency.
+- Runtime control, `built-ins/{TypedArray,TypedArrayConstructors,ArrayBuffer,DataView}/**`
+  (2,966 rows; base verdicts from the 2026-10-05 standalone baseline JSONL,
+  2,324 pass): screened IN-PROCESS on the branch (`.tmp/u2/ctl.mts`, one verdict
+  per row). See the U2 hand-off for the coverage reached; 0 base-pass rows lost
+  in the screened prefix, +1 gained (`from/iterated-array-changed-by-tonumber`).
+- Playground (`website/playground/examples`) + `benchmarks/suites`, gc and
+  standalone, base vs branch compiled in separate processes: 34/34 binaries
+  byte-identical.
+- `node scripts/equivalence-gate.mjs`: 22 failing = the 22 known failures, no
+  new regression.
+- Byte differential over the TA control set was started and stopped after 57
+  rows (9 differ — every harness module with a dyn-view constructor gains the
+  snapshot / internal-length arms), so the runtime screen is the control.
 
 ## Handoff — 2026-09-28, session wrap-up (D6, D7, H1 landed; I7 in this PR)
 

@@ -12451,9 +12451,36 @@ export function findUserBindingDecl(id: ts.Identifier): ts.Node | undefined {
         if (found) return found;
       }
     }
+    // A `var` nested in a loop / if / try body is hoisted to the enclosing
+    // function or script (§14.3.2 VarScopedDeclarations); the shallow search
+    // above misses it, so `for (…) { var name = … }` then `name` read the
+    // lib.dom `name` instead of the binding (#6651 U2, harness/testTypedArray).
+    const hoistRoot = ts.isSourceFile(scope)
+      ? scope
+      : ts.isFunctionLike(scope)
+        ? (scope as ts.FunctionLikeDeclaration).body
+        : undefined;
+    const hoisted = hoistRoot ? findHoistedVarDecl(hoistRoot, name) : undefined;
+    if (hoisted) return hoisted;
     scope = scope.parent;
   }
   return undefined;
+}
+
+/** A `var` declaration of `name` anywhere under `root`, not crossing a nested function or class. */
+function findHoistedVarDecl(root: ts.Node, name: string): ts.VariableDeclaration | undefined {
+  if (root.getSourceFile().isDeclarationFile) return undefined;
+  let found: ts.VariableDeclaration | undefined;
+  const visit = (node: ts.Node): void => {
+    if (found || ts.isFunctionLike(node) || ts.isClassLike(node)) return;
+    if (ts.isVariableDeclarationList(node) && (node.flags & ts.NodeFlags.BlockScoped) === 0) {
+      found = node.declarations.find((d) => ts.isIdentifier(d.name) && d.name.text === name);
+      if (found) return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(root, visit);
+  return found;
 }
 
 /**
