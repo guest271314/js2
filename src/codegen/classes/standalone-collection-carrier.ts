@@ -27,20 +27,28 @@
  *
  * Standalone/WASI only. The JS-host lane keeps the host `externClass` path.
  */
-import { ts } from "../ts-api.js";
-import type { FieldDef, Instr, StructTypeDef, ValType } from "../ir/types.js";
-import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { isNativeCollectionBuiltin } from "./builtin-tags.js";
-import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
-import { ensureMapRuntimeTypes, tryCompileNativeMapMethodCall } from "./map-runtime.js";
-import { tryCompileNativeSetMethodCall } from "./set-runtime.js";
-import { rollbackSpeculative, snapshotSpeculative } from "./context/speculative.js";
-import type { InnerResult } from "./shared.js";
-import { addFuncType } from "./registry/types.js";
-import { sealNominalStructParent } from "./struct-hierarchy-layout.js";
-import { UNDEF_F64_BITS } from "./value-tags.js";
+import { ts } from "../../ts-api.js";
+import type { FieldDef, Instr, StructTypeDef, ValType } from "../../ir/types.js";
+import type { CodegenContext, FunctionContext } from "../context/types.js";
+import { isNativeCollectionBuiltin } from "../builtin-tags.js";
+import { mintDefinedFunc, pushDefinedFunc } from "../func-space.js";
+import { rollbackSpeculative, snapshotSpeculative } from "../context/speculative.js";
+import type { InnerResult } from "../shared.js";
+import { addFuncType } from "../registry/types.js";
+import { sealNominalStructParent } from "../struct-hierarchy-layout.js";
+import { UNDEF_F64_BITS } from "../value-tags.js";
 
 const carrierClasses = new WeakMap<CodegenContext, Set<string>>();
+
+// map-runtime.ts / set-runtime.ts sit in the codegen import SCC; this module
+// stays outside it, so their entry points are passed in by the (SCC) callers.
+/** `tryCompileNativeMapMethodCall` / `tryCompileNativeSetMethodCall`. */
+export type NativeCollectionMethodCall = (
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  propAccess: ts.PropertyAccessExpression,
+  callExpr: ts.CallExpression,
+) => InnerResult | undefined;
 
 /** Hidden slots a class struct carries that are not own fields. */
 const NON_OWN_FIELD_NAMES: ReadonlySet<string> = new Set(["__tag", "__shape_brand", "__proto__"]);
@@ -99,6 +107,7 @@ export function prepareCollectionSubclassHeritage(
   className: string,
   parentClassName: string,
   parentIsUserClass: boolean,
+  ensureMapRuntimeTypes: (ctx: CodegenContext) => void,
 ): string | undefined {
   if (!ctx.nativeStrings) return undefined;
   const standalone = ctx.standalone || ctx.wasi;
@@ -272,6 +281,7 @@ export function compileCollectionSuperMethodCall(
   fctx: FunctionContext,
   expr: ts.CallExpression,
   className: string,
+  native: { readonly map: NativeCollectionMethodCall; readonly set: NativeCollectionMethodCall },
 ): InnerResult | undefined {
   if (!(ctx.standalone || ctx.wasi) || !ctx.classExternrefBackedSet.has(className)) return undefined;
   const parent = ctx.classBuiltinParentMap.get(className);
@@ -292,9 +302,7 @@ export function compileCollectionSuperMethodCall(
   Object.assign(call, { parent: expr.parent });
   const snap = snapshotSpeculative(ctx, fctx);
   const isSet = parent === "Set" || parent === "WeakSet";
-  const result = isSet
-    ? tryCompileNativeSetMethodCall(ctx, fctx, access, call)
-    : tryCompileNativeMapMethodCall(ctx, fctx, access, call);
+  const result = (isSet ? native.set : native.map)(ctx, fctx, access, call);
   if (result === undefined) rollbackSpeculative(ctx, fctx, snap);
   return result;
 }

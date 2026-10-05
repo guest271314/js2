@@ -62,7 +62,7 @@ import { CARRIER_BAG_HAS } from "../carrier-bag-visibility.js";
 import { ERROR_PROP_GET } from "../error-props.js";
 import { registerEmitWasiErrorConstructor } from "./error-constructor-delegates.js";
 import { buildErrorSubclassProtoChainArm } from "../error-subclass-proto-chain.js";
-import { isCollectionCarrierClass } from "../standalone-collection-carrier.js"; // (#6754)
+import { isCollectionCarrierClass } from "../classes/standalone-collection-carrier.js"; // (#6754)
 
 // (#2962) `getOrRegisterErrorStructType` moved to registry/types.ts so
 // native-strings.ts can import it without an import cycle (this module imports

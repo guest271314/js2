@@ -92,7 +92,7 @@ validation as soon as `instanceof` runs — class structs are assumed to carry
 
 ### Fix — a `$Map`-subtype carrier for the externref-backed representation
 
-New module `src/codegen/standalone-collection-carrier.ts` (standalone/WASI
+New module `src/codegen/classes/standalone-collection-carrier.ts` (standalone/WASI
 only; the JS-host lane never reaches it):
 
 - `$Map` is never a user-class parent: when the heritage is a native

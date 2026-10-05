@@ -20,6 +20,7 @@ import type { FieldDef, Instr, StructTypeDef, ValType } from "../ir/types.js";
 // (#3522) nested implicit-ctor family
 import { irPreparedNestedOrdinaryClass, type IrNestedClassFieldCallAdmission, type IrUnitId } from "../ir/identity.js";
 import { isHostConstructibleBuiltin } from "./builtin-tags.js";
+import { ensureMapRuntimeTypes } from "./map-runtime.js";
 import {
   applyCollectionCarrierLayout,
   classFieldInitReceiver,
@@ -27,7 +28,7 @@ import {
   emitCollectionCarrierWrap,
   isCollectionCarrierClass,
   isRuntimeCollectionStructHeritage,
-} from "./standalone-collection-carrier.js"; // (#6754)
+} from "./classes/standalone-collection-carrier.js"; // (#6754)
 import { isStandalonePromiseActive } from "./async-scheduler.js"; // (#2637 B2) host-only Promise-subclass ctor gate
 import { emitStandalonePromiseFromExecutorValue } from "./promise-executor.js"; // native standalone Promise-subclass super(executor)
 import { emitPromiseSubclassProtoLink, isStandalonePromiseSuperForwarder } from "./promise-subclass-proto-link.js"; // (#6651 D4)
@@ -1130,6 +1131,7 @@ export function collectClassDeclaration(
             className,
             parentClassName,
             ctx.classSet.has(parentClassName),
+            ensureMapRuntimeTypes,
           );
           if (collectionRefusal !== undefined) {
             reportError(ctx, decl, collectionRefusal);
