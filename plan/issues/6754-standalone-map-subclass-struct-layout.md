@@ -1,10 +1,11 @@
 ---
 id: 6754
 title: "tailwindcss standalone-dynamic lane: `class extends Map` with a field breaks the struct hierarchy (`U` / `__anonClass_70` no longer an exact mutable-field prefix of `Map`)"
-status: ready
+status: done
+completed: 2026-10-05
 sprint: current
 created: 2026-09-29
-updated: 2026-09-29
+updated: 2026-10-05
 priority: high
 horizon: m
 feasibility: medium
@@ -130,3 +131,42 @@ only; the JS-host lane never reaches it):
   before/after.
 - tailwindcss `standalone-dynamic` lane before/after; JS-host fixture binaries
   byte-identical.
+
+## Resolution
+
+Implemented as planned, plus one defect found on the way. In a standalone
+Map/Set/WeakMap/WeakSet subclass, `super.<m>(…)` had no compiled `Map_<m>`.
+The host bridge is refused in standalone, so the call silently folded to
+`undefined`: tailwind's `super.get(r)` cache never hit. It now calls the native
+collection helper on `this` (`compileCollectionSuperMethodCall`).
+
+Measurements, 2026-10-05:
+
+- **tailwindcss `standalone-dynamic`.** Before: compile-error `struct hierarchy
+  layout became invalid … (U) supertype #93 (Map) is no longer an exact
+  mutable-field prefix`. After: still compile-error, but the hierarchy
+  diagnostic is gone. The next and only error is `stack-balance invariant
+  (entry): '__anon_87_parseCandidate' references local 37, but only 2 params +
+  10 locals are declared`, filed as
+  [#6862](https://js2wasm.loopdive.com/dashboard/issue.html?slug=6862-tailwind-standalone-parsecandidate-stack-balance).
+- **Scoped standalone test262.** Covered `built-ins/Map`,
+  `language/statements/class/subclass` and every test262 file containing
+  `extends Map|Set|WeakMap|WeakSet`: 336 rows, each run in-process in its own
+  call, on base b6324ee6d1 and on the fix. Before: 282 pass, 41 fail, 13
+  compile_error. After: identical, with zero per-row flips.
+- **JS-host lane.** Six probe fixtures (`.tmp/h1`, `m1`, `m7`, `b2`, `m8`,
+  `f5`) produce byte-identical binaries. Every new arm is gated on
+  standalone/WASI, and `$Map` field names are not encoded in the binary.
+- **Regression test.** `tests/issue-6754-standalone-map-subclass-fields.test.ts`
+  passes 10/10. On the parent, 8 tests fail; the field-less control and the
+  JS-host compile pass on both.
+
+Residuals, filed separately:
+[#6856](https://js2wasm.loopdive.com/dashboard/issue.html?slug=6856-standalone-map-get-override-strict-eq-fold)
+(a TS `get(k: any)` override folds `Map#get(...) === n` to false; this was
+already the case on base) and
+[#6857](https://js2wasm.loopdive.com/dashboard/issue.html?slug=6857-standalone-map-subclass-iteration-dispatch-gaps)
+(for-of destructuring CE, forEach, spread and any-typed override dispatch on a
+Map subclass; all already failing on base). Still refused with a clean CE: a
+declared accessor on a collection subclass, and a subclass of a field-bearing
+collection subclass.
