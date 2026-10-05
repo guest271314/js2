@@ -3466,3 +3466,67 @@ Delivery takes priority: finish this existing PR before refreshing downstream Bo
 Final independent ordinary-reader review: cce0d4ae89de1ff2f463df646372d4aaa0e2471d62ecab3cd7528f286457333d. Independent quiet-root applicability verifies all 2,502 same byte/hash/mode inputs, zero missing/differences: 6eb0ff43114650ca58983a15d5e67d21ba889ee787e4cb830d0d60a7dc7b511e.
 
 The final publication read found canonical main 159c15c727c6dedef41a4dab2d535bb0b2d0f00b. Authenticated complete REST/local-tree comparison changes only six generated npm-compat reports/mirrors, with zero overlap in the frozen 2,502 runtime readset (independent review 1e47812e8dfdab0c4ccbefa8061b779d8da19a93d4c15ebd61a9884e295fd853). Three missing unique report blobs were recovered from canonical GitHub blob objects and verified by Git object hash, byte length and JSON parse. They are retained through an ordinary merge; source, tests, policy, hooks, package/config and the approved URL-path fix remain unchanged. This records report provenance, not new program/conformance coverage. The prior ordinary runtime evidence retains its explicit tested epoch; normal hooks and exact-head protected publication remain required.
+
+
+
+
+## Delivery correction — Linux preload child script transport (proposed 2026-10-05)
+
+This is a test-transport correction for existing PR6481, not a compiler, policy, or acceptance change. Implement only after root records this exact plan in the integration issue and releases an isolated writer. Root owns integration/publication; the writer owns only `tests/issue-3518-lowering-analysis-preservation.test.ts`. Other worktrees and the preserved Boolean/allocation increments remain untouched.
+
+### Observed failure and exact input
+
+The published5cf55 test is37729 bytes/SHAa41019ab812b74be6db0597a87a0ca34ea408e695d90c9c7e856b4f65de54f75. Saved Linux quality log `.tmp/presentation-classification/main-isview/publication/resumed-delivery-20261005/quality-log.stdout` is369936 bytes/SHAde309b6d0d92f770b50b4c544cfa95d3be7d33cbeb2073905c22dacd54c11ab9. Lines2233–2244 identify the policy-semantic and policy-raw fresh-preload tests and `spawnSync /opt/hostedtoolcache/node/25.9.0/x64/bin/node E2BIG`. The child never reaches its proof under that refusal; existing Darwin passes cannot establish Linux acceptance. Preserve the failed job and all earlier body evidence. Do not print the giant embedded spawn arguments.
+
+`applicationInput` (line693 onward) first projects the current policy through the new main/classification predecessors and authenticates the unchanged583986-byte D1 policy input. The application preload script embeds this entire string using JSON.stringify. The one `invoke` at line817 sends that script as a single `--eval` argument; Linux refuses that argument transport. The assertion at child.error correctly exposes the infrastructure failure and must remain.
+
+### Exact authorized edit
+
+In the application preload `invoke` only (within `it.each(applicationEntries)` at lines799–837), change:
+
+```ts
+spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script], {
+  cwd: root,
+  encoding: "utf8",
+});
+```
+
+to:
+
+```ts
+spawnSync(process.execPath, ["--import", "tsx", "--input-type=module"], {
+  cwd: root,
+  encoding: "utf8",
+  input: script,
+});
+```
+
+The same script bytes now enter the child's standard input. Keep process.execPath, tsx import, ESM mode, cwd, encoding and default process/error behavior. Module URLs remain the existing absolute URLs; no temporary script path or extra execution seam is necessary. Do not change the script text, its input interpolation, normal application imports, policy producers, guard messages, script error catch/exit code, or expected outputs. Do not change the earlier independent component preload invocation at line624, which does not embed this policy. No platform conditional, shell, environment workaround, maxBuffer/heap/timeout increase, catch-and-ignore, skip, retry or threshold change.
+
+All three application entries remain (`h2`, `policy-semantic`, `policy-raw`), each executing healthy-before, corrupt, healthy-after: nine actual child phases. Keep the healthy direct invocation before/after, prefault applicationInput capture, real inert implementation corruption/restoration and all error/signal/status/stdout/stderr/JSON assertions. In particular, corrupt status1 and exact implementation-guard stderr must come from the real normal application, not an E2BIG child.error. No registration or assertion expression changes are allowed.
+
+### Authority impact and reciprocal proof
+
+Read-only census found no reference to this test path, its a41019ab full hash, or37729 size anywhere in tests/helpers, scripts, or .github. Current `ir-c1-authority.json`379836/f02eee675a6b5a061c96987ab77e073e4abdb13b30f37aa29aa2eed37779da93 contains12 current instruments,10 recipes,11 immutable authorities and7 artifacts; this test is not a pinned member. Policy helper383161/21d795c773be21bbcd3eab1bee12c78d987a778d0a6a7ef52ccf7d9cec0f93de likewise does not reference it. Consequently no C1 manifest/anchor/external scalar, source receipt, policy receipt, helper pin, historical inverse, or source body is to be repinned. Preserve all those bytes. The test's own expected source/implementation/policy pins remain unchanged.
+
+Freeze the new test and a complete reciprocal edit recipe. Removing only this argv/options change must recover the entire authentic37729-byte predecessor; prove forward replay as well. Compare registration arguments and all assertion calls with the predecessor, and compare generated-script expressions byte-for-byte. Actual expected collection stays47; do not count nine subprocess phases as nine additional test registrations. Update root's final candidate custody to the new test hash separately from old2346 proof: that old cohort genuinely ran the old transport.
+
+### Required bounded checks and delivery
+
+1. Scoped formatter/linter and meaningful native focused type check using the existing configuration. Preserve any failed diagnostics and compare with the identical predecessor/profile if needed; no casts/config loosening. Full inverse and registration/assertion/script preservation are static proofs, not runtime acceptance.
+2. Run the complete unchanged47-test suite once in an isolated exclusive physical-fault checkout after root release. Actual collection and ordinary JSON names/order/counts, all statuses, raw channels, child errors/signals/exit codes, and complete before/after authority custody must agree. The existing three preload rows already supply healthy/corrupt/restored child controls; no synthetic replacement test is needed.
+3. Linux confirmation is necessary for the observed Linux failure: the existing hosted quality check on the corrected exact head must execute and pass these rows using the same large real policy. A local Darwin47 pass is useful but insufficient to call the Linux blocker resolved. A separately available isolated Linux execution of the same full suite may add earlier evidence, but no new infrastructure/workflow change is required. Retain the actual Linux Node/runtime identity and transport/error observations; do not infer success from syntax or a tiny stdin smoke test.
+4. Root uses the normal unmodified commit/pre-push/PR checks and protected admission. No blanket rerun or reseal of unchanged authority cohorts is justified solely by this transport edit; normal hooks still select whatever the repository requires. Preserve prior strict2346/C11283/new56 proofs with their real old-test epoch and the fresh47 proof separately. Existing CI failure remains recorded until superseded by actual corrected-head Linux results.
+
+This correction grants no broader IR language coverage, artifact equality, performance, public routing, or legacy retirement credit.
+
+
+### Linux transport correction — implementation and local acceptance (2026-10-05)
+
+Canonical claim3525:linux-child-stdin-20261005 is effect-verified for ttraenkler/codex-linux-child-stdin-20261005 on its isolated branch; existing presentation integration owner remains intact. The only test change is the final application child invocation: unchanged script enters stdin, retaining Node/tsx/ESM, cwd, encoding, every assertion and all three healthy/corrupt/restored application sequences. Earlier component invocation is unchanged. Candidate37736/SHA256 b478056168abb9b18f6c3162ebc658c2cce75711d1b2aed2c1b6857a34df176d/Gitblob ebbf9855a48221e89f9857695f22fa86e04e3f9a/mode100644; complete inverse reproduces original37729/a41019ab812b74be6db0597a87a0ca34ea408e695d90c9c7e856b4f65de54f75. No production, helper, policy, manifest or receipt change/reseal.
+
+Actual ordinary Node24.4.1 local collection/body exit0:47 ordered registrations,47passed,0failed/pending/todo; no ignored error option and no RPC/unhandled/error channel. All three application-preload tests pass, including nine asserted subprocess phases. Complete7656-input custody restored before/everyafter/final. Sol receipt e1dc1f9e4ab734a777f977d83430b3856a1937e9ba6d094f728b0b8377344b84; independent Astra source/whole-inverse/names/channels/custody review be73630f3e54d55e8fe533c5c33f6a07c9c112dd5c887f4aa1ac2da1419fb606. Focused strict native TS7 check of this single test with existing compiler settings and only rootDir/include/noEmit profile changes exits0, no diagnostics, full custody exact; receipt3f320034285469f807e7d99815a720ccecda611d02a978f72e083faca5e44374. Initial unavailable pnpmexec tsgo exit254 is preserved separately, never called a typing result; the successful command used the repository-pinned node node_modules/typescript7/lib/tsc.js.
+
+Important actual CI correction: the green issue-tests-changed job111595583435 is advisory only. Its actual full47 suite and required quality job111595157076 BOTH exited1 with45passed/2failed, same Node25.9.0/Vitest3.2.7 preview72d667a1eb5af5810d79244afbc51d5be215ce66, same policy-semantic/raw E2BIG before child module loading. TEST_OUTCOME was failure. Green advisory metadata is not a positive test control; original logs/refusals are retained. Source authenticates the583986-byte input before embedding;583163 is expected captured predecessor output, not the embedded input. CI error rendering truncates spawnargs; complete actual CI argv size/hash is unknown. No additional cache/source discrepancy was found.
+
+This is local acceptance and an exact reviewed transport correction, not yet Linux delivery evidence. Existing corrected-head Linux quality must genuinely pass before protected admission; normal hooks/prepush remain required. Older2346/56/1283 proof epochs stay separately qualified. No broader language/equivalence/performance/legacy-retirement credit. Existing ready PR6481 temporarily held during integration; remove after exact correctedhead publication and verify actual requiredCI then exact protectedqueue/main.

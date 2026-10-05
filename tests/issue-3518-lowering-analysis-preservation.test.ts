@@ -814,9 +814,10 @@ describe("D1 real guarded application implementation authority", () => {
       // No helper-body precheck or local wrapper: import and invoke the NORMAL application module.
       const script = `import{createHash}from'node:crypto';import{readFileSync}from'node:fs';const sha=b=>createHash('sha256').update(b).digest('hex');const hashes=b=>({bytes:b.length,sha256:sha(b),gitBlob:createHash('sha1').update(Buffer.from('blob '+b.length+'\\0')).update(b).digest('hex')});try{const m=await import(${JSON.stringify(moduleUrl)});const raw=${JSON.stringify(input)};let out;${body}console.log(JSON.stringify(out));}catch(error){console.error(error instanceof Error?error.message:String(error));process.exitCode=1;}`;
       const invoke = () =>
-        spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script], {
+        spawnSync(process.execPath, ["--import", "tsx", "--input-type=module"], {
           cwd: root,
           encoding: "utf8",
+          input: script,
         });
       for (const phase of ["healthy before", "corrupt", "healthy after"] as const) {
         const check = () => {
