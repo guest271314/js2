@@ -19748,29 +19748,21 @@ export function buildImports(
  */
 export interface WrapExportsSignature {
   /** Per-parameter boundary kind, positionally. */
-  params: (
-    | "boolean"
-    | "uint8array"
-    | "typed-array"
-    | "string"
-    | "symbol"
-    | "promise"
-    | "dynamic"
-    | "aggregate"
-    | "other"
-  )[];
+  params: WrapExportsBoundaryKind[];
   /** Boundary kind of the return value. */
-  result:
-    | "boolean"
-    | "uint8array"
-    | "typed-array"
-    | "string"
-    | "symbol"
-    | "promise"
-    | "dynamic"
-    | "aggregate"
-    | "other";
+  result: WrapExportsBoundaryKind;
 }
+
+type WrapExportsBoundaryKind =
+  | "boolean"
+  | "uint8array"
+  | "typed-array"
+  | "string"
+  | "symbol"
+  | "promise"
+  | "dynamic"
+  | "aggregate"
+  | "other";
 
 /**
  * (#1700) Copy each `Uint8Array` / TypedArray / plain-array argument into a
