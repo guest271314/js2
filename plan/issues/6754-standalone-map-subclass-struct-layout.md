@@ -12,6 +12,15 @@ reasoning_effort: high
 task_type: bug
 area: compiler
 goal: standalone-mode
+# 2026-10-05 (#6754): the carrier lives in the new standalone-collection-carrier.ts;
+# these are the one-line hooks into the existing call/layout sites, plus the
+# reserved `$Map` field-name comment in map-runtime.ts.
+loc-budget-allow:
+  - src/codegen/expressions/new-super.ts
+  - src/codegen/map-runtime.ts
+func-budget-allow:
+  - src/codegen/class-bodies.ts::compileClassBodiesInner
+  - src/codegen/class-bodies.ts::compileSuperCall
 ---
 
 ## Problem
@@ -48,3 +57,76 @@ A minimal `class extends Map { f; constructor(){ super(); this.f = 1 } get(k){ r
 compiles and runs host-free in standalone (regression test failing on its
 parent); the tailwindcss lane moves past this diagnostic (report the next one
 verbatim).
+
+## Implementation Plan
+
+Written 2026-10-05 after reproducing on `upstream/main` b6324ee6d1.
+
+### Root cause (measured)
+
+Two defects compose:
+
+1. **Order dependence.** `ensureMapRuntimeTypes` publishes the native `$Map`
+   runtime struct as `ctx.structMap.get("Map")`. `collectClassDeclaration`
+   resolves `class U extends Map` through `ctx.structMap.get(parentClassName)`,
+   so whenever ANY earlier declaration typed something as a `Map`
+   (tailwindcss's `chunk-5JIJA4QV.mjs` class `p` with
+   `constructor(e = new Map) { this.values = e }`), the builtin heritage
+   resolves to the runtime struct and `U` is registered as an ordinary
+   WasmGC subtype of `$Map` with NONE of `$Map`'s fields — the layout the
+   final hierarchy audit rejects. With no earlier `Map` type the same class
+   instead hits the explicit #2620/#3972 refusal ("declared property … not yet
+   supported"). Two-line fixture (`.tmp/m7.mjs` shape):
+   `var P = class { constructor(e = new Map()) { this.values = e } };` before
+   the `U` declaration flips the diagnostic.
+2. **No own-field storage on a native-collection subclass.** The standalone
+   Map/Set/WeakMap/WeakSet subclass is externref-backed: `super()` returns a
+   bare branded `$Map`, and `this.f = …` has nowhere to live (the #3972 note
+   in `standalone-subclass-ctors.ts`).
+
+Rejected alternative (measured): make `U` an ordinary struct subclass of
+`$Map` (copy the prefix, treat it like a user parent). It compiles but fails
+validation as soon as `instanceof` runs — class structs are assumed to carry
+`__tag` at field 0, which a `$Map` prefix makes impossible.
+
+### Fix — a `$Map`-subtype carrier for the externref-backed representation
+
+New module `src/codegen/standalone-collection-carrier.ts` (standalone/WASI
+only; the JS-host lane never reaches it):
+
+- `$Map` is never a user-class parent: when the heritage is a native
+  collection builtin that resolved to no user class, `collectClassDeclaration`
+  ignores the runtime struct (fixes defect 1 in every mode — the old path could
+  only produce an invalid module, so no successful binary changes).
+- A standalone `class X extends Map|Set|WeakMap|WeakSet` with a declared
+  instance FIELD becomes a *carrier* class: still externref-backed (so every
+  measured-working inherited-method/brand path is untouched), but its
+  registered struct is `$Map`'s exact field prefix + `__tag` + own fields with
+  `superTypeIdx = $Map`. `ref.test $Map` therefore still accepts the instance.
+- `super(...)` (explicit and implicit) keeps calling the existing
+  `__new_<Parent>@N` (iterable seeding unchanged) and wraps the result with a
+  per-class `__<X>_collection_carrier(externref) -> externref` that copies the
+  five `$Map` fields into `struct.new $X` (brand `kind` copied, so Set/Weak*
+  work too).
+- `$Map`'s field names become reserved (`__map_*`): names are not encoded in
+  the binary, but the carrier puts them in `ctx.structFields`, where a
+  structural scan for a user `x.entries()`/`x.kind` must not match them.
+- Own-field reads/writes on a carrier take the ordinary struct path
+  (`externrefBackedOwnFieldBacking` → `"collection-struct"`, which the
+  plain-object `__extern_get/__extern_set` fallback skips). Declared field
+  initializers run after `super()` via `struct.set` on the cast receiver.
+- Still refused (CE, not a trap): a declared accessor on a collection
+  subclass and a subclass OF a carrier class (its `super()` would bypass the
+  carrier constructor).
+
+### Acceptance / measurement
+
+- `tests/issue-6754-standalone-map-subclass-fields.test.ts`: the issue's
+  minimal class and the tailwind `U` shape compile with zero imports and run
+  correctly in standalone, in both declaration orders; anti-vacuity control:
+  the fixture fails on the parent commit.
+- Scoped standalone test262 over `built-ins/Map`, `built-ins/Set`,
+  `language/statements/class/subclass`, `language/expressions/class/subclass`
+  before/after.
+- tailwindcss `standalone-dynamic` lane before/after; JS-host fixture binaries
+  byte-identical.

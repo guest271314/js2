@@ -1,4 +1,5 @@
 import type { FieldDef, Instr, ValType } from "../../ir/types.js";
+import { compileCollectionSuperMethodCall } from "../standalone-collection-carrier.js"; // (#6754)
 import { widenJsDefaultGuessSlot } from "../js-default-param-type-guess.js";
 import { materializeFnctorTwinCaptures } from "../fnctor-twin-captures.js";
 import { resolveStaticSpreadArgs } from "../static-spread-arity.js"; // (#6460)
@@ -1370,6 +1371,9 @@ function compileSuperMethodCallCore(
       );
       if (arrayResult !== undefined) return arrayResult === VOID_RESULT ? null : arrayResult;
     }
+    // (#6754) Standalone Map/Set/WeakMap/WeakSet parent: the native helper on `this`.
+    const collectionResult = compileCollectionSuperMethodCall(ctx, fctx, expr, currentClassName);
+    if (collectionResult !== undefined) return collectionResult;
     // (#1614) The parent may be a builtin extern class (Set/Map/Array/...)
     // whose methods are host-backed, not compiled into funcMap. Dispatch
     // `super.method(args)` dynamically via __extern_method_call(this, name, args).
