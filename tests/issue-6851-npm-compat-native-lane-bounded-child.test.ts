@@ -23,6 +23,7 @@ import {
   resolveNativeFirstPerfLane,
   STANDALONE_PERF_LANES,
 } from "../scripts/lib/npm-compat-perf.mjs";
+import { laneBudgetOverrun } from "../scripts/lib/npm-compat-opt-budget.mjs";
 
 // A real V8 heap exhaustion, the way a lane child dies on a graph too big for it.
 function oomChild() {
@@ -94,19 +95,27 @@ describe("#6851 a host-blocked package's native-first lane runs in a bounded chi
     const legacy = legacyChildDiagnostic("js-host-native", child);
     expect(legacy).not.toMatch(/heap/i);
 
-    const diagnostic = childLaneFailureDiagnostic("js-host-native", 120_000, child);
+    const diagnostic = childLaneFailureDiagnostic("js-host-native", child);
     expect(diagnostic).toMatch(
       /^js-host-native lane ran out of JS heap compiling the package graph \(V8: JavaScript heap out of memory; child exit /,
     );
   });
 
-  it("keeps the budget-overrun and plain-exit texts the standalone lanes already reported", () => {
-    expect(childLaneFailureDiagnostic("standalone-dynamic", 180_000, { timedOut: true })).toBe(
-      "standalone-dynamic lane exceeded the 180000ms harness budget (compile-budget)",
+  it("keeps the plain-exit text; a js-host-native overrun names its codegen phase", () => {
+    expect(childLaneFailureDiagnostic("standalone-static", { status: 1, output: "boom\nError: real reason\n" })).toBe(
+      "standalone-static lane child exited 1: Error: real reason",
     );
-    expect(
-      childLaneFailureDiagnostic("standalone-static", 120_000, { status: 1, output: "boom\nError: real reason\n" }),
-    ).toBe("standalone-static lane child exited 1: Error: real reason");
+    expect(laneBudgetOverrun("js-host-native", 120_000, { phase: "codegen", atMs: 4100 }).diagnostic).toBe(
+      "js-host-native lane exceeded the 120000ms harness budget during codegen (started at 4100 ms) (compile-budget)",
+    );
+  });
+
+  it("the generator marks codegen for every lane child, not only standalone ones", () => {
+    const source = readFileSync(join(__dirname, "..", "scripts", "generate-npm-compat-report.mjs"), "utf-8");
+    const body = source.slice(source.indexOf("async function compileNpmCompatPerfLane("));
+    const compileFn = body.slice(0, body.indexOf("\n}\n"));
+    expect(compileFn).toMatch(/\n {2}markLanePhase\("codegen"\);/);
+    expect(compileFn).not.toContain('if (target === "standalone") markLanePhase("codegen")');
   });
 
   it("the generator routes the native-first lane through the resolver with the bounded child", () => {

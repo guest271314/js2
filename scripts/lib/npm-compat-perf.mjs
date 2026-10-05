@@ -268,17 +268,15 @@ export const CHILD_PERF_LANES = Object.freeze([
 const HEAP_EXHAUSTED_RE = /JavaScript heap out of memory|Reached heap limit|Allocation failed - /;
 
 /**
- * (#6851) Diagnostic for a bounded lane child that returned no lane record:
- * the budget overrun, a heap exhaustion (named as such), or the child's last
- * output line.
+ * (#6851) Diagnostic for a bounded lane child that exited (within its budget —
+ * an overrun is `laneBudgetOverrun`'s) without writing a lane record: a heap
+ * exhaustion is named as such, anything else quotes the child's last line.
  *
  * @param {string} lane CLI lane name (`standalone-dynamic`, `js-host-native`, ...)
- * @param {number} budgetMs the child's wall-clock budget
- * @param {{ timedOut?: boolean, status?: number | null, signal?: string | null, output?: string }} child
+ * @param {{ status?: number | null, signal?: string | null, output?: string }} child
  */
-export function childLaneFailureDiagnostic(lane, budgetMs, child) {
-  const { timedOut = false, status = null, signal = null, output = "" } = child;
-  if (timedOut) return `${lane} lane exceeded the ${budgetMs}ms harness budget (compile-budget)`;
+export function childLaneFailureDiagnostic(lane, child) {
+  const { status = null, signal = null, output = "" } = child;
   const text = String(output ?? "");
   if (HEAP_EXHAUSTED_RE.test(text)) {
     return `${lane} lane ran out of JS heap compiling the package graph (V8: JavaScript heap out of memory; child exit ${status ?? signal ?? "abnormal"})`;
@@ -296,7 +294,8 @@ export async function resolveNativeFirstPerfLane({ hostBlocked, inProcess, inChi
   return hostBlocked ? await inChild(JS_HOST_NATIVE_PERF_LANE.lane) : await inProcess();
 }
 
-const O4_TRY_TABLE_FLATTEN_OMISSION =
+/** The one tolerated O4 deviation (#4586): Flatten cannot read `try_table`. */
+export const O4_TRY_TABLE_FLATTEN_OMISSION =
   "wasm-opt -O4 omitted Binaryen's unsupported flatten pass for standardized try_table output; all remaining O4 passes completed.";
 
 function wasmOptWarnings(result) {
