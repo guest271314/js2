@@ -27,6 +27,7 @@ import { BUILTIN_BRAND_TABLE } from "./builtin-brands.js"; // (#5270 step 2)
 import { buildLazyNativeProtoGetInstrs } from "./native-proto.js"; // (#5270 step 2)
 import { fillNativeCarrierGetPrototypeOfArms } from "./object-model/native-carrier-get-prototype.js"; // (#6651 U1)
 import { nativeStringLiteralInstrs } from "./native-string-literals.js";
+import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
 import { buildIsPrototypeOfBody, type PrototypeChainSeed } from "../runtime/wasmgc/values/prototype-chain-bodies.js";
 import {
   protoLinkAnswerOr,
@@ -92,6 +93,12 @@ export function fillArrayProtoSingleton(ctx: CodegenContext): void {
   fillNativeCarrierGetPrototypeOfArms(ctx, {
     protoGet: buildLazyNativeProtoGetInstrs,
     stringLit: (c, v) => nativeStringLiteralInstrs(c, v),
+    addFunc: (name, typeIdx, locals, body) => {
+      const funcIdx = mintDefinedFunc(ctx);
+      ctx.funcMap.set(name, funcIdx);
+      pushDefinedFunc(ctx, funcIdx, { name, typeIdx, locals, body, exported: false });
+      return funcIdx;
+    },
   }); // (#6651 U1)
   const fn = ctx.mod.functions.find((f) => f.name === ARRAY_PROTO_SINGLETON);
   if (!fn) return;

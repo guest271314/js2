@@ -100,7 +100,11 @@ const I31_HEAP_TYPE = -20;
 export interface NativeCarrierProtoDeps {
   protoGet: (ctx: CodegenContext, brand: number) => Instr[] | null;
   stringLit: (ctx: CodegenContext, value: string) => Instr[];
+  /** Define a function with an existing type index; returns its call index. */
+  addFunc: (name: string, typeIdx: number, locals: { name: string; type: ValType }[], body: Instr[]) => number;
 }
+
+const BASE_NAME = "__getPrototypeOf_base";
 
 /** Fill-time state: the scratch locals the arms share, plus the injected helpers. */
 interface Slots {
@@ -281,26 +285,64 @@ export function fillNativeCarrierGetPrototypeOfArms(ctx: CodegenContext, deps: N
   if (!ctx.standalone && !ctx.wasi) return;
   if (!ctx.nativeProtoGlobals || ctx.nativeProtoGlobals.size === 0) return;
   const fn = ctx.mod.functions.find((f) => f.name === "__getPrototypeOf");
-  if (!fn?.body || fn.locals.some((l) => l.name === "__carrierAny")) return; // idempotent
+  if (!fn?.body || ctx.funcMap.has(BASE_NAME)) return; // idempotent
+  // The wrapper arm stays IN FRONT of the original body: a boxed primitive is
+  // an `$Object` the original answers with `%Object.prototype%` (present but
+  // wrong), and the arm's own test (null `$proto`, no null-proto flag, the
+  // internal primitive slot) matches nothing else.
   // Params: 0 = value. Locals are APPENDED so every baked index stays valid.
-  const slots: Slots = { any: 1 + fn.locals.length, entry: 2 + fn.locals.length, deps };
-  const arms: Instr[] = [
-    ...errorArms(ctx, slots),
-    ...collectionArms(ctx, slots),
-    ...structArm(ctx, slots, ctx.structMap.get("__Date"), "Date"),
-    ...structArm(ctx, slots, ctx.structMap.get("$Promise"), "Promise"),
-    ...structArm(ctx, slots, ctx.structMap.get("__StandaloneRegExp"), "RegExp"),
-    ...wrapperArm(ctx, slots),
+  const front: Slots = { any: 1 + fn.locals.length, entry: 2 + fn.locals.length, deps };
+  const wrapper = wrapperArm(ctx, front);
+  // Every other arm is a FALLBACK, consulted only when the original body
+  // answers null. Prepending them (the first cut) replaced PRESENT answers too —
+  // a user `class X extends Map` instance answered `%Map.prototype%`, which the
+  // Temporal polyfill then called methods through (158 standalone rows trapped
+  // with illegal_cast in the merge group). The original body moves into
+  // `__getPrototypeOf_base`; this function calls it first.
+  const tail: Slots = { any: 1, entry: 2, deps };
+  const fallback: Instr[] = [
+    ...errorArms(ctx, tail),
+    ...collectionArms(ctx, tail),
+    ...structArm(ctx, tail, ctx.structMap.get("__Date"), "Date"),
+    ...structArm(ctx, tail, ctx.structMap.get("$Promise"), "Promise"),
+    ...structArm(ctx, tail, ctx.structMap.get("__StandaloneRegExp"), "RegExp"),
   ];
-  if (arms.length === 0) return;
+  if (wrapper.length === 0 && fallback.length === 0) return;
   const entryType: ValType = ctx.objectRuntimeTypes
     ? { kind: "ref_null", typeIdx: ctx.objectRuntimeTypes.propEntryTypeIdx }
     : { kind: "anyref" };
-  fn.locals.push({ name: "__carrierAny", type: { kind: "anyref" } }, { name: "__carrierEntry", type: entryType });
-  fn.body.unshift(
+  if (wrapper.length > 0) {
+    fn.locals.push({ name: "__carrierAny", type: { kind: "anyref" } }, { name: "__carrierEntry", type: entryType });
+    fn.body.unshift(
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.set", index: front.any },
+      ...wrapper,
+    );
+  }
+  if (fallback.length === 0) return;
+  const baseIdx = deps.addFunc(BASE_NAME, fn.typeIdx, fn.locals, fn.body);
+  const answer = 3; // locals: 1 = any, 2 = entry, 3 = the base answer
+  fn.locals = [
+    { name: "__carrierAny", type: { kind: "anyref" } },
+    { name: "__carrierEntry", type: entryType },
+    { name: "__carrierBase", type: { kind: "externref" } },
+  ];
+  fn.body = [
     { op: "local.get", index: 0 },
-    { op: "any.convert_extern" },
-    { op: "local.set", index: slots.any },
-    ...arms,
-  );
+    { op: "call", funcIdx: baseIdx },
+    { op: "local.tee", index: answer },
+    { op: "ref.is_null" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: 0 },
+        { op: "any.convert_extern" },
+        { op: "local.set", index: tail.any },
+        ...fallback,
+      ],
+    },
+    { op: "local.get", index: answer },
+  ];
 }

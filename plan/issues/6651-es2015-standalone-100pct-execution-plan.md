@@ -2377,6 +2377,41 @@ and `Date/proto-from-ctor-realm-{one,two,zero}`. These 14 plus G2's four are +18
   - `Object.setPrototypeOf(<native carrier>, p)`;
   - `Reflect.construct(Map, [], NT)` with an object `NT.prototype`.
 
+#### U1 amendment — 2026-10-05, after the merge-queue park of PR #6504
+
+The merge group parked #6504: **158 standalone `built-ins/Temporal/**` rows went
+pass → `illegal_cast`** (trap in `__call_fn_method_1` via the linked Temporal
+provider's `__js2wasm_link_local_method_call`). U1's own controls could not see
+it: locally every Temporal row fails on base too unless the standalone Temporal
+provider is built and linked (`JS2WASM_TEMPORAL_CACHE=.test262-cache/temporal
+node scripts/prewarm-temporal-provider.mjs --target standalone`), and the rows
+only trap in-process, not under `--isolate`.
+
+Bisection, 60 `Temporal/Duration/prototype/round/*` rows, in-process, provider
+linked: main + #6505 → 57 pass / 0 casts; + U2 alone → 57 / 0; + U1 → 48 / 10
+casts; U1 with the `getPrototypeOf` arms OFF → still 48 / 10; U1 with only the
+`standalone-global-object-carriers.ts` seed list reverted → **57 / 0**. So the
+cause is the nine names U1 added to `STANDALONE_GLOBAL_EVAL_SAFE_CONSTRUCTOR_NAMES`
+(`String Boolean Number Date RegExp Map Set WeakMap WeakSet`), not the arms.
+
+Taken: the seed-list change is **reverted** (the file equals main again). The arms
+stay, restructured as a FALLBACK — the original `__getPrototypeOf` body moves to
+`__getPrototypeOf_base`, the new function calls it first and consults the
+Error/collection/Date/Promise/RegExp arms only on a null answer, so they can no
+longer replace a present answer (e.g. a user `class X extends Map` instance's
+own prototype). The boxed-wrapper arm stays in front (its test only matches a
+null-`$proto` `$Object` with the internal primitive slot). Re-measured: arms on,
+seeds reverted → 57 / 0 on the 60 rows.
+
+Cost: U1's gains drop from 18 to **7** (`{DataView,Object,Promise}/proto-from-ctor-realm`
++ the four `Array/prototype/*/create-proto-from-ctor-realm-non-array`). The 11
+`{Boolean,Map,Number,RegExp,Set,String,WeakMap,WeakSet}/proto-from-ctor-realm` and
+`Date/proto-from-ctor-realm-{one,two,zero}` rows need the seeds; re-landing them
+needs the in-process + linked-Temporal control above and a fix for whatever
+the seeded globals do to method dispatch in eval-using modules. **Lesson for
+every slice: run the Temporal family in-process with the linked provider before
+handing back** — `--isolate` and an unlinked tree both hide this class.
+
 ### 2026-10-05 — Uncovered slice U2
 
 TypedArray residue (census G3, 11 rows). Opus lane, branch
