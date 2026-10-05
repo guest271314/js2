@@ -101,9 +101,11 @@ import {
   npmPerfOptimizationOmittedPasses,
   npmPerfRows,
   packagePerfRecord,
+  resolveNativeFirstPerfLane,
   resolveStandalonePerfLanes,
   skippedPerfLane,
-  STANDALONE_PERF_LANES,
+  CHILD_PERF_LANES,
+  childLaneFailureDiagnostic,
 } from "./lib/npm-compat-perf.mjs";
 import { summarizePlaygroundFiles } from "./lib/npm-compat-playground.mjs";
 import { renderHarnessThrownText } from "./lib/wasm-exn-render.mjs";
@@ -1836,16 +1838,17 @@ function renderModuleInitThrow(error, instance) {
 const NPM_COMPAT_REPORT_SCRIPT = join(ROOT, "scripts", "generate-npm-compat-report.mjs");
 
 /**
- * (#6661, #6660) Measure one package's standalone lane (`standalone-static` or
- * `standalone-dynamic`) in a child process with a wall-clock budget. Used when
- * the JS-host package-entry gate failed: the in-process lane has no budget,
- * and a graph that exhausted the host harness (TypeScript, webpack, ...) would
- * otherwise stall the whole refresh. Returns the child's lane record verbatim,
- * or a failed lane naming the budget overrun / child failure — never the host
- * lane's diagnostic.
+ * (#6661, #6660, #6851) Measure one package's lane (`standalone-static`,
+ * `standalone-dynamic` or `js-host-native`) in a child process with a
+ * wall-clock budget. Used when the JS-host package-entry gate failed: the
+ * in-process lane has no budget and shares the generator's heap, and a graph
+ * that exhausted the host harness (TypeScript, webpack, jsdom, ...) would
+ * otherwise stall — or, out of memory, kill — the whole refresh. Returns the
+ * child's lane record verbatim, or a failed lane naming the budget overrun /
+ * heap exhaustion / child failure — never the host lane's diagnostic.
  */
-function standaloneLaneInChild(name, lane, budgetMs) {
-  const { key, inputMode } = STANDALONE_PERF_LANES.find((entry) => entry.lane === lane);
+function perfLaneInChild(name, lane, budgetMs) {
+  const { key, inputMode, placement } = CHILD_PERF_LANES.find((entry) => entry.lane === lane);
   const partial = join(ROOT, ".tmp", "npm-compat-lane", `${name}-${lane}-${process.pid}.json`);
   const args = ["--import", "tsx", NPM_COMPAT_REPORT_SCRIPT, "--only", name, "--no-write", "--perf-only"];
   args.push("--lane", lane, "--partial-output", partial);
@@ -1859,30 +1862,24 @@ function standaloneLaneInChild(name, lane, budgetMs) {
     killSignal: "SIGKILL",
   });
   const extra = { inputMode, compileDurationMs: performance.now() - started };
-  if (child.error?.code === "ETIMEDOUT") {
-    return failedOptimizedPerfLane(
-      "standalone",
-      "compile-error",
-      `${lane} lane exceeded the ${budgetMs}ms harness budget (compile-budget)`,
-      extra,
-    );
-  }
+  const timedOut = child.error?.code === "ETIMEDOUT";
   try {
-    const record = JSON.parse(readFileSync(partial, "utf-8")).packages?.find((entry) => entry.name === name)?.perf
-      ?.lanes?.[key];
+    const record = timedOut
+      ? null
+      : JSON.parse(readFileSync(partial, "utf-8")).packages?.find((entry) => entry.name === name)?.perf?.lanes?.[key];
     if (record) return record;
   } catch {
     // Fall through to the child's own failure text.
   } finally {
     rmSync(partial, { force: true });
   }
-  const tail = `${child.stderr ?? ""}${child.stdout ?? ""}`.trim().split("\n").filter(Boolean).at(-1);
-  return failedOptimizedPerfLane(
-    "standalone",
-    "compile-error",
-    `${lane} lane child exited ${child.status ?? child.signal ?? "abnormally"}: ${tail ?? "no output"}`,
-    extra,
-  );
+  const diagnostic = childLaneFailureDiagnostic(lane, budgetMs, {
+    timedOut,
+    status: child.status,
+    signal: child.signal,
+    output: `${child.stderr ?? ""}${child.stdout ?? ""}`,
+  });
+  return failedOptimizedPerfLane(placement, "compile-error", diagnostic, extra);
 }
 
 async function perfNpmCompatPackage(name, { setupFactory, report, compileOptions } = {}) {
@@ -2135,7 +2132,18 @@ async function perfNpmCompatPackage(name, { setupFactory, report, compileOptions
       : runJsHostLane
         ? await collectJsHostPerfLane(() => runHost())
         : skippedPerfLane("js-host");
-    jsHostNative = await nativeFirstPerfLane(() => runHost("js-host-native"));
+    // (#6851) A host-blocked graph is compiled for the native-first lane in a
+    // bounded child, like the standalone lanes below: in process it has no
+    // budget and shares this generator's heap, and for webpack/jsdom it ran
+    // that heap out — killing the measure job, so no partial was written and
+    // the dashboard kept serving their stale pre-#6661 rows.
+    jsHostNative = await nativeFirstPerfLane(() =>
+      resolveNativeFirstPerfLane({
+        hostBlocked,
+        inProcess: () => runHost("js-host-native"),
+        inChild: (lane) => perfLaneInChild(name, lane, report.compile?.timeoutMs ?? 120_000),
+      }),
+    );
   }
   // (#6661, #6660) Both standalone lanes compile their own host-free graph, so
   // a JS-host compile/validation failure is not evidence about them. When the
@@ -2146,7 +2154,7 @@ async function perfNpmCompatPackage(name, { setupFactory, report, compileOptions
     hostBlocked,
     selected: { "standalone-static": runStandaloneLane, "standalone-dynamic": runStandaloneDynamicLane },
     inProcess: (lane) => (lane === "standalone-static" ? runStatic() : runDynamic()),
-    inChild: (lane) => standaloneLaneInChild(name, lane, report.compile?.timeoutMs ?? 120_000),
+    inChild: (lane) => perfLaneInChild(name, lane, report.compile?.timeoutMs ?? 120_000),
   });
   return packagePerfRecord(spec.sampleOp, jsHost, standalone, { jsHostNative, standaloneDynamic });
 }
@@ -3124,7 +3132,11 @@ for (const entry of NPM_COMPAT_CATALOG) {
       ? await workloadRunner({ quiet: true })
       : null;
   const hasApiWorkload = workloadRunner !== null;
+  // (#6851) Name each phase, so a measure job that dies (OOM, runner kill)
+  // leaves the phase it died in on the CI log instead of only the first line.
+  console.log(`[npm-compat] ${entry.name} — upstream suite...`);
   const catalogUpstreamReport = await runConfiguredUpstreamSuite(entry.name, { quiet: true });
+  console.log(`[npm-compat] ${entry.name} — perf lanes...`);
   const upstreamSuite = entry.upstreamSuite;
   const upstreamTests = upstreamSuite
     ? {
