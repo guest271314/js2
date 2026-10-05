@@ -1,0 +1,9 @@
+# Prepared Boolean boundary composed with delivered early returns
+
+The private host presentation path preserves logical Boolean branding with physical i32, explicit export metadata, ToBoolean arguments and canonical0/1 results. Own __proto__, constructor and marked user __* names survive manifest cloning, helper generation and runtime adaptation. Numeric/void and unmarked runtime behavior remain unchanged.
+
+Base: delivered canonical main c3e3fab33d9ef4747f2a502ab1a8c46d8b224ea1; PR6488 exact45929 through b632. Six implementation files and the new54-case suite reuse preserved71ecd exact bytes. H1/H2/current-source tests compose the Boolean type union with the delivered early.return predecessor proof. Manifest15df changes exactly9 scalar pins, retaining all10 historical inverse/replay recipes and immutable authorities.
+
+Current ordinary evidence at local hook release:311/311 current-source (original297 plus14);272/272 across Boolean54, numeric44, early-return16, lowering57, classification45, isView56. Actual strict raw channels are clear and complete custody vectors restored. Nine native gates0; supplemental coercion148files566sites0. Additional runtime298/2980 is measured; historical631/validator62 remain pending in their separate checkout. Normal hooks are required; publication is held for complete ordinary evidence and checks. See issue3525, “IR-only R5: whole-program single- and multi-source Prepared ownership,” for exact plans/claims, runtime+33 allowance and evidence receipts.
+
+Local Node24.4.1/Vitest3.2.4 evidence differs from hosted CI. Existing legacy388 non-Boolean argument/coercion/identity differences remain full-goal gaps, not normalized matches or new caller restrictions. No public route switch, complete IR equality, performance acceptance or legacy retirement. The mixed WasmGC observation-interface plan is recorded only; it adds no implementation in this checkpoint.
