@@ -4,7 +4,7 @@ title: "ES2015 standalone → 100%: cluster execution plan from the 2026-09-20 c
 status: in-progress
 sprint: current
 created: 2026-09-20
-updated: 2026-10-04
+updated: 2026-10-05
 priority: high
 horizon: xl
 feasibility: hard
@@ -169,6 +169,28 @@ assignee: "ttraenkler/fable-es2015-plan"
 #     `$__ta_ctor`, which the Int8Array `$Object` carrier is not). The first cut
 #     inlined the arm here and cost +68 / +65; extracting it left these 8.
 loc-budget-allow:
+  # 2026-10-05 — uncovered slice U4 (record `### 2026-10-05 — Uncovered slice
+  # U4`). The mechanisms live in leaves: `statements/finally-ran-guard.ts`
+  # (NEW — the per-try `finallyRan` flag), `dstr-assign-iterator-drive.ts`
+  # (computed-key evaluation for for-of object patterns) and
+  # `declarations/array-rebind-element-widening.ts` (alias groups, the widened
+  # initializer, the aliasing struct-field carrier). What stays in the god-files
+  # is the call where each decision is taken:
+  #   - `ir/lower-generic.ts` +35: the IR twin of the finally guard — the
+  #     `try` arm and `resolveBrLabel` own the inlined finally copies, and the
+  #     flag has to be raised beside each copy and tested inside each handler
+  #     buffer they build (the IR lowering has no codegen-side helper to share);
+  #   - `statements/for-of-destructuring.ts` +24: the import, the struct arm's
+  #     hand-off to the extern-get arm for a runtime-only key, and the key
+  #     evaluation + runtime-key read in the extern-get arm;
+  #   - `statements/variables.ts` +3: the import and the widened-initializer
+  #     branch in the module-global initializer arm;
+  #   - `index.ts` +2: the import and the one-line field-type hook in
+  #     `ensureStructForType`, beside the #5376 accessor-value widening.
+  - src/ir/lower-generic.ts
+  - src/codegen/statements/for-of-destructuring.ts
+  - src/codegen/statements/variables.ts
+  - src/codegen/index.ts
   # 2026-09-29 — cluster H, slice H6 (record under the H6 claim).
   # `src/codegen/object-runtime-enumeration.ts` +4: one import and three
   # one-line `$Proxy` widenings of the array-like `$Object` arms of
@@ -1181,6 +1203,19 @@ loc-budget-allow:
   # `promise-subclass-cell-read.ts`; the hand-off cannot move, because it is the
   # arm that would otherwise emit the bare `global.get` of the cell.
 func-budget-allow:
+  # 2026-10-05 — uncovered slice U4 (see the loc-budget note): the finally
+  # guard's call sites in `compileTryStatement` +12, `lowerIrFunctionBody` +35
+  # and `emitInstrTree` +24 (IR twin); the computed-key evaluation in
+  # `compileForOfIteratorAssignDestructuring` +11 and its hand-off in
+  # `compileForOfAssignDestructuring` +9; `compileVariableStatement` +2;
+  # `ensureStructForType` +1.
+  - src/codegen/statements/exceptions.ts::compileTryStatement
+  - src/ir/lower-generic.ts::lowerIrFunctionBody
+  - src/ir/lower-generic.ts::emitInstrTree
+  - src/codegen/statements/for-of-destructuring.ts::compileForOfIteratorAssignDestructuring
+  - src/codegen/statements/for-of-destructuring.ts::compileForOfAssignDestructuring
+  - src/codegen/statements/variables.ts::compileVariableStatement
+  - src/codegen/index.ts::ensureStructForType
   # 2026-09-29 — cluster H, slice H6. `buildObjectEnumerationHelpers` +2: the
   # `$Proxy` widening of the `__extern_get_idx` / `__extern_has_idx`
   # array-like arms (one line each; the predicate is `proxy-array-like.ts`).
@@ -1996,6 +2031,87 @@ readable (repo hygiene, #6796). Headings, in order:
 
 Owners still append new cluster records at the end of this file. The
 2026-09-28 session wrap-up handoff and everything after it stay below.
+
+### 2026-10-05 — Uncovered slice U4
+
+Slice U4 of the uncovered-residue census (G5 for-of residue + G6 collection-ctor
+identity, 7 rows). Senior-dev lane, branch `issue-6651-u4-forof-collections` off
+`origin/main` @ `4d42eec28e`. Every number below is a local run on this box:
+`JS2WASM_EVAL_ENGINE=quickjs npx tsx scripts/run-test262-paths.mts <list> --standalone --isolate`,
+one runner at a time, QuickJS provider rebuilt after every `src/` change. The
+base side ran the same runner against a copy of base `src/` (the provider
+binary was the branch build; none of the base-checked rows evaluates code).
+
+**Three of the census root causes were wrong; the rows still flip.**
+
+| row(s) | census said | measured cause | fix |
+| --- | --- | --- | --- |
+| `for-of/map.js` | Map pair array boxes a boolean/null key as `null` | the Map iteration is right (probe p05 reads all four pairs). The fixture's `first = second; second = third; …` chain is the defect: `second` is a `boolean[]` slot, so `second = third` COPIED `[null, undefined]` into an i32 vec as `[false, false]` and the array identity was lost | `declarations/array-rebind-element-widening.ts`: module bindings assigned to one another (`x = y`) form an alias group; a group that holds both object-domain and primitive-domain arrays gets the externref-element vec for every member. A widened `[…]` initializer is built straight into that vec (a converted `true` came back as the number 1) |
+| `for-of/throw-from-finally.js` | for-of iterator-close entry + close-on-throw wrapper both re-enter the user finally | not for-of at all. ANY `try { } finally { i++; throw e }` ran its finally twice, on both lanes: the inlined normal-exit finally sits inside the statement's own catch_all. The same placement let a catch clause catch its own finally's throw | `statements/finally-ran-guard.ts` (new): one i32 flag per try-with-finally, raised before every inlined finally copy (normal exit, break/continue/return sites, catch-body wrapper); every handler of the statement propagates untouched while it is set. IR twin in `ir/lower-generic.ts` (`try` arm + `resolveBrLabel`) |
+| `for-of/dstr/obj-prop-name-evaluation-error.js` | evaluate the key before GetIterator (`dstr-assign-iterator-drive.ts`) | both for-of object-pattern arms SKIPPED a computed key they could not resolve statically, so `[a.b]` was never evaluated | `dstr-assign-iterator-drive.ts::evaluateForOfPatternKey` evaluates it in source order and the extern-get arm reads the runtime key; the struct arm hands a runtime-key pattern to the extern-get arm |
+| `{Map,WeakMap}/iterator-item-{first,second}-entry-returns-abrupt.js` (4) | as named (`new-super.ts:5570`) | confirmed: `{ value: item }` typed its field from the checker (`string[]` vec) while `item` lives in the descriptor-carrier externref vec, so the store copied it and the accessor overlay (keyed by vec identity) never fired | `propertyValueWidenedArrayCarrier`: an object-literal property whose value is a widened module array binding takes that binding's carrier, so the store aliases |
+
+Spec: §14.15.3 (a finally's abrupt completion replaces the try's completion;
+it is not re-handled by the same statement); §13.15.5.3 PropertyDefinition
+evaluation order; §24.1.1.1 step 8.h / §24.3.1.1 (`Get(item, "0")` abrupt →
+IteratorClose).
+
+**Before → after (standalone, per path):**
+
+| set | base | branch |
+| --- | ---: | ---: |
+| the 7 U4 rows | 0 / 7 | **7 / 7** |
+| collateral `language/statements/try/completion-values-fn-finally-abrupt.js` | fail | **pass** |
+| pin suite `tests/issue-6651-u4-forof-collections.test.ts` (12, eval-free) | 3 / 12 (the 3 GUARDs) | 12 / 12 |
+
+**Not done, deliberately.**
+
+- The 4M-entry `stepCap` in `emitNativeCollectionCtorIterableDrive` stays. The
+  plan says to delete it once identity is fixed, but only the object-literal
+  store aliases now: `var it2 = f().value` (a checker-typed module `string[]`
+  slot) and `[item][0]` still copy. The test262 runner has no wall-clock guard
+  around execution, so a remaining copy shape would wedge a CI shard.
+- The finally guard is OFF inside `async` functions. Measured on base and
+  branch alike: `try { await rejected } catch { … }` in standalone resumes
+  NORMALLY instead of throwing (`.tmp` probes q13/q15). Nine
+  `harness/asyncHelpers-throwsAsync-*.js` rows pass on base only because their
+  `finally { assert(caught) }` throws, the statement's own catch clause catches
+  that throw (setting `caught`) and the finally runs again. With the guard on,
+  those nine fail honestly. They belong with the await-rejection defect; the
+  guard should extend to async bodies when that lands.
+- Host lane: `for-of/dstr/obj-prop-name-evaluation-error.js` still fails on
+  gc (`a.b` with `a` undefined reads `undefined` there; the key IS evaluated now).
+
+**Controls.**
+
+- Reach, by static scan of the 1,908 rows of `language/statements/for-of/**`,
+  `built-ins/{Map,Set,WeakMap,WeakSet}/**`, `language/statements/try/**` and
+  every test262 file containing `finally {`: 393 rows can reach a U4
+  mechanism (202 `finally`, 14 for-of computed key, 40 `defineProperty`, 137
+  identifier-to-identifier assignment). All 393 were status-checked on the
+  branch; every branch non-pass row (41) and the collateral gain were then
+  re-run on base. Result: **0 pass → non-pass**; all 41 fail on base with the
+  same status and the same first error line. Against the CI artifact
+  (2026-10-05 13:34) the branch shows 6 "pass → fail" rows, all
+  `built-ins/Temporal/**/string-shorthand-no-object-prototype-pollution.js`:
+  they fail identically on the local base (no Temporal provider locally, as
+  U1 recorded).
+- The other 1,515 rows: compile-only byte differential, base vs branch — a
+  seeded 150-row sample on standalone AND gc (0 binaries differ), plus every
+  remaining `for-of/**` / `{Map,Set,WeakMap,WeakSet}/**` row on standalone
+  (1,285 rows). Those differ in 4 binaries, the
+  `for-of/head-{,await-}using-*` rows, whose disposal lowering builds its own
+  try/finally the static scan could not see; all 4 have the same status and
+  message on base and branch (1 pass, 3 fail).
+- Playground (`website/playground/examples/**`), `benchmarks/suites/**` and
+  `examples/**`: 30 files × {gc, wasi, standalone} byte-identical.
+- `node scripts/equivalence-gate.mjs`: 1,748 passing, the 22 known failures,
+  no new failures (run on the final tree).
+
+**Residuals for a later slice.** The copy shapes above (`var x = f().value`,
+`[item]`); the standalone await-rejection defect; and the 13
+`language/statements/for-of/dstr/obj-rest-*` rows in the reach set, which fail
+on base and branch with the same message (not investigated here).
 
 ## Handoff — 2026-09-28, session wrap-up (D6, D7, H1 landed; I7 in this PR)
 
