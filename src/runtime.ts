@@ -90,6 +90,7 @@ import {
   isDetachedVecMirrorSource as vecMirrorDetached,
   applyWithVecMirrorWriteback as applyVecMirror,
 } from "./runtime/vec-mirror-writeback.js"; // (#3603 S1) vec-mirror write-back; (#4531) mirror→vec mutation routing
+import { vecInheritedArrayMember } from "./runtime/vec-array-proto-read.js"; // (#4526)
 import {
   arrayIndexForPropertyKey as _asArrayIndex,
   copyWasmStructSidecar,
@@ -243,6 +244,7 @@ const _fnctorInstanceCtor = new WeakMap<object, object>();
  * ordinary Object inheriting from %Object.prototype%.
  */
 const _argumentsObjects = new WeakSet<object>();
+const _isArgumentsObject = (value: object): boolean => _argumentsObjects.has(value);
 
 /**
  * (#2743 a) Own-property predicate for a registered arguments object. `length`
@@ -12965,6 +12967,8 @@ assert._isSameValue = isSameValue;
           const val = _safeGet(obj, key, callbackState);
           if (val !== undefined)
             return wsh.normalizeSandboxValue(obj, val, key, globalSandbox, callbackState, _unwrapForHost);
+          const arrayMember = vecInheritedArrayMember(obj, key, callbackState?.getExports(), _isArgumentsObject); // (#4526)
+          if (arrayMember !== undefined) return arrayMember;
           // (#4618) A property read off a BARE closure bridge (the plain host
           // function `_wrapWasmClosureUnknownArity` mints): the bridge drops
           // the closure's sidecar surface, so `console.log.mock` /
@@ -19116,6 +19120,8 @@ assert._isSameValue = isSameValue;
           // `arr.constructor === Array` holds. No-op without a sandbox.
           return wsh.normalizeSandboxValue(obj, val, key, globalSandbox, callbackState, _unwrapForHost);
         }
+        const arrayMember = vecInheritedArrayMember(obj, key, callbackState?.getExports(), _isArgumentsObject); // (#4526)
+        if (arrayMember !== undefined) return arrayMember;
         if (obj == null || typeof obj !== "object") return undefined;
         try {
           if (Object.getPrototypeOf(obj) !== null) return undefined;
