@@ -1,7 +1,9 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { ts } from "../ts-api.js";
 import { hasDeclareModifier } from "./ast-modifiers.js";
-import type { CodegenContext } from "./context/types.js";
+import type { CodegenContext, FunctionContext } from "./context/types.js";
+import { buildThrowJsErrorInstrs } from "./js-errors.js";
+import { compileExpression, type InnerResult, VOID_RESULT } from "./shared.js";
 
 /**
  * Whether an identifier is the binding created by an unaliased node:fs named
@@ -29,4 +31,44 @@ export function isUnaliasedNodeFsImportBinding(ctx: CodegenContext, id: ts.Ident
   if (declaration.getSourceFile().isDeclarationFile) return false;
   if (hasDeclareModifier(declaration)) return true;
   return ts.isVariableDeclaration(declaration) && hasDeclareModifier(declaration.parent.parent);
+}
+
+/**
+ * (#6840) A node:fs path call (`readFileSync`/`writeFileSync`) that a host-free
+ * `--target standalone` module reaches from DEPENDENCY code (a `node_modules`
+ * source file). #1491 refuses the compile without `--allow-fs` so the JS-host
+ * `__node_fs_*` import never leaks the host filesystem to third-party code; a
+ * host-free module imports nothing, so there is nothing to leak and `--allow-fs`
+ * cannot help either. The call lowers to a documented throw instead (the
+ * #6659/#6664/#6675/#6691 contract). The program's own source keeps the #1491
+ * compile error, as do WASI and the linked / JS-environment standalone regimes.
+ */
+function isStandaloneDependencyNodeFsCall(ctx: CodegenContext, expr: ts.CallExpression): boolean {
+  if (!ctx.standalone || ctx.wasi || ctx.targetProfile.environment !== "none") return false;
+  if (ctx.standaloneGlobalThisImport !== undefined) return false;
+  // A package-linker provider build (#5247) compiles one dependency package
+  // with package-relative file keys, so its path carries no `node_modules`.
+  if (ctx.exportsConsumedByWasm) return true;
+  return /(?:^|[\\/])node_modules[\\/]/.test(expr.getSourceFile().fileName);
+}
+
+/**
+ * (#6840) Lower such a call: evaluate the arguments (the ArgumentList is
+ * evaluated before the callee runs), then throw a catchable `Error` — the
+ * shape Node's permission model uses for a denied fs call. Returns `undefined`
+ * when the call is not a standalone dependency call (the #1491 path applies).
+ */
+export function tryEmitStandaloneDependencyNodeFsCall(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+  fnName: string,
+): InnerResult | undefined {
+  if (!isStandaloneDependencyNodeFsCall(ctx, expr)) return undefined;
+  for (const arg of expr.arguments) {
+    if (compileExpression(ctx, fctx, arg)) fctx.body.push({ op: "drop" });
+  }
+  const message = `node:fs.${fnName} is not available in a standalone module: there is no filesystem (#6840)`;
+  fctx.body.push(...buildThrowJsErrorInstrs(ctx, "Error", message, { flush: fctx }));
+  return fnName === "writeFileSync" ? VOID_RESULT : { kind: "externref" };
 }

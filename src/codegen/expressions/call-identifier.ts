@@ -89,7 +89,7 @@ import { bindingMayReceiveHostCallable } from "../analysis/mixed-assignment-carr
 import { ensureStandaloneBuiltinStaticMethodClosure } from "../builtin-value-read.js";
 import { localBindingShadowsCapturingFunction } from "../function-declaration-observation.js";
 import { genericIdentityReturnParamIndex, genericStructFactoryCall } from "../generic-struct-factory.js";
-import { isUnaliasedNodeFsImportBinding } from "../node-fs-binding-identity.js";
+import { isUnaliasedNodeFsImportBinding, tryEmitStandaloneDependencyNodeFsCall } from "../node-fs-binding-identity.js";
 import {
   canEmitAssertedStructExtension,
   canStructurallyProjectRef,
@@ -789,6 +789,8 @@ function compileBoundIdentifierCall(
     (expr.expression.text === "readFileSync" || expr.expression.text === "writeFileSync")
   ) {
     const fnName = expr.expression.text;
+    const dependencyFsThrow = tryEmitStandaloneDependencyNodeFsCall(ctx, fctx, expr, fnName); // #6840
+    if (dependencyFsThrow !== undefined) return dependencyFsThrow;
     if (!ctx.allowFs) {
       const { line, character } = expr.getSourceFile().getLineAndCharacterOfPosition(expr.getStart());
       ctx.errors.push({
