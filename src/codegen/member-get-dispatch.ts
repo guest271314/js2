@@ -41,12 +41,13 @@
  * hazard is mode-independent — acorn dogfoods in gc/host mode).
  */
 import type { Instr, ValType } from "../ir/types.js";
-import { classMemberFuncKey, resolveMethodOwnerClass } from "./class-member-keys.js"; // (#2963) method-arm candidates
+import { classMemberFuncKey, isInstanceAccessorKey, resolveMethodOwnerClass } from "./class-member-keys.js"; // (#2963) method-arm candidates
 import { ensureMethodClosureSingleton } from "./closures.js"; // (#2963) canonical method-value singleton
 import { closureBagInitInstr } from "./closures/funcref-wrapper-types.js"; // (#4241) $bag header operand
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { isNativeGeneratorResultStruct, sentinelAwareF64BoxInstrs } from "./generators-native.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
+import { registerHostPropertyKey, staticHostPropertyKeyInstrs } from "./host-property-key.js";
 import { findAlternateStructsForField } from "./property-access.js";
 import { FLAG_ACCESSOR, FLAG_TOMBSTONE } from "./object-runtime.js"; // (#4157)
 import { nativeStringLiteralInstrs } from "./native-string-literals.js"; // (#4157)
@@ -74,6 +75,7 @@ import {
   residFieldReadInstrs,
   residMatchTestInstrs,
 } from "./fnctor-layout-emit.js"; // (#3927) per-type layouts
+import { readEnv } from "../env.js";
 
 /** Mangle a property name into the reserved member-get dispatcher name. */
 function dispatcherName(propName: string): string {
@@ -216,7 +218,7 @@ export function classMethodCandidatesForProp(
     if (receiverStructTypeIdx === undefined) continue;
     const owner = resolveMethodOwnerClass(ctx, className, propName);
     const methodFullName = `${owner}_${propName}`;
-    const methodFuncIdx = ctx.funcMap.get(classMemberFuncKey(ctx, methodFullName));
+    const methodFuncIdx = ctx.funcMap.get(classMemberFuncKey(ctx, methodFullName, "instance"));
     if (methodFuncIdx === undefined) continue;
     const ownerStructTypeIdx = ctx.structMap.get(owner) ?? receiverStructTypeIdx;
     // Inheritance depth (for children-first arm ordering under subtyping).
@@ -279,8 +281,7 @@ export function classAccessorCandidatesForProp(ctx: CodegenContext, propName: st
     if (seenCanonical.has(className)) continue;
     seenCanonical.add(className);
     const accessorKey = `${className}_${propName}`;
-    if (!ctx.classAccessorSet.has(accessorKey)) continue;
-    if (ctx.staticAccessorSet.has(accessorKey)) continue; // static accessor — off the constructor, not an instance
+    if (!isInstanceAccessorKey(ctx, accessorKey)) continue; // static accessor — off the constructor, not an instance (#6772 S12)
     const structTypeIdx = ctx.structMap.get(className);
     if (structTypeIdx === undefined || seenStructs.has(structTypeIdx)) continue;
     // Inherited getters register a per-child funcMap entry pointing at the
@@ -423,6 +424,7 @@ export function reserveMemberGetDispatch(
   );
   if (getIdx === undefined) return undefined;
   registerLateReadStringConstant(ctx, propName);
+  registerHostPropertyKey(ctx, propName);
   addUnionImportsViaRegistry(ctx);
   // (#3032 W6) A `value` dispatcher may grow a sentinel-canonicalizing arm for
   // the native-generator IteratorResult structs at fill time; under a JS host
@@ -585,7 +587,7 @@ export function fillMemberGetDispatch(ctx: CodegenContext): void {
         getIdx !== undefined
           ? [
               { op: "local.get", index: 0 }, // recv
-              ...stringConstantExternrefInstrs(ctx, propName),
+              ...staticHostPropertyKeyInstrs(ctx, propName),
               { op: "call", funcIdx: getIdx },
             ]
           : [{ op: "ref.null.extern" }];
@@ -627,7 +629,7 @@ export function fillMemberGetDispatch(ctx: CodegenContext): void {
         : getIdx !== undefined
           ? [
               { op: "local.get", index: 0 }, // recv
-              ...stringConstantExternrefInstrs(ctx, propName),
+              ...staticHostPropertyKeyInstrs(ctx, propName),
               { op: "call", funcIdx: getIdx },
             ]
           : [{ op: "ref.null.extern" }];
@@ -1082,7 +1084,7 @@ function buildMemberGetInlineCacheArm(
     findColdStructsForField(ctx, propName).length === 0 &&
     findFnctorLayoutStructsForField(ctx, propName).length === 0;
   if (
-    process.env.JS2WASM_MEMBER_GET_IC !== "1" ||
+    readEnv("JS2WASM_MEMBER_GET_IC") !== "1" ||
     !eligible ||
     !ctx.standalone ||
     !ctx.nativeStrings ||

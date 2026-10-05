@@ -57,7 +57,10 @@ import { emitThrowReferenceError, emitThrowTypeError, noJsHost } from "../expres
 import { emitToPropertyKeyOnce } from "../expressions/computed-member-reference.js";
 import { emitLazyProtoGet, emitRegisterDynamicClassParent } from "../expressions/extern.js";
 import { emitStandaloneHeritageCheck } from "../class-heritage-check.js"; // (#5195 r3-5)
+import { emitStandaloneCommaHeritageEffects } from "../classes/class-heritage-comma.js"; // (#6772 S6)
+import { emitStandaloneHeritagePrototypeGet } from "../classes/class-heritage-runtime-get.js"; // (#6772 S11)
 import { classHierarchyHasDynamicMember, dynamicClassKeyGlobalKey } from "../class-dynamic-keys.js"; // (#5195 Step 1 / F1)
+import { computedKeyHasAssignment } from "../class-member-keys.js"; // (#6772 S5)
 import { isForeignEvalNode } from "../expressions/eval-source.js";
 import { ensureNativeArrayFromIterN } from "../iterator-native.js";
 import { ensureObjectRuntime } from "../object-runtime.js";
@@ -132,6 +135,7 @@ import {
   shadowNestedFuncName,
 } from "../nested-function-name-scope.js"; // (#4456) lexical scope for the flat funcMap namespace
 import { collectBlockScopedNames } from "./shared.js";
+import { classifyReferencedSiblingFns } from "./nested-sibling-visibility.js";
 
 /**
  * Mirror declarations.ts' omitted-parameter ABI rule for lifted nested
@@ -465,9 +469,16 @@ export function emitUnresolvedComputedAccessorNameEffects(
         !ts.isSetAccessorDeclaration(member) &&
         !ts.isMethodDeclaration(member)) ||
       !member.name ||
-      !ts.isComputedPropertyName(member.name) ||
-      resolveComputedKeyExpression(ctx, member.name.expression) !== undefined
+      !ts.isComputedPropertyName(member.name)
     ) {
+      continue;
+    }
+    if (resolveComputedKeyExpression(ctx, member.name.expression) !== undefined) {
+      // (#6772 S5) The name folded, but a write inside the key still runs here.
+      if (computedKeyHasAssignment(member.name.expression)) {
+        const effectType = compileExpression(ctx, fctx, member.name.expression);
+        if (effectType !== null && effectType !== (VOID_RESULT as unknown as ValType)) fctx.body.push({ op: "drop" });
+      }
       continue;
     }
     const keyGlobalIdx =
@@ -537,6 +548,8 @@ export function compileNestedClassDeclaration(
   // only for a heritage shape with no static parent lane — see
   // `class-heritage-check.ts`, whose predicate is the safety property here.
   emitStandaloneHeritageCheck(ctx, fctx, decl, compileExpression);
+  emitStandaloneCommaHeritageEffects(ctx, fctx, decl, compileExpression); // (#6772 S6)
+  emitStandaloneHeritagePrototypeGet(ctx, fctx, decl); // (#6772 S11)
 
   const isDeferred = ctx.deferredClassBodies.has(className);
   // (#4646) "Already fully compiled" used to be `structMap.has(className)` — a
@@ -1415,7 +1428,11 @@ function compileNestedFunctionDeclarationInScope(
   for (let pi = 0; pi < stmt.parameters.length; pi++) {
     const p = stmt.parameters[pi]!;
     const paramType = foreignEvalDeclaration ? undefined : ctx.checker.getTypeAtLocation(p);
-    if (paramType !== undefined) ensureStructForType(ctx, paramType);
+    // The Deno primordial graph registers these carriers in its hoist lane.
+    // A second registration while compiling the body can move the ref type
+    // after reservation and change an externref ABI into ref_null. Other
+    // targets still use the general pre-registration fix.
+    if (paramType !== undefined && ctx.targetProfile.ambientPlatform !== "deno") ensureStructForType(ctx, paramType);
     let wasmType: ValType =
       foreignEvalDeclaration || restBindingOverridesToExternref(p) || nestedBindingPatternParamNeedsWiden(p)
         ? { kind: "externref" }
@@ -1840,34 +1857,16 @@ function compileNestedFunctionDeclarationInScope(
   // (#6436) A plain call to this name must install `undefined` as the receiver.
   if (readsAmbientThisGlobal(stmt)) ctx.funcReadsOwnThis.add(funcName);
 
-  // (#5148 checkpoint) Classify referenced sibling registry functions for the
-  // lift-time transitive-capture promotion both branches below perform. The
-  // capture registry is NAME-keyed across frames, so a same-named local can
-  // shadow a foreign frame's function (Deno's 01_core destructures 00_infra's
-  // `__resolvePromise` from `window.__infra`). Discriminate by whether the
-  // registry entry's recorded captures are actually sourceable from THIS
-  // frame: if any capture's recorded slot neither names the captured binding
-  // here nor has a same-named local, the registry entry is foreign — the only
-  // sound call target is the local VALUE, so value-promote it instead of
-  // chasing unresolvable captures.
-  const referencedSiblingFns = new Set<string>();
-  const shadowedSiblingFnValues = new Set<string>();
-  for (const name of referencedNames) {
-    if (name === funcName || !ctx.funcMap.has(name) || !ctx.nestedFuncCaptures.has(name)) continue;
-    const sibCaps = ctx.nestedFuncCaptures.get(name)!;
-    const capsForeign =
-      fctx.localMap.has(name) &&
-      sibCaps.some((cap) => {
-        if (fctx.localMap.has(cap.name)) return false;
-        const def =
-          cap.outerLocalIdx < fctx.params.length
-            ? fctx.params[cap.outerLocalIdx]
-            : fctx.locals[cap.outerLocalIdx - fctx.params.length];
-        return def?.name !== cap.name;
-      });
-    if (capsForeign) shadowedSiblingFnValues.add(name);
-    else referencedSiblingFns.add(name);
-  }
+  // (#5148 / #6730) Classify referenced sibling registry functions for the
+  // lift-time transitive-capture promotion both branches below perform.
+  const { referencedSiblingFns, shadowedSiblingFnValues } = classifyReferencedSiblingFns(
+    ctx,
+    fctx,
+    stmt,
+    funcName,
+    referencedNames,
+    captures,
+  );
 
   if (captures.length === 0) {
     // No captures — compile as a regular module-level function

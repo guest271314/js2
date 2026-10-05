@@ -8,7 +8,9 @@
 // `String.fromCharCode`, `Object.keys`, …). It returns `undefined` when the
 // callee is not one of these, so the caller in calls.ts continues its dispatch
 // chain. Moved verbatim: the emitted Wasm is byte-identical.
+import { classStaticSidecarApplies } from "../class-static-sidecar.js"; // (#6774 S6)
 import { ts } from "../../ts-api.js";
+import { emitProxyAwareOwnKeysCall } from "../object-model/proxy-own-keys-surfaces.js"; // (#6770 S7)
 import { isBooleanType, isNumberType, isStringType } from "../../checker/type-mapper.js";
 import { ensureIntegrityPredicate } from "../object-integrity-carrier.js"; // (#4032)
 import { emitToInt32 } from "../binary-ops.js";
@@ -30,6 +32,7 @@ import {
   emitGeneratorFunctionPrototypeSingleton,
   isStaticSyncGeneratorFunctionValue,
 } from "../generator-function-intrinsic.js";
+import { isDynamicGeneratorFunctionValue } from "../generator-function-dynamic.js"; // (#6651 A14)
 import { isAnyValue, undefinedExternInstrs, undefinedSingletonActive } from "../any-helpers.js";
 import { BUILTIN_STATIC_METHOD_ARITY, pushBuiltinFnSingletonValueInstrs } from "../builtin-fn-meta.js";
 import {
@@ -118,6 +121,7 @@ import {
   ensureObjectRuntime,
 } from "../object-runtime.js";
 import { isArrayCarrierValType, retainArrayIsArrayExternrefCandidate } from "../array-carrier-brand.js"; // (#4556)
+import { integrityCallLiteralArg } from "../object-model/object-literal-reflective-escape.js"; // (#6770 S2)
 import {
   BUILTIN_CTOR_NAMES,
   emitArrayIsArrayExternrefPredicate,
@@ -143,6 +147,7 @@ import {
   classStaticOwnPropertyNames,
   hasClassStaticMethod,
 } from "../class-static-metadata.js";
+import { isClassStaticReflectiveMember } from "../class-static-descriptor.js"; // (#6767)
 import { standaloneClassProtoObjectApplies } from "../class-proto-object.js";
 import { expectedArgumentCountOfParams } from "../function-expected-argument-count.js";
 import { mayStaticallyExpandCreateDescriptor, staticDescriptorTypeError } from "../descriptor-shape.js";
@@ -152,7 +157,9 @@ import * as objectGetPrototypeOf from "./object-get-prototype-of.js";
 import { tryCompileFnctorInstanceGetPrototypeOf } from "../fnctor-instance-prototype.js";
 import { recordStandaloneRuntimeKeyClassMemberRead } from "../standalone-class-dyn-member.js"; // (#6617)
 import { isStandaloneArraySubclass } from "../array-subclass-receiver.js"; // (#2917)
+import { newSiteBuiltinParent } from "../builtin-subclass-new-site.js"; // (#6772 S10)
 import { emitArrayRootedProtoParent } from "../vec-proto-link.js"; // (#2917)
+import { arrayCtorThisCallSeen } from "../array/array-ctor-this.js"; // (#6771 S7)
 import {
   BUILTIN_CLASS_NAMES,
   compileCallExpression,
@@ -893,7 +900,9 @@ export function compileBuiltinStaticCall(
     // The runtime predicate answers correctly for a live proxy too (it unwraps
     // to the target), so routing here is strictly closer to the spec.
     const mayBeProxy = ctx.standalone && tracesToProxyValue(ctx, expr.arguments[0]!);
-    if (argWasmType.kind === "externref" || isErasedTsType || isErasedCarrier || mayBeProxy) {
+    // (#6771 S7) …or `Construct(C)` from a constructor-`this` `Array.from`/`of`.
+    const mayBeConstructed = arrayCtorThisCallSeen(ctx) && argWasmType.kind !== "i32" && argWasmType.kind !== "f64";
+    if (argWasmType.kind === "externref" || isErasedTsType || isErasedCarrier || mayBeProxy || mayBeConstructed) {
       const argType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
       if (!retainArrayIsArrayExternrefCandidate(fctx, argType)) return { kind: "i32" };
       emitArrayIsArrayExternrefPredicate(ctx, fctx);
@@ -1929,7 +1938,10 @@ export function compileBuiltinStaticCall(
     }
 
     // Compile the argument — returns the object itself (freeze/seal return their arg)
-    let argType = compileExpression(ctx, fctx, expr.arguments[0]!);
+    // (#6770 S2) An inline literal is built as the identity-bearing `$Object`.
+    const inlineLiteral = ctx.standalone ? integrityCallLiteralArg(expr) : undefined;
+    if (inlineLiteral) compileObjectAssignArg(ctx, fctx, inlineLiteral);
+    let argType = inlineLiteral ? ({ kind: "externref" } as ValType) : compileExpression(ctx, fctx, expr.arguments[0]!);
     if (!argType) return null;
 
     // #1472 Phase B Blocker A Half 2 — object-receiver normalization.
@@ -2447,7 +2459,10 @@ export function compileBuiltinStaticCall(
     // `built-ins/GeneratorFunction/**` row uses — and for a provably unchanged
     // object-literal generator METHOD (`o.m`, see the predicate). Neither
     // operand evaluation is observable, so neither is compiled.
-    if ((ctx.standalone || ctx.wasi) && isStaticSyncGeneratorFunctionValue(ctx, arg0)) {
+    if (
+      (ctx.standalone || ctx.wasi) &&
+      (isStaticSyncGeneratorFunctionValue(ctx, arg0) || isDynamicGeneratorFunctionValue(ctx, arg0))
+    ) {
       const t = emitGeneratorFunctionPrototypeSingleton(ctx, fctx);
       if (t) return t;
     }
@@ -3061,8 +3076,13 @@ export function compileBuiltinStaticCall(
     const arg0TsType = ctx.checker.getTypeAtLocation(arg0);
     // (#2917) A standalone Array subclass's struct is vestigial — the instance
     // is a vec — so the struct fold answered `undefined` for `length`/indices.
+    // (#6772 S10) Same for a new-site builtin subclass (`class RE extends RegExp {}`):
+    // the instance IS the parent's carrier, so only the dynamic native knows its own keys.
+    const arg0SymName = arg0TsType.getSymbol()?.name;
     const structName =
-      isScriptGlobalThisReceiver || isStandaloneArraySubclass(ctx, arg0TsType.getSymbol()?.name)
+      isScriptGlobalThisReceiver ||
+      isStandaloneArraySubclass(ctx, arg0SymName) ||
+      (arg0SymName !== undefined && newSiteBuiltinParent(ctx, arg0SymName) !== undefined)
         ? undefined
         : resolveStructName(ctx, arg0TsType);
     const literalKeyText = (e: ts.Expression): string | undefined => {
@@ -3329,10 +3349,9 @@ export function compileBuiltinStaticCall(
             !ctx.staticAccessorSet.has(`${classIdentity}_${propLiteral}`) &&
             !ctx.staticProps.has(`${classIdentity}_${propLiteral}`);
           const methodNames = ctx.classMethodNames.get(structName);
-          const staticMethodNames = ctx.classStaticMethodNames.get(structName);
-          const isMethodLookup =
-            (methodNames && methodNames.includes(propLiteral)) ||
-            (staticMethodNames && staticMethodNames.includes(propLiteral));
+          // (#6767) …and, standalone, a static ACCESSOR: the native's class-object view answers both.
+          const isStaticMember = isClassStaticReflectiveMember(ctx, structName, propLiteral);
+          const isMethodLookup = (methodNames && methodNames.includes(propLiteral)) || isStaticMember;
           if (isMethodLookup || isClassIntrinsicLookup) {
             // Skip the fast-path null-return; let the dynamic fallback below
             // handle the method case via the host import.
@@ -3698,6 +3717,7 @@ export function compileBuiltinStaticCall(
     if (argResult.kind !== "externref") {
       coerceType(ctx, fctx, argResult, { kind: "externref" });
     }
+    if (emitProxyAwareOwnKeysCall(ctx, fctx, expr, false)) return { kind: "externref" }; // (#6770 S7)
     const funcIdx = ensureLateImport(ctx, "__getOwnPropertyNames", [{ kind: "externref" }], [{ kind: "externref" }]);
     flushLateImportShifts(ctx, fctx);
     if (funcIdx !== undefined) {
@@ -3717,6 +3737,8 @@ export function compileBuiltinStaticCall(
     expr.arguments.length >= 1
   ) {
     const arg = expr.arguments[0]!;
+    // (#6774 S6) A class's symbol-keyed statics live on its static sidecar `$Object`.
+    const sidecarIdx = noJsHost(ctx) ? classStaticSidecarFor(ctx, arg) : undefined;
     const argResult = compileExpression(ctx, fctx, arg, { kind: "externref" });
     if (!argResult) {
       fctx.body.push({ op: "ref.null.extern" });
@@ -3725,6 +3747,7 @@ export function compileBuiltinStaticCall(
     if (argResult.kind !== "externref") {
       coerceType(ctx, fctx, argResult, { kind: "externref" });
     }
+    if (sidecarIdx !== undefined) fctx.body.push({ op: "drop" }, { op: "global.get", index: sidecarIdx });
     const funcIdx = ensureLateImport(ctx, "__getOwnPropertySymbols", [{ kind: "externref" }], [{ kind: "externref" }]);
     // (#5268 step 3) §20.1.2.11 step 1 is `ToObject(O)`, which THROWS for
     // null/undefined — the native answers an empty list for every non-`$Object`
@@ -3754,7 +3777,9 @@ export function compileBuiltinStaticCall(
       fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: throwNotCoercible });
       fctx.body.push({ op: "local.get", index: gopsLocal });
       releaseTempLocal(fctx, gopsLocal);
-      fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__getOwnPropertySymbols") ?? funcIdx });
+      if (!emitProxyAwareOwnKeysCall(ctx, fctx, expr, true)) {
+        fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__getOwnPropertySymbols") ?? funcIdx });
+      } // (#6770 S7) a $Proxy answers the symbols of its [[OwnPropertyKeys]]
     } else if (funcIdx !== undefined) {
       fctx.body.push({ op: "call", funcIdx });
     } else {
@@ -4720,4 +4745,11 @@ export function tryCompileFromCharCodeFamilyReflective(
 
   fctx.body.push({ op: "drop" });
   return undefined; // re-eval-safe by the gate above
+}
+
+/** (#6774 S6) The static sidecar global of a directly named class, when it has one. */
+function classStaticSidecarFor(ctx: CodegenContext, arg: ts.Expression): number | undefined {
+  const className = classIdentityFromExpression(ctx, arg);
+  if (className === undefined || !classStaticSidecarApplies(ctx, className)) return undefined;
+  return ctx.classStaticSidecarGlobals.get(className);
 }

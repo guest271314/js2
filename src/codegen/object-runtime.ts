@@ -262,6 +262,14 @@ import {
 // `ensureObjectRuntime` (imported back here); `fillProxyDispatch` is re-exported
 // so `index.ts`s `from "./object-runtime.js"` importer keeps resolving.
 import { ensureProxyRuntime } from "./object-runtime-proxy.js";
+import {
+  PROTO_LINK_FIELD,
+  fillProtoLinkArms,
+  protoLinkActive,
+  reserveProtoLinkSetWalk,
+  protoLinkSetWalkArm,
+  withProtoLinkNull,
+} from "./object-runtime-proxy-chain.js"; // (#6766) a Proxy as [[Prototype]]
 import { ensureArgcGlobal } from "./statements/nested-declarations.js";
 import { buildLazyNativeProtoGetInstrs, flushPendingNativeProtoSeeders, getBuiltinBrand } from "./native-proto.js";
 import { applyUndefinedInstrs } from "./apply-closure-args.js";
@@ -277,6 +285,7 @@ import {
   registerStringExoticPushKeys,
   stringExoticHasOwnPrologue,
 } from "./string-exotic-own-props.js"; // (#4232/#4491) §10.4.3 own props + own keys
+import { inOwnKeyOrder, registerObjOrderIndexOfKey } from "./object-model/object-own-key-order.js"; // (#6770 S3)
 import { ensureWrapperConstructorCarriers, wrapperConstructorArmInstrs } from "./wrapper-constructor-carrier.js"; // (#4223) runtime `<wrapper>.constructor`
 import { overlayRouteActive } from "./typed-lane-overlay-route.js"; // (#4222) overlay-aware index presence
 import { backedBoundsGuard, canonicalIndexDigitStep } from "./vec-index-domain.js"; // (#4434) index domain + sparse tail
@@ -294,8 +303,11 @@ import {
   captureReversePeerReadBinding,
   reverseMethodCallArmInstrs,
 } from "./standalone-link-reverse-peer.js"; // (#5383 S17 / #6600) the REVERSE hop
+import { stringWrapperLengthArm } from "./string-wrapper-dynamic-length.js"; // (#6651 C5)
 import { captureWrapperPrimitiveKey } from "./to-primitive-wrapper-slot.js"; // (#4492 wave-5) __to_primitive's [[PrimitiveValue]] arms
 import { buildToPrimitiveBody } from "../runtime/wasmgc/values/to-primitive-bodies.js";
+import { proxyTrapAbsentTail } from "./object-model/proxy-trap-read.js"; // (#6770 S8)
+import { registerExpressionHelpers } from "./registry/expression-helper-delegates.js";
 import type {
   ToPrimitiveCoreBindings,
   ToPrimitiveMethodLiterals,
@@ -1228,7 +1240,12 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     // string keys were first added. Powers OrdinaryOwnPropertyKeys insertion
     // ordering for Object.keys/values/entries/for-in/spread/JSON.stringify.
     { name: "nextSeq", type: { kind: "i32" }, mutable: true },
+    // (#6766) A Proxy in [[Prototype]] position: non-null only on a LINK — an
+    // empty `$Object` standing in `$proto` for the `$Proxy` it holds. Appended
+    // (never renumber); see object-runtime-proxy-chain.ts.
+    { name: "protoLink", type: { kind: "anyref" }, mutable: true },
   ];
+  if (objectFields.length !== PROTO_LINK_FIELD + 1) throw new Error("$Object.protoLink must stay the last field");
   // `$Object` is a plain (final) struct. NOTE (#1100): an earlier attempt made
   // this a NON-FINAL `sub` so the standalone `$Proxy` could extend it, but
   // opening `$Object` up triggered WasmGC iso-recursive canonicalization
@@ -1707,7 +1724,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       propMapTypeIdx,
       initialCapacity: INITIAL_CAP,
     });
-    registerNative("__new_plain_object", [], [{ kind: "externref" }], [], body);
+    registerNative("__new_plain_object", [], [{ kind: "externref" }], [], withProtoLinkNull(body, objectTypeIdx));
   }
 
   // ── $__obj_find(ref $Object, externref key) -> ref null $PropEntry ────────
@@ -2253,6 +2270,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     { op: "i32.const", value: 0 }, // tombstones
     { op: "i32.const", value: 0 }, // flags
     { op: "i32.const", value: 1 }, // nextSeq (slot consumes seq 0)
+    { op: "ref.null", typeIdx: NONE_HEAP }, // protoLink (#6766)
     { op: "struct.new", typeIdx: objectTypeIdx },
     { op: "local.set", index: objLocal },
     // __obj_insert(o, WRAPPER_PRIMITIVE_KEY, any.convert_extern(value),
@@ -2427,6 +2445,9 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   const SET_RESULT_SUCCESS = 1;
   const SET_RESULT_REFUSED = 2;
   let externSetResultGlobalIdx: number | undefined;
+  // (#6766) Without #4504's decide walk, a Proxy link on the chain is found by
+  // its own reserved walk (filled once the Proxy dispatch exists).
+  const protoLinkSetWalkIdx = inheritedSetRuntimeActive ? undefined : reserveProtoLinkSetWalk(ctx);
 
   // ── __extern_set(externref obj, externref key, externref value) -> void ──
   //
@@ -2691,7 +2712,10 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
           ...(protoIndexSetDecisionInstrs(ctx, 0, 2, 3) ?? [{ op: "i32.const", value: SET_DECISION_MISS }]),
         ],
       );
-
+    }
+    // (#6766) Also registered for a Proxy-as-prototype module without #4504:
+    // §10.1.9.2's receiver-side write must be OWN-only, or a link walk re-enters.
+    if (inheritedSetRuntimeActive || protoLinkActive(ctx)) {
       // Allowed own data updates/creates are centralized here so carrier bags
       // never recurse through `__extern_set` as the hidden bag receiver.  That
       // would restart an Object companion walk with the wrong `this`.
@@ -3169,6 +3193,8 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       // creating one. Runs AFTER the own-entry block (which returns for every
       // own case) and BEFORE the frozen gate + own-create below.
       ...inheritedAccessorArm,
+      // (#6766) …and a Proxy link on that chain takes the write (§10.1.9.2 2.b).
+      ...protoLinkSetWalkArm(protoLinkSetWalkIdx),
       // #1472 Phase B Blocker A Half 2 — FROZEN write gate. A frozen object
       // refuses ALL data writes (update AND new key) per ES §10.4.7 / the
       // [[Set]] invariant on non-writable own data properties. Sloppy-mode
@@ -3407,6 +3433,8 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
           { op: "return" },
         ],
       },
+      // (#6766) Missing own property: a Proxy link on the chain answers first.
+      ...protoLinkSetWalkArm(protoLinkSetWalkIdx, 6),
       // Missing own property: non-extensible objects refuse the new key.
       { op: "local.get", index: 4 },
       { op: "ref.as_non_null" },
@@ -3432,6 +3460,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         { name: "any", type: { kind: "anyref" } },
         { name: "o", type: objRefNull },
         { name: "e", type: entryRefNull },
+        ...(protoLinkSetWalkIdx === undefined ? [] : [{ name: "linkSet", type: { kind: "i32" } as ValType }]),
       ],
       body,
     );
@@ -3995,10 +4024,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         else: [
           { op: "local.get", index: 2 },
           { op: "ref.cast", typeIdx: proxyTypeIdx },
-          { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: 3 },
-          { op: "ref.as_non_null" },
-          { op: "struct.get", typeIdx: proxyTrapsTypeIdx, fieldIdx: 2 },
-          { op: "ref.is_null" },
+          ...proxyTrapAbsentTail(ctx, 2), // (#6770 S8) has
           {
             op: "if",
             blockType: { kind: "empty" },
@@ -4225,6 +4251,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         boxSymbolIdx,
         applyClosureIdx,
         defaultHint: stringExtern("default"),
+        defaultHintNative: nativeStringLiteralInstrs(ctx, "default"),
         errors: [
           stringExtern(typeErrorMessage),
           stringExtern(typeErrorMessage),
@@ -4547,7 +4574,11 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   //         12=candIdx 13=bestIdx 14=candSeq 15=bestSeq 16=tmp(ref null $PropEntry)
   {
     const entryRef: ValType = { kind: "ref", typeIdx: propEntryTypeIdx };
-    // Inline: leave on stack the array index (i32) for entry `e` (local idx given
+    // (#6770 S3) The sort key covers the FULL array-index domain [0, 2^32-2]
+    // as an i64 (see object-own-key-order.ts); `__obj_index_of_key`'s i32
+    // answer stops at 2^31-1.
+    const orderIndexIdx = registerObjOrderIndexOfKey(ctx, strFlattenIdx);
+    // Inline: leave on stack the array index (i64) for entry `e` (local idx given
     // by `entryLocal`) — its key parsed as a canonical array index, else -1.
     const entryIndexOf = (entryLocal: number): Instr[] => [
       { op: "local.get", index: entryLocal },
@@ -4556,7 +4587,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       // (#2866) key is anyref; entries reaching here are pre-filtered to string
       // keys (the compaction pass excludes `$Symbol` keys), so this cast is safe.
       { op: "ref.cast", typeIdx: anyStrTypeIdx },
-      { op: "call", funcIdx: objIndexOfKeyIdx },
+      { op: "call", funcIdx: orderIndexIdx },
     ];
     const entrySeqOf = (entryLocal: number): Instr[] => [
       { op: "local.get", index: entryLocal },
@@ -4571,8 +4602,8 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     const keyLess = (candIdx: number, candSeq: number, bestIdx: number, bestSeq: number): Instr[] => [
       // if candIdx >= 0
       { op: "local.get", index: candIdx },
-      { op: "i32.const", value: 0 },
-      { op: "i32.ge_s" },
+      { op: "i64.const", value: 0n },
+      { op: "i64.ge_s" },
       {
         op: "if",
         blockType: { kind: "val", type: { kind: "i32" } },
@@ -4580,12 +4611,12 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
           // candidate is an integer index
           // if bestIdx >= 0 → candIdx < bestIdx ; else → true (int before string)
           { op: "local.get", index: bestIdx },
-          { op: "i32.const", value: 0 },
-          { op: "i32.ge_s" },
+          { op: "i64.const", value: 0n },
+          { op: "i64.ge_s" },
           {
             op: "if",
             blockType: { kind: "val", type: { kind: "i32" } },
-            then: [{ op: "local.get", index: candIdx }, { op: "local.get", index: bestIdx }, { op: "i32.lt_s" }],
+            then: [{ op: "local.get", index: candIdx }, { op: "local.get", index: bestIdx }, { op: "i64.lt_s" }],
             else: [{ op: "i32.const", value: 1 }],
           },
         ],
@@ -4593,8 +4624,8 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
           // candidate is a string key
           // if bestIdx >= 0 → false (string never precedes int) ; else → candSeq < bestSeq
           { op: "local.get", index: bestIdx },
-          { op: "i32.const", value: 0 },
-          { op: "i32.ge_s" },
+          { op: "i64.const", value: 0n },
+          { op: "i64.ge_s" },
           {
             op: "if",
             blockType: { kind: "val", type: { kind: "i32" } },
@@ -4845,8 +4876,8 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       { name: "k", type: { kind: "i32" } },
       { name: "cand", type: entryRefNull },
       { name: "bestE", type: entryRefNull },
-      { name: "candIdx", type: { kind: "i32" } },
-      { name: "bestIdx", type: { kind: "i32" } },
+      { name: "candIdx", type: { kind: "i64" } },
+      { name: "bestIdx", type: { kind: "i64" } },
       { name: "candSeq", type: { kind: "i32" } },
       { name: "bestSeq", type: { kind: "i32" } },
       { name: "tmp", type: entryRefNull },
@@ -5549,6 +5580,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   reserveOrdinarySetWithReceiver(ctx);
 
   ensureProxyRuntime(ctx, types, registerNative);
+  fillProtoLinkArms(ctx, types, registerNative); // (#6766) per-hop Proxy arms in the prototype walkers
 
   // (#4749) Fill Object.assign's standalone Proxy-source CopyDataProperties
   // arm now that descriptor helpers and Proxy dispatch front-guards exist.
@@ -7454,6 +7486,8 @@ interface ExternGetIdxBodyParams {
   numberToStringIdx: number;
   /** funcIdx of `__extern_get` (only used when objArrayLikeArms). */
   externGetIdx: number;
+  /** (#6651 H6) `$Proxy` type: its indexed read is the same `Get(O, ToString(i))`. */
+  proxyTypeIdx?: number;
   /** Pre-built per-`__vec_<k>` dispatch arms (empty at registration time). */
   vecArms: Instr[];
   /** (#2106 S1) Factory for the miss ("index absent") result instrs. A FACTORY
@@ -7483,6 +7517,13 @@ export function buildExternGetIdxBody(p: ExternGetIdxBodyParams): Instr[] {
     ? [
         { op: "local.get", index: 2 },
         { op: "ref.test", typeIdx: objectTypeIdx },
+        ...(p.proxyTypeIdx === undefined
+          ? []
+          : ([
+              { op: "local.get", index: 2 },
+              { op: "ref.test", typeIdx: p.proxyTypeIdx },
+              { op: "i32.or" },
+            ] satisfies Instr[])),
         {
           op: "if",
           blockType: { kind: "empty" },
@@ -8639,7 +8680,7 @@ function buildClosedStructEnumerationArms(
   const arms: Instr[] = [];
   for (const entry of entries) {
     const pushFields: Instr[] = [];
-    for (const field of entry.fields) {
+    for (const field of inOwnKeyOrder(entry.fields, (f) => f.name)) {
       const pushName: Instr[] = [
         { op: "local.get", index: vecLocalIdx },
         ...nativeStringLiteralInstrs(ctx, field.name),
@@ -9698,6 +9739,7 @@ export function unshiftExternGetStringExoticArm(ctx: CodegenContext): void {
           op: "if",
           blockType: { kind: "empty" },
           then: [
+            ...stringWrapperLengthArm(ctx, 1, stringData), // (#6651 C5) `length`
             // n = ToNumber(key), then require Number::toString(n) to equal the
             // original key. This rejects 01, 1.0, NaN, and other non-canonical
             // numeric strings before the String-exotic arm runs.
@@ -10323,7 +10365,7 @@ export function fillDynamicForinVecArms(ctx: CodegenContext): void {
         : [];
     // (#4220) `<array>.constructor` on a receiver only known at RUNTIME —
     // rationale and blast radius in vec-constructor-carrier.ts.
-    const ctorBody = vecConstructorArmInstrs(ctx, keyIs("constructor"));
+    const ctorBody = vecConstructorArmInstrs(ctx, keyIs("constructor"), gAny);
     const arm: Instr[] = [
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
@@ -11858,3 +11900,5 @@ export const OBJECT_RUNTIME_HELPER_NAMES: ReadonlySet<string> = new Set([
   // builder (the value arrives already boxed as a `$Symbol` carrier).
   "__new_Symbol",
 ]);
+
+registerExpressionHelpers({ ensureObjVecBuilders, reserveApplyClosure }); // (#6797) late-bound for the expressions/ leaves

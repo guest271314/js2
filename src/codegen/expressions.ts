@@ -29,12 +29,14 @@ import {
   getDrainFuncIdxForWasiStart,
   getOrRegisterPromiseType,
   isStandalonePromiseActive,
+  isStandaloneThenChainNativeActive,
   emitDrainMicrotasks,
   PROMISE_STATE_FULFILLED,
   PROMISE_STATE_REJECTED,
 } from "./async-scheduler.js";
+import { promiseSubclassNameOfType } from "./expressions/promise-subclass.js"; // (#5197 r3)
 import { reportError, reportErrorNoNode } from "./context/errors.js";
-import { ensureExnTag } from "./registry/imports.js"; // (#3178) async-call rejection payload
+import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js"; // (#3178) async-call rejection payload
 import { allocTempLocal, getLocalType, releaseTempLocal } from "./context/locals.js";
 import { snapshotSpeculative, rollbackSpeculative } from "./context/speculative.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
@@ -63,6 +65,19 @@ import {
 import { assertedStructFactoryExpression } from "./generic-struct-factory.js";
 import { buildTargetTaggedTry } from "../ir/try-table.js";
 import { emitVoidOperandSideEffects } from "./expressions/void-operand.js";
+// (#6797) The real functions behind `helpers/core-delegates.ts` — registered below.
+import { canonicalUndefinedExternInstrs } from "./any-helpers.js";
+import { holeSentinelInstrs, holeTestInstrs } from "./array-holes.js";
+import { emitArraySetLengthValidation } from "./array-length-define.js";
+import { clampRelative, integerArg, requireObjectCoercible, resolveSliceDeps } from "./array-slice-native.js";
+import { sourceOverridesBuiltinPrototypeMember } from "./builtin-proto-member-override.js";
+import { emitBuiltinNamespaceObject } from "./builtin-static-globals.js";
+import { emitArrayIsArrayExternrefPredicate } from "./builtin-value-read.js";
+import { registerCoreDelegates } from "./helpers/core-delegates.js";
+import { buildThrowJsErrorInstrs } from "./js-errors.js";
+import { stringConstantExternrefInstrs } from "./native-strings.js";
+import { buildArrayLikeToLengthFromExternref } from "./object-runtime-enumeration.js";
+import { protoIndexBrandCompanionHasInstrs } from "./proto-index-store.js";
 
 // ── Sub-module imports ─────────────────────────────────────────────────
 
@@ -84,6 +99,7 @@ import { isForeignEvalNode } from "./expressions/eval-source.js";
 
 import { compileClassExpression, compileNewExpression } from "./expressions/new-super.js";
 import { emitNewTargetClassId } from "./new-target.js"; // (#2023)
+import { compileNewTargetValue } from "./expressions/new-target-value.js"; // (#6774 S4)
 import { boxNullRefAsUndefined } from "./null-ref-undefined-box.js"; // (#1058)
 
 import { compileConditionalExpression, compileYieldExpression } from "./expressions/misc.js";
@@ -94,7 +110,12 @@ import { closureBagInitInstr } from "./closures/closure-header-layout.js";
 
 // Property access + binary ops (used inside compileExpressionInner)
 import { brandBooleanBinaryResult, compileBinaryExpression } from "./binary-ops.js";
-import { compileArrayLiteral, compileObjectLiteral } from "./literals.js";
+import { compileArrayLiteral, compileObjectLiteral, compileObjectLiteralAsExternref } from "./literals.js";
+import { classIdentityFromExpression } from "./class-static-metadata.js"; // (#6772) core delegate
+import { sourceClassForCallee } from "./class-call-without-new.js"; // (#6772) core delegate
+import { runtimeEvalMayReplaceCallee, unwrapCallee } from "./expressions/calls-guards.js"; // (#6772) core delegate
+import { bindingIsUniqueAndNeverWritten, heritageExpressionNeedingRuntimeCheck } from "./class-heritage-check.js"; // (#6772) core delegates
+import { ensureObjectRuntime } from "./object-runtime.js"; // (#6772 S11) core delegate
 import { compileElementAccess, compilePropertyAccess, maybeWrapAnyReadEqualityCarrier } from "./property-access.js";
 import { tryEmitLinkedStaticComputedRead } from "./standalone-linked-static-inheritance.js"; // (#6644)
 import { notePromiseDynamicMemberRead } from "./promise-dynamic-member-read.js"; // (#6651 D5)
@@ -248,8 +269,17 @@ function isAsyncCallExpression(ctx: CodegenContext, expr: ts.CallExpression): bo
   ) {
     const receiverType = ctx.checker.getTypeAtLocation(expr.expression.expression);
     const receiverSym = receiverType.getSymbol()?.name;
-    const apparentSym = ctx.checker.getApparentType(receiverType).getSymbol()?.name;
+    const apparentType = ctx.checker.getApparentType(receiverType);
+    const apparentSym = apparentType.getSymbol()?.name;
     if (receiverSym === "Promise" || apparentSym === "Promise") {
+      return false;
+    }
+    // (#5197 r3) A Promise-subclass receiver on the native lane is §27.2.5.4 too: a throwing
+    // species constructor must propagate synchronously, not become a rejection.
+    if (
+      isStandaloneThenChainNativeActive(ctx) &&
+      promiseSubclassNameOfType(ctx, receiverType, apparentType) !== undefined
+    ) {
       return false;
     }
   }
@@ -1170,7 +1200,7 @@ function compileExpressionInner(
   }
 
   if (expr.kind === ts.SyntaxKind.ThisKeyword) {
-    return compileThisKeyword(ctx, fctx, expr);
+    return compileThisKeyword(ctx, fctx, expr, expectedType);
   }
 
   if (ts.isIdentifier(expr)) {
@@ -1616,6 +1646,7 @@ function compileExpressionInner(
   }
 
   if (ts.isMetaProperty(expr) && expr.keywordToken === ts.SyntaxKind.NewKeyword && expr.name.text === "target") {
+    if (ctx.standalone) return compileNewTargetValue(ctx, fctx); // (#6774 S4) the constructor OBJECT
     if (fctx.isConstructor) {
       // (#2023) Read the live new.target class-id (set at the outermost `new`
       // site, preserved through super()). Non-zero inside a construction, so
@@ -1700,3 +1731,30 @@ registerCompileExpression(compileExpression);
 registerCompileThisKeyword(compileThisKeyword);
 registerEnsureLateImport(ensureLateImport);
 registerFlushLateImportShifts(flushLateImportShifts);
+// (#6797) Same idea for the leaves under array/ etc. that core modules call.
+registerCoreDelegates({
+  addStringConstantGlobal,
+  bindingIsUniqueAndNeverWritten,
+  buildArrayLikeToLengthFromExternref,
+  buildThrowJsErrorInstrs,
+  canonicalUndefinedExternInstrs,
+  clampRelative,
+  classIdentityFromExpression,
+  compileObjectLiteralAsExternref,
+  emitArrayIsArrayExternrefPredicate,
+  emitArraySetLengthValidation,
+  emitBuiltinNamespaceObject,
+  ensureObjectRuntime,
+  heritageExpressionNeedingRuntimeCheck,
+  holeSentinelInstrs,
+  holeTestInstrs,
+  integerArg,
+  protoIndexBrandCompanionHasInstrs,
+  requireObjectCoercible,
+  resolveSliceDeps,
+  runtimeEvalMayReplaceCallee,
+  sourceClassForCallee,
+  sourceOverridesBuiltinPrototypeMember,
+  stringConstantExternrefInstrs,
+  unwrapCallee,
+});

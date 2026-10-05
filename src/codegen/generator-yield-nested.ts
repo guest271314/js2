@@ -158,6 +158,35 @@ export function bodyHasComputedKeyYield(body: ts.Node): boolean {
 }
 
 /**
+ * (#6651 A10) The third generator-level gate: a statement `<member> = yield …`
+ * — a yield as the right-hand side of an assignment whose target is a property
+ * or element reference (`obj.foo = yield`). §13.15.2 evaluates the target's
+ * base (and key) BEFORE the yield suspends; the walker below orders exactly
+ * that, so such a generator no longer needs the #680 refusal.
+ */
+function bodyHasMemberTargetYield(body: ts.Node): boolean {
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found || isFunctionLikeScope(node)) return;
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isYieldExpression(skipOuterExpressions(node.right)) &&
+      !(skipOuterExpressions(node.right) as ts.YieldExpression).asteriskToken
+    ) {
+      const target = skipOuterExpressions(node.left);
+      if (ts.isPropertyAccessExpression(target) || ts.isElementAccessExpression(target)) {
+        found = true;
+        return;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(body, visit);
+  return found;
+}
+
+/**
  * (#6651 A6) The second generator-level gate: the body (outside nested function
  * scopes) holds a non-delegating yield whose OPERAND holds a yield
  * (`yield yield 1`, `yield [...yield]`), or a `return` whose expression holds a
@@ -166,7 +195,7 @@ export function bodyHasComputedKeyYield(body: ts.Node): boolean {
  * no suspension at all — `function* g() { return yield 1; }` completed on the
  * first `next()`.
  */
-export function bodyHasNestedYield(body: ts.Node): boolean {
+function bodyHasNestedYield(body: ts.Node): boolean {
   let found = false;
   const visit = (node: ts.Node): void => {
     if (found) return;
@@ -192,6 +221,11 @@ export function bodyHasNestedYield(body: ts.Node): boolean {
   };
   ts.forEachChild(body, visit);
   return found;
+}
+
+/** A6's nested-operand / return gate or A10's member-target gate (above). */
+export function bodyHasNestedYieldShape(body: ts.Node): boolean {
+  return bodyHasNestedYield(body) || bodyHasMemberTargetYield(body);
 }
 
 /**

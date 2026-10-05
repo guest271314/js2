@@ -3,7 +3,17 @@
  * Call expression compilation: direct calls, optional calls, closure calls,
  * property method calls, IIFEs, and conditional callees.
  */
+import { hoistParameterEvalVars } from "./eval-param-scope-hoist.js"; // (#6774 S7)
+import { referencesOwnNewTarget } from "./new-target-value.js"; // (#6774 S4)
+import { tryCompileStandaloneEvalSpread } from "./eval-spread-args.js"; // (#6774 S18)
+import { emitThrowReferenceError } from "../js-errors.js"; // (#6774 S8)
+import { tryCompileWithRoutedCall } from "./with-call-binding.js"; // (#6774 S15)
 import { ts, forEachChild } from "../../ts-api.js";
+import {
+  emitOverriddenProtoMemberCall,
+  protoMemberReadIsOverridden,
+  tryEmitPrimitiveToLocaleStringInvoke,
+} from "../object-model/object-proto-to-locale-string.js"; // (#6770 S5)
 import { widenJsDefaultGuessSlot, widenJsDefaultGuessSymbolSlot } from "../js-default-param-type-guess.js";
 import { profilePhase } from "../../compile-profile.js";
 import {
@@ -27,6 +37,7 @@ import { tryStandaloneHostFreeCall } from "./standalone-dynamic-code.js"; // (#6
 import { compileArrayMethodCall, compileArrayPrototypeCall, resolveArrayInfo } from "../array-methods.js";
 import { emitGlobalThisGopdFold } from "../dyn-read.js"; // (#2984)
 import { tryEmitNullishReceiverCall } from "../nullish-receiver-coercible.js"; // (#4484 B) §7.3.2 on a syntactic null/undefined receiver
+import { tryEmitDynamicGeneratorFunction } from "../generator-function-dynamic.js"; // (#6651 A9)
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "../func-space.js"; // (#1916 S3b) stable-regime minting
 import { sourceFunctionHandleForDeclaration } from "../program-abi-source-callable-planning.js";
 import { withRuntimeModuleCallableBindings } from "../runtime-module-callable-metadata.js";
@@ -35,6 +46,7 @@ import { expectedArgumentCountOfParams } from "../function-expected-argument-cou
 import { reshapeFunctionCtorReflectiveCall } from "../function-ctor-reflective-call.js"; // (#4483) Function.call/apply → Function(…)
 import { tryEmitApplyArgArrayTypeError } from "../apply-arglist-typeerror.js"; // (#4483) §20.2.3.1 step 4 primitive argArray
 import { tryEmitClassConstructorCallWithoutNew } from "../class-call-without-new.js"; // (#4483) §10.2.1 step 2
+import { tryEmitClassCtorCallApply } from "../classes/class-ctor-call-apply.js"; // (#6772 S3)
 import { buildClosureResultBoxing } from "../closures/result-boxing.js"; // (#4082) the single closure-result→externref decision
 import { emitCollectionIteratorVec, ensureMapGroupBy } from "../map-runtime.js"; // (#42) native Set/Map → vec, shared with spread / Array.from; (#3149) native Map.groupBy
 import { isCollectionReflectiveCallShape, tryCompileCollectionReflectiveCall } from "../collections-brand.js"; // (#2604/#3171) {Map,Set,WeakMap,WeakSet}.prototype.METHOD.call brand-check
@@ -45,6 +57,7 @@ import { emitNativeDateParse } from "../date-parse-native.js"; // (#2164) pure-W
 import { observeHostDynamicMethodCallArity } from "../dynamic-method-call-arity.js";
 import { NATIVE_HOF_METHODS } from "../hof-native.js";
 import { ensureTaMapFilterHelper } from "../ta-hof-map-filter.js";
+import { buildTypedArrayIntrinsicCarrierMatch } from "../ta-static-from-of-spec.js"; // (#6769 S7d)
 import { LAZY_ITER_METHODS } from "../iter-lazy-native.js"; // (#2903 R3b) flatMap closure-path exemption
 import { prepareBuiltinCtorValueInvoke } from "../builtin-ctor-value-invoke.js"; // (#6713)
 import {
@@ -101,6 +114,7 @@ import {
   tryBorrowedPrototypeNullishThisThrow,
 } from "../builtin-prototype-brand.js"; // (#4076, #5143)
 import { tryCompilePromiseCallWithoutNew } from "../promise-newtarget.js"; // (#5143)
+import { isDrainedCombinatorResultHandler } from "../promise-species-then.js"; // (#5197 r3)
 import { isReflectivePromiseMember } from "../promise-finally-invoke.js"; // (#6651 D7)
 import {
   appendDynamicCandidateArgcSetup,
@@ -320,6 +334,7 @@ import {
   ensurePromiseNativeProtoGlue,
   ensureStringNativeProtoGlue,
   ensureSymbolNativeProtoGlue,
+  ensureFunctionNativeProtoGlue,
   ensureGeneratorPrototypeNativeProtoGlue,
   emitTypedArrayIntrinsicCtorObject,
   emitArrayIteratorPrototypeSingleton,
@@ -500,7 +515,9 @@ import {
   tryCompileErrorCtorCallWithoutNew,
   tryCompileCollectionCtorCallWithoutNew,
 } from "./new-builtin-globals.js";
-import { compileSuperElementMethodCall, compileSuperMethodCall, emitSuperInitializedFlagStore } from "./new-super.js";
+import { compileSuperElementMethodCall, compileSuperMethodCall } from "./new-super.js";
+import { constructorFrameClassName, emitSuperCallBindThis } from "../classes/derived-ctor-this-guard.js"; // (#6772 S1b)
+import { emitSaveParentOverride, emitSuperCallValue } from "../classes/ctor-return-override.js"; // (#6772 S2 / #6774 S22)
 import { compileIdentifierCall } from "./call-identifier.js";
 import { compileBuiltinStaticCall, tryCompileFromCharCodeFamilyReflective } from "./call-builtin-static.js";
 import { compileNamespaceStaticCall } from "./call-namespace-static.js";
@@ -755,8 +772,11 @@ export function compileObjectAssignArg(ctx: CodegenContext, fctx: FunctionContex
 export function compileProtoArg(ctx: CodegenContext, fctx: FunctionContext, arg: ts.Expression): void {
   if (
     ctx.standalone &&
+    // (#6770 S4) an EMPTY `{}` too: compiled as anything but a `$Object` the
+    // writers coerce it to null, the encoding of the `%Object.prototype%`
+    // terminal, so `Reflect.setPrototypeOf(nonExtensible, {})` read as a
+    // same-prototype no-op and answered `true`.
     ts.isObjectLiteralExpression(arg) &&
-    arg.properties.length > 0 &&
     arg.properties.every(
       (p) => ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p) || ts.isSpreadAssignment(p),
     ) &&
@@ -1227,6 +1247,11 @@ function tryEmitNativeProtoReflectiveCall(
 ): ValType | undefined {
   if (!ctx.standalone) return undefined;
   if (expr.arguments.length === 0) return undefined; // need at least a thisArg
+  // (#6770 S5) `Object.prototype.toLocaleString.call(<primitive>)` — Invoke(O, "toString").
+  if (isCall && ts.isPropertyAccessExpression(expr.expression)) {
+    const invoked = tryEmitPrimitiveToLocaleStringInvoke(ctx, fctx, expr, expr.expression);
+    if (invoked !== undefined) return invoked;
+  }
 
   // Resolve the member name + declaring builtin from the receiver's symbol.
   let sym: ts.Symbol | undefined;
@@ -1273,6 +1298,10 @@ function tryEmitNativeProtoReflectiveCall(
   {
     const syntactic = wrapperProtoSyntacticMember(ctx, unwrapTransparent(receiver), member);
     if (syntactic !== undefined) ({ member, ifaceName } = syntactic);
+  }
+  // (#6770 S5) A source-overridden member's value is no longer the intrinsic closure this lowering casts to.
+  if (protoMemberReadIsOverridden(ctx, unwrapTransparent(receiver))) {
+    return emitOverriddenProtoMemberCall(ctx, fctx, expr, unwrapTransparent(receiver), isCall);
   }
 
   // TypeScript declares `Error.prototype.toString` through the broad Object
@@ -1395,6 +1424,11 @@ function tryEmitNativeProtoReflectiveCall(
   // value-erased twin both already answered correctly.
   else if (brand === undefined && ifaceName === "Symbol" && wrapperWiredMember) {
     brand = ensureSymbolNativeProtoGlue(ctx);
+  }
+  // (#6775 S18) `Function.prototype.toString.call(x)` — §20.2.3.5's own body
+  // (TypeError for a non-callable `this`, incl. a Proxy over a plain object).
+  else if (brand === undefined && ifaceName === "Function" && member === "toString" && ctx.standalone) {
+    brand = ensureFunctionNativeProtoGlue(ctx);
   }
   if (brand === undefined) return undefined;
 
@@ -5554,8 +5588,29 @@ function buildInlineDynamicDispatch(
     }
   }
 
-  return dispatch;
+  return wantTaCtorArm ? wrapTaIntrinsicCallThrow(ctx, fctx, anyLocal, dispatch) : dispatch; // (#6769 S7d)
 }
+
+/**
+ * (#6769 S7d) §23.2.1.1: the `%TypedArray%` intrinsic throws TypeError when
+ * CALLED too. It is an ordinary `$Object` carrier here, so the `$__ta_ctor` /
+ * Int8Array-carrier arms cannot see it and `TypedArray()` returned normally.
+ * The existing identity match (`ta-static-from-of-spec.ts`) reserves the
+ * carrier's global itself, so a `__dyn_call_N` helper built from harness code
+ * before the intrinsic is first materialized still recognises it.
+ */
+function wrapTaIntrinsicCallThrow(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  anyLocal: number,
+  dispatch: Instr[],
+): Instr[] {
+  const abstractThrow = buildThrowJsErrorInstrs(ctx, "TypeError", TA_INTRINSIC_ABSTRACT_MSG, { flush: fctx });
+  return [...buildTypedArrayIntrinsicCarrierMatch(ctx, anyLocal, abstractThrow), ...dispatch];
+}
+
+/** (#6769 S7d) §23.2.1.1 — the message `dataview-native.ts` already uses for this throw. */
+export const TA_INTRINSIC_ABSTRACT_MSG = "TypeError: Abstract class TypedArray not directly constructable";
 
 /**
  * Statically flatten an array literal's elements into a positional argument
@@ -5752,6 +5807,9 @@ export function compileStandalonePromiseThenCallback(
   const savedWidenTuple = ctx.widenTupleCallbackParams;
   const restoreNativeIteratorResult = enterNativeIteratorResultCallback(ctx, nativeIteratorResult);
   ctx.widenTupleCallbackParams = true;
+  // (#5197 r3 Step 7) a drained combinator aggregate is an externref vec, never the typed one.
+  const savedForceExternref = ctx.forceExternrefCallbackParams;
+  if (isDrainedCombinatorResultHandler(ctx, arg)) ctx.forceExternrefCallbackParams = true;
   try {
     const type =
       ts.isArrowFunction(arg) || ts.isFunctionExpression(arg)
@@ -5784,6 +5842,7 @@ export function compileStandalonePromiseThenCallback(
     return { instrs, closureInfo };
   } finally {
     ctx.widenTupleCallbackParams = savedWidenTuple;
+    ctx.forceExternrefCallbackParams = savedForceExternref;
     restoreNativeIteratorResult();
     fctx.savedBodies.pop();
     fctx.body = savedBody;
@@ -7563,7 +7622,8 @@ function compileCallExpression(
     if (r !== undefined) return r;
   }
   {
-    const r = tryRuntimeEvalInterpretedBoundaryIntrinsic(ctx, fctx, expr);
+    const r =
+      tryRuntimeEvalInterpretedBoundaryIntrinsic(ctx, fctx, expr) ?? tryEmitDynamicGeneratorFunction(ctx, fctx, expr); // (#6651 A9)
     if (r !== undefined) return r;
   }
 
@@ -7812,6 +7872,11 @@ function compileCallExpression(
   // isDirect flag (1 = direct call, 0 = indirect) lets the host shim
   // preserve ECMA-262 §19.2.1 scope semantics — direct eval has access to
   // the caller's lexical scope, indirect eval runs in global scope.
+  // (#6774 S15) a bare call resolved through a `with` object environment
+  if (!(ts.isIdentifier(expr.expression) && expr.expression.text === "eval")) {
+    const withCall = tryCompileWithRoutedCall(ctx, fctx, expr);
+    if (withCall !== undefined) return withCall;
+  }
   {
     const evalKind = classifyEvalCallExpression(expr, ctx.checker);
     if (evalKind !== "none") {
@@ -7822,6 +7887,8 @@ function compileCallExpression(
       if (rewritten !== undefined) return rewritten;
       const inlined = tryStaticEvalInline(ctx, fctx, expr, evalKind === "direct");
       if (inlined !== undefined) return inlined;
+      const spreadEval = tryCompileStandaloneEvalSpread(ctx, fctx, expr); // (#6774 S18)
+      if (spreadEval !== undefined) return spreadEval;
       // #2928/#2929 — direct eval adds live caller cells to indirect eval's global environment.
       const runtimeEval =
         evalKind === "direct"
@@ -8065,13 +8132,20 @@ function compileCallExpression(
   //
   // Own-field initializers are deliberately NOT re-run here — the statement
   // site owns that sequencing, and this arm only replaces a no-op.
+  // (#6774 S8) An arrow created AFTER the constructor's own top-level `super()`
+  // re-runs the parent on the captured instance, then BindThisValue throws.
+  if (expr.expression.kind === ts.SyntaxKind.SuperKeyword && fctx.isConstructor !== true && ctx.standalone) {
+    const lateArrowSuper = emitLateArrowSuperCall(ctx, fctx, expr);
+    if (lateArrowSuper !== undefined) return lateArrowSuper;
+  }
   if (expr.expression.kind === ts.SyntaxKind.SuperKeyword && fctx.isConstructor === true) {
-    const enclosingClass = resolveEnclosingClassName(fctx);
+    const enclosingClass = constructorFrameClassName(ctx, fctx); // (#6772 S1b)
     const thisLocal = fctx.localMap.get("this");
     if (enclosingClass !== undefined && thisLocal !== undefined) {
       compileSuperCall(ctx, fctx, enclosingClass, thisLocal, expr, []);
-      emitSuperInitializedFlagStore(fctx); // (#5350 r3) `this` is initialised from here on
-      return VOID_RESULT;
+      emitSuperCallBindThis(ctx, fctx); // (#5350 r3 / #6772 S1b) BindThisValue
+      emitSaveParentOverride(ctx, fctx, enclosingClass); // (#6772 S2)
+      return ctx.standalone ? emitSuperCallValue(ctx, fctx, thisLocal) : VOID_RESULT; // (#6774 S22) the bound `this`
     }
   }
 
@@ -8346,6 +8420,8 @@ function compileCallExpression(
       // (`Promise.prototype.then.call(Promise.prototype, …)`).
       const brandThis = tryBorrowedPrototypeBrandThisThrow(ctx, fctx, expr, innerExpr, compileOneArg, expectedType);
       if (brandThis !== undefined) return brandThis;
+      const classCtorCall = tryEmitClassCtorCallApply(ctx, fctx, expr, propAccess); // (#6772 S3) §10.2.1 step 2
+      if (classCtorCall !== undefined) return classCtorCall;
 
       // (#4483) `Function.call(thisArg, …body)` / `Function.apply(thisArg, [body])`
       // are reflective spellings of the Function CONSTRUCTOR, whose [[Call]]
@@ -10422,6 +10498,22 @@ function compileIIFE(ctx: CodegenContext, fctx: FunctionContext, expr: ts.CallEx
     return undefined;
   }
   const funcExpr = callee as ts.FunctionExpression | ts.ArrowFunction;
+  // (#6774 S4) A lexical `new.target` needs the closure path's snapshot capture.
+  if (ctx.standalone && ts.isArrowFunction(funcExpr) && referencesOwnNewTarget(funcExpr)) return undefined;
+  // (#6774 S8) `(_ => super(…))()` in a derived constructor: the arrow's
+  // `super()` IS the constructor's (§13.3.7.1 walks past arrows). An
+  // argument-free expression-bodied arrow evaluates its body in this frame.
+  if (
+    ctx.standalone &&
+    fctx.isConstructor === true &&
+    ts.isArrowFunction(funcExpr) &&
+    !ts.isBlock(funcExpr.body) &&
+    expr.arguments.length === 0 &&
+    funcExpr.parameters.every((p) => p.initializer === undefined && ts.isIdentifier(p.name)) &&
+    isSuperCallExpression(funcExpr.body)
+  ) {
+    return compileExpression(ctx, fctx, funcExpr.body) ?? VOID_RESULT;
+  }
 
   // Determine parameter types from the function's declared parameters
   const paramTypes: ValType[] = [];
@@ -10579,6 +10671,7 @@ function compileIIFE(ctx: CodegenContext, fctx: FunctionContext, expr: ts.CallEx
   // source FunctionDeclaration. The old path only padded missing numeric
   // arguments with NaN and entered the body directly, so `function (x = 1)`
   // observed NaN whenever the call omitted `x`.
+  hoistParameterEvalVars(ctx, liftedFctx, funcExpr); // (#6774 S7)
   emitDefaultParamInit(ctx, liftedFctx, funcExpr, paramTypes, captures.length);
 
   if (ts.isBlock(body)) {
@@ -10895,3 +10988,44 @@ export function nativeProtoBrandForInterface(ctx: CodegenContext, ifaceName: str
 }
 
 export { compileCallExpression, compileIIFE, compileOptionalCallExpression };
+
+/** (#6774 S8) `super(…)`, possibly parenthesised. */
+function isSuperCallExpression(node: ts.Node): boolean {
+  let e = node;
+  while (ts.isParenthesizedExpression(e)) e = e.expression;
+  return ts.isCallExpression(e) && e.expression.kind === ts.SyntaxKind.SuperKeyword;
+}
+
+/**
+ * (#6774 S8) `super(…)` inside an arrow (not inside the constructor frame) whose
+ * creation statically follows a top-level `super(…)` statement of the enclosing
+ * derived constructor: [[ThisBindingStatus]] is already initialized, so after
+ * the parent constructor runs (§13.3.7.1 step 7) BindThisValue throws a
+ * ReferenceError. Declines (undefined) for any other shape.
+ */
+function emitLateArrowSuperCall(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+): InnerResult | undefined {
+  let fn: ts.Node | undefined = expr.parent;
+  let arrow: ts.ArrowFunction | undefined;
+  while (fn !== undefined && (ts.isArrowFunction(fn) || !ts.isFunctionLike(fn))) {
+    if (ts.isArrowFunction(fn)) arrow = fn;
+    fn = fn.parent;
+  }
+  if (arrow === undefined || fn === undefined || !ts.isConstructorDeclaration(fn) || fn.body === undefined)
+    return undefined;
+  const firstSuper = fn.body.statements.find(
+    (st) => ts.isExpressionStatement(st) && isSuperCallExpression(st.expression),
+  );
+  if (firstSuper === undefined || firstSuper.end > arrow.pos) return undefined;
+  const enclosingClass = resolveEnclosingClassName(fctx);
+  const thisLocal = fctx.localMap.get("this");
+  if (enclosingClass === undefined || thisLocal === undefined) return undefined;
+  const thisType = getLocalType(fctx, thisLocal);
+  if (thisType?.kind !== "ref" && thisType?.kind !== "ref_null") return undefined;
+  compileSuperCall(ctx, fctx, enclosingClass, thisLocal, expr, []);
+  emitThrowReferenceError(ctx, fctx, "Super constructor may only be called once");
+  return VOID_RESULT;
+}

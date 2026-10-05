@@ -47,6 +47,10 @@ import { isBrandedBuiltinName } from "./builtin-brands.js"; // (#4176) named pro
 import { isRegExpProtoSymbolWrite } from "./regexp-proto-symbol-writes.js"; // (#6651 B9)
 import { planHoleyArrayCarrier } from "./holey-array-plan.js"; // (#4222) isolated sparse-carrier proof
 import { recordDescriptorArrayReceiver } from "./declarations/descriptor-array-carrier.js"; // (#4670)
+import { armExhaustiveForNonCallableMemberLiteral } from "./class-to-primitive.js"; // (#6771 S2d)
+import { isArrayLengthConstructor } from "./array/array-length-holes.js"; // (#6771 S3)
+import { noteArrayCtorThisCall } from "./array/array-ctor-this.js"; // (#6771 S7)
+import { readEnv } from "../env.js";
 
 /**
  * Cheap AST pre-scan: set `ctx.usesArrayHoles` when the program contains any
@@ -63,7 +67,12 @@ import { recordDescriptorArrayReceiver } from "./declarations/descriptor-array-c
 export function scanForArrayHoles(ctx: CodegenContext, root: ts.Node): void {
   const pendingBagIdents = new Set<string>();
   const visit = (node: ts.Node): void => {
+    // (#6771 S2d) Not a flag of this pass, so it must not be cut off by the
+    // all-flags-set early-out below: that early-out also waits for it.
+    const exhaustiveArmed = armExhaustiveForNonCallableMemberLiteral(ctx, node);
+    noteArrayCtorThisCall(ctx, node); // (#6771 S7)
     if (
+      exhaustiveArmed &&
       ctx.usesArrayHoles &&
       ctx.protoIndexDirty &&
       ctx.protoNamedDirty &&
@@ -86,6 +95,9 @@ export function scanForArrayHoles(ctx: CodegenContext, root: ts.Node): void {
         }
       }
     }
+    // (#6771 S3) `Array(n)` / `new Array(n)` stores the `$Hole` marker
+    // standalone (`holeFilledArrayNewInstrs`), so its reads must be armed too.
+    if (!ctx.usesArrayHoles && ctx.standalone && isArrayLengthConstructor(node)) ctx.usesArrayHoles = true;
     // (#6482 r4) A plain `x.length = n` arms the marker too, for the same
     // reason `isDescriptorDefineReference` does: §10.4.2.1 ArraySetLength makes
     // a shrink DELETE the dropped elements, so the store now writes the f64
@@ -139,6 +151,10 @@ export function scanForArrayHoles(ctx: CodegenContext, root: ts.Node): void {
     // member a runtime value (the static read declines), so the companion must
     // hold the builtin before the write — seeded only under this flag.
     if (!ctx.protoMemberDirty && isRegExpProtoSymbolWrite(node)) ctx.protoMemberDirty = true;
+    // (#6775 S5) `x[Symbol.toPrimitive](…)` reads the INHERITED method as a
+    // runtime value (the call lowers to Get + apply), so the companion must
+    // hold `Symbol.prototype[@@toPrimitive]`.
+    if (!ctx.protoMemberDirty && isToPrimitiveMethodCall(node)) ctx.protoMemberDirty = true;
     if (!ctx.vecAccessorDescriptorDirty && isNonDataDescriptorDefine(node)) {
       ctx.vecAccessorDescriptorDirty = true;
     }
@@ -146,6 +162,9 @@ export function scanForArrayHoles(ctx: CodegenContext, root: ts.Node): void {
     if (descriptorArrayReceiver !== undefined) {
       recordDescriptorArrayReceiver(ctx, descriptorArrayReceiver);
     }
+    // (#6774 S13) A tagged template's object and `raw` are FROZEN carriers, so a
+    // strict write to either must observe the refused [[Set]].
+    if (ctx.standalone && ts.isTaggedTemplateExpression(node)) ctx.inheritedSetDescriptorDirty = true;
     if (!ctx.inheritedSetDescriptorDirty) {
       // (#4602) Statically-named triggers poison only their own keys; a
       // trigger whose key cannot be named sets the module-wide flag, which
@@ -153,7 +172,7 @@ export function scanForArrayHoles(ctx: CodegenContext, root: ts.Node): void {
       // bags queue for the dedicated post-visit resolution walk.
       const poisoned = inheritedSetDescriptorUseKeys(node);
       if (poisoned === "all") {
-        if (process.env.JS2WASM_DEBUG_4602) {
+        if (readEnv("JS2WASM_DEBUG_4602")) {
           console.error(
             `[4602] ALL-trigger kind=${ts.SyntaxKind[node.kind]} text=${node.getText().slice(0, 120).replace(/\n/g, " ")}`,
           );
@@ -182,6 +201,14 @@ export function scanForArrayHoles(ctx: CodegenContext, root: ts.Node): void {
     if (!ctx.isConcatSpreadableDirty && isIsConcatSpreadableObservable(node)) {
       ctx.isConcatSpreadableDirty = true;
     }
+    // (#6651 H6) Every Proxy VALUE this module can make starts at the identifier
+    // `Proxy`. Deliberately NOT in the dynamic-code cascade below: a proxy built
+    // by eval'd code keeps the pre-H6 array-like answers, and eval-using
+    // modules (most of ES5) keep their bytes.
+    // (#6770 S8) …and a Proxy's trap-absent [[OwnPropertyKeys]] forwards to its
+    // TARGET's own-key list, an own-name read on a possibly-vec target that
+    // this pass cannot see (`Object.keys(new Proxy([], h))` must list `length`).
+    if (!ctx.proxyDirty && ts.isIdentifier(node) && node.text === "Proxy") ctx.proxyDirty = ctx.vecOwnKeysDirty = true;
     if (isOwnKeysOrDescriptorDefineUse(node)) {
       ctx.vecOwnKeysDirty = true;
       // ArraySetLength can expose absent f64 indices even when every literal
@@ -213,11 +240,11 @@ export function scanForArrayHoles(ctx: CodegenContext, root: ts.Node): void {
     if (ctx.inheritedSetDescriptorDirty) break;
     const resolved = resolveBagIdentifierKeys(root, name);
     if (resolved === "all") {
-      if (process.env.JS2WASM_DEBUG_4602) console.error(`[4602] bag identifier "${name}" escapes — all-keys`);
+      if (readEnv("JS2WASM_DEBUG_4602")) console.error(`[4602] bag identifier "${name}" escapes — all-keys`);
       ctx.inheritedSetDescriptorDirty = true;
     } else for (const key of resolved) ctx.inheritedSetDirtyKeys.add(key);
   }
-  if (process.env.JS2WASM_DEBUG_4602) {
+  if (readEnv("JS2WASM_DEBUG_4602")) {
     console.error(
       `[4602] allDirty=${ctx.inheritedSetDescriptorDirty} dynamicCode=${ctx.dynamicCodeDirty} keys=${JSON.stringify([...ctx.inheritedSetDirtyKeys])}`,
     );
@@ -225,7 +252,7 @@ export function scanForArrayHoles(ctx: CodegenContext, root: ts.Node): void {
   // (#6485) The gate's whole safety argument is "flag clear ⇒ not reached ⇒
   // bytes unchanged", so the flag's HIT RATE over a corpus is evidence, not a
   // detail. This makes it measurable without a second, drifting scan.
-  if (process.env.JS2WASM_DEBUG_6485) console.error(`[6485] isConcatSpreadableDirty=${ctx.isConcatSpreadableDirty}`);
+  if (readEnv("JS2WASM_DEBUG_6485")) console.error(`[6485] isConcatSpreadableDirty=${ctx.isConcatSpreadableDirty}`);
   planHoleyArrayCarrier(ctx, root);
 }
 
@@ -1173,11 +1200,20 @@ function isProtoMemberValueUse(node: ts.Node): boolean {
     return true;
   }
   // Object-of-a-member-access ⇒ the syntactic path handles it; not a value use.
+  // (#6771 S5) Except `[Symbol.unscopables]`: that member exists only as a
+  // companion entry (`symbolDataProps`), which only the seeder installs.
   if (
     (ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) &&
     unwrapExpr(parent.expression) === unwrapExpr(node)
   ) {
-    return false;
+    const key = ts.isElementAccessExpression(parent) ? unwrapExpr(parent.argumentExpression) : undefined;
+    return (
+      key !== undefined &&
+      ts.isPropertyAccessExpression(key) &&
+      key.name.text === "unscopables" &&
+      ts.isIdentifier(key.expression) &&
+      key.expression.text === "Symbol"
+    );
   }
   // `Object.defineProperty(X.prototype, …)` / `defineProperties` /
   // `Reflect.defineProperty` — the proto is a WRITE TARGET here, not a value
@@ -1467,4 +1503,16 @@ export function joinEmptyElementTest(
       },
     ],
   };
+}
+
+/** (#6775 S5) `<expr>[Symbol.toPrimitive](…)`. */
+function isToPrimitiveMethodCall(node: ts.Node): boolean {
+  if (!ts.isCallExpression(node) || !ts.isElementAccessExpression(node.expression)) return false;
+  const key = node.expression.argumentExpression;
+  return (
+    ts.isPropertyAccessExpression(key) &&
+    key.name.text === "toPrimitive" &&
+    ts.isIdentifier(key.expression) &&
+    key.expression.text === "Symbol"
+  );
 }

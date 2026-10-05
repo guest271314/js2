@@ -163,6 +163,7 @@ import {
   saveArgumentLocalAsExtern,
 } from "./argc-extras.js";
 import { resolvePlainCallThisTrampoline } from "../named-this-call.js"; // (#6436)
+import { readEnv } from "../../env.js";
 
 function tryEmitGenericStructFactoryResult(
   ctx: CodegenContext,
@@ -2826,7 +2827,7 @@ function compileBoundIdentifierCall(
             if (reservedVecMaterializer) flushLateImportShifts(ctx, fctx);
           }
           const unmatchedClosureHostCall =
-            funcCandidates.length > 1 ? reserveUnmatchedClosureHostCall(ctx, fctx, expr.arguments.length) : undefined;
+            funcCandidates.length > 1 ? reserveUnmatchedClosureHostCall(ctx, fctx, expr) : undefined;
           // Preserve the JavaScript distinction between an omitted argument
           // and null. A preregistered callback with optional externref formals
           // can be wider than the public callable signature, so keep one
@@ -3781,7 +3782,7 @@ function compileBoundIdentifierCall(
           if (mapped !== undefined) {
             fctx.body.push({ op: "local.get", index: mapped });
           } else {
-            if (process.env?.JS2WASM_FRAME_OPS) {
+            if (readEnv("JS2WASM_FRAME_OPS")) {
               process.stderr.write(
                 `[js2:inline-unmapped] inlining '${funcName}' into ${fctx.name}: local.get ${(instr as any).index} ` +
                   `has no arg mapping (paramCount=${inlineInfo.paramCount}, argLocals=${argLocals.join(",")}), ` +

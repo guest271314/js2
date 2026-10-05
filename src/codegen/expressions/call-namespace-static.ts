@@ -38,6 +38,7 @@ import { allocLocal, allocTempLocal, releaseTempLocal } from "../context/locals.
 import { rollbackSpeculative, snapshotSpeculative } from "../context/speculative.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import { isViewRefTestInstrs } from "../dataview-native.js";
+import { arrayBufferIsViewStaticDecision } from "./arraybuffer-isview-static-decision.js";
 import { ensureReflectIsConstructor } from "../reflect-construct-native.js";
 import { GLOBAL_NON_CONSTRUCTOR_FUNCTION_NAMES, resolvesToAmbientGlobal } from "./non-constructable.js"; // (#5158)
 import { emitNativeReflectNonObjectGuard, emitNativeReflectTargetGuard } from "../reflect-target-guard.js";
@@ -87,7 +88,8 @@ import {
 } from "../promise-combinators.js";
 import { isCustomCombinatorMethod, tryEmitCustomCombinatorCall } from "../promise-custom-combinator.js";
 import { tryEmitClassReceiverCombinatorCall } from "../promise-class-receiver-drive.js"; // (#6651 D3)
-import { tryEmitClassReceiverSettleCall } from "../promise-class-receiver-settle.js"; // (#6651 D4)
+import { emitClassReceiverSettle, tryEmitClassReceiverSettleCall } from "../promise-class-receiver-settle.js"; // (#6651 D4)
+import { isOrdinaryFunctionCtorArg } from "../promise-class-receiver-drive.js"; // (#5197 r3)
 import { emitStandalonePromiseCombinatorDrive } from "../promise-combinator-drive.js";
 import type { InnerResult } from "../shared.js";
 import { brandExternMethodResult, coerceType, compileExpression, VOID_RESULT } from "../shared.js";
@@ -121,10 +123,12 @@ import {
   classifyRuntimeNewTargetSite,
   emitRuntimeNewTargetPrototype,
   prepareRuntimeNewTargetProto,
+  tryEmitArrayBufferNewTargetPreRead,
   tryEmitOrdinaryConstructWithNewTarget,
   tryEmitProxyConstructWithNewTarget,
 } from "./reflect-construct-newtarget.js"; // (#3371 r4)
 import { objectPrototypeIsImmutableInstrs } from "../object-proto-proto-accessor.js"; // (#5268 step 1)
+import { definePropertyBooleanFrom } from "../object-model/define-rejection-channel.js"; // (#6770 S4)
 import {
   compileCallExpression,
   compileProtoArg,
@@ -491,6 +495,68 @@ function emitJsonCodecValueAsAnyref(
 }
 
 /**
+ * (#6775 S5) `Symbol.for(key)`'s key on the native registry, left as a
+ * `ref $AnyString`. A statically non-string key takes the §7.1.17 ToString
+ * walker (ToPrimitive → a user `toString` runs, and may throw; a Symbol
+ * throws TypeError); the plain ref coercion answered null for an object.
+ */
+function compileSymbolForKey(ctx: CodegenContext, fctx: FunctionContext, key: ts.Expression): void {
+  if (ctx.oracle.typeFactOf(key).kind !== "string") {
+    emitArgAsNativeString(ctx, fctx, key);
+    return;
+  }
+  const keyType = compileExpression(ctx, fctx, key, { kind: "ref", typeIdx: ctx.anyStrTypeIdx });
+  if (keyType && (keyType.kind !== "ref" || keyType.typeIdx !== ctx.anyStrTypeIdx)) {
+    coerceType(ctx, fctx, keyType, { kind: "ref", typeIdx: ctx.anyStrTypeIdx });
+  }
+}
+
+/**
+ * (#6775 S4) A Proxy replacer is classified (IsArray, `length`, each index)
+ * BEFORE the root is serialised, so its traps are observable even for a
+ * primitive root — the primitive fold must not answer.
+ */
+function jsonReplacerIsProxyShaped(ctx: CodegenContext, replacer: ts.Expression | undefined): boolean {
+  return replacer !== undefined && jsonValueIsProxyShaped(ctx, replacer);
+}
+
+/** Evaluate `e` for its side effects only. */
+function compileExpressionForEffect(ctx: CodegenContext, fctx: FunctionContext, e: ts.Expression): void {
+  if (compileExpression(ctx, fctx, e)) fctx.body.push({ op: "drop" });
+}
+
+/**
+ * (#6775 S4) A `JSON.stringify` replacer that is provably neither callable nor
+ * an Array exotic object — so §25.5.2 step 4 ignores it. Syntactic, over the
+ * spellings whose result kind cannot depend on runtime state: primitive
+ * literals, an object literal, `Symbol(…)` and `new String|Number|Boolean(…)`
+ * on the ambient globals.
+ */
+function isStaticallyIgnoredJsonReplacer(ctx: CodegenContext, replacer: ts.Expression | undefined): boolean {
+  if (replacer === undefined) return false;
+  let e = replacer;
+  while (ts.isParenthesizedExpression(e)) e = e.expression;
+  if (
+    ts.isStringLiteral(e) ||
+    ts.isNoSubstitutionTemplateLiteral(e) ||
+    ts.isNumericLiteral(e) ||
+    e.kind === ts.SyntaxKind.TrueKeyword ||
+    e.kind === ts.SyntaxKind.FalseKeyword ||
+    ts.isObjectLiteralExpression(e)
+  ) {
+    return true;
+  }
+  const ambient = (id: ts.Expression, names: readonly string[]): boolean => {
+    if (!ts.isIdentifier(id) || !names.includes(id.text)) return false;
+    const decl = ctx.oracle.valueDeclarationOf(id);
+    return decl === undefined || decl.getSourceFile().isDeclarationFile;
+  };
+  if (ts.isCallExpression(e)) return ambient(e.expression, ["Symbol"]);
+  if (ts.isNewExpression(e)) return ambient(e.expression, ["String", "Number", "Boolean"]);
+  return false;
+}
+
+/**
  * (#5269 G-2) Does this `JSON.stringify` value argument statically denote a
  * `Proxy` carrier?
  *
@@ -677,6 +743,28 @@ function isDefinitelyPrimitivePrototype(ctx: CodegenContext, value: ts.Expressio
  * namespace statics — the caller then continues into the receiver-type method
  * dispatch. Moved unchanged so the emitted Wasm is byte-identical.
  */
+/**
+ * (#6770 S4) §28.1 — the Reflect namespace's own function properties. Any
+ * other member (`Reflect.hasOwnProperty`, `Reflect.toString`) belongs to the
+ * namespace OBJECT's [[Prototype]], %Object.prototype%, and is compiled by the
+ * ordinary receiver-method dispatch instead of the standalone refusal.
+ */
+const REFLECT_FUNCTIONS = new Set([
+  "apply",
+  "construct",
+  "defineProperty",
+  "deleteProperty",
+  "get",
+  "getOwnPropertyDescriptor",
+  "getPrototypeOf",
+  "has",
+  "isExtensible",
+  "ownKeys",
+  "preventExtensions",
+  "set",
+  "setPrototypeOf",
+]);
+
 export function compileNamespaceStaticCall(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -701,13 +789,7 @@ export function compileNamespaceStaticCall(
       if (usesNativeSymbolProvider(ctx)) {
         ensureNativeSymbolBoundaryBridge(ctx);
         const { forIdx } = ensureSymbolRegistry(ctx);
-        const keyType = compileExpression(ctx, fctx, expr.arguments[0]!, {
-          kind: "ref",
-          typeIdx: ctx.anyStrTypeIdx,
-        });
-        if (keyType && (keyType.kind !== "ref" || keyType.typeIdx !== ctx.anyStrTypeIdx)) {
-          coerceType(ctx, fctx, keyType, { kind: "ref", typeIdx: ctx.anyStrTypeIdx });
-        }
+        compileSymbolForKey(ctx, fctx, expr.arguments[0]!);
         fctx.body.push({ op: "ref.as_non_null" });
         fctx.body.push({ op: "call", funcIdx: forIdx });
         return { kind: "i32" };
@@ -872,22 +954,11 @@ export function compileNamespaceStaticCall(
       const argSym = argTs.getSymbol()?.name;
       const rawTs = ctx.checker.getTypeAtLocation(arg0);
       const isAnyOrUnknown = (rawTs.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
-      const isView = argSym !== undefined && (TYPED_ARRAY_NAMES.has(argSym) || argSym === "DataView");
-      // A non-view whose static type is resolvable: ArrayBuffer itself, a
-      // primitive, null/undefined, a plain array, a class/object — all `false`.
-      const isResolvableNonView =
-        !isAnyOrUnknown && !isView && argSym !== "BigInt64Array" && argSym !== "BigUint64Array" && !rawTs.isUnion();
-      if (isView || argSym === "BigInt64Array" || argSym === "BigUint64Array") {
-        // Static `true`. Still evaluate the (possibly side-effecting) arg, drop it.
+      const decision = arrayBufferIsViewStaticDecision(ctx, argSym, isAnyOrUnknown, rawTs, TYPED_ARRAY_NAMES);
+      if (decision !== undefined) {
         const at = compileExpression(ctx, fctx, arg0);
         if (at !== null) fctx.body.push({ op: "drop" });
-        fctx.body.push({ op: "i32.const", value: 1 });
-        return { kind: "i32" };
-      }
-      if (isResolvableNonView) {
-        const at = compileExpression(ctx, fctx, arg0);
-        if (at !== null) fctx.body.push({ op: "drop" });
-        fctx.body.push({ op: "i32.const", value: 0 });
+        fctx.body.push({ op: "i32.const", value: decision ? 1 : 0 });
         return { kind: "i32" };
       }
       // Runtime fallback for `any`/union/unresolved receivers: ref.test the
@@ -1764,19 +1835,22 @@ export function compileNamespaceStaticCall(
           guardNativeReflectTarget(targetLocal, "Reflect.defineProperty called on non-object");
           // `undefinedFields` is the host-only ToPropertyDescriptor presence
           // sidecar — unused on the standalone path, so pass empty.
+          const applierStart = fctx.body.length;
           const r = emitDefinePropertyDescRuntime(ctx, fctx, objArg, keyArg, descArg, [], targetLocal);
           releaseTempLocal(fctx, targetLocal);
+          // (#6770 S4) §28.1.3 step 4: a REJECTED define answers `false`.
+          // The applier returns an externref; Reflect wants a boolean.
+          // (#1355 Slice F) For a PROXY receiver the standalone
+          // `__obj_define_from_desc` front-guard returns the defineProperty
+          // trap's booleanish externref (NOT the obj) — so we must surface
+          // that result, not unconditionally return true. For a non-proxy
+          // receiver the applier returns the (always-truthy) obj, so
+          // `__is_truthy` still yields the spec `true`. This keeps the
+          // non-proxy behaviour identical while making a proxy trap's
+          // false/true return observable through Reflect.defineProperty.
+          const isTruthyIdx = ctx.funcMap.get("__is_truthy");
+          if (r !== null && definePropertyBooleanFrom(ctx, fctx, applierStart, isTruthyIdx)) return { kind: "i32" };
           if (r !== null) {
-            // The applier returns an externref; Reflect wants a boolean.
-            // (#1355 Slice F) For a PROXY receiver the standalone
-            // `__obj_define_from_desc` front-guard returns the defineProperty
-            // trap's booleanish externref (NOT the obj) — so we must surface
-            // that result, not unconditionally return true. For a non-proxy
-            // receiver the applier returns the (always-truthy) obj, so
-            // `__is_truthy` still yields the spec `true`. This keeps the
-            // non-proxy behaviour identical while making a proxy trap's
-            // false/true return observable through Reflect.defineProperty.
-            const isTruthyIdx = ctx.funcMap.get("__is_truthy");
             if (isTruthyIdx !== undefined) {
               fctx.body.push({ op: "call", funcIdx: isTruthyIdx });
             } else {
@@ -1889,6 +1963,20 @@ export function compileNamespaceStaticCall(
         // uses); keeps the ordinary externref path for non-literal / null protos.
         compileProtoArg(ctx, fctx, protoArg);
         fctx.body.push({ op: "local.tee", index: spoProtoLocal });
+        // The static guards above cannot validate values read from the realm's
+        // heterogeneous handle table. Both operands have now been evaluated;
+        // reject invalid dynamic values before the writer can mutate anything.
+        emitNativeReflectTargetGuard(ctx, fctx, spoTargetLocal, "Reflect.setPrototypeOf called on non-object");
+        fctx.body.push({ op: "local.get", index: spoProtoLocal }, { op: "ref.is_null" }, { op: "i32.eqz" });
+        const beforePrototypeGuard = fctx.body.length;
+        emitNativeReflectTargetGuard(
+          ctx,
+          fctx,
+          spoProtoLocal,
+          "Reflect.setPrototypeOf requires an object or null prototype",
+        );
+        const prototypeGuard = fctx.body.splice(beforePrototypeGuard);
+        fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: prototypeGuard });
         const spoIdx = ensureLateImport(ctx, "__object_setPrototypeOf", [externRef, externRef], [externRef]);
         flushLateImportShifts(ctx, fctx);
         // (#6651 cluster F) §28.1.14 step 4 — the REAL boolean. The KNOWN
@@ -2481,6 +2569,14 @@ export function compileNamespaceStaticCall(
           return { kind: "externref" };
         }
 
+        // (#6775 S6) ArrayBuffer reads NewTarget.prototype BEFORE allocating.
+        const abTarget = unwrapReflectConstructExpr(targetArg);
+        const abPreRead =
+          runtimeNewTargetProto &&
+          ts.isIdentifier(abTarget) &&
+          abTarget.text === "ArrayBuffer" &&
+          isGlobalBuiltinIdentifier(ctx, fctx, abTarget) &&
+          tryEmitArrayBufferNewTargetPreRead(ctx, fctx, unwrappedList.elements, ntValueLocal!);
         const newExpr = ts.factory.createNewExpression(targetArg, undefined, [
           ...unwrappedList.elements,
         ] as ts.Expression[]);
@@ -2492,7 +2588,7 @@ export function compileNamespaceStaticCall(
         }
         if (resultType.kind !== "externref") coerceType(ctx, fctx, resultType, externRef);
 
-        if (!distinctNewTarget) return { kind: "externref" };
+        if (!distinctNewTarget || abPreRead) return { kind: "externref" };
 
         if (refuseDistinctNewTarget) {
           // Verbatim the pre-r4 refusal, emitted at the pre-r4 point (after the
@@ -2605,6 +2701,8 @@ export function compileNamespaceStaticCall(
         fctx.body.push({ op: "local.get", index: resultLocal });
         return { kind: "externref" };
       }
+      // (#6770 S4) `Reflect.hasOwnProperty(…)` etc.: an ordinary `obj.m(…)` call.
+      if (!REFLECT_FUNCTIONS.has(reflectMethod)) return undefined;
       // Boolean-returning methods need an i32 on the stack; the rest return
       // externref. Pick the fallback shape per method so the surrounding
       // expression still type-checks even though the module is already marked
@@ -3150,6 +3248,18 @@ export function compileNamespaceStaticCall(
     }
     if (isResolveReject) {
       const methodName = propAccess.name.text;
+      // (#5197 r3 Step 1f) `P.resolve(x)` on a Promise subclass: the inherited static's
+      // `this` is `P`, so NewPromiseCapability(P) — not the intrinsic `%Promise%` path.
+      if (isPromiseSubclassReceiver && expr.arguments.length <= 1) {
+        const settled = emitClassReceiverSettle(
+          ctx,
+          fctx,
+          propAccess.expression,
+          expr.arguments[0],
+          methodName === "reject" ? "reject" : "resolve",
+        );
+        if (settled !== undefined) return settled;
+      }
       // (#1326 Phase 1B) Standalone-mode `Promise.resolve(v)` /
       // `Promise.reject(r)` — emit Wasm-native `$Promise` struct.new instead
       // of the JS-host `Promise_{resolve,reject}_import` (unsatisfiable in
@@ -3236,15 +3346,7 @@ export function compileNamespaceStaticCall(
   ) {
     const settleKind = propAccess.expression.name.text === "reject" ? "reject" : "resolve";
     const ctorArg = unwrapReflectConstructExpr(expr.arguments[0]!);
-    const ctorDecl = ts.isIdentifier(ctorArg) ? ctx.oracle.valueDeclarationOf(ctorArg) : ctorArg;
-    const ctorInit = ctorDecl && ts.isVariableDeclaration(ctorDecl) ? ctorDecl.initializer : undefined;
-    const ctorExpr = ctorInit ? unwrapReflectConstructExpr(ctorInit) : ctorDecl;
-    const isOrdinaryCtorDecl =
-      (ctorExpr !== undefined && ts.isFunctionExpression(ctorExpr) && ctorExpr.asteriskToken === undefined) ||
-      (ctorDecl !== undefined &&
-        ts.isFunctionDeclaration(ctorDecl) &&
-        ctorDecl.asteriskToken === undefined &&
-        !(ctorDecl.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) ?? false));
+    const isOrdinaryCtorDecl = isOrdinaryFunctionCtorArg(ctx, expr.arguments[0]!); // (#5197 r3) shared with the drive
     if (isOrdinaryCtorDecl) {
       const snap = snapshotSpeculative(ctx, fctx);
       ensurePromiseSettleFunctions(ctx);
@@ -3348,6 +3450,12 @@ export function compileNamespaceStaticCall(
     // unsatisfiable `Promise_all`/`Promise_race` host import. Tried BEFORE the
     // narrow #4682 empty-array arm, which remains the fallback.
     if (isStandalonePromiseActive(ctx) && isCustomCombinatorMethod(methodName)) {
+      // (#5197 r3) A function `C` over a NON-literal iterable takes D3's step-wise drive first.
+      const iterableArg = expr.arguments[1];
+      if (iterableArg === undefined || !ts.isArrayLiteralExpression(iterableArg)) {
+        const driven = tryEmitClassReceiverCombinatorCall(ctx, fctx, expr, methodName);
+        if (driven !== undefined) return driven;
+      }
       const custom = tryEmitCustomCombinatorCall(ctx, fctx, expr, methodName);
       if (custom !== undefined) return custom;
     }
@@ -3568,7 +3676,9 @@ export function compileNamespaceStaticCall(
         // (#1599) …except under a native FUNCTION replacer: §25.5.2 step 12
         // serialises its return for the root (`JSON.stringify(null, () => ({a: 1}))`).
         const primitiveStringType =
-          useNativeJsonProvider && jsonReplacerSeesRoot(ctx, expr.arguments[0]!, expr.arguments[1])
+          useNativeJsonProvider &&
+          (jsonReplacerSeesRoot(ctx, expr.arguments[0]!, expr.arguments[1]) ||
+            jsonReplacerIsProxyShaped(ctx, expr.arguments[1]))
             ? undefined
             : tryEmitJsonStringifyPrimitive(ctx, fctx, expr.arguments[0]!);
         if (primitiveStringType !== undefined) {
@@ -3606,10 +3716,12 @@ export function compileNamespaceStaticCall(
           reserveJsonToJson(ctx, fctx);
           const replacerArg = expr.arguments[1];
           const spaceArg = expr.arguments[2];
+          const replacerIgnored = isStaticallyIgnoredJsonReplacer(ctx, replacerArg); // (#6775 S4)
           const replacerNullish =
             replacerArg === undefined ||
             replacerArg.kind === ts.SyntaxKind.NullKeyword ||
-            (ts.isIdentifier(replacerArg) && replacerArg.text === "undefined");
+            (ts.isIdentifier(replacerArg) && replacerArg.text === "undefined") ||
+            replacerIgnored;
           // (#1599) Only a TUPLE (a closed positional struct no codec arm reads)
           // keeps the refusal; vecs normalise into the `$ObjVec` arm (#4085).
           const isTupleValue = ctx.oracle.typeFactOf(expr.arguments[0]!).kind === "tuple";
@@ -3642,6 +3754,7 @@ export function compileNamespaceStaticCall(
             (!isTupleValue || arrayLiteralForCodec !== undefined || proxyShapedValue)
           ) {
             if (!emitJsonCodecValueAsAnyref(ctx, fctx, expr.arguments[0]!)) return null;
+            if (replacerIgnored) compileExpressionForEffect(ctx, fctx, replacerArg!);
             emitJsonStringifyValue(ctx);
             flushLateImportShifts(ctx, fctx);
             if (gap === "") {
@@ -3893,7 +4006,8 @@ export function compileNamespaceStaticCall(
           // $NativeString widened, or a ref $AnyValue for primitives). The
           // downstream coercion paths (object property read, AnyValue→
           // primitive) dispatch on the concrete ref via ref.test.
-          return { kind: "anyref" };
+          fctx.body.push({ op: "extern.convert_any" }); // (#6775 S4) an anyref `===` operand never matched a box
+          return { kind: "externref" };
         }
       }
       void tryEmitJsonParsePrimitive;

@@ -7,6 +7,7 @@
  * - compileCallablePropertyCall — call to a callable struct field
  * - tryExternClassMethodOnAny — resolve method call on any-typed receiver via extern classes
  */
+import { tryEmitDynamicToPrimitiveMethodCall } from "./to-primitive-method-call.js"; // (#6775 S5)
 import { guardedExternRefResultBridge } from "./dispatch-extern-result-bridge.js";
 import { standaloneMissingStringArgRead, standaloneRefToExternBridge } from "./dispatch-extern-arg-bridge.js";
 import { tryEmitFunctionTypedPropertyCall } from "./function-typed-property-call.js";
@@ -65,6 +66,7 @@ import {
   emitWrapperDynamicMethodCall,
   flattenCallArgs,
   STANDALONE_TA_SCALAR_HOFS,
+  tracesToTypedArrayIntrinsicProto,
 } from "./calls.js";
 
 /**
@@ -101,7 +103,12 @@ import {
 import { tryCompileGetPrototypeOfIsPrototypeOf } from "./object-get-prototype-of.js";
 import { tryEmitStaticOrNativeIsPrototypeOf } from "../native-is-prototype-of.js";
 import { ensureFunctionNativeProtoGlue } from "../array-object-proto.js";
-import { ensureFunctionProtoEdge, FUNCTION_PROTO_HAS_INSTANCE_MEMBER } from "../function-proto-has-instance.js";
+import {
+  emitNullishHasInstanceReceiverThrow,
+  ensureFunctionProtoEdge,
+  FUNCTION_PROTO_HAS_INSTANCE_MEMBER,
+  isNullableFunctionFact,
+} from "../function-proto-has-instance.js";
 import { tryEmitHostFunctionHasInstanceCall } from "../host-function-has-instance.js";
 import { ensureStandaloneNativeMethodClosure } from "../native-proto.js";
 import { pushBuiltinFnSingletonValueInstrs } from "../builtin-fn-meta.js";
@@ -2130,6 +2137,11 @@ export function compileCallableElementAccessCall(
     if (hostHasInstance !== undefined) return hostHasInstance;
   }
 
+  {
+    const toPrimitive = tryEmitDynamicToPrimitiveMethodCall(ctx, fctx, expr, elemAccess);
+    if (toPrimitive !== undefined) return toPrimitive;
+  }
+
   // `%Function.prototype%[@@hasInstance]` is a native method closure whose
   // first user parameter is the dynamic `this` receiver. The generic element
   // call path treats the value as an ordinary one-argument closure and thus
@@ -2151,10 +2163,15 @@ export function compileCallableElementAccessCall(
       !fctx.localMap.has("Function") &&
       !(fctx.boxedCaptures?.has("Function") ?? false);
     const sourceText = elemAccess.getSourceFile().text;
-    const hasCustomPrototype =
-      sourceText.includes("prototype") && (sourceText.includes("defineProperty") || /\.prototype\s*=/.test(sourceText));
+    // (#6775 S16) A `defineProperty`-installed own `prototype` is now read by
+    // the native body itself (`function-proto-has-instance.ts`); only a
+    // reassigned fnctor `prototype` still declines.
+    const hasCustomPrototype = sourceText.includes("prototype") && /\.prototype\s*=/.test(sourceText);
     if (
-      (fact.kind === "function" || (fact.kind === "builtin" && fact.name === "Function") || directFunctionProto) &&
+      (fact.kind === "function" ||
+        isNullableFunctionFact(fact) ||
+        (fact.kind === "builtin" && fact.name === "Function") ||
+        directFunctionProto) &&
       !hasCustomPrototype
     ) {
       ensureFunctionProtoEdge(ctx, fctx, receiver);
@@ -2165,6 +2182,7 @@ export function compileCallableElementAccessCall(
           kind: "externref",
         });
         fctx.body.push({ op: "local.set", index: receiverLocal });
+        if (fact.kind === "union") emitNullishHasInstanceReceiverThrow(ctx, fctx, receiverLocal);
 
         const brand = ensureFunctionNativeProtoGlue(ctx);
         const closure =
@@ -2648,7 +2666,7 @@ export function tryExternClassMethodOnAny(
   // unsatisfiable standalone (e.g. `(Object.values(o) as any).join(",")`). Route
   // to the native externref `join` (host-free under noJsHost since #3155); host
   // lane keeps the existing binding (byte-identical).
-  if (noJsHost(ctx) && methodName === "join") {
+  if (noJsHost(ctx) && methodName === "join" && !joinOnTypedArrayIntrinsicProto(ctx, propAccess)) {
     const nativeJoin = compileArrayJoinExtern(ctx, fctx, propAccess, expr);
     if (nativeJoin !== null) return nativeJoin;
   }
@@ -2731,4 +2749,14 @@ export function tryExternClassMethodOnAny(
     return sig.results[0]!;
   }
   return null;
+}
+
+/**
+ * (#6769 S7b) `%TypedArray%.prototype.join()` called on the prototype object
+ * itself must reach the closed-method dispatcher's `$NativeProto` arm and its
+ * brand TypeError (§23.2.3.18 step 1, as for the eight sibling methods), so the
+ * `any`-receiver native `join` above declines it.
+ */
+function joinOnTypedArrayIntrinsicProto(ctx: CodegenContext, propAccess: ts.PropertyAccessExpression): boolean {
+  return ctx.standalone === true && tracesToTypedArrayIntrinsicProto(ctx, propAccess.expression);
 }

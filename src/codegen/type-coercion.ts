@@ -10,6 +10,7 @@ import { coercionPlan } from "./coercion-plan.js";
 import { recordVecFromExternMaterializer } from "./compiler-support-abi.js";
 import { boxToAny, UNDEF_F64_BITS } from "./value-tags.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
+import { emitToInt32 } from "./binary-ops.js";
 import { popBody, pushBody } from "./context/bodies.js";
 import type { ClosureInfo, CodegenContext, FunctionContext, OptionalParamInfo } from "./context/types.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
@@ -18,6 +19,8 @@ import { canonicalUndefinedExternInstrs, ensureAnyFromExternHelper, undefinedExt
 import { anyValueElemFromExternInstrs } from "./anyvalue-elem-materialize.js"; // (#2717)
 import { ensureAnyToStringHelper, stringConstantExternrefInstrs } from "./native-strings.js";
 import { buildThrowJsErrorInstrs } from "./expressions/helpers.js";
+import { arrayLikeLengthLimitGuard } from "./proxy-array-like.js"; // (#6651 H6)
+import { prepareVecF64UndefElem, vecF64ElemFromExternInstrs } from "./array/vec-elem-fidelity.js"; // (#6771 S8)
 import { ensureWrapperStringValueHelper } from "./object-runtime.js";
 import { ensureNativeArrayFromIterN } from "./iterator-native.js";
 import { markNoBrandSiblingShapes } from "./shape-brand.js";
@@ -26,7 +29,8 @@ import { emitNativeNumberFormat } from "./number-format-native.js";
 import { reserveObjLitToPrimitive } from "./objlit-to-primitive.js"; // (#3481 step 3)
 import { buildRecordFromExternref } from "./record-from-host-object.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
-import { addFuncType, getArrTypeIdxFromVec } from "./registry/types.js";
+import { addFuncType } from "./registry/types.js";
+import { emitHostCarrierToStringTail, isHostArrayCarrier } from "./host-carrier-to-primitive.js"; // (#6788)
 import { ensureCanonicalUndefinedExtern } from "./undefined-extern-import.js"; // (#6419/#6492 r6)
 import { f64HoleToExternrefInstrs } from "./vec-f64-hole-coercion.js";
 import {
@@ -962,6 +966,8 @@ export function buildVecFromExternref(
       [{ kind: "externref" }],
     );
   }
+  const lengthGuard = arrayLikeLengthLimitGuard(ctx, fctx); // (#6651 H6) before the flush
+  prepareVecF64UndefElem(ctx, vecInfo.elemType); // (#6771 S8) before the flush
   flushLateImportShifts(ctx, fctx);
   const lenIdx = ctx.funcMap.get("__extern_length");
   const getIdx = ctx.funcMap.get("__extern_get");
@@ -986,10 +992,34 @@ export function buildVecFromExternref(
   });
   const idxLocal = allocLocal(fctx, `__vec_idx_${fctx.locals.length}`, { kind: "i32" });
 
+  // (#2866 slice 3, see the i32 element arm) `$Symbol` carrier → its id, else
+  // a number unbox. (#6770 S2) Shared with the tuple-field arm below.
+  const symbolCarrierOrNumberUnbox = (unbox: number): Instr[] | undefined => {
+    if (!(ctx.standalone || ctx.wasi) || ctx.symbolTypeIdx < 0) return undefined;
+    const symIdx = ctx.symbolTypeIdx;
+    const tmpSym = allocLocal(fctx, `__sym_elem_${fctx.locals.length}`, { kind: "externref" });
+    return [
+      { op: "local.tee", index: tmpSym },
+      { op: "any.convert_extern" },
+      { op: "ref.test", typeIdx: symIdx },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [
+          { op: "local.get", index: tmpSym },
+          { op: "any.convert_extern" },
+          { op: "ref.cast", typeIdx: symIdx },
+          { op: "struct.get", typeIdx: symIdx, fieldIdx: 0 },
+        ],
+        else: [{ op: "local.get", index: tmpSym }, { op: "call", funcIdx: unbox }, { op: "i32.trunc_sat_f64_s" }],
+      },
+    ];
+  };
+
   const buildElemCoerce = (): Instr[] => {
     const et = vecInfo.elemType;
     if (et.kind === "f64" && unboxIdx !== undefined) {
-      return [{ op: "call", funcIdx: unboxIdx }];
+      return vecF64ElemFromExternInstrs(ctx, fctx, unboxIdx); // (#6771 S8) undefined → UNDEF_F64_BITS
     }
     // i8/i16 are PACKED array element kinds (Uint8Array, Int8Array, Uint16Array,
     // …). Their value-position representation is i32: a packed `array.set`
@@ -1035,30 +1065,8 @@ export function buildVecFromExternref(
       // runtime: a `$Symbol` carrier yields its i32 id (`$Symbol.id`), anything
       // else unboxes as a number. Gated on the carrier being registered
       // (standalone/WASI symbol modules); plain numeric modules are byte-identical.
-      if ((ctx.standalone || ctx.wasi) && ctx.symbolTypeIdx >= 0 && et.kind === "i32") {
-        const symIdx = ctx.symbolTypeIdx;
-        const tmpSym = allocLocal(fctx, `__sym_elem_${fctx.locals.length}`, { kind: "externref" });
-        return [
-          { op: "local.tee", index: tmpSym },
-          { op: "any.convert_extern" },
-          { op: "ref.test", typeIdx: symIdx },
-          {
-            op: "if",
-            blockType: { kind: "val", type: { kind: "i32" } },
-            then: [
-              { op: "local.get", index: tmpSym },
-              { op: "any.convert_extern" },
-              { op: "ref.cast", typeIdx: symIdx },
-              { op: "struct.get", typeIdx: symIdx, fieldIdx: 0 },
-            ],
-            else: [
-              { op: "local.get", index: tmpSym },
-              { op: "call", funcIdx: unboxIdx },
-              { op: "i32.trunc_sat_f64_s" },
-            ],
-          },
-        ];
-      }
+      const symbolElem = et.kind === "i32" ? symbolCarrierOrNumberUnbox(unboxIdx) : undefined;
+      if (symbolElem) return symbolElem;
       return [{ op: "call", funcIdx: unboxIdx }, { op: "i32.trunc_sat_f64_s" }];
     }
     // (#3024) i64 (BigInt) element arrays previously fell through to the empty
@@ -1139,8 +1147,9 @@ export function buildVecFromExternref(
           if (fieldType.kind === "f64" && unboxIdx !== undefined) {
             instrs.push({ op: "call", funcIdx: unboxIdx });
           } else if (fieldType.kind === "i32" && unboxIdx !== undefined) {
-            instrs.push({ op: "call", funcIdx: unboxIdx });
-            instrs.push({ op: "i32.trunc_sat_f64_s" });
+            // (#6770 S2) a `symbol` field keeps its carrier's identity
+            const sym = fieldType.symbol === true ? symbolCarrierOrNumberUnbox(unboxIdx) : undefined;
+            instrs.push(...(sym ?? [{ op: "call", funcIdx: unboxIdx }, { op: "i32.trunc_sat_f64_s" }]));
           }
           // externref fields don't need conversion
         }
@@ -1173,6 +1182,7 @@ export function buildVecFromExternref(
     ...matInstrs,
     { op: "local.get", index: matLocal },
     { op: "call", funcIdx: lenIdx },
+    ...lengthGuard,
     { op: "i32.trunc_sat_f64_s" },
     { op: "local.set", index: lenLocal },
     { op: "local.get", index: lenLocal },
@@ -3005,9 +3015,10 @@ export function coerceType(
     fctx.body.push({ op: "f64.convert_i32_s" });
     return;
   }
-  // f64 → i32
+  // f64 → i32 (#6798: a native `i32` destination wraps with ToInt32, like `| 0`)
   if (from.kind === "f64" && to.kind === "i32") {
-    fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+    if (to.int32 === true) emitToInt32(fctx);
+    else fctx.body.push({ op: "i32.trunc_sat_f64_s" });
     return;
   }
   // externref → i32 (unbox as number to preserve value, then truncate)
@@ -3587,6 +3598,9 @@ export function coerceType(
       return;
     }
     fctx.body.push({ op: "extern.convert_any" });
+    // (#6788) No in-Wasm `@@toPrimitive`/`toString` reduced the carrier above;
+    // a string-hint consumer needs its ToString, not the object itself.
+    if (toPrimitiveHint === "string" && emitHostCarrierToStringTail(ctx, fctx, typeIdx)) return;
     // Vec structs (arrays) need Symbol.iterator to be iterable by JS APIs (#854).
     // After extern.convert_any, call __make_iterable to attach Symbol.iterator via sidecar.
     // Skip i32_byte vec structs (ArrayBuffer/DataView backing) — neither is
@@ -3599,13 +3613,7 @@ export function coerceType(
     // JS boundary exposes the identity-cached live array view. Materializing a
     // detached JS array merely because an internal type widens to externref
     // would make the embedder a semantic provider again and lose ownership.
-    if (
-      !ctx.standalone &&
-      !ctx.wasi &&
-      ctx.targetProfile.semanticProviders !== "native-first" &&
-      getArrTypeIdxFromVec(ctx, typeIdx) >= 0 &&
-      ctx.vecTypeMap.get("i32_byte") !== typeIdx
-    ) {
+    if (isHostArrayCarrier(ctx, typeIdx)) {
       const makeIterIdx = ensureLateImport(ctx, "__make_iterable", [{ kind: "externref" }], [{ kind: "externref" }]);
       if (makeIterIdx !== undefined) {
         flushLateImportShifts(ctx, fctx);

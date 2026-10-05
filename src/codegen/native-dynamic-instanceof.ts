@@ -173,6 +173,8 @@ import { getWellKnownSymbolId } from "./literals.js"; // (#6651 I2) @@hasInstanc
 import { moduleInstallsCallableHasInstance } from "./native-ordinary-instanceof.js"; // (#6651 I2)
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { ensureObjectRuntime, reserveApplyClosure } from "./object-runtime.js";
+import { protoIndexOwnViewSubstituteInstrs } from "./proto-index-store.js"; // (#6774 S20)
+import { unwrapArrayProtoVecAliasInstrs } from "./vec-proto-link.js"; // (#6774 S20)
 import { standaloneLinkBoundaryPeerIndex } from "./standalone-link-boundary.js"; // (#6644) linked-provider target
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { addFuncType } from "./registry/types.js";
@@ -297,6 +299,223 @@ function reserveFunctionPrototypeTargetHelper(ctx: CodegenContext): number {
   };
   pushDefinedFunc(ctx, funcIdx, fn);
   ctx.funcMap.set(FUNCTION_PROTO_TARGET_HELPER, funcIdx);
+  return funcIdx;
+}
+
+/**
+ * (#6769 S3) §7.3.20 steps 6-7 for a `prototype` value that is a
+ * TypedArray-family `$NativeProto` glue (`%TypedArray%.prototype` or a per-kind
+ * `<View>.prototype`) — an arm of the `__instanceof_object_prototype` probe,
+ * which already receives `(proto, value)` at exactly this step and already
+ * answers the tri-state for the one `$NativeProto` it knew (the Object brand).
+ *
+ * `__isPrototypeOf` walks `$Object.$proto` only, and a glue is not an
+ * `$Object`, so `view instanceof TA` (a `$__ta_ctor` target, whose `prototype`
+ * is the per-kind glue) and `view instanceof %TypedArray%` both answered the
+ * conservative `false` — while `Object.getPrototypeOf(view) === TA.prototype`
+ * already held. This walk asks `__getPrototypeOf` hop by hop (it has the
+ * dyn-view arm and the glue → parent-glue edge) and `ref.eq`s each hop against
+ * the glue: an exact identity, so it can only turn a miss into a hit. Any other
+ * brand falls through to the probe's UNKNOWN.
+ *
+ * Slots: params 0=proto 1=value; `protoAny` holds proto (already proven a
+ * `$NativeProto`); `cur`/`curAny`/`hops` are the walk's scratch.
+ */
+/** Scratch locals {@link taProtoWalkArm} needs after the probe's `protoAny` (slots 3-5). */
+const TA_WALK_LOCALS = [
+  { name: "cur", type: EXTERNREF },
+  { name: "curAny", type: { kind: "anyref" } as ValType },
+  { name: "hops", type: I32 },
+];
+
+function taProtoWalkArm(
+  ctx: CodegenContext,
+  nativeProtoTypeIdx: number,
+  slots: { protoAny: number; cur: number; curAny: number; hops: number },
+): Instr[] {
+  const getProtoIdx = ctx.funcMap.get("__getPrototypeOf");
+  const loBrand = BUILTIN_BRAND_TABLE["%TypedArray%"];
+  const hiBrand = BUILTIN_BRAND_TABLE.BigUint64Array;
+  if (getProtoIdx === undefined || loBrand === undefined || hiBrand === undefined) return [];
+  // Only a module that minted a TA-family glue can hold one as a `prototype`;
+  // every other module keeps the probe byte-identical.
+  const minted = [...(ctx.nativeProtoGlobals?.keys() ?? [])].some((b) => b >= loBrand && b <= hiBrand);
+  if (!minted) return [];
+  const walk: Instr[] = [
+    { op: "local.get", index: 1 },
+    { op: "local.set", index: slots.cur },
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            { op: "local.get", index: slots.cur },
+            { op: "call", funcIdx: getProtoIdx },
+            { op: "local.tee", index: slots.cur },
+            { op: "ref.is_null" },
+            { op: "br_if", depth: 1 },
+            { op: "local.get", index: slots.cur },
+            { op: "any.convert_extern" },
+            { op: "local.tee", index: slots.curAny },
+            { op: "ref.test", typeIdx: EQ_HEAP_TYPE },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: slots.curAny },
+                { op: "ref.cast", typeIdx: EQ_HEAP_TYPE },
+                { op: "local.get", index: slots.protoAny },
+                { op: "ref.cast", typeIdx: EQ_HEAP_TYPE },
+                { op: "ref.eq" },
+                { op: "if", blockType: { kind: "empty" }, then: [{ op: "i32.const", value: 1 }, { op: "return" }] },
+              ],
+            },
+            // A chain is finite by construction ([[SetPrototypeOf]] refuses a
+            // cycle); the cap only bounds a representation this walk does not
+            // model, answering `false` rather than spinning.
+            { op: "local.get", index: slots.hops },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "local.tee", index: slots.hops },
+            { op: "i32.const", value: 10000 },
+            { op: "i32.lt_u" },
+            { op: "br_if", depth: 0 },
+          ],
+        },
+      ],
+    },
+    { op: "i32.const", value: 0 },
+    { op: "return" },
+  ];
+  // brand ∈ [%TypedArray%, BigUint64Array] — the contiguous TA-family range.
+  return [
+    { op: "local.get", index: slots.protoAny },
+    { op: "ref.cast", typeIdx: nativeProtoTypeIdx },
+    { op: "struct.get", typeIdx: nativeProtoTypeIdx, fieldIdx: NATIVE_PROTO_BRAND_FIELD },
+    { op: "i32.const", value: loBrand },
+    { op: "i32.sub" },
+    { op: "i32.const", value: hiBrand - loBrand },
+    { op: "i32.le_u" },
+    { op: "if", blockType: { kind: "empty" }, then: walk },
+  ];
+}
+
+const CARRIER_CHAIN_HELPER = "__instanceof_carrier_chain";
+/** Chain helpers whose entry already carries the vec-alias unwrap (finalize may run twice). */
+const aliasUnwrapped = new WeakSet<WasmFunction>();
+
+/**
+ * (#6774 S20) §7.3.20 steps 6-7 for a value that is not an `$Object`: a native
+ * `$Array`, a string wrapper, a closure. `__isPrototypeOf` walks `$Object.$proto`
+ * only (and casts the PROTOTYPE to `$Object` too), so `[] instanceof G` with
+ * `G.prototype = Array.prototype` answered `false` while
+ * `Object.getPrototypeOf([]) === Array.prototype` held. This generalises the
+ * TA-family hop walk above: `__isPrototypeOf` first (unchanged answer and
+ * fast path; it owns the `$Object` and Proxy candidates), then — for any
+ * other candidate — `__getPrototypeOf` hop by hop with an identity test per
+ * level. It can only turn a miss into a hit. Params: 0=proto 1=value.
+ */
+function ensureCarrierChainWalk(ctx: CodegenContext, isProtoOfIdx: number, objectTypeIdx: number): number {
+  const existing = ctx.funcMap.get(CARRIER_CHAIN_HELPER);
+  if (existing !== undefined) return existing;
+  const getProtoIdx = ctx.funcMap.get("__getPrototypeOf");
+  if (getProtoIdx === undefined) return isProtoOfIdx;
+  const proxyTypeIdx = ctx.objectRuntimeTypes?.proxyTypeIdx;
+  const [CUR, CUR_ANY, PROTO_ANY, HOPS, CANON] = [2, 3, 4, 5, 6];
+  const returnZero: Instr[] = [{ op: "i32.const", value: 0 }, { op: "return" }];
+  const notOrdinary: Instr[] = [
+    { op: "local.get", index: CUR_ANY },
+    { op: "ref.test", typeIdx: objectTypeIdx },
+  ];
+  if (proxyTypeIdx !== undefined) {
+    notOrdinary.push({ op: "local.get", index: CUR_ANY }, { op: "ref.test", typeIdx: proxyTypeIdx }, { op: "i32.or" });
+  }
+  const body: Instr[] = [
+    { op: "local.get", index: 0 },
+    { op: "local.get", index: 1 },
+    { op: "call", funcIdx: isProtoOfIdx },
+    { op: "if", blockType: { kind: "empty" }, then: [{ op: "i32.const", value: 1 }, { op: "return" }] },
+    { op: "local.get", index: 1 },
+    { op: "any.convert_extern" },
+    { op: "local.set", index: CUR_ANY },
+    ...notOrdinary,
+    { op: "if", blockType: { kind: "empty" }, then: returnZero },
+    // A builtin prototype has two carriers (the `$NativeProto` glue and its
+    // companion `$Object`); compare both sides in the companion form.
+    ...protoIndexOwnViewSubstituteInstrs(ctx, 0),
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" },
+    { op: "local.tee", index: PROTO_ANY },
+    { op: "ref.test", typeIdx: EQ_HEAP_TYPE },
+    { op: "i32.eqz" },
+    { op: "if", blockType: { kind: "empty" }, then: [{ op: "i32.const", value: 0 }, { op: "return" }] },
+    { op: "local.get", index: 1 },
+    { op: "local.set", index: CUR },
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            { op: "local.get", index: CUR },
+            { op: "call", funcIdx: getProtoIdx },
+            { op: "local.tee", index: CUR },
+            { op: "ref.is_null" },
+            { op: "br_if", depth: 1 },
+            { op: "local.get", index: CUR },
+            { op: "local.set", index: CANON },
+            ...protoIndexOwnViewSubstituteInstrs(ctx, CANON),
+            { op: "local.get", index: CANON },
+            { op: "any.convert_extern" },
+            { op: "local.tee", index: CUR_ANY },
+            { op: "ref.test", typeIdx: EQ_HEAP_TYPE },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: CUR_ANY },
+                { op: "ref.cast", typeIdx: EQ_HEAP_TYPE },
+                { op: "local.get", index: PROTO_ANY },
+                { op: "ref.cast", typeIdx: EQ_HEAP_TYPE },
+                { op: "ref.eq" },
+                { op: "if", blockType: { kind: "empty" }, then: [{ op: "i32.const", value: 1 }, { op: "return" }] },
+              ],
+            },
+            // Bounds a representation this walk does not model (a chain is
+            // finite by construction), answering `false` rather than spinning.
+            { op: "local.get", index: HOPS },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "local.tee", index: HOPS },
+            { op: "i32.const", value: 10000 },
+            { op: "i32.lt_u" },
+            { op: "br_if", depth: 0 },
+          ],
+        },
+      ],
+    },
+    { op: "i32.const", value: 0 },
+  ];
+  const funcIdx = mintDefinedFunc(ctx);
+  ctx.funcMap.set(CARRIER_CHAIN_HELPER, funcIdx);
+  pushDefinedFunc(ctx, funcIdx, {
+    name: CARRIER_CHAIN_HELPER,
+    typeIdx: addFuncType(ctx, [EXTERNREF, EXTERNREF], [I32]),
+    locals: [
+      { name: "cur", type: EXTERNREF },
+      { name: "curAny", type: { kind: "anyref" } },
+      { name: "protoAny", type: { kind: "anyref" } },
+      { name: "hops", type: I32 },
+      { name: "canon", type: EXTERNREF },
+    ],
+    body,
+    exported: false,
+  });
   return funcIdx;
 }
 
@@ -458,7 +677,7 @@ export function ensureNativeDynamicInstanceOf(ctx: CodegenContext): number | und
     },
     { op: "local.get", index: L_PROTO },
     { op: "local.get", index: P_VALUE },
-    { op: "call", funcIdx: isProtoOfIdx },
+    { op: "call", funcIdx: ensureCarrierChainWalk(ctx, isProtoOfIdx, objectTypeIdx) }, // (#6774 S20)
     { op: "return" },
   ];
   /**
@@ -779,7 +998,9 @@ export function fillNativeDynamicInstanceOf(ctx: CodegenContext): void {
   const objectProtoFn = objectProtoFnIdx === undefined ? undefined : definedFuncAt(ctx, objectProtoFnIdx);
   if (objectProtoFn && nativeProtoTypeIdx !== undefined) {
     const protoAny = 2;
+    const taWalk = taProtoWalkArm(ctx, nativeProtoTypeIdx, { protoAny, cur: 3, curAny: 4, hops: 5 }); // (#6769 S3)
     objectProtoFn.locals = [{ name: "protoAny", type: { kind: "anyref" } }];
+    if (taWalk.length > 0) objectProtoFn.locals.push(...TA_WALK_LOCALS);
     objectProtoFn.body = [
       { op: "local.get", index: 0 },
       { op: "ref.is_null" },
@@ -806,10 +1027,21 @@ export function fillNativeDynamicInstanceOf(ctx: CodegenContext): void {
             blockType: { kind: "empty" },
             then: [...objectValueResult(1, typeofObjectIdx, typeofFunctionIdx), { op: "return" }],
           },
+          ...taWalk,
         ],
       },
       { op: "i32.const", value: UNKNOWN_RESULT },
     ];
+  }
+
+  // (#6774 S20) An `Array.prototype` read through a vec-typed slot (a getter
+  // whose inferred return is `any[]`) is the vec ALIAS, not the `$NativeProto`
+  // the chain walk meets; unwrap it on entry. Once per helper.
+  const chainIdx = ctx.funcMap.get(CARRIER_CHAIN_HELPER);
+  const chainFn = chainIdx === undefined ? undefined : definedFuncAt(ctx, chainIdx);
+  if (chainFn && !aliasUnwrapped.has(chainFn)) {
+    aliasUnwrapped.add(chainFn);
+    chainFn.body.unshift(...unwrapArrayProtoVecAliasInstrs(ctx, 0));
   }
 
   // (#6651 I3) `target === %Function.prototype%`. A 0/1 answer, not the

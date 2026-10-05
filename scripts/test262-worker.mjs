@@ -10,10 +10,8 @@ import { parseTest262SemanticProviders } from "./test262-lane.mjs";
  * When execute=false: compile only, write to disk (for cache warming).
  * When execute=true: compile + instantiate + run test(), return full result.
  */
-import { readFileSync, writeFileSync } from "node:fs";
-import { createHash } from "node:crypto";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { createContext, runInContext } from "node:vm";
 import { compile, compileMulti, createIncrementalCompiler } from "./compiler-bundle.mjs";
 // (#5353) NAMESPACE imports, deliberately, for the two symbol sets this worker
@@ -30,11 +28,12 @@ import * as runtimeBundle from "./runtime-bundle.mjs";
 import { buildImports, _resetIteratorRuntimeIntrinsicsForRealmIsolation } from "./runtime-bundle.mjs";
 import { poisonRecycleReason } from "./test262-poison-error.mjs";
 import { negativeCompileErrorMatches, negativeCompileSucceededVerdict } from "./negative-verdict.mjs";
-import { hasPinnedNamespaceSelfModuleImport } from "./test262-fixture-graph.mjs";
+import { hasPinnedEntryValueSelfImport, hasPinnedNamespaceSelfModuleImport } from "./test262-fixture-graph.mjs";
 // (#3613) ONE renderer, shared with tests/test262-runner.ts. The worker's
 // behaviour is unchanged — these bodies moved here verbatim; it is the LOCAL
 // runner that was missing the tryNativeExnRender step.
 import { safeStringifyThrown, tryNativeExnRender } from "./lib/wasm-exn-render.mjs";
+import { startNativeEvalBoundaryObservation, NATIVE_EVAL_OBSERVATION_FIELD } from "./lib/native-eval-boundary-observation.mjs";
 import { SANDBOX_GLOBAL_NAMES, applySandboxGlobalFunctionAttributes } from "./test262-sandbox-globals.mjs";
 import {
   restoreOwnKeyOrder,
@@ -48,7 +47,7 @@ import {
 // `js2wasm:runtime-eval` imports). This worker used to own that logic alone;
 // the in-process lanes did not have it, so their standalone runs died at
 // instantiate and MASKED the tests' real error signatures.
-import { instantiateTest262Module } from "./test262-import-object.mjs";
+import { instantiateTest262Module, TEST262_DYNAMIC_CODE_POLICY } from "./test262-import-object.mjs";
 // (#5353) ONE gate + ONE pre-warm contract for the compiled `Temporal` global,
 // shared with tests/test262-runner.ts and tests/test262-shared.ts.
 import {
@@ -58,7 +57,7 @@ import {
   temporalProviderDisabled,
   test262TemporalLaneEnabled,
 } from "./test262-temporal.mjs";
-import { test262HarnessProviderCacheDir } from "./test262-harness-cache.mjs";
+import { test262CompilerBundleHash, test262HarnessProviderCacheDir } from "./test262-harness-cache.mjs";
 
 // ── Bundle hash (#1521) ────────────────────────────────────────────────
 // Each cache entry written below carries a `bundle_hash` field. When the
@@ -72,19 +71,8 @@ import { test262HarnessProviderCacheDir } from "./test262-harness-cache.mjs";
 //   2. sha256 of the source-runner compiler bundle or packaged compiler entry
 //
 // Computed once per worker startup — cheap (a few MB read + sha256).
-const _workerDir = dirname(fileURLToPath(import.meta.url));
-function computeBundleHash() {
-  const fromEnv = process.env.TEST262_BUNDLE_HASH;
-  if (fromEnv && fromEnv.length > 0) return fromEnv;
-  for (const file of ["compiler-bundle.mjs", "index.js"]) {
-    try {
-      const buf = readFileSync(join(_workerDir, file));
-      return createHash("sha256").update(buf).digest("hex").slice(0, 16);
-    } catch {}
-  }
-  return "no-bundle";
-}
-const BUNDLE_HASH = computeBundleHash();
+// (#6723 P1) One implementation, shared with the harness-provider cache key.
+const BUNDLE_HASH = test262CompilerBundleHash();
 
 // ── Standalone runtime-eval provider (#2928 E6/E7, now shared — #4162) ──
 // A standalone module whose ONLY dynamic-code dependency is the core-Wasm
@@ -184,13 +172,16 @@ createFreshCompiler();
 // still override by passing its own `hostBridge`.
 const HARNESS_HOST_BRIDGE = { hostBridge: "always" };
 
+// #6776: the worker validates itself with source-mapped reporting; the library default would turn the negative-test arm's compile failure into an incidental pass (see #2920).
+const WORKER_SELF_VALIDATES = { validate: false };
+
 function compileSingleSource(source, options) {
-  const opts = { ...HARNESS_HOST_BRIDGE, ...options };
+  const opts = { ...HARNESS_HOST_BRIDGE, ...WORKER_SELF_VALIDATES, ...options };
   return incrementalCompiler ? incrementalCompiler.compile(source, opts) : compile(source, opts);
 }
 
 function compileMultipleSources(files, entryFile, options) {
-  const opts = { ...HARNESS_HOST_BRIDGE, ...options };
+  const opts = { ...HARNESS_HOST_BRIDGE, ...WORKER_SELF_VALIDATES, ...options };
   return incrementalCompiler?.compileMulti
     ? incrementalCompiler.compileMulti(files, entryFile, opts)
     : compileMulti(files, entryFile, opts);
@@ -1259,6 +1250,16 @@ function hasValidatedSelfNamespaceGraph({ selfModuleGraph, originalHarness, entr
   );
 }
 
+function hasValidatedEntrySelfImportGraph({ requiresEntrySelfImportGraph, originalHarness, entryFile, fixtureFiles, source }) {
+  return (
+    requiresEntrySelfImportGraph === true &&
+    originalHarness === true &&
+    isFixtureFileRecord(fixtureFiles) &&
+    Object.keys(fixtureFiles).length === 0 &&
+    hasPinnedEntryValueSelfImport(entryFile, source)
+  );
+}
+
 // #3506 — the 5 resolution-phase paths in this slice import Test262's
 // `ensure-linking-error_FIXTURE.js`, whose deliberate self-import of an
 // unexported binding is reported by TypeScript as TS2459. Requiring that
@@ -1434,7 +1435,17 @@ function harnessProviderWiringAvailable() {
 function harnessProviderCompileOptions(target) {
   // Must match `compileHarnessLinkedBody`'s option set on the consumer side, or
   // the provider and the body disagree about the ABI they share.
-  return { allowJs: true, emitWat: false, skipSemanticDiagnostics: true, ...(target ? { target } : {}) };
+  // (#6723 D4) Both sides carry the harness's `hostBridge: "always"`, like
+  // every other worker compile site (HARNESS_HOST_BRIDGE): on standalone the
+  // default strips `__stdout_*`, so the provider's `print` (hence `$DONE`'s
+  // completion marker) wrote to a sink nothing could read.
+  return {
+    ...HARNESS_HOST_BRIDGE,
+    allowJs: true,
+    emitWat: false,
+    skipSemanticDiagnostics: true,
+    ...(target ? { target } : {}),
+  };
 }
 
 async function getWorkerHarnessProvider(harnessPrefix, target) {
@@ -1554,9 +1565,8 @@ async function doCompile(
     }
 
     // Preserve the literal FYI entry as its own Module and link the pinned
-    // fixture sources beside it. Like the project runner's #2932 path, the
-    // graph deliberately omits deferTopLevelInit: compileMulti synthesizes
-    // one init schedule for the entire graph, including circular exports.
+    // fixture sources beside it. The existing deferOpt wires runtime exports
+    // before the graph's single initializer, including circular/self imports.
     return compileMultipleSources({ ...fixtureFiles, [entryFile]: source }, entryFile, {
       // #3506 — every virtual root is a real pinned `.js` file. With
       // `allowJs:false`, TypeScript excludes the graph before syntax checking
@@ -1612,6 +1622,7 @@ async function doCompile(
       temporalSource = linkedHarnessHonestSource(linkedHarness, source);
     }
     return compilerBundle.compileWithTemporalGlobal(temporalSource, temporal, {
+      ...WORKER_SELF_VALIDATES,
       allowJs: true,
       fileName: "test.js",
       sourceMap: true,
@@ -1638,6 +1649,8 @@ async function doCompile(
     // measurement, which is the one thing a shadow oracle must never do. So
     // the caller is told, and the row is stamped `linked-harness-fallback`.
     const bodyOptions = {
+      ...HARNESS_HOST_BRIDGE, // (#6723 D4) same bridge as the provider and the honest lane
+      ...WORKER_SELF_VALIDATES,
       allowJs: true,
       fileName: "test.js",
       sourceMap: true,
@@ -1746,17 +1759,36 @@ async function doCompile(
  * import the one implementation in scripts/lib/wasm-exn-render.mjs.
  */
 
-function extractWasmExceptionMessage(err, instance) {
+let currentNativeEvalBoundaryObservation = null;
+
+function extractWasmExceptionMessage(err, instance, observation = currentNativeEvalBoundaryObservation?.reader("negative-match")) {
+  observation?.("consumer-instance", Boolean(instance));
   if (err instanceof WebAssembly.Exception) {
+    observation?.("exception-kind", "wasm");
     let payload = null;
     if (instance) {
+      let extractionStage = "tag-read";
       try {
-        const tag = instance.exports.__exn_tag ?? instance.exports.__tag;
-        if (tag) payload = err.getArg(tag, 0);
-      } catch {}
+        const exnTag = instance.exports.__exn_tag;
+        const tag = exnTag ?? instance.exports.__tag;
+        observation?.("consumer-tag", tag ? (exnTag != null ? "__exn_tag" : "__tag") : "no-tag");
+        if (tag) {
+          extractionStage = "getArg";
+          payload = err.getArg(tag, 0);
+          observation?.("extraction", "success");
+          observation?.("payload-category", payload === null ? "null" : typeof payload);
+        }
+      } catch {
+        observation?.("extraction", extractionStage === "getArg" ? "failed" : "tag-read-failed");
+      }
+    } else {
+      observation?.("consumer-tag", "no-instance");
     }
     if (payload instanceof Error) {
-      return payload.message ?? safeStringifyThrown(payload);
+      const text = payload.message ?? safeStringifyThrown(payload);
+      observation?.("text-route", "payload-Error");
+      observation?.("reader-text", text);
+      return text;
     }
     if (payload != null) {
       // (#2962) A host-opaque GC payload renders through the module's own
@@ -1765,20 +1797,50 @@ function extractWasmExceptionMessage(err, instance) {
       const t = typeof payload;
       if (t === "object" || t === "function") {
         const native = tryNativeExnRender(instance, payload);
-        if (native != null) return native;
+        observation?.("consumer-native", native);
+        // (#6723 D4) The consumer renders a PROVIDER-minted `Test262Error`
+        // (a provider fnctor instance) as the generic "[object Object]": its
+        // `toString` lives on the provider's prototype. Treat that answer as
+        // "not mine" when a linked peer can do better.
+        if (native != null && (native !== "[object Object]" || currentLinkedPeers.length === 0)) {
+          observation?.("text-route", "consumer-native");
+          observation?.("reader-text", native);
+          return native;
+        }
         // (#6723) A STANDALONE linked row: the payload may be minted by the
         // harness provider (a `Test262Error` thrown by `assert.*`), whose GC
         // layout only the provider's own `__exn_render_*` exports can read.
+        let generic = native;
+        let peerOrdinal = 0;
         for (const peer of currentLinkedPeers) {
           const viaPeer = tryNativeExnRender({ exports: peer }, payload);
-          if (viaPeer != null) return viaPeer;
+          observation?.("linked-peer-ordinal", ++peerOrdinal);
+          observation?.("linked-peer-native", viaPeer);
+          if (viaPeer != null && viaPeer !== "[object Object]") {
+            observation?.("text-route", "linked-peer-native");
+            observation?.("reader-text", viaPeer);
+            return viaPeer;
+          }
+          generic ??= viaPeer;
+        }
+        if (generic != null) {
+          observation?.("text-route", "generic-native");
+          observation?.("reader-text", generic);
+          return generic;
         }
       }
-      return safeStringifyThrown(payload);
+      const text = safeStringifyThrown(payload);
+      observation?.("text-route", "payload-safe-stringification");
+      observation?.("reader-text", text);
+      return text;
     }
-    return instance ? "TypeError (null/undefined access)" : "wasm exception during module init";
+    const text = instance ? "TypeError (null/undefined access)" : "wasm exception during module init";
+    observation?.("text-route", "wasm-nullish-label");
+    observation?.("reader-text", text);
+    return text;
   }
   if (err instanceof Error) {
+    observation?.("exception-kind", "host-Error");
     let info = err.message ?? String(err);
     const stack = err.stack ?? "";
     if (/illegal cast|null|unreachable|out of bounds/.test(info)) {
@@ -1801,9 +1863,15 @@ function extractWasmExceptionMessage(err, instance) {
         info += "]";
       }
     }
+    observation?.("text-route", "host-Error");
+    observation?.("reader-text", info);
     return info;
   }
-  return safeStringifyThrown(err);
+  observation?.("exception-kind", "non-wasm");
+  const text = safeStringifyThrown(err);
+  observation?.("text-route", "non-wasm-fallback");
+  observation?.("reader-text", text);
+  return text;
 }
 
 /**
@@ -2001,7 +2069,9 @@ function extractWatFunctionSnippet(wat, funcName) {
 async function buildInvalidBinaryError(source, sourceMapUrl, result, target) {
   let detailErr;
   try {
-    const imports = buildImports(result.imports, undefined, result.stringPool);
+    const imports = buildImports(result.imports, undefined, result.stringPool, {
+      dynamicCode: TEST262_DYNAMIC_CODE_POLICY,
+    });
     // (#4162) Same shared seam. This path exists to name WHY a binary is
     // invalid; without the provider a standalone module would report the
     // unresolved `js2wasm:runtime-eval` import as the reason and bury the
@@ -2026,6 +2096,8 @@ async function buildInvalidBinaryError(source, sourceMapUrl, result, target) {
 
   try {
     const watResult = await compile(source, {
+      // The bytes are known invalid here; this re-compile only wants the WAT.
+      ...WORKER_SELF_VALIDATES,
       fileName: "test.ts",
       sourceMap: true,
       sourceMapUrl: sourceMapUrl || "test.wasm.map",
@@ -2043,6 +2115,7 @@ async function buildInvalidBinaryError(source, sourceMapUrl, result, target) {
 }
 
 process.on("message", async (msg) => {
+  currentNativeEvalBoundaryObservation = startNativeEvalBoundaryObservation(msg.source);
   runtimeIntrinsicCanarySnapshot = null;
   currentLinkedFallback = false;
   currentLinkedFallbackReason = undefined;
@@ -2065,7 +2138,16 @@ process.on("message", async (msg) => {
     fixtureFiles: msg.fixtureFiles,
     source,
   });
-  const fixtureGraph = staticFixtureGraph || selfNamespaceGraph;
+  // The new protocol field requests an empty entry graph; the source and
+  // canonical key, rather than a caller-supplied boolean, prove admission.
+  const entrySelfImportGraph = hasValidatedEntrySelfImportGraph({
+    requiresEntrySelfImportGraph: msg.requiresEntrySelfImportGraph,
+    originalHarness,
+    entryFile: msg.entryFile,
+    fixtureFiles: msg.fixtureFiles,
+    source,
+  });
+  const fixtureGraph = staticFixtureGraph || selfNamespaceGraph || entrySelfImportGraph;
   const compileStart = performance.now();
 
   // #3492/#3509/#3494 — Dynamic fixture discovery is transport metadata, not
@@ -2407,7 +2489,9 @@ process.on("message", async (msg) => {
       result.imports,
       originalHarness ? { console: consoleProxy } : undefined,
       result.stringPool,
-      originalHarness ? { globalSandbox: harnessSandbox } : undefined,
+      originalHarness
+        ? { globalSandbox: harnessSandbox, dynamicCode: TEST262_DYNAMIC_CODE_POLICY }
+        : { dynamicCode: TEST262_DYNAMIC_CODE_POLICY },
     );
     if (REALM_CANARY_MODE) {
       runtimeIntrinsicCanarySnapshot = snapshotRuntimeIntrinsicSurface(importObj);
@@ -2469,7 +2553,7 @@ process.on("message", async (msg) => {
       sendResult({
         id,
         status: "fail",
-        error: extractWasmExceptionMessage(err, null),
+        error: extractWasmExceptionMessage(err, null, currentNativeEvalBoundaryObservation?.reader("instantiate")),
         isException: true,
         instantiateError: true,
         compileMs,
@@ -2511,7 +2595,7 @@ process.on("message", async (msg) => {
         sendResult({
           id,
           status: "fail",
-          error: extractWasmExceptionMessage(initErr, instance),
+          error: extractWasmExceptionMessage(initErr, instance, currentNativeEvalBoundaryObservation?.reader("deferred-module-init")),
           isException: true,
           compileMs,
           execMs,
@@ -2579,7 +2663,7 @@ process.on("message", async (msg) => {
           // "not observed", so it re-buckets as an honest failure.
           const noMarkerError =
             standaloneDrainError != null
-              ? `async continuation threw before completion: ${extractWasmExceptionMessage(standaloneDrainError, instance)}`
+              ? `async continuation threw before completion: ${extractWasmExceptionMessage(standaloneDrainError, instance, currentNativeEvalBoundaryObservation?.reader("async-drain"))}`
               : "async completion marker not observed";
           sendResult({
             id,
@@ -2722,7 +2806,7 @@ process.on("message", async (msg) => {
         return;
       }
 
-      let errInfo = extractWasmExceptionMessage(execErr, instance);
+      let errInfo = extractWasmExceptionMessage(execErr, instance, currentNativeEvalBoundaryObservation?.reader("exported-test"));
 
       // Annotate with source location via source map
       const byteOffset = extractWasmByteOffset(execErr);
@@ -2757,7 +2841,7 @@ process.on("message", async (msg) => {
       sendResult({
         id,
         status: "fail",
-        error: extractWasmExceptionMessage(outerErr, instance ?? null),
+        error: extractWasmExceptionMessage(outerErr, instance ?? null, currentNativeEvalBoundaryObservation?.reader("outer-wasm")),
         isException: true,
         compileMs,
         execMs: performance.now() - execStart,
@@ -3252,6 +3336,9 @@ function noteLinkedFallback(reason) {
 }
 
 function sendResult(payload, forceRecycleReason) {
+  const observation = currentNativeEvalBoundaryObservation?.snapshot();
+  currentNativeEvalBoundaryObservation = null;
+  if (observation) payload = { ...payload, [NATIVE_EVAL_OBSERVATION_FIELD]: observation };
   if (currentLinkedFallback && payload && typeof payload === "object")
     payload = { ...payload, linkedFallback: true, linkedFallbackReason: currentLinkedFallbackReason };
   const cleanup = postCompileCleanup();

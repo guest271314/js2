@@ -8,6 +8,8 @@
  * widened and closed-struct object carriers.
  */
 
+import { restPatternParamSlot } from "./resolved-rest-param.js"; // (#6774 S7)
+import { hoistParameterEvalVars } from "./expressions/eval-param-scope-hoist.js"; // (#6774 S7)
 import ts from "typescript";
 import { hoistFunctionDeclarations } from "./statements/nested-declarations.js";
 import { isStringType, isVoidType, unwrapPromiseType } from "../checker/type-mapper.js";
@@ -28,7 +30,9 @@ import { emitAsyncGenerator, isAsyncGenDriveCandidate } from "./async-frame.js";
 import { addFunctionOwnLocals } from "../ir/analysis/binding-info.js";
 import { exactClassExpressionTypeName } from "./class-expression-identity.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
+import { staticHostPropertyKeyInstrs } from "./host-property-key.js";
 import { emitHoleSentinel } from "./array-holes.js"; // (#2001 S1)
+import { holeFilledArrayNewInstrs } from "./array/array-length-holes.js"; // (#6771 S3)
 import { objectLiteralTakesToPrimitiveOpenPath } from "./to-primitive-open-object.js"; // (#5269 R3-2) shared with the type-level twin in index.ts
 import { bareAnyArrayLiteralNeedsExternref } from "./array-literal-any-carrier.js";
 import { hasIncompatibleElementCarrier, hasNonStructElementForStructCarrier } from "./struct-carrier-inhabits.js"; // (#5327 / #6613) array-literal element-carrier compatibility proofs
@@ -60,6 +64,7 @@ import {
 import type { ObjLitDefineCopyHelpers } from "./objlit-dynamic-accessors.js";
 import { bodyNeedsArgumentsObject, needsImplicitArgumentsObject } from "./helpers/body-uses-arguments.js";
 import { widenedVarKeyFromDecl } from "./widened-var-key.js";
+import { argumentsBeforeDefaults, endArgumentsBeforeDefaults } from "./object-method-arguments-first.js"; // (#6651 A11)
 import { isStrictFunction, isSimpleParameterList } from "./helpers/is-strict-function.js";
 import { initializeFunctionPoisonPillContext } from "./function-poison-pill.js";
 import { collectInstrs } from "./statements/shared.js";
@@ -126,6 +131,7 @@ import { resolveObjectLiteralCarrier } from "./object-literal-carrier.js";
 import { tagAccessorObjectLiteralReceiver } from "./accessor-object-literal.js";
 import { widenUndefinedDefaultParamSlot } from "./destructuring-params.js";
 import { widenAsyncThenableResults } from "./async-thenable-return.js"; // (#5371)
+import { readEnv } from "../env.js";
 /**
  * Check if a TS expression is "undefined-like" — OmittedExpression (array hole),
  * undefined keyword, identifier `undefined`, void expression, or any of the
@@ -1370,18 +1376,8 @@ function compileObjectLiteralWithAccessors(
         compileRuntimeComputedPropertyKey(ctx, fctx, prop.name.expression);
       } else {
         if (propName === undefined) continue;
-        // (#51) Materialize the data-property key via the dual-mode helper, not a
-        // bare `global.get <stringGlobalMap.get(propName)>`. Under
-        // standalone/nativeStrings `addStringConstantGlobal` records the `-1`
-        // sentinel (there is no host string-constant global), so a bare
-        // `global.get -1` reaches binary emit as "global index out of range — -1".
-        // `stringConstantExternrefInstrs` emits the NativeString inline (externref)
-        // path under standalone and the host `global.get` only when a real import
-        // global exists — exactly the fix already applied to the accessor-key path
-        // below (#1888 S5c).
-        addStringConstantGlobal(ctx, propName);
         fctx.body.push({ op: "local.get", index: objLocal });
-        for (const instr of stringConstantExternrefInstrs(ctx, propName)) {
+        for (const instr of staticHostPropertyKeyInstrs(ctx, propName)) {
           fctx.body.push(instr);
         }
       }
@@ -1466,13 +1462,8 @@ function compileObjectLiteralWithAccessors(
         continue;
       }
       if (methodName === undefined) continue;
-      // (#2194) Same dual-mode key fix as the data-property arm above: the raw
-      // `global.get <stringGlobalMap.get(method)>` baked `global.get -1` in
-      // standalone for a method key on a literal that also takes the accessor
-      // path. Route through the guarded helper.
-      addStringConstantGlobal(ctx, methodName);
       fctx.body.push({ op: "local.get", index: objLocal });
-      for (const instr of stringConstantExternrefInstrs(ctx, methodName)) {
+      for (const instr of staticHostPropertyKeyInstrs(ctx, methodName)) {
         fctx.body.push(instr);
       }
       const ok = emitObjectLiteralMethodFn(ctx, fctx, prop as unknown as ts.FunctionExpression, objLocal);
@@ -1496,11 +1487,17 @@ function compileObjectLiteralWithAccessors(
           currentAccIdx,
           (expression) => compileRuntimeComputedPropertyKey(ctx, fctx, expression),
           (half, isGetter) =>
-            emitObjectLiteralAccessorFn(ctx, fctx, half as unknown as ts.FunctionExpression, {
-              forceMutableCaptures: accessorForceMutable,
-              sharedRefCells: accessorSharedRefCells,
-              ...(isGetter ? {} : { forceExternrefParams: true }),
-            }),
+            emitObjectLiteralAccessorFn(
+              ctx,
+              fctx,
+              half as unknown as ts.FunctionExpression,
+              {
+                forceMutableCaptures: accessorForceMutable,
+                sharedRefCells: accessorSharedRefCells,
+                ...(isGetter ? {} : { forceExternrefParams: true }),
+              },
+              objLocal,
+            ), // (#6774 S1) [[HomeObject]] for a runtime key too
         );
         continue;
       }
@@ -1512,16 +1509,28 @@ function compileObjectLiteralWithAccessors(
 
       // Stack: [obj, key, getterCb | null, setterCb | null, flags]
       fctx.body.push({ op: "local.get", index: objLocal });
-      // (#1888 S5c / C5) Materialize the accessor key via the dual-mode helper.
-      // Under standalone/nativeStrings, `addStringConstantGlobal` records the
-      // `-1` sentinel (no host string-constant global), so the old
-      // `global.get <stringGlobalMap.get(prop)>` emitted `global.get -1` →
-      // "u32 out of range: -1" at serialize time (the objlit-accessor standalone
-      // defect). `stringConstantExternrefInstrs` emits the native-string inline
-      // path under standalone and the host `global.get` under GC.
-      addStringConstantGlobal(ctx, propName);
-      for (const instr of stringConstantExternrefInstrs(ctx, propName)) {
-        fctx.body.push(instr);
+      // Host imports require real String keys even with native string storage.
+      // Native targets retain their existing native key representation.
+      // (#6774 S15) A well-known-symbol key (`get [Symbol.unscopables]()`) is
+      // the interned symbol carrier, not the "@@name" spelling.
+      // Only @@unscopables: the iterator-protocol readers still look the other
+      // well-known accessors up under their "@@name" key.
+      const wkSymId =
+        ctx.standalone && propName === "@@unscopables" ? getWellKnownSymbolId(propName.slice(2)) : undefined;
+      const boxSymIdx =
+        wkSymId !== undefined
+          ? ensureLateImport(ctx, "__box_symbol", [{ kind: "i32" }], [{ kind: "externref" }])
+          : undefined;
+      if (wkSymId !== undefined && boxSymIdx !== undefined) {
+        flushLateImportShifts(ctx, fctx);
+        fctx.body.push(
+          { op: "i32.const", value: wkSymId },
+          { op: "call", funcIdx: ctx.funcMap.get("__box_symbol") ?? boxSymIdx },
+        );
+      } else {
+        for (const instr of staticHostPropertyKeyInstrs(ctx, propName)) {
+          fctx.body.push(instr);
+        }
       }
 
       // Getter (or ref.null.extern when only setter is defined).
@@ -3747,7 +3756,7 @@ export function compileObjectLiteralForStruct(
       if (hasBindingPattern && !param.type && !param.dotDotDotToken && wasmType.kind !== "externref") {
         wasmType = { kind: "externref" };
       }
-      newParams.push(wasmType);
+      newParams.push(restPatternParamSlot(ctx, param, wasmType)); // (#6774 S7)
     }
 
     // Compare against the existing function's signature. A mismatched param
@@ -4413,7 +4422,7 @@ export function compileObjectLiteralForStruct(
         if (hasBindingPattern && !param.type && !param.dotDotDotToken && wasmType.kind !== "externref") {
           wasmType = { kind: "externref" };
         }
-        methodParams.push(wasmType);
+        methodParams.push(restPatternParamSlot(ctx, param, wasmType)); // (#6774 S7)
       }
 
       const sig = ctx.checker.getSignatureFromDeclaration(prop);
@@ -4576,7 +4585,7 @@ export function compileObjectLiteralForStruct(
         if (hasBindingPattern && !param.type && !param.dotDotDotToken && wasmType.kind !== "externref") {
           wasmType = { kind: "externref" };
         }
-        methodFctxParams.push({ name: paramName, type: wasmType });
+        methodFctxParams.push({ name: paramName, type: restPatternParamSlot(ctx, param, wasmType) }); // (#6774 S7)
       }
 
       const methodFctx: FunctionContext = {
@@ -4603,7 +4612,9 @@ export function compileObjectLiteralForStruct(
       if (savedFunc) ctx.funcStack.push(savedFunc);
       ctx.currentFunc = methodFctx;
 
+      const argumentsFirst = argumentsBeforeDefaults(ctx, methodFctx, prop, methodFctxParams); // (#6651 A11)
       // Emit default-value initialization for parameters with initializers
+      hoistParameterEvalVars(ctx, methodFctx, prop); // (#6774 S7)
       emitMethodParamDefaults(ctx, methodFctx, prop.parameters, 1); // 1 to skip 'this'
 
       // Destructure parameters with binding patterns (e.g. method([...x]) or method({a, b}))
@@ -4620,7 +4631,7 @@ export function compileObjectLiteralForStruct(
       // Set up `arguments` object if the method body references it (#820).
       // Object literal methods need an arguments vec struct so that
       // `arguments.length` and `arguments[n]` work at runtime.
-      if (needsImplicitArgumentsObject(prop)) {
+      if (!endArgumentsBeforeDefaults(methodFctx, prop, argumentsFirst) && needsImplicitArgumentsObject(prop)) {
         const methodParamTypes = methodFctxParams.slice(1).map((p) => p.type); // skip 'this'
         // Object-literal methods inherit the surrounding code's strictness (#779e).
         // (#2743) Also unmapped when the parameter list is non-simple
@@ -5696,7 +5707,7 @@ export function compileArrayLiteral(
     // reflective reader (String, typeof, sameValue, symbol-keying) already
     // understands. Native-symbol lanes only; the js-host lane keeps its vec
     // selection byte-identical (the 2026-08-23 park precedent for brand leaks).
-    if (process.env.JS2_SYM_DEBUG)
+    if (readEnv("JS2_SYM_DEBUG"))
       console.error(
         "[arr-lit]",
         expr.getText().slice(0, 30),
@@ -6878,7 +6889,7 @@ export function compileArrayConstructorCall(
     const sizeLocal = allocLocal(fctx, `__arr_size_${fctx.locals.length}`, { kind: "i32" });
     fctx.body.push({ op: "local.tee", index: sizeLocal });
     fctx.body.push({ op: "local.get", index: sizeLocal });
-    fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx });
+    fctx.body.push(...holeFilledArrayNewInstrs(ctx, fctx, arrTypeIdx)); // (#6771 S3)
     fctx.body.push({ op: "struct.new", typeIdx: vecTypeIdx });
     return { kind: "ref_null", typeIdx: vecTypeIdx };
   }

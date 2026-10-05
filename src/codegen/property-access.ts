@@ -8,6 +8,7 @@
  */
 
 import { ts } from "../ts-api.js";
+import { builtinSubclassReceiverType } from "./builtin-subclass-receiver.js"; // (#6651 C5) inherited builtin members
 import { carrierNameForAccess } from "./carrier-name-fallback.js"; // (#5187)
 import { isAccessorReceiver } from "./accessor-object-literal.js";
 import {
@@ -32,7 +33,12 @@ import {
 } from "./proxy-receiver-generic-read.js"; // (#6651 F4)
 import type { PresenceSlot } from "./fnctor-presence-bits.js"; // (#3780) packed own-presence flags
 import { presenceSlotOf, presenceTestInstrs } from "./fnctor-presence-bits.js";
-import { classMemberFuncKey, resolveMethodOwnerClass } from "./class-member-keys.js"; // (#1983) collision-free class-member funcMap keys; (#2963) method-owner chain
+import {
+  classMemberFuncKey,
+  isInstanceAccessorKey,
+  resolveMethodOwnerClass,
+  staticReceiverAccessorKey,
+} from "./class-member-keys.js"; // (#1983) collision-free class-member funcMap keys; (#2963) method-owner chain
 import { exactClassExpressionTypeName } from "./class-expression-identity.js";
 import { popBody, pushBody } from "./context/bodies.js";
 import { resolveWidenedVarKey, integrityVarKey } from "./widened-var-key.js";
@@ -121,6 +127,7 @@ import { tryEmitLinearU8ElementGet, tryEmitLinearU8Length } from "./linear-uint8
 import { resolveUserFnctorName, tryEmitFnctorPrototypeRead } from "./expressions/fnctor-prototype.js";
 import { tryEmitFnctorTypedFieldGet } from "./fnctor-typed-reads.js"; // (#4155 Phase 2) struct-typed fnctor receiver
 import { ensureNativeStringHelpers, stringConstantExternrefInstrs } from "./native-strings.js";
+import { compileHostPropertyKey, staticHostPropertyKeyInstrs } from "./host-property-key.js";
 import { ensureObjectRuntime } from "./object-runtime.js";
 import { emitIsUndefF64 } from "./value-tags.js";
 import { tryEmitStaticI32Expression } from "./i32-static-range-expr.js";
@@ -225,6 +232,7 @@ import { classMethodCandidatesForProp, reserveMemberGetDispatch } from "./member
 import { resolveReceiverStruct } from "./fnctor-escape-gate.js"; // (#2681/#2686 A3) pinned-struct read dispatch
 import { emitGuardedNativeStringElementGet } from "./string-element-read.js"; // (#3973) any-typed native-string element read
 import { emitStringExoticIndexGet } from "./string-exotic-index.js"; // (#4232) §10.4.3.5 bounds for a statically-string receiver
+import { isObjectAssignPrimitiveResultBinding } from "./object-model/object-assign-primitive-operands.js"; // (#6770 S1)
 import { reserveAccessorGetDriver } from "./accessor-driver.js";
 import { S5C_STRUCT_ACCESSOR_CLOSURE } from "./struct-accessor-closure.js";
 import { tryCompileTemporalPropertyAccess } from "./temporal-native.js";
@@ -447,12 +455,14 @@ function tryCompileStandaloneArrayIteratorRead(
 }
 
 import { tryBuiltinPrototypeGetterBrandThrow } from "./builtin-prototype-brand.js";
+import { tryCompileClassBuiltinSpeciesRead } from "./class-builtin-species-read.js"; // (#6775 S14)
 import { tryCompileFunctionPoisonRead } from "./function-poison-pill-access.js";
 import { isFnctorLayoutStructName } from "./fnctor-layout-emit.js"; // (#3927) per-type layouts
 import { tryEmitPrimitiveAbsentPropertyRead } from "./primitive-absent-property.js"; // (#4483) absent prop of a number/boolean primitive → undefined
 import { tryEmitPrimitiveProtoMemberGet } from "./primitive-proto-member-get.js"; // (#4668) PRESENT prop of a number/boolean primitive → chain walk
 import { isForeignEvalNode } from "./expressions/eval-source.js";
 import { identityPreservingStructuralParamCarrier } from "./identity-preserving-structural-param.js";
+import { isReturnOverrideMemberRead, returnOverrideReceiverIsDynamic } from "./classes/ctor-return-override.js"; // (#6772 S2)
 import { ensureFunctionProtoEdge, FUNCTION_PROTO_HAS_INSTANCE_MEMBER } from "./function-proto-has-instance.js";
 import {
   finalizeStructAndDynamicMemberGet,
@@ -474,6 +484,7 @@ import {
   tryStringLengthIteratorAndExternClassReads,
   trySuperAndImportMetaRead,
 } from "./property-access-dispatch.js"; // (#3276) Wave B — extracted guard bands
+import { readEnv } from "../env.js";
 
 /**
  * (#3037 CS1b) True when `expr` is a direct operand of a standalone
@@ -947,8 +958,7 @@ export function emitRuntimeDescriptorGet(
     coerceType(ctx, fctx, recvType, { kind: "externref" });
   }
 
-  addStringConstantGlobal(ctx, propName);
-  fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
+  fctx.body.push(...staticHostPropertyKeyInstrs(ctx, propName));
   fctx.body.push({ op: "call", funcIdx: getIdx });
   if (resultType.kind === "f64" && unboxIdx !== undefined) {
     fctx.body.push({ op: "call", funcIdx: unboxIdx });
@@ -1207,6 +1217,13 @@ export function resolveStructNameForExpr(
     typeName = resolveThisStructName(ctx, fctx);
   }
   typeName = typeName ?? carrierNameForAccess(ctx, resolvedCarrier, accessedMember); // (#5187)
+  // (#6772 S2) A binding of a return-override class may hold the FOREIGN
+  // override object, never castable to the struct: take the dynamic member
+  // path (it reads a real instance's fields too). Private members, and `this`
+  // outside an override-capable derived frame, keep the exact struct.
+  if (typeName !== undefined && returnOverrideReceiverIsDynamic(ctx, fctx, typeName, bareIdent, accessedMember)) {
+    return undefined;
+  }
   return typeName;
 }
 
@@ -3525,6 +3542,13 @@ export function taViewReceiverTypeIdx(
   return undefined;
 }
 
+function receiverHasOwnComputedProto(ctx: CodegenContext, expr: ts.PropertyAccessExpression): boolean {
+  // The member resolves to a `["__proto__"]: v` definition of an object literal.
+  return ctx.oracle
+    .declarationsOf(expr.name)
+    .some((d) => ts.isPropertyAssignment(d) && ts.isComputedPropertyName(d.name));
+}
+
 /**
  * Dynamic member READ off an open-object carrier. The established standalone
  * growable-object case keeps its reserved-accessor/callable exclusions. The
@@ -3540,9 +3564,16 @@ function tryOpenObjectDynamicGet(
   expr: ts.PropertyAccessExpression,
   propName: string,
 ): ValType | null | undefined {
-  const irWithTarget = isIrWithOpenObjectTargetReceiver(ctx, expr.expression);
+  // (#6774 S2) `{ ["__proto__"]: v }` holds an OWN "__proto__" data property:
+  // read it raw, never through the reserved proto-walk / typed-unbox lowerings.
+  const ownProto = ctx.standalone && propName === "__proto__" && receiverHasOwnComputedProto(ctx, expr);
+  const irWithTarget = ownProto || isIrWithOpenObjectTargetReceiver(ctx, expr.expression);
   if (!irWithTarget && !ctx.standalone) return undefined;
-  if (!irWithTarget && !chainRootIsGrowable(ctx, expr.expression)) return undefined;
+  // (#6772 S2) a return-override class binding may hold the foreign override
+  // object: read the raw MOP value (never the checker's field type).
+  if (!irWithTarget && !chainRootIsGrowable(ctx, expr.expression) && !isReturnOverrideMemberRead(ctx, expr)) {
+    return undefined;
+  }
   if (
     !irWithTarget &&
     (propName === "length" ||
@@ -3611,7 +3642,7 @@ function tryKnownFnctorDynamicObjectCarrierGet(
   propName: string,
 ): ValType | undefined {
   // Narrow rollback switch used by the Acorn exact A/B benchmark.
-  if (process.env.JS2WASM_TYPED_OPEN_CARRIER_READS === "0") return undefined;
+  if (readEnv("JS2WASM_TYPED_OPEN_CARRIER_READS") === "0") return undefined;
   if (!ctx.standalone) return undefined;
   if (!ts.isPropertyAccessExpression(expr.expression)) return undefined;
   const carrierRead = expr.expression;
@@ -3984,6 +4015,14 @@ export function compilePropertyAccess(
   // file; their identifiers are compiled as externrefs, but the checker cannot
   // answer property-access queries for those unbound declarations. Keep this
   // lane dynamic so expressions such as `a1.length` and `this.shifted` remain evaluable.
+  // (#6774 S5) A spliced `eval("super.x")` resolves against the CALLER frame's home object.
+  if (
+    isForeignEvalNode(expr) &&
+    expr.expression.kind === ts.SyntaxKind.SuperKeyword &&
+    !ts.isPrivateIdentifier(expr.name)
+  ) {
+    return compileSuperPropertyAccess(ctx, fctx, expr, expr.name.text);
+  }
   if (isForeignEvalNode(expr)) {
     const foreignPoison = tryCompileFunctionPoisonRead(ctx, fctx, expr);
     if (foreignPoison !== undefined) return foreignPoison;
@@ -4018,8 +4057,8 @@ export function compilePropertyAccess(
   const linU8Len = tryEmitLinearU8Length(ctx, fctx, expr);
   if (linU8Len !== null) return linU8Len;
 
-  const objType = ctx.checker.getTypeAtLocation(expr.expression);
   const propName = ts.isPrivateIdentifier(expr.name) ? "__priv_" + expr.name.text.slice(1) : expr.name.text;
+  const objType = builtinSubclassReceiverType(ctx, ctx.checker.getTypeAtLocation(expr.expression), propName); // (#6651 C5)
 
   // (#6651 F4) proxy receiver → generic `__extern_get`; proxy-receiver-generic-read.ts
   const __f4p = tryProxyReceiverPropertyRead(ctx, fctx, expr, propName);
@@ -5135,7 +5174,8 @@ export function compileElementAccess(
   const jsonParseElementType = tryEmitJsonParseElementAccess(ctx, fctx, expr);
   if (jsonParseElementType !== undefined) return jsonParseElementType;
 
-  const functionHasInstanceRead = tryCompileStandaloneFunctionHasInstanceRead(ctx, fctx, expr);
+  const functionHasInstanceRead =
+    tryCompileStandaloneFunctionHasInstanceRead(ctx, fctx, expr) ?? tryCompileClassBuiltinSpeciesRead(ctx, fctx, expr); // (#6775 S14)
   if (functionHasInstanceRead !== undefined) return functionHasInstanceRead;
 
   // (#4731) Resolve the static Set/Map prototype iterator alias before the
@@ -5218,7 +5258,7 @@ export function compileElementAccess(
         const accessorKey = `${resolvedClass}_${key}`;
         if (ctx.classAccessorSet.has(accessorKey)) {
           const getterName = `${resolvedClass}_get_${key}`;
-          const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, getterName));
+          const funcIdx = ctx.funcMap.get(staticReceiverAccessorKey(ctx, resolvedClass, "get", key)); // (#6772 S12)
           if (funcIdx !== undefined) {
             const retType = emitGetterCallWithDummy(ctx, fctx, resolvedClass, getterName, funcIdx);
             return retType ?? { kind: "externref" };
@@ -5272,7 +5312,7 @@ export function compileElementAccess(
       const key = resolveComputedKeyExpression(ctx, expr.argumentExpression);
       if (key !== undefined) {
         const accessorKey = `${className}_${key}`;
-        if (ctx.classAccessorSet.has(accessorKey) && !ctx.staticAccessorSet.has(accessorKey)) {
+        if (isInstanceAccessorKey(ctx, accessorKey)) {
           const getterName = `${className}_get_${key}`;
           const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, getterName));
           if (funcIdx !== undefined) {
@@ -5286,7 +5326,7 @@ export function compileElementAccess(
         // dot-access path at property-access.ts:1361–1383.
         const methodFullName = `${className}_${key}`;
         if (ctx.classMethodSet.has(methodFullName) && !ctx.staticMethodSet.has(methodFullName)) {
-          const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, methodFullName));
+          const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, methodFullName, "instance"));
           const structTypeIdx = ctx.structMap.get(className);
           if (funcIdx !== undefined && structTypeIdx !== undefined) {
             if (emitCachedMethodClosureAccess(ctx, fctx, methodFullName, funcIdx, structTypeIdx)) {
@@ -5322,7 +5362,8 @@ export function compileElementAccess(
     const recvWrapTsType = ctx.checker.getTypeAtLocation(expr.expression);
     if (
       (isStringWrapperType(recvWrapTsType) || ctx.oracle.staticJsTypeOf(expr.expression) === "string") &&
-      isNumericIndexExpression(ctx, expr.argumentExpression, fctx)
+      isNumericIndexExpression(ctx, expr.argumentExpression, fctx) &&
+      !isObjectAssignPrimitiveResultBinding(ctx, expr.expression) // (#6770 S1) checker type is `T & U`, runtime is ToObject(T)
     ) {
       // (#4232) …with §10.4.3.5 bounds, not §22.1.3.1 charAt bounds: an index
       // outside `[0, len)` — or a non-canonical one like `NaN` / `1.5` — is
@@ -6019,7 +6060,7 @@ export function compileElementAccessBody(
       }
       return null;
     }
-    compileExpression(ctx, fctx, expr.argumentExpression, { kind: "externref" });
+    compileHostPropertyKey(ctx, fctx, expr.argumentExpression);
     // Lazily register __extern_get if not already registered
     const funcIdx = ensureLateImport(
       ctx,
@@ -6063,7 +6104,7 @@ export function compileElementAccessBody(
       return null;
     }
     // Compile key as externref and call __extern_get
-    compileExpression(ctx, fctx, expr.argumentExpression, { kind: "externref" });
+    compileHostPropertyKey(ctx, fctx, expr.argumentExpression);
     const funcIdx = ensureLateImport(
       ctx,
       "__extern_get",

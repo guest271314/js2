@@ -7,8 +7,9 @@ import { ts } from "../../ts-api.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression } from "../shared.js";
-import { emitLazyNativeProtoGet } from "../native-proto.js";
+import { buildLazyNativeProtoGetInstrs, emitLazyNativeProtoGet } from "../native-proto.js";
 import {
+  ensureArrayBufferNativeProtoGlue,
   ensureTypedArrayIntrinsicNativeProtoGlue,
   ensureTypedArrayViewNativeProtoGlue,
   isTypedArrayViewProtoName,
@@ -22,6 +23,13 @@ import { objectLiteralHasColonProto } from "../literals.js"; // (#5270 step 2)
 import { sourceShadowsGlobalName } from "../source-function-members.js"; // (#5194 review F1)
 import { allocLocal } from "../context/locals.js"; // (#6609)
 import { popBody, pushBody } from "../context/bodies.js"; // (#6630 fallback)
+import { isStandaloneBaseClassOrPrototype } from "../class-proto-object.js"; // (#6767 step 2)
+import { tryEmitOverrideBindingGetPrototypeOf } from "../classes/ctor-return-override.js"; // (#6772 S2)
+import { classIdentityFromExpression } from "../class-static-metadata.js"; // (#6772 S6)
+import { bindingIsUniqueAndNeverWritten } from "../class-heritage-check.js"; // (#6772 S6)
+import { heritageBindsParentClass } from "../classes/class-heritage-comma.js"; // (#6772 S6)
+import { emitLazyClassObjectGet } from "./extern.js"; // (#6772 S6)
+import { arrayTypedValueMayNotBeArray } from "../proxy-array-like.js"; // (#6651 H6)
 
 const NATIVE_COLLECTION_NAMES = new Set(["Map", "Set", "WeakMap", "WeakSet"]);
 
@@ -221,7 +229,7 @@ function isJsonObjectParseCall(ctx: CodegenContext, fctx: FunctionContext, expr:
  * Emit the compiler-owned intrinsic prototype singleton rather than asking the
  * host MOP for the prototype of an opaque Wasm closure/struct.
  */
-function emitEs5IntrinsicPrototype(
+export function emitEs5IntrinsicPrototype(
   ctx: CodegenContext,
   fctx: FunctionContext,
   anchor: ts.Node,
@@ -246,6 +254,86 @@ function emitEs5IntrinsicConstructor(
   (builtin as { parent?: ts.Node }).parent = anchor;
   ts.setTextRange(builtin, anchor);
   return compileExpression(ctx, fctx, builtin, { kind: "externref" }) ?? { kind: "externref" };
+}
+
+/**
+ * (#6767 step 2) `Object.getPrototypeOf(C.prototype)` / `Object.getPrototypeOf(C)`
+ * for a standalone BASE class read the real [[Prototype]] at runtime.
+ *
+ * The class folds in `call-builtin-static.ts` predate the prototype `$Object`
+ * (#3976): `C.prototype` folded to `null` ("Object.prototype not modeled") and
+ * the class OBJECT took the class-INSTANCE arm and answered `C.prototype`
+ * (`definition/basics.js`; p11 bits 8/16). The runtime already answers both —
+ * the native `__getPrototypeOf` gives `%Object.prototype%` for the null-`$proto`
+ * prototype object, and the #6609 callable arm gives `%Function.prototype%` for
+ * the class-object carrier (measured through an untyped parameter,
+ * `.tmp/6767/q2.js`) — so this is the generic fallback's own lowering minus its
+ * iterator-record branch and its all-classes demand record, neither of which a
+ * class operand needs. A later `Object.setPrototypeOf(C.prototype, …)` stays
+ * observable, which no fold could.
+ *
+ * DERIVED classes keep their folds: `D.prototype` already answers the parent
+ * prototype, and the runtime answers the class object `D` wrongly too (neither
+ * the parent class nor `%Function.prototype%`, `.tmp/6767/q3.js`).
+ */
+function tryEmitStandaloneBaseClassGetPrototypeOf(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  arg0: ts.Expression,
+): InnerResult | null {
+  if (!isStandaloneBaseClassOrPrototype(ctx, arg0)) return null;
+  const argType = compileExpression(ctx, fctx, arg0, { kind: "externref" });
+  if (!argType) {
+    fctx.body.push({ op: "ref.null.extern" });
+    return { kind: "externref" };
+  }
+  if (argType.kind !== "externref") coerceType(ctx, fctx, argType, { kind: "externref" });
+  if (tryEmitDynamicCallableGetPrototypeOf(ctx, fctx, arg0)) return { kind: "externref" };
+  // Declined: the receiver is still on the stack.
+  const gpoIdx = ensureLateImport(ctx, "__getPrototypeOf", [{ kind: "externref" }], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
+  if (gpoIdx === undefined) fctx.body.push({ op: "drop" }, { op: "ref.null.extern" });
+  else fctx.body.push({ op: "call", funcIdx: gpoIdx });
+  return { kind: "externref" };
+}
+
+/**
+ * (#6772 S6, #6767 R4) `Object.getPrototypeOf(D)` for a standalone DERIVED class
+ * spelled by an unwritten binding: §15.7.14 step 8 made the superclass the
+ * constructor's [[Prototype]], so when the heritage provably names a class of
+ * this program (`heritageBindsParentClass`) the answer is that parent's class
+ * object — the same singleton the parent's own name reads. Anything else (a
+ * parameter heritage, a rewritten binding, a parent with no class object)
+ * declines to the folds below.
+ */
+function tryEmitStandaloneDerivedClassGetPrototypeOf(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  arg0: ts.Expression,
+): InnerResult | null {
+  if (!ctx.standalone) return null;
+  let bare = arg0;
+  while (ts.isParenthesizedExpression(bare)) bare = bare.expression;
+  const className = classIdentityFromExpression(ctx, bare);
+  const declaredParent = className === undefined ? undefined : ctx.classParentMap.get(className);
+  const parent =
+    declaredParent === undefined ? undefined : (ctx.classExprNameMap.get(declaredParent) ?? declaredParent);
+  if (
+    parent === undefined ||
+    !ctx.classSet.has(parent) ||
+    !ctx.classObjectGlobals?.has(parent) ||
+    !ctx.structMap.has(parent) ||
+    !ctx.structFields.has(parent)
+  ) {
+    return null;
+  }
+  if (!heritageBindsParentClass(ctx, className!, parent)) return null;
+  const declaration = ts.isIdentifier(bare) ? ctx.oracle.valueDeclarationOf(bare) : undefined;
+  if (declaration === undefined || !bindingIsUniqueAndNeverWritten(bare as ts.Identifier, declaration)) return null;
+  const argType = compileExpression(ctx, fctx, arg0);
+  if (argType) fctx.body.push({ op: "drop" });
+  if (!emitLazyClassObjectGet(ctx, fctx, parent)) fctx.body.push({ op: "ref.null.extern" });
+  return { kind: "externref" };
 }
 
 /**
@@ -293,6 +381,15 @@ export function tryCompileEs5GetPrototypeOfEarly(
   // READ, not folded — see `tryEmitDynamicProtoRuntimeRead`.
   const dynamicProtoRead = tryEmitDynamicProtoRuntimeRead(ctx, fctx, arg0);
   if (dynamicProtoRead) return dynamicProtoRead;
+  const overrideProto = tryEmitOverrideBindingGetPrototypeOf(ctx, fctx, arg0); // (#6772 S2)
+  if (overrideProto) return overrideProto;
+
+  // (#6767 step 2) A standalone BASE class and its prototype read their real
+  // [[Prototype]] instead of the class folds below — see the helper.
+  const baseClassProto = tryEmitStandaloneBaseClassGetPrototypeOf(ctx, fctx, arg0);
+  if (baseClassProto) return baseClassProto;
+  const derivedClassProto = tryEmitStandaloneDerivedClassGetPrototypeOf(ctx, fctx, arg0); // (#6772 S6)
+  if (derivedClassProto) return derivedClassProto;
 
   if (ts.isIdentifier(arg0) && isGlobalBuiltinIdentifier(ctx, fctx, arg0)) {
     if (ES5_FUNCTION_PROTOTYPE_CTORS.has(arg0.text)) {
@@ -460,7 +557,8 @@ export function tryCompileEs5GetPrototypeOfValue(
   if (staticType === "symbol") return emitEs5IntrinsicPrototype(ctx, fctx, expr, "Symbol");
 
   const knownPrototypeName = ES5_OBJECT_PROTOTYPES.get(ctx.oracle.declaredNameOf(arg0) ?? "");
-  if (knownPrototypeName) {
+  // (#6651 H6) An Array-typed value may be a species result or a Proxy here.
+  if (knownPrototypeName && !(knownPrototypeName === "Array" && arrayTypedValueMayNotBeArray(ctx))) {
     return emitEs5IntrinsicPrototype(ctx, fctx, expr, knownPrototypeName);
   }
   if (ctx.oracle.signatureOf(arg0) !== undefined || ts.isFunctionExpression(arg0) || ts.isArrowFunction(arg0)) {
@@ -697,6 +795,41 @@ function isEmptyReconstructedConstructor(ctx: CodegenContext, expr: ts.NewExpres
  */
 const dynamicProtoReceiverNamesBySource = new WeakMap<ts.SourceFile, Set<string>>();
 
+/** `Object.getOwnPropertyDescriptor(<x>, "__proto__")`. */
+function isProtoDescriptorCall(e: ts.Expression): boolean {
+  return (
+    ts.isCallExpression(e) &&
+    ts.isPropertyAccessExpression(e.expression) &&
+    e.expression.name.text === "getOwnPropertyDescriptor" &&
+    e.arguments.length >= 2 &&
+    ts.isStringLiteralLike(e.arguments[1]!) &&
+    e.arguments[1].text === "__proto__"
+  );
+}
+
+/**
+ * Is `e` the Annex B `__proto__` SETTER — `gOPD(<x>, "__proto__").set`, a
+ * `<desc>.set` over a binding of that descriptor, or a binding of either?
+ */
+function protoSetterMatcher(source: ts.SourceFile): ((e: ts.Expression) => boolean) | undefined {
+  const descs = new Set<string>();
+  const setters = new Set<string>();
+  const isSetter = (e: ts.Expression): boolean =>
+    (ts.isIdentifier(e) && setters.has(e.text)) ||
+    (ts.isPropertyAccessExpression(e) &&
+      e.name.text === "set" &&
+      (isProtoDescriptorCall(e.expression) || (ts.isIdentifier(e.expression) && descs.has(e.expression.text))));
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+      if (isProtoDescriptorCall(node.initializer)) descs.add(node.name.text);
+      else if (isSetter(node.initializer)) setters.add(node.name.text);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return descs.size > 0 || setters.size > 0 ? isSetter : undefined;
+}
+
 function dynamicProtoReceiverNames(source: ts.SourceFile): Set<string> {
   const cached = dynamicProtoReceiverNamesBySource.get(source);
   if (cached) return cached;
@@ -719,7 +852,19 @@ function dynamicProtoReceiverNames(source: ts.SourceFile): Set<string> {
     const target = unwrap(e);
     if (ts.isIdentifier(target)) names.add(target.text);
   };
+  // (#6770 S5) …and the receiver of the REFLECTIVE Annex B setter,
+  // `set.call(o, proto)` / `desc.set.call(o, proto)` over `gOPD(<x>, "__proto__")`.
+  const isProtoSetter = protoSetterMatcher(source);
   const visit = (node: ts.Node): void => {
+    if (
+      isProtoSetter !== undefined &&
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      (node.expression.name.text === "call" || node.expression.name.text === "apply") &&
+      isProtoSetter(node.expression.expression)
+    ) {
+      mark(node.arguments[0]);
+    }
     if (
       ts.isCallExpression(node) &&
       ts.isPropertyAccessExpression(node.expression) &&
@@ -879,4 +1024,37 @@ export function tryCompileGetPrototypeOfIsPrototypeOf(
     fctx.body.push({ op: "drop" }, { op: "drop" }, { op: "i32.const", value: 0 });
   }
   return { kind: "i32", boolean: true };
+}
+
+/**
+ * (#6769 S10) `__getPrototypeOf(<ArrayBuffer carrier>)` is `ArrayBuffer.prototype`.
+ *
+ * An ArrayBuffer is the packed byte vec `$__vec_i32_byte` — a `$__vec_base`
+ * subtype — so the dynamic native answered the vec default, `Array.prototype`,
+ * for every buffer that reached it through a dynamic value: `new
+ * TA(sample).buffer`, `view.buffer`, and a statically created buffer passed
+ * through `any`. §25.1.3.1 AllocateArrayBuffer creates it from
+ * `%ArrayBuffer.prototype%`; the arm answers the same lazily-built glue
+ * singleton `ArrayBuffer.prototype` reads, so the identity holds by `ref.eq`.
+ *
+ * Finalize-time (called from `fillTaDynViewMopArms`, i.e. only in a module that
+ * builds dynamic TypedArray views): prepended, so it precedes the generic vec
+ * answer. Residual: a buffer re-parented with `Object.setPrototypeOf` still
+ * answers `ArrayBuffer.prototype` here (#2917's vec proto link is not
+ * consulted for this carrier).
+ */
+export function fillArrayBufferGetPrototypeOfArm(ctx: CodegenContext): void {
+  if (!ctx.standalone) return;
+  const byteVecIdx = ctx.vecTypeMap.get("i32_byte");
+  const fn = ctx.mod.functions.find((f) => f.name === "__getPrototypeOf");
+  if (byteVecIdx === undefined || !fn) return;
+  const brand = ensureArrayBufferNativeProtoGlue(ctx);
+  const read = brand === undefined ? null : buildLazyNativeProtoGetInstrs(ctx, brand);
+  if (!read) return;
+  fn.body.unshift(
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" },
+    { op: "ref.test", typeIdx: byteVecIdx },
+    { op: "if", blockType: { kind: "empty" }, then: [...read, { op: "return" }] },
+  );
 }

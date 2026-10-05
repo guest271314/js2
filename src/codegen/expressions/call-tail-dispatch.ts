@@ -9,6 +9,7 @@
 // unconditional, so it ALWAYS returns an InnerResult — compileCallExpression's
 // tail is a single `return compileTailDispatch(...)`. Moved verbatim: the
 // emitted Wasm is byte-identical.
+import { isAccessorReceiver } from "../accessor-object-literal.js"; // (#6774 S6)
 import { forEachChild, ts } from "../../ts-api.js";
 import { widenJsDefaultGuessSymbolSlot } from "../js-default-param-type-guess.js";
 import { profilePhase } from "../../compile-profile.js";
@@ -45,7 +46,13 @@ import { objectLiteralTakesStandaloneAnyObjectPath, resolveComputedKeyExpression
 import { emitNullCheckThrow, typeErrorThrowInstrs } from "../property-access.js";
 import { tryCompileStandaloneRegExpSymbolCall, usesNativeRegExpProvider } from "../regexp-standalone.js";
 import type { InnerResult } from "../shared.js";
-import { brandExternMethodResult, coerceType, compileExpression, VOID_RESULT } from "../shared.js";
+import {
+  brandExternMethodResult,
+  coerceType,
+  compileExpression,
+  skipTransparentExpressions,
+  VOID_RESULT,
+} from "../shared.js";
 import { compileStatement, hoistFunctionDeclarations } from "../statements.js";
 import { ensureExtrasArgvGlobal, maybeSetArgcForKnownCall } from "../statements/nested-declarations.js";
 import { compileStringLiteral, isStaticUndefinedArg } from "../string-ops.js";
@@ -79,7 +86,7 @@ import { resolveStructName } from "./misc.js";
 import { resolvePlainCallThisTrampoline, tryReshapeBindToNamedThisCall } from "../named-this-call.js"; // (#4203, #6436)
 import { compileSuperElementMethodCall } from "./new-super.js";
 import { compileCallDispatchTail, tryEmitStoredMemberClosureCall } from "./stored-member-closure-call.js";
-import { classMemberFuncKey } from "../class-member-keys.js";
+import { classMemberFuncKey, elementCallTargetsStaticMethod } from "../class-member-keys.js";
 import { matchClosureInfoBySignature } from "./closure-sig-match.js"; // (#4394) exact-first closure pick
 import { emitPlainObjectDynamicCallWithReceiver } from "./plain-object-dynamic-receiver-call.js";
 import { tryEmitClassDynamicMemberCall } from "./class-dynamic-member-call.js"; // (#5195 F1/F3)
@@ -1072,8 +1079,8 @@ export function compileTailDispatch(
       }
       if (receiverClassName && ctx.classSet.has(receiverClassName)) {
         const fullName = `${receiverClassName}_${methodName}`;
-        const funcIdx = ctx.funcMap.get(fullName);
-        if (funcIdx !== undefined) {
+        const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, fullName, "instance")); // (#6772 S4)
+        if (funcIdx !== undefined && !elementCallTargetsStaticMethod(ctx, elemAccess.expression, methodName)) {
           // Push self (the receiver) as first argument
           compileExpression(ctx, fctx, elemAccess.expression);
           // Push remaining arguments with type hints
@@ -1113,11 +1120,16 @@ export function compileTailDispatch(
       }
 
       // Try struct method: structName_methodName
-      const structTypeName = resolveStructName(ctx, receiverType);
+      // (#6774 S6) An open `$Object` literal binding keeps the dynamic call: the
+      // closed-shape method arm would `ref.cast` it to the stale inferred struct.
+      const structTypeName =
+        ctx.standalone && isAccessorReceiver(ctx, skipTransparentExpressions(elemAccess.expression))
+          ? undefined
+          : resolveStructName(ctx, receiverType);
       if (structTypeName) {
         const fullName = `${structTypeName}_${methodName}`;
-        const funcIdx = ctx.funcMap.get(fullName);
-        if (funcIdx !== undefined) {
+        const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, fullName, "instance")); // (#6772 S4)
+        if (funcIdx !== undefined && !elementCallTargetsStaticMethod(ctx, elemAccess.expression, methodName)) {
           const recvType = compileExpression(ctx, fctx, elemAccess.expression);
           // Check if receiver went through emitGuardedRefCast — null may mean
           // "wrong struct type" rather than genuinely null (#789)

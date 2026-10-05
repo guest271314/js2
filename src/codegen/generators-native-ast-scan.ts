@@ -94,7 +94,7 @@ export function statementContainsYield(stmt: ts.Statement): boolean {
  * produce `{value, done:true}`, NOT a raw wasm `return` (which `compileStatement`
  * would emit, mis-coercing the value to the resume function's result-ref type).
  */
-function statementContainsReturn(stmt: ts.Statement): boolean {
+export function statementContainsReturn(stmt: ts.Statement): boolean {
   let found = false;
   function visit(node: ts.Node): void {
     if (found) return;
@@ -141,6 +141,23 @@ export function nodeContainsYield(root: ts.Node): boolean {
   }
   ts.forEachChild(root, visit);
   return found;
+}
+
+/**
+ * (#6651 A10) A generator METHOD whose computed key holds a `yield` of the
+ * ENCLOSING generator: `function* g() { ({ *[yield]() {} }); }`. TypeScript's
+ * checker recurses without bound on a signature query for this method
+ * (checkYieldExpression → the method's contextual return type → the literal's
+ * contextual type → the same yield), so its callers must answer it
+ * syntactically instead of asking.
+ */
+export function isGeneratorMethodWithYieldKey(node: ts.Node): boolean {
+  return (
+    ts.isMethodDeclaration(node) &&
+    node.asteriskToken !== undefined &&
+    ts.isComputedPropertyName(node.name) &&
+    nodeContainsYield(node.name)
+  );
 }
 
 /**

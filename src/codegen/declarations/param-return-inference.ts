@@ -12,6 +12,7 @@ import { fnctorCtorParamTypesFlagEnabled, numericReturnsFlagEnabled } from "../.
 import { forEachChild, ts } from "../../ts-api.js";
 import { numericAdmissionEnabled } from "../analysis/mixed-assignment-carrier.js";
 import { isStandalonePromiseActive } from "../async-scheduler.js";
+import { isStandaloneClassProtoObjectExpression } from "../class-proto-object.js"; // (#6767) C.prototype is an $Object
 import { hasAsyncModifier, resolveWasmType } from "../index.js";
 import { overlayRouteActive } from "../typed-lane-overlay-route.js";
 import { getVecInfo } from "../type-coercion.js";
@@ -594,7 +595,7 @@ export function inferParamTypeFromCallSites(
       if (!conflict) {
         const arg = callArgs?.[paramIndex];
         if (arg) {
-          if (isStandaloneCollectionNativeProtoArgument(ctx, arg)) {
+          if (isStandaloneCollectionNativeProtoArgument(ctx, arg) || isStandaloneClassProtoObjectExpression(ctx, arg)) {
             sawStandaloneCollectionNativeProtoArg = true;
             return;
           }
@@ -718,6 +719,12 @@ export function inferParamTypeFromCallSites(
             // number 0. Record the position; the withdrawal rule below keeps a
             // native scalar from being inferred out of it.
             if ((argType.flags & ~(ts.TypeFlags.Void | ts.TypeFlags.Undefined)) === 0) sawNullishArg = true;
+            // (#6774 S6) A symbol's i32 id is not a number: an untyped param
+            // narrowed to i32 from it re-boxes as a NUMBER. Keep it externref.
+            if (ctx.standalone && (argType.flags & ts.TypeFlags.ESSymbolLike) !== 0) {
+              sawOpaqueAnyArg = true;
+              return;
+            }
             const wasmType = resolveWasmType(ctx, argType);
             // (#4611) A GC-ref claim sourced from a DYNAMIC member read is only
             // as strong as the receiver's DECLARED shape. Acorn's

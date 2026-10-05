@@ -491,6 +491,10 @@ export interface NativeGeneratorInfo {
   paramTypes: ValType[];
   /** Field index where captured params start in the state struct. */
   paramFieldOffset: number;
+  /** (#6651 A12) `paramNames` indices the body can write: mutable fields, stored back at each suspension. */
+  writableParamIdxs?: ReadonlySet<number>;
+  /** (#6651 A12) Resume-function locals of `writableParamIdxs` and their fields (frame-core `storeSpills`). */
+  paramWriteBack?: readonly { local: number; field: number }[];
   /**
    * (#2864 C02) Field carrying the eagerly-created `arguments` vec across
    * generator suspension. Present only for generators whose body observes the
@@ -1046,6 +1050,10 @@ export interface FunctionContext {
    * binding so reads that occur before the first arrow remain unchanged.
    */
   lexicalThisCaptureLocal?: number;
+  /** (#6774 S4) Frame slot holding the `new.target` snapshot arrows capture. */
+  newTargetSnapshotLocal?: number;
+  /** (#6774 S4) A fnctor `new F()` body's `new.target` value: the binding naming `F`. */
+  newTargetValueNode?: ts.Expression;
   /** While lowering a compile-time direct-eval Script, an otherwise absent
    * receiver in a sloppy caller denotes the realm global object. This is
    * scoped to the foreign eval AST so ordinary strict/direct-call `this`
@@ -1947,6 +1955,13 @@ export interface CodegenContext extends StandaloneCapabilityDemandState, BodyRou
    */
   arraySpeciesDirty: boolean;
   /**
+   * (#6651 H6) The module may hold a Proxy VALUE — the identifier `Proxy`
+   * occurs anywhere (`scanForArrayHoles`). Gates the `$Proxy` arms of the
+   * standalone array-like trio (`proxy-array-like.ts`), so a Proxy-free module
+   * keeps its bytes.
+   */
+  proxyDirty?: boolean;
+  /**
    * (#6485) The module can make `@@isConcatSpreadable` OBSERVABLE — it mentions
    * `isConcatSpreadable` anywhere (identifier, string literal, property name),
    * lets the `Symbol` intrinsic escape as a VALUE (`var S = Symbol`,
@@ -2137,6 +2152,8 @@ export interface CodegenContext extends StandaloneCapabilityDemandState, BodyRou
   structAccessorClosure: Map<string, { getGlobal?: number; setGlobal?: number }>;
   /** Set of "ClassName_propName" for static getter/setter accessor properties */
   staticAccessorSet: Set<string>;
+  /** (#6772 S12) "ClassName_propName" of every INSTANCE class accessor, filled before any accessor key is minted. */
+  classInstanceAccessorKeys: Set<string>;
   /** Set of "ClassName_methodName" for static methods (no self param) */
   staticMethodSet: Set<string>;
   /** Map from "ClassName_propName" → global index for static properties */
@@ -3394,6 +3411,8 @@ export interface CodegenContext extends StandaloneCapabilityDemandState, BodyRou
   capturedGlobalsOwner?: Map<string, FunctionContext>;
   /** Map from TS symbol name → synthetic class name for class expressions */
   classExprNameMap: Map<string, string>;
+  /** (#6772 S7) Names assigned two DIFFERENT class expressions: never put back in `classExprNameMap`. */
+  classExprAmbiguousNames: Set<string>;
   /** Map from class AST node → synthetic class name (expressions and nested declarations). */
   anonClassExprNames: Map<ts.ClassExpression | ts.ClassDeclaration, string>;
   /** Map from function/class identifier → its ES-spec .name string value */
@@ -3494,6 +3513,8 @@ export interface CodegenContext extends StandaloneCapabilityDemandState, BodyRou
    * chain is already live, so publishing the renderer costs ~150 B.
    */
   usesSourceThrowStatement: boolean;
+  /** (#6651 A13) The source declares a `function*` or a generator method (prescan). */
+  usesSourceGenerator?: boolean;
   /**
    * (#2866) Type index of the native `$Symbol` carrier struct
    * `(struct (field $id i32) (field $desc (ref null $AnyString)))`, used in
@@ -4007,9 +4028,9 @@ export interface CodegenContext extends StandaloneCapabilityDemandState, BodyRou
     /**
      * (#2025) Whether the method body reads `this` (param 0), computed at
      * registration BEFORE the TypeError-helper late import shifts function
-     * indices (which would make a finalize-time `methodFuncIdx` lookup point at
-     * the wrong function). Finalize reuses this captured value to decide whether
-     * the trampoline's null-`this` arm throws a catchable TypeError.
+     * indices. Finalize reuses it to decide whether the null-`this` arm throws
+     * a catchable TypeError; (#6789) `undefined` = body not compiled yet at
+     * registration, so finalize rescans the compiled body.
      */
     methodUsesThis?: boolean;
     /**

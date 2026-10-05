@@ -25,6 +25,7 @@ import { join, relative } from "path";
 import { afterAll, beforeAll, describe, it } from "vitest";
 import { CompilerPool, type TestResult } from "../scripts/compiler-pool.js";
 // (#5353) ONE Temporal gate across every lane — see scripts/test262-temporal.mjs.
+import { test262OracleLane } from "../scripts/test262-harness-cache.mjs";
 import { test262NeedsTemporalGlobal, test262TemporalLaneEnabled } from "../scripts/test262-temporal.mjs";
 // oracle-version-exempt: #5215 changes callback-completeness evidence only; Test262 scoring is unchanged.
 import { negativeCompileErrorMatches, negativeCompileSucceededVerdict } from "../scripts/negative-verdict.mjs";
@@ -33,7 +34,7 @@ import { getTest262ShardCompletionPath } from "../scripts/validate-test262-compl
 import { discoverFixtureGraph, hasSelfModuleImport } from "../scripts/test262-fixture-graph.mjs";
 // (#4162) ONE import-object finaliser, shared with scripts/test262-worker.mjs
 // and tests/test262-runner.ts.
-import { instantiateTest262Module } from "../scripts/test262-import-object.mjs";
+import { instantiateTest262Module, TEST262_DYNAMIC_CODE_POLICY } from "../scripts/test262-import-object.mjs";
 import { isPoisonCompileError } from "../scripts/test262-poison-error.mjs";
 import { isRecordedVerdictSentinel } from "../scripts/verdict-once.mjs";
 import { findNthAssert } from "./test262-assert-locator.js";
@@ -181,13 +182,13 @@ const TEST262_SEMANTIC_PROVIDERS = parseTest262SemanticProviders(process.env.TES
 // they stay HONEST v8 even inside a fast-mode merge_group run. This mirrors the
 // worker's own rule (sr-3461): standalone target NEVER sets `nativeHarness`.
 const TEST262_ORACLE_MODE = process.env.TEST262_ORACLE_MODE;
-const IS_HOST_LANE = TEST262_TARGET === undefined;
-const ORACLE_LANE: "honest" | "fast-nativeharness" | "linked-harness" =
-  TEST262_ORACLE_MODE === "fast" && IS_HOST_LANE
-    ? "fast-nativeharness"
-    : TEST262_ORACLE_MODE === "linked" && IS_HOST_LANE
-      ? "linked-harness"
-      : "honest";
+// (#6723 P2) `TEST262_STANDALONE_LINKED=1` admits the linked arm on the
+// standalone target (shadow measurement only); unset => the host-only gate.
+const ORACLE_LANE = test262OracleLane({
+  oracleMode: TEST262_ORACLE_MODE,
+  target: TEST262_TARGET,
+  standaloneLinked: process.env.TEST262_STANDALONE_LINKED,
+});
 
 // (#3451 slice 3) Linked-harness shadow oracle — the harness prefix is compiled
 // ONCE per include-set into a separate provider module (#2527) and each body is
@@ -845,9 +846,16 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
             // test executes import(). Standalone import() of a module outside
             // the compiled graph settles as a rejected Promise at runtime. Do
             // not turn dynamic fixtures into eager compileMulti inputs.
-            if (Object.keys(fixtureGraph.fixtureFiles).length > 0 || selfModuleImport) {
+            if (
+              Object.keys(fixtureGraph.fixtureFiles).length > 0 ||
+              selfModuleImport ||
+              fixtureGraph.requiresEntrySelfImportGraph === true
+            ) {
               // Fixture tests are rare — compile in-process
               try {
+                if (Object.prototype.hasOwnProperty.call(fixtureGraph.fixtureFiles, fixtureGraph.entryFile)) {
+                  throw new Error(`fixture graph collides with entry file: ${fixtureGraph.entryFile}`);
+                }
                 const vfiles: Record<string, string> = {
                   ...fixtureGraph.fixtureFiles,
                   [fixtureGraph.entryFile]: compileSource,
@@ -855,6 +863,8 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                 const multiCompile = await getCompileMulti();
                 const result = await multiCompile(vfiles, fixtureGraph.entryFile, {
                   skipSemanticDiagnostics: true,
+                  // #6776: this path instantiates and classifies the bytes itself; the library default would turn the negative-test arm's compile failure into an incidental pass (see #2920).
+                  validate: false,
                   target: TEST262_TARGET,
                   semanticProviders: TEST262_SEMANTIC_PROVIDERS,
                   inferModuleStrictArguments,
@@ -977,6 +987,7 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                   };
                   const importObj = buildImports(result.imports, { console: consoleProxy }, result.stringPool, {
                     globalSandbox: createTestSandbox(consoleProxy as unknown as Console),
+                    dynamicCode: TEST262_DYNAMIC_CODE_POLICY,
                   });
                   // (#4162) The fixture-graph lane executes in this process
                   // instead of scripts/test262-worker.mjs. Both go through the

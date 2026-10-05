@@ -24,6 +24,11 @@ import {
 } from "./dynamic-with-shape.js";
 import { collectRedeclarationWidenedModuleVarNames } from "./redeclared-var-widening.js";
 import { sourceContainsWithStatement } from "../source-scan-predicates.js"; // (#5313)
+import {
+  isReflectiveWriterCallArg,
+  markStandaloneReflectiveWriteTargets,
+} from "../object-model/object-literal-reflective-escape.js"; // (#6770 S2)
+import { readEnv } from "../../env.js";
 
 function isUnboxedPrimitiveCarrier(type: ValType): boolean {
   return ["f64", "f32", "i64", "i32", "i16", "i8"].includes(type.kind);
@@ -591,6 +596,7 @@ export function collectEmptyObjectWidening(
           if (ctx.standalone && !ctx.objectHashConsumerVars.has(varName)) {
             for (const s of stmts) {
               markStandaloneObjectMutationTargets(ctx, s, varName, ctx.objectHashConsumerVars);
+              markStandaloneReflectiveWriteTargets(s, varName, ctx.objectHashConsumerVars); // (#6770 S2/S4)
             }
           }
 
@@ -1274,7 +1280,7 @@ export function collectGrowableObjectLiterals(
   // Emergency rollback for the closed-outer-table refinement below. Keeping
   // this narrow switch makes the performance claim directly A/B measurable:
   // `0` restores the old "every depth-2 write opens the root" policy.
-  const keepClosedOuterForDeclaredNestedWrites = process.env.JS2WASM_KEEP_CLOSED_NESTED_TABLES !== "0";
+  const keepClosedOuterForDeclaredNestedWrites = readEnv("JS2WASM_KEEP_CLOSED_NESTED_TABLES") !== "0";
   const nestedWriteTargetsDeclaredField = createDeclaredNestedWriteClassifier(ctx, sourceFile);
   // (#4206) Names a direct `eval(<literal>)` in this module could mutate.
   const evalMutableNames = collectEvalMutableNames(sourceFile);
@@ -1409,6 +1415,7 @@ export function collectGrowableObjectLiterals(
               // (#4491) `m.foo++` on a field the literal typed non-numerically —
               // or on no field at all — cannot land in the closed struct.
               markStandaloneNumericUpdateKindChangeTargets(s, varName, decl.initializer, mopSet);
+              markStandaloneReflectiveWriteTargets(s, varName, mopSet); // (#6770 S2)
             }
             // (#4491) `for…in` over a literal that out-of-shape writes GREW:
             // the closed struct has no slots for the added keys, so the
@@ -1434,6 +1441,7 @@ export function collectGrowableObjectLiterals(
                   // concrete, but the MOP call is exactly what the `$Object`
                   // rep serves. Only genuine user-typed positions count.
                   !isObjectMopCallArg(node) &&
+                  !isReflectiveWriterCallArg(node) && // #6770 S2
                   !isBorrowedMethodThisArg(node) && // #4524 — borrowed `thisArg: any`
                   typeRequiresStruct(checker.getContextualType(node))
                 ) {
