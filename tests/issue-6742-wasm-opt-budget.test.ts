@@ -5,17 +5,21 @@
 // record the level that produced the measured artifact. The optimizer names a
 // timeout and keeps the #4586 retry's own failure readable.
 
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.ts";
 import { optimizeBinaryAsync } from "../src/optimize.ts";
 import {
+  laneBudgetOverrun,
+  lanePhasePath,
   optimizationReceiptHolds,
   optimizeStandaloneLaneBinary,
   planStandaloneOptimization,
   STANDALONE_OPT_SIZE_CEILINGS,
+  takeLanePhase,
+  writeLanePhase,
 } from "../scripts/lib/npm-compat-opt-budget.mjs";
 import { O4_TRY_TABLE_FLATTEN_OMISSION } from "../scripts/lib/npm-compat-perf.mjs";
 
@@ -87,6 +91,79 @@ process.exit(1);`,
     expect(result.warning).toContain("Flatten.cpp:231");
     expect(result.warning).not.toContain("var Module=");
     expect(result.warning).not.toContain("    at abort");
+  });
+});
+
+// First run aborts in Flatten after 1.5 s; the --skip-pass=flatten retry needs 1.8 s.
+const SLOW_FLATTEN_ABORT = `if (args.includes("--skip-pass=flatten")) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1800);
+  fs.copyFileSync(args[0], args[args.indexOf("-o") + 1]);
+  process.exit(0);
+}
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500);
+process.stderr.write("unexpected expr type\\nUNREACHABLE executed at /x/binaryen/src/passes/Flatten.cpp:231!\\n");
+process.exit(1);`;
+
+describe("#6742 — a caller's wasm-opt limit bounds the #4586 retry too", () => {
+  const raw = new Uint8Array([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]);
+
+  it("gives the Flatten retry only what the first run left of timeoutMs", async () => {
+    // 3 s limit: the first run spends at least 1.5 s, so the retry gets at
+    // most 1.5 s and cannot finish its 1.8 s. Before, the retry got a fresh
+    // 3 s, and the attempt overran the caller's limit by the whole first run.
+    const result = await withFakeWasmOpt(SLOW_FLATTEN_ABORT, () =>
+      optimizeBinaryAsync(raw, { level: 4, timeoutMs: 3000 }),
+    );
+    expect(result.optimized).toBe(false);
+    expect(result.timedOut).toBe(true);
+    expect(result.warning).toMatch(/^wasm-opt -O4 failed: retry without flatten failed: wasm-opt timed out/);
+  }, 30_000);
+
+  it("control: without a caller limit each run keeps the default limit, so the retry succeeds", async () => {
+    const result = await withFakeWasmOpt(SLOW_FLATTEN_ABORT, () => optimizeBinaryAsync(raw, { level: 4 }));
+    expect(result.optimized).toBe(true);
+    expect(result.timedOut).toBeUndefined();
+    expect(result.warning).toBe(O4_TRY_TABLE_FLATTEN_OMISSION);
+  }, 30_000);
+});
+
+describe("#6742 — a budget overrun names the phase that was running", () => {
+  it("reports each wasm-opt rung before it starts, and never a skipped one", async () => {
+    const started: { level: number; timeoutMs: number }[] = [];
+    await optimizeStandaloneLaneBinary(new Uint8Array(5_822_763), {
+      requestedLevel: 4,
+      deadline: 90_000,
+      now: () => 50_000,
+      onAttempt: (attempt: { level: number; timeoutMs: number }) => started.push(attempt),
+      optimize: async () => ({ binary: new Uint8Array(1), optimized: true }),
+    });
+    expect(started).toEqual([{ level: 1, timeoutMs: 40_000 }]);
+  });
+
+  it("round-trips the child's phase marker into the overrun diagnostic", () => {
+    const dir = mkdtempSync(join(tmpdir(), "js2-lane-phase-6742-"));
+    const partial = join(dir, "axios-standalone-dynamic.json");
+    try {
+      expect(takeLanePhase(partial)).toBeNull();
+      expect(laneBudgetOverrun("standalone-dynamic", 120_000, null)).toEqual({
+        diagnostic:
+          "standalone-dynamic lane exceeded the 120000ms harness budget before it recorded a phase (compile-budget)",
+        phase: "startup",
+      });
+
+      writeLanePhase(partial, "codegen", 812.4);
+      writeLanePhase(partial, "wasm-opt -O2 (limit 31000 ms)", 61_234.6);
+      const marker = takeLanePhase(partial);
+      expect(marker).toEqual({ phase: "wasm-opt -O2 (limit 31000 ms)", atMs: 61_235 });
+      expect(existsSync(lanePhasePath(partial))).toBe(false);
+      expect(laneBudgetOverrun("standalone-dynamic", 120_000, marker)).toEqual({
+        diagnostic:
+          "standalone-dynamic lane exceeded the 120000ms harness budget during wasm-opt -O2 (limit 31000 ms) (started at 61235 ms) (compile-budget)",
+        phase: "wasm-opt -O2 (limit 31000 ms)",
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

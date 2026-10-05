@@ -4,8 +4,8 @@ title: "npm-compat standalone lanes: budget-aware wasm-opt level, recorded per l
 status: done
 sprint: current
 created: 2026-09-29
-updated: 2026-09-29
-completed: 2026-09-29
+updated: 2026-10-05
+completed: 2026-10-05
 priority: high
 horizon: m
 feasibility: medium
@@ -14,7 +14,7 @@ task_type: bug
 area: npm-compat, optimizer
 goal: standalone
 requested_by: ttraenkler/sendev-standalone
-related: [4157, 4586, 6732, 6737, 6746]
+related: [4157, 4586, 6732, 6737, 6746, 6842, 6843]
 files:
   - src/optimize.ts
   - scripts/lib/npm-compat-opt-budget.mjs
@@ -144,8 +144,78 @@ Tests: `tests/issue-6742-wasm-opt-budget.test.ts`.
   lane optimizer at O4 (Flatten omitted), and the same fixture at a
   budget-lowered O2. Both run correctly.
 
+## Update 2026-10-05 — refresh onto main; the overrun names its phase
+
+On main (`b6324ee6d1`), five standalone-dynamic lanes end in the same record:
+`<lane> lane exceeded the Nms harness budget (compile-budget)`, with
+`optimizationLevel: 4` (typescript 600 s, eslint 180 s, axios 120 s, three
+180 s, stylelint 120 s). That `4` is only the requested level, stamped on every
+failed record. The record cannot say whether codegen or wasm-opt ran out of time,
+and for at least three of the five it was codegen.
+
+Two changes on top of the merge:
+
+1. **Phase marker** (`scripts/lib/npm-compat-opt-budget.mjs`
+   `writeLanePhase` / `takeLanePhase` / `laneBudgetOverrun`). A bounded lane
+   child writes `<partial-output>.phase` as each phase starts: `codegen`,
+   `wasm-opt -O<n> (limit N ms)` (through a new `onAttempt` hook that skipped
+   rungs never fire), and `instantiate and measure`. When the parent kills the
+   child at the budget, the record now reads, for example,
+   `… exceeded the 120000ms harness budget during codegen (started at 12996 ms) (compile-budget)`,
+   with `phase: "codegen"`.
+2. **The #4586 Flatten retry stays inside a caller's `timeoutMs`.** Before, the
+   retry got a fresh `timeoutMs`, so one O4 rung could run for its limit plus
+   the whole aborted first run. Now, when the caller passes `timeoutMs`, the
+   retry gets only what the first run left. Without `timeoutMs` (every JS-host
+   and CLI caller), each run still gets 600 s.
+
+### Lane status, before → after
+
+All runs are local `standalone-dynamic` runs on a shared box at load 80–390 on
+8 cores, so wall times are 3–10× CPU time. "Unbounded" means the in-process
+`--perf-only --lane standalone-dynamic` run. "Bounded" means the exact
+`standaloneLaneInChild` command line under the given budget.
+
+| package (budget) | before (main record) | after, bounded | after, unbounded: next real error |
+|---|---|---|---|
+| axios (120 s) | `compile-budget`, no phase | 120 s: `compile-budget` **during codegen** (codegen alone ran past 120 s at this load). 480 s: **`host-import-error`, 62 imports**, after 430 s total: O4 skipped by its cost floor, O2 timed out at 130.9 s, O1 timed out at 85.7 s, so level 0 was measured | `host-import-error`, 57 imports at `-O1` (5,474,968 B from 6,766,103 B raw). O4's retry and O2 each timed out at 600 s → [#6746](https://js2wasm.loopdive.com/dashboard/issue.html?slug=6746-standalone-axios-retained-host-imports) |
+| three (180 s) | `compile-budget`, no phase | not run bounded: unbounded codegen alone took 1,294 s, so the bounded run can only end `during codegen` | `compile-error` in codegen, before wasm-opt: host import `env.requestAnimationFrame` leaks into the standalone binary |
+| stylelint (120 s) | `compile-budget`, no phase | as for three: codegen alone took 867 s | `compile-error` in codegen, before wasm-opt: host import `env.isDynamicPattern` leaks into the standalone binary |
+| eslint (180 s) | `compile-budget`, no phase | 180 s: `compile-budget` **during codegen** (started at 56 s) | not reached: the in-process run was still in codegen after 49 min wall at this load |
+| typescript (600 s) | `compile-budget`, no phase | not run (JS-host compile alone exceeds 600 s on CI) | not run |
+
+So the wasm-opt ladder is the right fix only for lanes whose codegen fits the
+budget, and of these five that is axios at most. For three, stylelint and (at
+this load) eslint, the budget runs out in codegen. Three and stylelint then
+end in a codegen compile error before any optimizer runs, so a lower wasm-opt
+level cannot help them. The phase marker now makes that visible on the
+dashboard. Their next errors are filed as
+[#6842](https://js2wasm.loopdive.com/dashboard/issue.html?slug=6842-standalone-three-requestanimationframe-host-import-leak)
+(three) and
+[#6843](https://js2wasm.loopdive.com/dashboard/issue.html?slug=6843-standalone-stylelint-globby-isdynamicpattern-host-import-leak)
+(stylelint).
+
+JS-host output is unchanged. `gc` `-O2` and `-O4` binaries of a `try_table`
+fixture and a loop/string fixture hash the same with main's `src/optimize.ts`
+and this branch's (`95c63e88…`, `b18a6a71…`, `930500bd…`, `d71619c2…`). The new
+retry bound applies only when a caller passes `timeoutMs`, and only the
+standalone lane does that.
+
+Tests (`tests/issue-6742-wasm-opt-budget.test.ts`, 14 tests):
+
+- The retry-bound test fails on the parent `src/optimize.ts`: the retry got a
+  fresh 3 s and succeeded past the limit.
+- Its control passes on both trees. Without `timeoutMs`, the same slow fake
+  `wasm-opt` retry still succeeds.
+- The phase-marker tests need the new exports, so they fail on the parent
+  tree.
+
 ## Residuals
 
+- At CI's 120–180 s child budgets, a lane whose standalone codegen takes
+  longer than the budget still ends `compile-budget`. It now ends `during
+  codegen`, which is accurate. Raising the per-package budgets, or making
+  standalone codegen faster, is a separate decision.
 - The aborted first `-O4` run is still paid on every `try_table` module
   (3.7–13.5 CPU-s here). Skipping it needs an exact "module uses
   `try_table`" signal. The optimizer only sees bytes, and a heuristic would

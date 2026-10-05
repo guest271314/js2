@@ -322,6 +322,7 @@ export async function optimizeBinaryAsync(binary: Uint8Array, options: OptimizeO
       exceptionHandling,
       preserveNames,
       options.timeoutMs ?? WASM_OPT_DEFAULT_TIMEOUT_MS,
+      options.timeoutMs !== undefined,
     );
     if (result && result.optimized) {
       const validation = validateEmittedBinary(result.binary);
@@ -632,6 +633,9 @@ function optimizeWithSystemBinary(
   exceptionHandling: boolean,
   preserveNames: boolean,
   timeoutMs: number,
+  // (#6742) A caller-supplied limit bounds the whole invocation, #4586 retry
+  // included; the 600 s default keeps applying to each run separately.
+  timeoutCoversRetry: boolean,
 ): OptimizeResult | null {
   const n = getNodeImportsSync();
   if (!n) return null; // Not in Node.js environment (browser)
@@ -682,6 +686,7 @@ function optimizeWithSystemBinary(
       timeout: timeoutMs,
       stdio: ["ignore", "pipe", "pipe"] as ["ignore", "pipe", "pipe"],
     };
+    const firstRunStarted = Date.now();
     try {
       n.execFileSync(wasmOptPath, args, execOptions);
     } catch (err) {
@@ -704,7 +709,8 @@ function optimizeWithSystemBinary(
         (text.includes("unexpected expr type") || text.includes("Unsupported instruction for Flatten: try_table"));
       if (unsupportedFlatten) {
         try {
-          n.execFileSync(wasmOptPath, [...args, "--skip-pass=flatten"], execOptions);
+          const retryTimeout = timeoutCoversRetry ? Math.max(1, timeoutMs - (Date.now() - firstRunStarted)) : timeoutMs;
+          n.execFileSync(wasmOptPath, [...args, "--skip-pass=flatten"], { ...execOptions, timeout: retryTimeout });
           const optimizedBinary = n.readFileSync(outputPath);
           return {
             binary: new Uint8Array(optimizedBinary),

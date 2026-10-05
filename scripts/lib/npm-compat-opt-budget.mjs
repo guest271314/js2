@@ -28,6 +28,8 @@
  * artifact under an O4 label.
  */
 
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
+
 import { O4_TRY_TABLE_FLATTEN_OMISSION } from "./npm-compat-perf.mjs";
 
 /**
@@ -86,6 +88,9 @@ export function planStandaloneOptimization(rawBytes, requestedLevel, ceilings = 
  * @param {boolean} [options.preserveNames]
  * @param {number} [options.attemptTimeoutMs]
  * @param {readonly { level: number, maxRawBytes: number }[]} [options.ceilings]
+ * @param {(attempt: { level: number, timeoutMs: number }) => void} [options.onAttempt]
+ *   Called before each wasm-opt run, so a bounded lane child can record which
+ *   rung was running if its parent kills it at the lane budget.
  */
 export async function optimizeStandaloneLaneBinary(raw, options) {
   const { optimize, requestedLevel, deadline, preserveNames } = options;
@@ -112,6 +117,7 @@ export async function optimizeStandaloneLaneBinary(raw, options) {
       reason = `-O${level} skipped: ${detail}`;
       continue;
     }
+    options.onAttempt?.({ level, timeoutMs });
     const attemptStarted = now();
     const result = await optimize(raw, { level, preserveNames, timeoutMs });
     const durationMs = Math.round(now() - attemptStarted);
@@ -164,4 +170,49 @@ export function optimizationReceiptHolds(lane, expectedLevel) {
     last.level === lane.optimizationLevel &&
     lane.optimizationLevel <= expectedLevel
   );
+}
+
+/**
+ * (#6742) Phase marker of a bounded lane child. The parent kills the child at
+ * the lane budget with SIGKILL, so the child cannot report anything itself;
+ * it records each phase as it starts (`codegen`, `wasm-opt -O<n>`,
+ * `instantiate and measure`) in `<partial-output>.phase`, and the parent reads
+ * the last one when the budget runs out.
+ */
+export function lanePhasePath(partialOutputPath) {
+  return `${partialOutputPath}.phase`;
+}
+
+export function writeLanePhase(partialOutputPath, phase, atMs) {
+  try {
+    writeFileSync(lanePhasePath(partialOutputPath), JSON.stringify({ phase, atMs: Math.round(atMs) }));
+  } catch {
+    // A missing marker only makes the overrun text less specific.
+  }
+}
+
+/** Read and remove the marker; `null` when the child never wrote one. */
+export function takeLanePhase(partialOutputPath) {
+  const path = lanePhasePath(partialOutputPath);
+  try {
+    const marker = JSON.parse(readFileSync(path, "utf-8"));
+    return typeof marker?.phase === "string" ? marker : null;
+  } catch {
+    return null;
+  } finally {
+    rmSync(path, { force: true });
+  }
+}
+
+/**
+ * Diagnostic and extra record fields for a lane child killed at its budget.
+ * Names the phase that was running, so "codegen alone exceeds the budget" and
+ * "a wasm-opt rung overran" are distinguishable on the dashboard.
+ */
+export function laneBudgetOverrun(lane, budgetMs, marker) {
+  const where = marker ? `during ${marker.phase} (started at ${marker.atMs} ms)` : "before it recorded a phase";
+  return {
+    diagnostic: `${lane} lane exceeded the ${budgetMs}ms harness budget ${where} (compile-budget)`,
+    phase: marker?.phase ?? "startup",
+  };
 }

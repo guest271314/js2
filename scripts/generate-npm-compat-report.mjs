@@ -106,7 +106,13 @@ import {
   skippedPerfLane,
   STANDALONE_PERF_LANES,
 } from "./lib/npm-compat-perf.mjs";
-import { optimizationReceiptHolds, optimizeStandaloneLaneBinary } from "./lib/npm-compat-opt-budget.mjs";
+import {
+  laneBudgetOverrun,
+  optimizationReceiptHolds,
+  optimizeStandaloneLaneBinary,
+  takeLanePhase,
+  writeLanePhase,
+} from "./lib/npm-compat-opt-budget.mjs";
 import { summarizePlaygroundFiles } from "./lib/npm-compat-playground.mjs";
 import { renderHarnessThrownText } from "./lib/wasm-exn-render.mjs";
 
@@ -237,6 +243,11 @@ const LANE_MEASUREMENT_RESERVE_FRACTION = 0.25;
 function standaloneOptimizationDeadline() {
   if (!Number.isFinite(laneBudgetMs)) return undefined;
   return laneBudgetMs * (1 - LANE_MEASUREMENT_RESERVE_FRACTION);
+}
+/** (#6742) Record the running phase for the parent of a bounded lane child. */
+function markLanePhase(phase) {
+  if (!Number.isFinite(laneBudgetMs) || !partialOutputPath) return;
+  writeLanePhase(resolve(ROOT, partialOutputPath), phase, performance.now());
 }
 
 /**
@@ -1676,6 +1687,7 @@ async function compileNpmCompatPerfLane({ setup, spec, lane, compileOptions }) {
   const driverPath = join(setup.root, `.js2-npm-compat-perf-${lane}.mjs`);
   const packageSpecifier = packageSpecifierFor(setup);
   writeFileSync(driverPath, buildNpmCompatPerfDriver(spec, packageSpecifier, lane));
+  if (target === "standalone") markLanePhase("codegen");
   const compileStarted = performance.now();
   let result;
   try {
@@ -1732,10 +1744,12 @@ async function compileNpmCompatPerfLane({ setup, spec, lane, compileOptions }) {
       requestedLevel: NPM_COMPAT_STANDALONE_OPTIMIZE_LEVEL,
       deadline: standaloneOptimizationDeadline(),
       preserveNames: preserveDebugNames,
+      onAttempt: ({ level, timeoutMs }) => markLanePhase(`wasm-opt -O${level} (limit ${timeoutMs} ms)`),
     });
     result.binary = optimized.binary;
     laneOptimization = optimized.metadata;
     compileDurationMs = performance.now() - compileStarted;
+    markLanePhase(`instantiate and measure (optimized at -O${laneOptimization.optimizationLevel})`);
   }
   const optimizationFailure = npmPerfOptimizationFailure(result, npmCompatOptimizationLevel(placement));
   if (optimizationFailure) {
@@ -1890,13 +1904,13 @@ function standaloneLaneInChild(name, lane, budgetMs) {
     killSignal: "SIGKILL",
   });
   const extra = { inputMode, compileDurationMs: performance.now() - started };
+  const marker = takeLanePhase(partial);
   if (child.error?.code === "ETIMEDOUT") {
-    return failedOptimizedPerfLane(
-      "standalone",
-      "compile-error",
-      `${lane} lane exceeded the ${budgetMs}ms harness budget (compile-budget)`,
-      extra,
-    );
+    const overrun = laneBudgetOverrun(lane, budgetMs, marker);
+    return failedOptimizedPerfLane("standalone", "compile-error", overrun.diagnostic, {
+      ...extra,
+      phase: overrun.phase,
+    });
   }
   try {
     const record = JSON.parse(readFileSync(partial, "utf-8")).packages?.find((entry) => entry.name === name)?.perf
