@@ -1,10 +1,11 @@
 ---
 id: 6840
 title: "standalone: a node:fs readFileSync/writeFileSync call inside a dependency (node_modules) refuses the whole compile — throw at the call site instead (jest)"
-status: in-progress
+status: done
 sprint: current
 created: 2026-10-05
 updated: 2026-10-05
+completed: 2026-10-05
 priority: high
 horizon: s
 feasibility: easy
@@ -110,3 +111,51 @@ Scoped, standalone-only throwing lowering:
    (fails on parent too — anti-vacuity), and the JS-host compile of the
    dependency fixture is byte-identical (the change is standalone-gated).
 4. Measure jest `standalone-dynamic` before/after; record the next blocker.
+
+   Step 2 as shipped: the lowering lives in `node-fs-binding-identity.ts`
+   (`tryEmitStandaloneDependencyNodeFsCall`); call-identifier.ts only
+   dispatches (+2 lines). A package-linker provider build (#5247,
+   `ctx.exportsConsumedByWasm`) also counts as dependency code — it compiles
+   one dependency package with package-relative file keys, so its paths carry
+   no `node_modules` segment.
+
+## Resolution
+
+- `tests/issue-6840-standalone-node-fs-library-call.test.ts` (3 cases):
+  parent **1 failed / 2 passed**, fix **3 / 3**. The two cases passing both
+  ways are the controls: the program's own `readFileSync` keeps the #1491
+  compile error (anti-vacuity), and the JS-host target keeps it for dependency
+  code too.
+- jest `standalone-dynamic` (same checkout, parent vs fix, measured
+  2026-10-05 on a heavily loaded shared box):
+
+  | | parent | fix |
+  | --- | --- | --- |
+  | status | `compile-error` — #1491 `--allow-fs` refusal (`readFileSync`) | `compile-error` — "`'__get_builtin'` (dynamic-shape object/property operation) is not yet supported in --target standalone (#1472 Phase B)" |
+
+  The next blocker is a `__get_builtin` dynamic property operation somewhere
+  in jest's graph (#1472 Phase B umbrella); not identified further here.
+  #6735 no longer applies as a compile blocker: its own 2026-09-29 re-measure
+  records that #3494 removed the `import()` refusal, and the fixed lane does not
+  report it.
+- JS-host and WASI output byte-identical: sha256 of a `target: "gc"` +
+  `allowFs: true` compile and a `target: "gc"` compile of a dependency-fs
+  fixture match parent vs fix; the WASI compile reports the same #1772 error
+  both ways. The change is gated on `ctx.standalone && !ctx.wasi &&
+  environment === "none"` without a realm-global link.
+- test262: no `test/` or `harness/` file references `readFileSync` or
+  `writeFileSync`, and the changed branch requires a binding recorded in
+  `ctx.wasiNodeFsFuncs` (only populated from `fs`/`node:fs` imports), so
+  standalone test262 output is unchanged by construction.
+- Existing fs suites green: `issue-1491`, `issue-1772-no-provider-gate`,
+  `issue-2647`, `issue-2631-node-fs-fd-shim` (21/21).
+
+## Residuals
+
+- In standalone, other `node:fs` uses (`import * as fs`, `existsSync`, …)
+  still lower through the `env.__node_fs` module-object import, which the
+  #2961 scan reports as a leak (warning). Not reached by jest's current first
+  diagnostic; a graph that gets past `__get_builtin` may surface it.
+- Standalone user code with `allowFs: true` still emits the
+  `env.__node_fs_*` host import (a #2961 leak) instead of a clear "no
+  filesystem provider in standalone" error — unchanged here.
