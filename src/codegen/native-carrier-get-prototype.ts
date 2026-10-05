@@ -55,8 +55,6 @@ import type { Instr, ValType } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
 import { BUILTIN_BRAND_TABLE } from "./builtin-brands.js";
 import { BUILTIN_TYPE_TAGS } from "./builtin-tags.js";
-import { buildLazyNativeProtoGetInstrs } from "./native-proto.js";
-import { nativeStringLiteralInstrs } from "./native-strings.js";
 
 /** `$Error_struct` fields (`string-layouts.ts::createErrorStructType`). */
 const ERROR_TAG_FIELD = 0;
@@ -94,17 +92,28 @@ const ENTRY_FLAGS = 2;
 const FLAG_INTERNAL = 0x10;
 const I31_HEAP_TYPE = -20;
 
-/** Fill-time state: the scratch locals the arms share. */
+/**
+ * The two emit helpers this leaf needs, injected by the caller so the leaf does
+ * not import `native-proto` / `native-strings` and stays out of the codegen
+ * import-cycle SCC (`check:import-cycles`).
+ */
+export interface NativeCarrierProtoDeps {
+  protoGet: (ctx: CodegenContext, brand: number) => Instr[] | null;
+  stringLit: (ctx: CodegenContext, value: string) => Instr[];
+}
+
+/** Fill-time state: the scratch locals the arms share, plus the injected helpers. */
 interface Slots {
   any: number;
   entry: number;
+  deps: NativeCarrierProtoDeps;
 }
 
 /** The intrinsic prototype read for `name`, or null when not materialised. */
-function materializedProtoRead(ctx: CodegenContext, name: string): Instr[] | null {
+function materializedProtoRead(ctx: CodegenContext, slots: Slots, name: string): Instr[] | null {
   const brand = BUILTIN_BRAND_TABLE[name];
   if (brand === undefined || !ctx.nativeProtoGlobals?.has(brand)) return null;
-  return buildLazyNativeProtoGetInstrs(ctx, brand);
+  return slots.deps.protoGet(ctx, brand);
 }
 
 /** `if (<cond>) return <proto>` — the cond leaves an i32 on the stack. */
@@ -121,7 +130,7 @@ function errorArms(ctx: CodegenContext, slots: Slots): Instr[] {
     { op: "struct.get", typeIdx, fieldIdx },
   ];
   const inner = ERROR_BRANDS.flatMap((name): Instr[] => {
-    const proto = materializedProtoRead(ctx, name);
+    const proto = materializedProtoRead(ctx, slots, name);
     const tag = (BUILTIN_TYPE_TAGS as Record<string, number>)[name];
     if (!proto || tag === undefined) return [];
     return answerIf([...field(ERROR_TAG_FIELD), { op: "i32.const", value: tag }, { op: "i32.eq" }], proto);
@@ -149,7 +158,7 @@ function collectionArms(ctx: CodegenContext, slots: Slots): Instr[] {
   const typeIdx = ctx.mapTypeIdx;
   if (typeIdx === undefined || typeIdx < 0) return [];
   const inner = COLLECTION_BRANDS.flatMap(([kind, name]): Instr[] => {
-    const proto = materializedProtoRead(ctx, name);
+    const proto = materializedProtoRead(ctx, slots, name);
     if (!proto) return [];
     return answerIf(
       [
@@ -173,7 +182,7 @@ function collectionArms(ctx: CodegenContext, slots: Slots): Instr[] {
 /** A carrier struct whose instances all share one intrinsic prototype. */
 function structArm(ctx: CodegenContext, slots: Slots, typeIdx: number | undefined, name: string): Instr[] {
   if (typeIdx === undefined || typeIdx < 0) return [];
-  const proto = materializedProtoRead(ctx, name);
+  const proto = materializedProtoRead(ctx, slots, name);
   if (!proto) return [];
   return answerIf(
     [
@@ -205,7 +214,7 @@ function wrapperArm(ctx: CodegenContext, slots: Slots): Instr[] {
   }
   kinds.push([numberTest, "Number"]);
   const inner = kinds.flatMap(([test, name]): Instr[] => {
-    const proto = materializedProtoRead(ctx, name);
+    const proto = materializedProtoRead(ctx, slots, name);
     return proto ? answerIf(test, proto) : [];
   });
   if (inner.length === 0) return [];
@@ -236,7 +245,7 @@ function wrapperArm(ctx: CodegenContext, slots: Slots): Instr[] {
           blockType: { kind: "empty" },
           then: [
             ...obj(),
-            ...nativeStringLiteralInstrs(ctx, WRAPPER_PRIMITIVE_KEY),
+            ...slots.deps.stringLit(ctx, WRAPPER_PRIMITIVE_KEY),
             { op: "extern.convert_any" },
             { op: "call", funcIdx: findIdx },
             { op: "local.tee", index: slots.entry },
@@ -268,13 +277,13 @@ function wrapperArm(ctx: CodegenContext, slots: Slots): Instr[] {
  * Standalone/WASI only; a module with none of the carriers (or none of their
  * intrinsics materialised) is left byte-identical.
  */
-export function fillNativeCarrierGetPrototypeOfArms(ctx: CodegenContext): void {
+export function fillNativeCarrierGetPrototypeOfArms(ctx: CodegenContext, deps: NativeCarrierProtoDeps): void {
   if (!ctx.standalone && !ctx.wasi) return;
   if (!ctx.nativeProtoGlobals || ctx.nativeProtoGlobals.size === 0) return;
   const fn = ctx.mod.functions.find((f) => f.name === "__getPrototypeOf");
   if (!fn?.body || fn.locals.some((l) => l.name === "__carrierAny")) return; // idempotent
   // Params: 0 = value. Locals are APPENDED so every baked index stays valid.
-  const slots: Slots = { any: 1 + fn.locals.length, entry: 2 + fn.locals.length };
+  const slots: Slots = { any: 1 + fn.locals.length, entry: 2 + fn.locals.length, deps };
   const arms: Instr[] = [
     ...errorArms(ctx, slots),
     ...collectionArms(ctx, slots),

@@ -26,6 +26,7 @@ import { FUNCTION_FROM_PROTO, PROTO_FROM_FUNCTION } from "./proto-function-value
 import { BUILTIN_BRAND_TABLE } from "./builtin-brands.js"; // (#5270 step 2)
 import { buildLazyNativeProtoGetInstrs } from "./native-proto.js"; // (#5270 step 2)
 import { fillNativeCarrierGetPrototypeOfArms } from "./native-carrier-get-prototype.js"; // (#6651 U1)
+import { nativeStringLiteralInstrs } from "./native-string-literals.js";
 import { buildIsPrototypeOfBody, type PrototypeChainSeed } from "../runtime/wasmgc/values/prototype-chain-bodies.js";
 import {
   protoLinkAnswerOr,
@@ -88,7 +89,10 @@ export const ARRAY_PROTO_SINGLETON = "__array_proto_singleton";
  */
 export function fillArrayProtoSingleton(ctx: CodegenContext): void {
   if (!ctx.standalone && !ctx.wasi) return;
-  fillNativeCarrierGetPrototypeOfArms(ctx); // (#6651 U1) the other native carriers, same finalize point
+  fillNativeCarrierGetPrototypeOfArms(ctx, {
+    protoGet: buildLazyNativeProtoGetInstrs,
+    stringLit: (c, v) => nativeStringLiteralInstrs(c, v),
+  }); // (#6651 U1)
   const fn = ctx.mod.functions.find((f) => f.name === ARRAY_PROTO_SINGLETON);
   if (!fn) return;
   const instrs = buildLazyNativeProtoGetInstrs(ctx, BUILTIN_BRAND_TABLE.Array);
