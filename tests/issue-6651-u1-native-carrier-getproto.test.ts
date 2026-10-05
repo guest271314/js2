@@ -14,7 +14,7 @@
 // (`built-ins/*/proto-from-ctor-realm.js`). Measured on base (no realm, no
 // eval): every case below answered `null` (or, for the wrappers, "other").
 //
-// The fix is `src/codegen/native-carrier-get-prototype.ts`, prepended to
+// The fix is `src/codegen/object-model/native-carrier-get-prototype.ts`, prepended to
 // `__getPrototypeOf` at finalize. No eval anywhere in this suite.
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";

@@ -25,7 +25,7 @@ import { proxyTrapAbsentTail } from "./object-model/proxy-trap-read.js"; // (#67
 import { FUNCTION_FROM_PROTO, PROTO_FROM_FUNCTION } from "./proto-function-value.js"; // (#4637 A1)
 import { BUILTIN_BRAND_TABLE } from "./builtin-brands.js"; // (#5270 step 2)
 import { buildLazyNativeProtoGetInstrs } from "./native-proto.js"; // (#5270 step 2)
-import { fillNativeCarrierGetPrototypeOfArms } from "./native-carrier-get-prototype.js"; // (#6651 U1)
+import { fillNativeCarrierGetPrototypeOfArms } from "./object-model/native-carrier-get-prototype.js"; // (#6651 U1)
 import { nativeStringLiteralInstrs } from "./native-string-literals.js";
 import { buildIsPrototypeOfBody, type PrototypeChainSeed } from "../runtime/wasmgc/values/prototype-chain-bodies.js";
 import {

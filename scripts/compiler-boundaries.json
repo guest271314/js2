@@ -7484,7 +7484,7 @@
       "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."
     },
     {
-      "path": "src/codegen/native-carrier-get-prototype.ts",
+      "path": "src/codegen/object-model/native-carrier-get-prototype.ts",
       "state": "unmigrated",
       "layer": "mixed-needs-split",
       "destination": "backend-wasmgc",

@@ -51,10 +51,10 @@
  * `$Map` struct; those answer the intrinsic default here where they answered
  * `null` before.
  */
-import type { Instr, ValType } from "../ir/types.js";
-import type { CodegenContext } from "./context/types.js";
-import { BUILTIN_BRAND_TABLE } from "./builtin-brands.js";
-import { BUILTIN_TYPE_TAGS } from "./builtin-tags.js";
+import type { Instr, ValType } from "../../ir/types.js";
+import type { CodegenContext } from "../context/types.js";
+import { BUILTIN_BRAND_TABLE } from "../builtin-brands.js";
+import { BUILTIN_TYPE_TAGS } from "../builtin-tags.js";
 
 /** `$Error_struct` fields (`string-layouts.ts::createErrorStructType`). */
 const ERROR_TAG_FIELD = 0;
