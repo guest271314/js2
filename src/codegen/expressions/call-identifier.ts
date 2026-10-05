@@ -136,6 +136,7 @@ import { prepareStandaloneEvalAliasCall } from "./eval-alias.js";
 import { ensureLateImport, flushLateImportShifts } from "./late-imports.js";
 import { buildUnmatchedClosureHostCall, reserveUnmatchedClosureHostCall } from "./unmatched-closure-host-call.js"; // (#1058)
 import { withDeclarationBoundCallee } from "./declaration-bound-callee.js"; // (#1058)
+import { tryCompileNodeBuiltinMemberCall } from "./node-builtin-member-call.js"; // (#6450)
 import { isModuleInitChunkFunctionContext } from "../module-init-chunks.js";
 import { paramUndefinedTypeIsDefaultArtifact } from "../destructuring-params.js";
 import {
@@ -1837,6 +1838,9 @@ function compileBoundIdentifierCall(
     // identifiers and assignment targets, so a BindingElement's by-name hit is
     // always some OTHER binding's info.
     const calleeBindingDecl = ctx.oracle.valueDeclarationOf(expr.expression);
+    // (#6450) Before the bare-name ladder below can mis-claim a node-builtin import.
+    const nodeBuiltinMemberCall = tryCompileNodeBuiltinMemberCall(ctx, fctx, expr, funcName, calleeBindingDecl);
+    if (nodeBuiltinMemberCall !== undefined) return nodeBuiltinMemberCall;
     const propertyCallableAlias = tryCompileImmutablePropertyCallableAlias(ctx, fctx, expr);
     if (propertyCallableAlias !== null) return propertyCallableAlias;
     const calleeBindingMayReceiveHostCallable =

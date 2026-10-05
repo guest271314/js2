@@ -1,10 +1,11 @@
 ---
 id: 6450
 title: "node lane: `createHash` imported from `'crypto'` compiles to null — hono `src/utils/crypto.test.ts` 'Should create hash for Buffer' reads `update is not a function`"
-status: ready
+status: done
 sprint: current
 created: 2026-09-13
-updated: 2026-09-13
+updated: 2026-10-05
+completed: 2026-10-05
 priority: medium
 horizon: m
 feasibility: medium
@@ -12,6 +13,14 @@ reasoning_effort: high
 task_type: bug
 area: runtime
 goal: correctness
+# (#6450, 2026-10-05) One guarded call in `compileBoundIdentifierCall`'s
+# resolution ladder — it has to run after `calleeBindingDecl` is known and
+# before the bare-name closureMap/funcMap arms. The lowering itself is in
+# expressions/node-builtin-member-call.ts.
+loc-budget-allow:
+  - src/codegen/expressions/call-identifier.ts
+func-budget-allow:
+  - src/codegen/expressions/call-identifier.ts::compileBoundIdentifierCall
 ---
 
 ## Problem
@@ -93,3 +102,24 @@ Two distinct things are probably in play there and this issue covers both:
 ## Dispatch
 
 **opus** — mechanical once the arm is placed, but the placement inside the call-identifier resolution ladder (before closureMap/funcMap, after lexical shadows) and the per-function LOC budget need judgment; the diagnosis is already confirmed so no exploration is left.
+
+## Resolution
+
+Implemented as planned (the parked `issue-6450` worktree's work, ported onto
+upstream/main `c3e3fab33d`): `tryCompileNodeBuiltinMemberCall`
+(`src/codegen/expressions/node-builtin-member-call.ts`) lowers a direct call
+of a node-builtin NAMED import as
+`__extern_method_call(__node_<mod>(), "<name>", [args])`, gated on the
+checker's binding for the call site being an `ImportSpecifier` of a node
+builtin. It sits in `compileBoundIdentifierCall` right after
+`calleeBindingDecl` is resolved, before the bare-name ladder. Regression test
+`tests/issue-6450-node-builtin-named-call.test.ts` (4 of 5 rows fail on the
+parent; the same-named-graph-function control passes on both).
+
+AC1/AC2 met. **AC3 not met by this fix alone**: hono `crypto.test.ts` stays
+3/4 — `createHash('sha256')` now resolves to the builtin (the
+`update is not a function` message is gone), but the row then fails on
+`expect(await sha256(…))`, because its LAST line holds two awaits and the
+whole test body declines to the synchronous pass-through. Filed as
+[#6863](https://js2wasm.loopdive.com/dashboard/issue.html?slug=6863-async-two-awaits-in-one-statement).
+
