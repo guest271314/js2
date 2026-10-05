@@ -7241,7 +7241,7 @@ export function captureWasmGcHelperPredecessorPolicySource(raw: string): string 
 
 import {
   captureLinearLayoutPredecessor as loweringAnalysisLayoutProof,
-  captureLoweringLegalityPredecessor as loweringAnalysisLegalityProof,
+  captureCurrentLoweringLegalityPredecessor as loweringAnalysisLegalityProof,
 } from "./ir-lowering-analysis-relocation.js";
 
 const loweringAnalysisExpected = {
@@ -7554,7 +7554,11 @@ function loweringAnalysisRead(path: string): string {
     const info = wasmGcHelperLstat(url);
     if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o7777) !== expected.mode)
       loweringAnalysisFail("source mode/identity changed: " + path);
-    loweringAnalysisPin(bytes, expected, path);
+    loweringAnalysisPin(
+      bytes,
+      path === "src/ir/analysis/backend-legality.ts" ? earlyReturnCurrentOwnerPin : expected,
+      path,
+    );
   } else if (path !== loweringAnalysisExpected.sourceReceipt.path)
     loweringAnalysisFail("source proof path outside fixed domain: " + path);
   return bytes.toString("utf8");
@@ -7592,7 +7596,12 @@ function authenticateLoweringAnalysisPolicy(): LoweringAnalysisReceipt {
     (implementationStat.mode & 0o7777) !== receipt.componentImplementation.mode
   )
     loweringAnalysisFail("component implementation mode/identity changed: " + receipt.componentImplementation.path);
-  loweringAnalysisPin(implementation, receipt.componentImplementation, receipt.componentImplementation.path);
+  loweringAnalysisPin(implementation, earlyReturnComponentPin, receipt.componentImplementation.path);
+  loweringAnalysisPin(
+    implementation.subarray(0, receipt.componentImplementation.bytes),
+    receipt.componentImplementation,
+    receipt.componentImplementation.path + " historical prefix",
+  );
   // Both operations freshly read the fixed source receipt. No historical source enters current resolution.
   const legality = loweringAnalysisLegalityProof(
     loweringAnalysisRead("src/ir/backend/legality.ts"),
@@ -7904,7 +7913,9 @@ function authenticatePresentationClassification(): PresentationClassificationRec
   if (!same(receipt, presentationClassificationExpected))
     presentationClassificationFail("fixed receipt schema mismatch");
   presentationClassificationPin(
-    readFileSync(new URL("./ir-runtime-program-policy-evolution.ts", import.meta.url)).subarray(0, 356816),
+    earlyReturnClassificationHistoricalPrefix(
+      readFileSync(new URL("./ir-runtime-program-policy-evolution.ts", import.meta.url)),
+    ),
     receipt.helperPrefix,
     "complete predecessor helper prefix changed",
   );
@@ -8202,7 +8213,9 @@ function authenticateArrayBufferIsViewMain(): ArrayBufferIsViewMainReceipt {
   const receipt = JSON.parse(bytes.toString("utf8")) as ArrayBufferIsViewMainReceipt;
   if (!same(receipt, arrayBufferIsViewMainExpected)) arrayBufferIsViewMainFail("fixed receipt schema mismatch");
   arrayBufferIsViewMainPin(
-    readFileSync(new URL("./ir-runtime-program-policy-evolution.ts", import.meta.url)).subarray(0, 369345),
+    earlyReturnIsViewHistoricalPrefix(
+      readFileSync(new URL("./ir-runtime-program-policy-evolution.ts", import.meta.url)),
+    ),
     receipt.helperPrefix,
     "complete predecessor helper prefix changed",
   );
@@ -8347,4 +8360,174 @@ export function captureArrayBufferIsViewMainPredecessorPolicySource(raw: string)
   if (!same(parsed, semantic) || arrayBufferIsViewMainRaw(before, receipt, true) !== raw)
     arrayBufferIsViewMainFail("raw/semantic reciprocal proof disagree");
   return before;
+}
+
+// Fixed current-owner evolution; these tables are outside both historical prefixes.
+const earlyReturnCurrentOwnerPin = {
+  bytes: 21387,
+  sha256: "cdd60287d9c98f700eca41f351f02ac609f3e9fdd43a25e28d7951f16f0c1a37",
+  gitBlob: "157777ff1c14c6cf5f0e4241c4e361843d694f5b",
+};
+const earlyReturnComponentPin = {
+  bytes: 18956,
+  sha256: "253eda01462fad0ab84a940965a083eaf80b0ca8a3e10a4ca012fbafaaf30e99",
+  gitBlob: "c732f2eb22a127714373bc8fa363514bcf7a818b",
+};
+type EarlyReturnPrefixPin = { readonly bytes: number; readonly sha256: string; readonly gitBlob: string };
+type EarlyReturnPrefixEdit = {
+  readonly beforeOffset: number;
+  readonly afterOffset: number;
+  readonly before: string;
+  readonly after: string;
+};
+type EarlyReturnPrefixProof = {
+  readonly before: EarlyReturnPrefixPin;
+  readonly current: EarlyReturnPrefixPin;
+  readonly edits: readonly EarlyReturnPrefixEdit[];
+};
+const earlyReturnClassificationPrefixProof = {
+  before: {
+    bytes: 356816,
+    sha256: "f195d0c432429bfb43c3f8a65617c886ef176e24fa81c2c6539845575fc01a54",
+    gitBlob: "ea6cef6bbd168ab0f68f412ae3bc270184fd8e9c",
+  },
+  current: {
+    bytes: 357119,
+    sha256: "91f4c65528072df09092f47ac11f2a6d9d944ae90bd58aa4c29258d2aec71dd2",
+    gitBlob: "996123d86af1f162e19f37fff2c19339ce203440",
+  },
+  edits: [
+    {
+      beforeOffset: 332028,
+      afterOffset: 332028,
+      before: "  captureLoweringLegalityPredecessor as loweringAnalysisLegalityProof,\n",
+      after: "  captureCurrentLoweringLegalityPredecessor as loweringAnalysisLegalityProof,\n",
+    },
+    {
+      beforeOffset: 346469,
+      afterOffset: 346476,
+      before: "    loweringAnalysisPin(bytes, expected, path);\n",
+      after:
+        '    loweringAnalysisPin(\n      bytes,\n      path === "src/ir/analysis/backend-legality.ts" ? earlyReturnCurrentOwnerPin : expected,\n      path,\n    );\n',
+    },
+    {
+      beforeOffset: 348569,
+      afterOffset: 348679,
+      before:
+        "  loweringAnalysisPin(implementation, receipt.componentImplementation, receipt.componentImplementation.path);\n",
+      after:
+        '  loweringAnalysisPin(implementation, earlyReturnComponentPin, receipt.componentImplementation.path);\n  loweringAnalysisPin(\n    implementation.subarray(0, receipt.componentImplementation.bytes),\n    receipt.componentImplementation,\n    receipt.componentImplementation.path + " historical prefix",\n  );\n',
+    },
+  ],
+};
+const earlyReturnIsViewPrefixProof = {
+  before: {
+    bytes: 369345,
+    sha256: "3ccadadfcceb0134ba97816c4fa6dedada6248c183b37f9ad339e765c608730f",
+    gitBlob: "eeaaafffec963ce21dfbf27e76ae24beea86ae79",
+  },
+  current: {
+    bytes: 369684,
+    sha256: "dc117e53e82264b09aac71009b46a5424925fe16cf16c2dc434744d5b73c867b",
+    gitBlob: "9a83c4f87cf586ee1776accdcd95e8227381cfd3",
+  },
+  edits: [
+    {
+      beforeOffset: 332028,
+      afterOffset: 332028,
+      before: "  captureLoweringLegalityPredecessor as loweringAnalysisLegalityProof,\n",
+      after: "  captureCurrentLoweringLegalityPredecessor as loweringAnalysisLegalityProof,\n",
+    },
+    {
+      beforeOffset: 346469,
+      afterOffset: 346476,
+      before: "    loweringAnalysisPin(bytes, expected, path);\n",
+      after:
+        '    loweringAnalysisPin(\n      bytes,\n      path === "src/ir/analysis/backend-legality.ts" ? earlyReturnCurrentOwnerPin : expected,\n      path,\n    );\n',
+    },
+    {
+      beforeOffset: 348569,
+      afterOffset: 348679,
+      before:
+        "  loweringAnalysisPin(implementation, receipt.componentImplementation, receipt.componentImplementation.path);\n",
+      after:
+        '  loweringAnalysisPin(implementation, earlyReturnComponentPin, receipt.componentImplementation.path);\n  loweringAnalysisPin(\n    implementation.subarray(0, receipt.componentImplementation.bytes),\n    receipt.componentImplementation,\n    receipt.componentImplementation.path + " historical prefix",\n  );\n',
+    },
+    {
+      beforeOffset: 362600,
+      afterOffset: 362903,
+      before:
+        '    readFileSync(new URL("./ir-runtime-program-policy-evolution.ts", import.meta.url)).subarray(0, 356816),\n',
+      after:
+        '    earlyReturnClassificationHistoricalPrefix(\n      readFileSync(new URL("./ir-runtime-program-policy-evolution.ts", import.meta.url)),\n    ),\n',
+    },
+  ],
+};
+function earlyReturnHistoricalPrefix(
+  source: Buffer,
+  proof: EarlyReturnPrefixProof,
+  check: (bytes: Buffer, expected: EarlyReturnPrefixPin, detail: string) => void,
+  fail: (detail: string) => never,
+): Buffer {
+  const detail = "complete predecessor helper prefix changed";
+  const current = source.subarray(0, proof.current.bytes);
+  check(current, proof.current, detail);
+  const inverse: Buffer[] = [];
+  let beforeEnd = 0,
+    currentEnd = 0;
+  for (const edit of proof.edits) {
+    if (
+      !Number.isSafeInteger(edit.beforeOffset) ||
+      !Number.isSafeInteger(edit.afterOffset) ||
+      edit.beforeOffset < beforeEnd ||
+      edit.afterOffset < currentEnd ||
+      edit.beforeOffset - beforeEnd !== edit.afterOffset - currentEnd ||
+      typeof edit.before !== "string" ||
+      typeof edit.after !== "string"
+    )
+      fail(detail);
+    const oldPart = Buffer.from(edit.before, "utf8"),
+      newPart = Buffer.from(edit.after, "utf8");
+    if (
+      oldPart.toString("utf8") !== edit.before ||
+      newPart.toString("utf8") !== edit.after ||
+      edit.beforeOffset + oldPart.length > proof.before.bytes ||
+      edit.afterOffset + newPart.length > current.length ||
+      !current.subarray(edit.afterOffset, edit.afterOffset + newPart.length).equals(newPart)
+    )
+      fail(detail);
+    inverse.push(current.subarray(currentEnd, edit.afterOffset), oldPart);
+    beforeEnd = edit.beforeOffset + oldPart.length;
+    currentEnd = edit.afterOffset + newPart.length;
+  }
+  inverse.push(current.subarray(currentEnd));
+  const historical = Buffer.concat(inverse);
+  check(historical, proof.before, detail);
+  const forward: Buffer[] = [];
+  beforeEnd = 0;
+  for (const edit of proof.edits) {
+    const oldPart = Buffer.from(edit.before, "utf8");
+    if (!historical.subarray(edit.beforeOffset, edit.beforeOffset + oldPart.length).equals(oldPart)) fail(detail);
+    forward.push(historical.subarray(beforeEnd, edit.beforeOffset), Buffer.from(edit.after, "utf8"));
+    beforeEnd = edit.beforeOffset + oldPart.length;
+  }
+  forward.push(historical.subarray(beforeEnd));
+  if (!Buffer.concat(forward).equals(current)) fail(detail);
+  return historical;
+}
+function earlyReturnClassificationHistoricalPrefix(source: Buffer): Buffer {
+  return earlyReturnHistoricalPrefix(
+    source,
+    earlyReturnClassificationPrefixProof,
+    presentationClassificationPin,
+    presentationClassificationFail,
+  );
+}
+function earlyReturnIsViewHistoricalPrefix(source: Buffer): Buffer {
+  return earlyReturnHistoricalPrefix(
+    source,
+    earlyReturnIsViewPrefixProof,
+    arrayBufferIsViewMainPin,
+    arrayBufferIsViewMainFail,
+  );
 }

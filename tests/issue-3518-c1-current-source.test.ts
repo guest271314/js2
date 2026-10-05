@@ -9,6 +9,13 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   existsSync,
+  chmodSync,
+  closeSync,
+  lstatSync,
+  openSync,
+  renameSync,
+  rmdirSync,
+  unlinkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -45,7 +52,7 @@ afterEach(async () => {
 // Root replaces this ONE external assertion root after final instrument formatting/manifest assembly.
 // A missing freeze is a hard failure, never an alternate accepted manifest.
 const independentFreeze: string =
-  '{"manifestSha256":"f02eee675a6b5a061c96987ab77e073e4abdb13b30f37aa29aa2eed37779da93","anchorSource":"// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.\\n\\nexport const c1AuthorityManifestSha256 = \\"f02eee675a6b5a061c96987ab77e073e4abdb13b30f37aa29aa2eed37779da93\\";\\n","anchorPin":{"bytes":194,"sha256":"cffaa3d5f262635cfb8067efddae7c5eace0ff3e8998c3f38a15ce5943db338d","gitBlob":"16b650fa19e31ec4bfb73d5c2d400d38594b7841"},"declarationPin":{"bytes":1633,"sha256":"5294c0fce2be6c6974b61a3686c05e60aa66d5bb4599fc97cb315ee53cab71be","gitBlob":"8c594e598e0d946ed92fd658cbe2efe3063ca2c4"}}';
+  '{"manifestSha256":"15df36672c658dd96fd3e35a5ab0a538a6d1183eea1c2d618ee4e282d7cc97d0","anchorSource":"// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.\\n\\nexport const c1AuthorityManifestSha256 = \\"15df36672c658dd96fd3e35a5ab0a538a6d1183eea1c2d618ee4e282d7cc97d0\\";\\n","anchorPin":{"bytes":194,"sha256":"44c04c84e428c220702e8f6feecd77a1b96dafedcd842383a92212e576042ba6","gitBlob":"40434825c026cf02fd88b0eadb480ea783df79d2"},"declarationPin":{"bytes":1633,"sha256":"5294c0fce2be6c6974b61a3686c05e60aa66d5bb4599fc97cb315ee53cab71be","gitBlob":"8c594e598e0d946ed92fd658cbe2efe3063ca2c4"}}';
 const root = resolve(import.meta.dirname, "..");
 const manifestPath = "tests/helpers/ir-c1-authority.json";
 const anchorPath = "tests/helpers/ir-c1-authority-root.ts";
@@ -576,6 +583,18 @@ describe("C1 fresh live source contract bridge", () => {
           bytes: 5833,
           sha256: "5b67993fe312a0f5a52f9ef816c76a10cd32470f7e2a53819dec736764f45878",
           gitBlob: "c38edb2f3d1350b0ea23f887c9349ac768d48afa",
+        });
+      } else if (path === "src/ir/types.ts") {
+        expect(pin(source)).toEqual({
+          bytes: 7744,
+          sha256: "d82e92ee276dd9a57bd69d9dee16410d24225a028bd9dca53bc406f69b9623ac",
+          gitBlob: "f7717d7c70bb57bd73d799a1d26d1825aa0a41e8",
+        });
+        expect(source).not.toBe(read(path));
+        expect(capture.observedCurrentPins.find((record) => record.path === path)!.pin).toEqual({
+          bytes: 7756,
+          sha256: "0282ae61c6a43f837a9a3c7b12d879151e67ec155939c541cd9b5ea662979140",
+          gitBlob: "bdf9d6ace5f7f5530373cea6007a1ad7dfe905d0",
         });
       } else if (path !== linearPath)
         expect(source).toBe(
@@ -2047,4 +2066,546 @@ describe("C1 lowering-analysis guarded reader integration", () => {
       healthy();
     },
   );
+});
+
+// The owner is supplemental authority, never a fabricated member of population47.
+describe("C1 actual early-return owner authority", () => {
+  const owner = "src/ir/analysis/backend-legality.ts";
+  const adapter = "src/ir/backend/legality.ts";
+  const ownerPin = {
+    bytes: 21387,
+    sha256: "cdd60287d9c98f700eca41f351f02ac609f3e9fdd43a25e28d7951f16f0c1a37",
+    gitBlob: "157777ff1c14c6cf5f0e4241c4e361843d694f5b",
+  };
+  const previousPin = {
+    bytes: 21362,
+    sha256: "e6bdc35fbf47fc26581c24cbecb08f27a4d590a7006d005031b6a309db26b506",
+    gitBlob: "34a1399bdd963163f2155f0de0933d085dbc4f25",
+  };
+  function healthy() {
+    const authority: string[] = [],
+      actualOwner: string[] = [];
+    const got = captureC1CurrentPopulation(read, (path) => {
+      authority.push(path);
+      const value = read(path);
+      if (path === owner) actualOwner.push(value);
+      return value;
+    });
+    expect(authority).toEqual(loweringAnalysisAuthorityTrace);
+    expect(actualOwner).toHaveLength(1);
+    expect(pin(actualOwner[0]!)).toEqual(ownerPin);
+    expect(got.observedCurrentPins.some((row) => row.path === owner)).toBe(false);
+    expect(got.observedCurrentPins.some((row) => row.pin.sha256 === previousPin.sha256)).toBe(false);
+    expect(got.historicalPopulation.has(owner)).toBe(false);
+    expect(pin(got.historicalPopulation.get(adapter)!)).toEqual({
+      bytes: 26410,
+      sha256: "6a64764b2691d6b2994258a966afabdac0b981fc036f611be5d8969032a3db98",
+      gitBlob: "d4854103ad1fae2f12c105fc0e1a66e2d20a5c6e",
+    });
+    expect(pin(read("src/ir/analysis/linear-memory-plan.ts"))).toEqual({
+      bytes: 49040,
+      sha256: "5f2f5ded3a788e2cc1b70dceb01afe97d249e0e5407e555ced11c5aedb0dbc52",
+      gitBlob: "a44148b86cf60d75a8ebcd9decd2f0fc3a5aad1c",
+    });
+    return actualOwner[0]!;
+  }
+  it("observes actual cdd owner once while returning only the original legality donor", () => {
+    healthy();
+    healthy();
+  });
+  it.each(["missing", "corrupt", "old e6 substitution", "same-size unrelated edit"] as const)(
+    "refuses %s actual owner authority and accepts healthy restoration",
+    (name) => {
+      const current = Buffer.from(healthy());
+      const insertion = Buffer.from('    case "early.return":\n');
+      expect(current.subarray(8250, 8275)).toEqual(insertion);
+      const original = Buffer.concat([current.subarray(0, 8250), current.subarray(8275)]);
+      expect(pin(original.toString("utf8"))).toEqual(previousPin);
+      const missing = Object.assign(new Error("missing current early-return owner"), { code: "ENOENT" });
+      let reads = 0;
+      const operation = () =>
+        captureC1CurrentPopulation(read, (path) => {
+          if (path !== owner) return read(path);
+          reads++;
+          if (name === "missing") throw missing;
+          if (name === "old e6 substitution") return original.toString("utf8");
+          if (name === "corrupt") return current.toString("utf8") + "\n// owner mutation\n";
+          const changed = Buffer.from(current);
+          changed[0] = changed[0]! ^ 1;
+          return changed.toString("utf8");
+        });
+      if (name === "missing") expect(operation).toThrow(missing);
+      else expect(operation).toThrow("full pin changed " + owner);
+      expect(reads).toBe(1);
+      healthy();
+    },
+  );
+});
+
+// Independent fixed union epoch: expected bytes come from root's reviewed source span, never an H2 output.
+const booleanTypesPath = "src/ir/types.ts";
+const booleanTypesBeforePin = {
+  bytes: 7744,
+  sha256: "d82e92ee276dd9a57bd69d9dee16410d24225a028bd9dca53bc406f69b9623ac",
+  gitBlob: "f7717d7c70bb57bd73d799a1d26d1825aa0a41e8",
+};
+const booleanTypesCurrentPin = {
+  bytes: 7756,
+  sha256: "0282ae61c6a43f837a9a3c7b12d879151e67ec155939c541cd9b5ea662979140",
+  gitBlob: "bdf9d6ace5f7f5530373cea6007a1ad7dfe905d0",
+};
+const booleanTypesOffset = 6465;
+const booleanTypesBefore =
+  'export type ExportBoundaryKind = TypedArrayKind | "string" | "symbol" | "promise" | "dynamic" | "aggregate";';
+const booleanTypesCurrent =
+  'export type ExportBoundaryKind = TypedArrayKind | "boolean" | "string" | "symbol" | "promise" | "dynamic" | "aggregate";';
+function independentBooleanTypesBefore(current: string): string {
+  expect(pin(current)).toEqual(booleanTypesCurrentPin);
+  const bytes = Buffer.from(current),
+    before = Buffer.from(booleanTypesBefore),
+    after = Buffer.from(booleanTypesCurrent);
+  expect(bytes.subarray(booleanTypesOffset, booleanTypesOffset + after.length)).toEqual(after);
+  const predecessor = Buffer.concat([
+    bytes.subarray(0, booleanTypesOffset),
+    before,
+    bytes.subarray(booleanTypesOffset + after.length),
+  ]);
+  expect(pin(predecessor.toString("utf8"))).toEqual(booleanTypesBeforePin);
+  expect(predecessor.subarray(booleanTypesOffset, booleanTypesOffset + before.length)).toEqual(before);
+  const replay = Buffer.concat([
+    predecessor.subarray(0, booleanTypesOffset),
+    after,
+    predecessor.subarray(booleanTypesOffset + before.length),
+  ]);
+  expect(replay).toEqual(bytes);
+  expect(pin(replay.toString("utf8"))).toEqual(booleanTypesCurrentPin);
+  return predecessor.toString("utf8");
+}
+function booleanTypesHealthy(): void {
+  const capture = captureC1CurrentPopulation(read, read);
+  expect(capture.originals.size).toBe(4);
+  expect(pin(capture.historicalPopulation.get(booleanTypesPath)!)).toEqual(booleanTypesBeforePin);
+  expect(capture.observedCurrentPins.filter((row) => row.path === booleanTypesPath)).toEqual([
+    { path: booleanTypesPath, pin: booleanTypesCurrentPin },
+  ]);
+}
+function booleanTypesExpectMissing(action: () => void, path: string): void {
+  let failure: unknown;
+  try {
+    action();
+  } catch (error) {
+    failure = error;
+  }
+  expect(failure).toMatchObject({ code: "ENOENT", path: resolve(root, path) });
+}
+/** Same fail-closed persistent-backup and expected-fault identity protocol as the established authority harness. */
+function booleanTypesWithFault(path: string, kind: "mutation" | "missing", action: () => void, byte: 0 = 0): void {
+  if (path !== booleanTypesPath) throw new Error("unapproved Boolean type authority fault: " + path);
+  if (byte !== 0) throw new Error("unapproved Boolean type fault byte");
+  const target = resolve(root, path);
+  const scratch = resolve(import.meta.dirname, "../.tmp/c1-boolean-types-authority-faults");
+  mkdirSync(scratch, { recursive: true });
+  const lock = resolve(scratch, "checkout.lock");
+  // Exclusive creation fails closed if another operation owns this checkout.
+  const descriptor = openSync(lock, "wx", 0o600);
+  closeSync(descriptor);
+  let backupDirectory: string | undefined;
+  let backup: string | undefined;
+  let restored = true;
+  const failures: unknown[] = [];
+  const cleanupRestoredFault = (): void => {
+    if (backup) {
+      // Missing-input restoration renames the sole original out of this operation directory.
+      try {
+        lstatSync(backup);
+        unlinkSync(backup);
+      } catch (error) {
+        if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error;
+      }
+    }
+    if (backupDirectory) rmdirSync(backupDirectory);
+    unlinkSync(lock);
+  };
+  try {
+    const initial = lstatSync(target);
+    if (!initial.isFile() || initial.isSymbolicLink())
+      throw new Error("authority target must be a regular non-symlink file: " + target);
+    const original = readFileSync(target);
+    const mode = initial.mode & 0o7777;
+    const mutated = Buffer.from(original);
+    if (mutated.length === 0) throw new Error("empty authority target: " + target);
+    if (byte >= mutated.length) throw new Error("authority fault byte outside target");
+    mutated[byte] = mutated[byte]! ^ 1;
+    backupDirectory = mkdtempSync(resolve(scratch, "operation-"));
+    backup = resolve(backupDirectory, "original");
+    const recovery = backup;
+    writeFileSync(lock, JSON.stringify({ path, kind, backup }) + "\n", {
+      flag: "r+",
+    });
+    const verifyTarget = (bytes: Buffer): void => {
+      const stat = lstatSync(target);
+      if (
+        !stat.isFile() ||
+        stat.isSymbolicLink() ||
+        stat.ino !== initial.ino ||
+        stat.dev !== initial.dev ||
+        (stat.mode & 0o7777) !== mode ||
+        !readFileSync(target).equals(bytes)
+      )
+        throw new Error("unexpected authority edit; refusing to overwrite: " + target);
+    };
+    const restoreFault = (): void => {
+      const saved = lstatSync(recovery);
+      if (
+        !saved.isFile() ||
+        saved.isSymbolicLink() ||
+        (saved.mode & 0o7777) !== mode ||
+        !readFileSync(recovery).equals(original)
+      )
+        throw new Error("recovery copy differs from captured authority");
+      if (kind === "mutation") {
+        verifyTarget(mutated);
+        writeFileSync(target, original);
+        chmodSync(target, mode);
+      } else {
+        booleanTypesExpectMissing(() => {
+          lstatSync(target);
+        }, path);
+        if (saved.ino !== initial.ino || saved.dev !== initial.dev)
+          throw new Error("renamed authority identity changed");
+        renameSync(recovery, target);
+        chmodSync(target, mode);
+      }
+      verifyTarget(original);
+      restored = true;
+    };
+    verifyTarget(original);
+    if (kind === "mutation") {
+      writeFileSync(recovery, original, { flag: "wx", mode });
+      chmodSync(recovery, mode);
+    }
+    restored = false;
+    try {
+      if (kind === "mutation") {
+        writeFileSync(target, mutated);
+        chmodSync(target, mode);
+        verifyTarget(mutated);
+        if (byte === 0) {
+          expect(mutated[0]).not.toBe(original[0]);
+          expect(mutated.subarray(1).equals(original.subarray(1))).toBe(true);
+        } else {
+          expect(mutated[byte]).not.toBe(original[byte]);
+          expect(mutated.subarray(0, byte).equals(original.subarray(0, byte))).toBe(true);
+          expect(mutated.subarray(byte + 1).equals(original.subarray(byte + 1))).toBe(true);
+        }
+      } else {
+        renameSync(target, recovery);
+        booleanTypesExpectMissing(() => {
+          readFileSync(target);
+        }, path);
+        expect(() => lstatSync(target)).toThrow(/ENOENT/);
+      }
+      action();
+    } catch (error) {
+      failures.push(error);
+    } finally {
+      try {
+        restoreFault();
+      } catch (error) {
+        failures.push(
+          new Error(
+            "authority restoration failed; recovery retained at " + backup + "; checkout lock retained at " + lock,
+            { cause: error },
+          ),
+        );
+      }
+    }
+  } catch (error) {
+    failures.push(error);
+  } finally {
+    if (restored) {
+      try {
+        cleanupRestoredFault();
+      } catch (error) {
+        failures.push(
+          new Error("authority cleanup failed; checkout lock/recovery retained at " + lock + " / " + backup, {
+            cause: error,
+          }),
+        );
+      }
+    }
+  }
+  // Propagate only after every safe restoration/cleanup path has completed.
+  if (failures.length > 1) throw new AggregateError(failures, "authority operation and recovery failures: " + target);
+  if (failures.length === 1) throw failures[0];
+}
+
+describe("C1 fixed Boolean type union epoch", () => {
+  it("independently proves current inverse and full forward replay", () => {
+    const current = read(booleanTypesPath),
+      predecessor = independentBooleanTypesBefore(current);
+    const capture = captureC1CurrentPopulation(read, read);
+    expect(capture.historicalPopulation.get(booleanTypesPath)).toBe(predecessor);
+    expect(capture.observedCurrentPins.find((row) => row.path === booleanTypesPath)?.pin).toEqual(
+      booleanTypesCurrentPin,
+    );
+    expect(reconstructRuntimeProgramRelocationPopulation(capture.historicalPopulation, capture.receiptText)).toEqual(
+      capture.originals,
+    );
+  });
+  it("keeps genuine current types refused by the unchanged direct historical guard", () => {
+    booleanTypesHealthy();
+    const capture = captureC1CurrentPopulation(read, read),
+      mutant = new Map(capture.historicalPopulation);
+    mutant.set(booleanTypesPath, read(booleanTypesPath));
+    expect(() => reconstructRuntimeProgramRelocationPopulation(mutant, capture.receiptText)).toThrow(
+      /length\/SHA256: src\/ir\/types\.ts/,
+    );
+    booleanTypesHealthy();
+  });
+  it("refuses the stale predecessor before real resolver IO", () => {
+    booleanTypesHealthy();
+    let calls = 0;
+    const io: C1ResolverObservationIO = {
+      fileExists: () => {
+        calls++;
+        return false;
+      },
+      directoryExists: () => {
+        calls++;
+        return false;
+      },
+      realpath: (path) => {
+        calls++;
+        return path;
+      },
+    };
+    expect(() =>
+      captureC1CurrentPopulation(
+        replaced(booleanTypesPath, independentBooleanTypesBefore(read(booleanTypesPath))),
+        read,
+        io,
+      ),
+    ).toThrow("C1 current source: full pin mismatch: " + booleanTypesPath);
+    expect(calls).toBe(0);
+    booleanTypesHealthy();
+  });
+  it.each([
+    "missing Boolean member",
+    "duplicate Boolean member",
+    "same-size member content",
+    "shifted fragment",
+    "outside union",
+  ] as const)("refuses exact current type mutation: %s", (name) => {
+    booleanTypesHealthy();
+    const seed = read(booleanTypesPath);
+    let mutant: string;
+    if (name === "missing Boolean member") mutant = replaceOnce(seed, booleanTypesCurrent, booleanTypesBefore);
+    else if (name === "duplicate Boolean member")
+      mutant = replaceOnce(
+        seed,
+        booleanTypesCurrent,
+        booleanTypesCurrent.replace('"boolean"', '"boolean" | "boolean"'),
+      );
+    else if (name === "same-size member content")
+      mutant = replaceOnce(seed, booleanTypesCurrent, booleanTypesCurrent.replace('"boolean"', '"booleam"'));
+    else if (name === "shifted fragment") {
+      expect(seed.endsWith("\n")).toBe(true);
+      mutant = "\n" + seed.slice(0, -1);
+    } else mutant = replaceOnce(seed, "Loopdive GmbH", "Loopdive GmbI");
+    expect(mutant).not.toBe(seed);
+    if (name === "same-size member content" || name === "shifted fragment" || name === "outside union")
+      expect(Buffer.byteLength(mutant)).toBe(Buffer.byteLength(seed));
+    let reached = 0,
+      resolver = 0;
+    const io: C1ResolverObservationIO = {
+      fileExists: () => {
+        resolver++;
+        return false;
+      },
+      directoryExists: () => {
+        resolver++;
+        return false;
+      },
+      realpath: (path) => {
+        resolver++;
+        return path;
+      },
+    };
+    expect(() =>
+      captureC1CurrentPopulation(
+        (path) => {
+          if (path === booleanTypesPath) {
+            reached++;
+            return mutant;
+          }
+          return read(path);
+        },
+        read,
+        io,
+      ),
+    ).toThrow("C1 current source: full pin mismatch: " + booleanTypesPath);
+    expect(reached).toBe(1);
+    expect(resolver).toBe(0);
+    booleanTypesHealthy();
+  });
+  it("refuses nonprimitive population types without coercion", () => {
+    booleanTypesHealthy();
+    let coerced = 0,
+      reached = 0;
+    const value = {
+      toString() {
+        coerced++;
+        throw new Error("coercion must not run");
+      },
+      [Symbol.toPrimitive]() {
+        coerced++;
+        throw new Error("coercion must not run");
+      },
+    };
+    expect(() =>
+      captureC1CurrentPopulation((path) => {
+        if (path === booleanTypesPath) {
+          reached++;
+          return value as unknown as string;
+        }
+        return read(path);
+      }, read),
+    ).toThrow("C1 current source: primitive source required: " + booleanTypesPath);
+    expect(reached).toBe(1);
+    expect(coerced).toBe(0);
+    booleanTypesHealthy();
+  });
+  it("does not replace a supplied population mutant with healthy authority bytes", () => {
+    booleanTypesHealthy();
+    const mutant = read(booleanTypesPath) + "\n// supplied population mutation\n";
+    let population = 0,
+      authority = 0;
+    expect(() =>
+      captureC1CurrentPopulation(
+        (path) => {
+          if (path === booleanTypesPath) {
+            population++;
+            return mutant;
+          }
+          return read(path);
+        },
+        (path) => {
+          if (path === booleanTypesPath) authority++;
+          return read(path);
+        },
+      ),
+    ).toThrow("C1 current source: full pin mismatch: " + booleanTypesPath);
+    expect(population).toBe(1);
+    expect(authority).toBe(0);
+    booleanTypesHealthy();
+  });
+  it("refuses a changed second-call population after a healthy warm capture", () => {
+    let reads = 0;
+    const reader = (path: string): string => {
+      if (path === booleanTypesPath && ++reads === 2) return read(path) + "\n// warm mutation\n";
+      return read(path);
+    };
+    expect(captureC1CurrentPopulation(reader, read).originals.size).toBe(4);
+    expect(() => captureC1CurrentPopulation(reader, read)).toThrow(
+      "C1 current source: full pin mismatch: " + booleanTypesPath,
+    );
+    expect(reads).toBe(2);
+    booleanTypesHealthy();
+  });
+  it.each(["mutation", "missing"] as const)(
+    "refuses a real fresh types source fault and accepts exact restoration: %s",
+    (kind) => {
+      booleanTypesHealthy();
+      booleanTypesWithFault(booleanTypesPath, kind, () => {
+        if (kind === "missing")
+          booleanTypesExpectMissing(() => captureC1CurrentPopulation(read, read), booleanTypesPath);
+        else
+          expect(() => captureC1CurrentPopulation(read, read)).toThrow(
+            "C1 current source: full pin mismatch: " + booleanTypesPath,
+          );
+      });
+      expect(pin(read(booleanTypesPath))).toEqual(booleanTypesCurrentPin);
+      booleanTypesHealthy();
+    },
+  );
+  it("resolves the actual current Boolean union with the unchanged operation and target contract", () => {
+    const { data } = manifest(),
+      population: string[] = [],
+      authority: string[] = [],
+      observed: { operation: string; path: string }[] = [];
+    const actual = actualIO();
+    const locate = (path: string): string => {
+      const packageRoot = dirname(createRequire(import.meta.url).resolve("typescript/package.json"));
+      for (const packagePath of [packageRoot, resolve(root, "node_modules/typescript")])
+        if (path === packagePath || path.startsWith(packagePath + sep))
+          return "typescript-package/" + relative(packagePath, path).split(sep).join("/");
+      return relative(root, path).split(sep).join("/");
+    };
+    const io: C1ResolverObservationIO = {
+      fileExists: (path) => {
+        observed.push({ operation: "fileExists", path: locate(path) });
+        return actual.fileExists(path);
+      },
+      directoryExists: (path) => {
+        observed.push({ operation: "directoryExists", path: locate(path) });
+        return actual.directoryExists(path);
+      },
+      realpath: (path) => {
+        observed.push({ operation: "realpath", path: locate(path) });
+        return actual.realpath(path);
+      },
+    };
+    let supplied: string | undefined;
+    const capture = captureC1CurrentPopulation(
+      (path) => {
+        population.push(path);
+        const source = read(path);
+        if (path === booleanTypesPath) supplied = source;
+        return source;
+      },
+      (path) => {
+        authority.push(path);
+        return read(path);
+      },
+      io,
+    );
+    expect(population).toEqual([runtimeProgramRelocationReceiptPath, ...runtimeProgramRelocationPopulationPaths]);
+    expect(authority).toEqual(loweringAnalysisAuthorityTrace);
+    expect(authority.filter((path) => path === booleanTypesPath)).toHaveLength(0);
+    expect(pin(supplied!)).toEqual(booleanTypesCurrentPin);
+    const file = ts.createSourceFile(booleanTypesPath, supplied!, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    const declarations = file.statements
+      .filter(ts.isTypeAliasDeclaration)
+      .filter((row) => row.name.text === "ExportBoundaryKind");
+    expect(declarations).toHaveLength(1);
+    expect(ts.isUnionTypeNode(declarations[0]!.type)).toBe(true);
+    const union = declarations[0]!.type;
+    if (!ts.isUnionTypeNode(union)) throw new Error("actual ExportBoundaryKind union missing");
+    expect(
+      union.types
+        .filter(ts.isLiteralTypeNode)
+        .filter((row) => ts.isStringLiteral(row.literal) && row.literal.text === "boolean"),
+    ).toHaveLength(1);
+    expect(data.linearOptions.resolver.requests).toHaveLength(13);
+    expect(data.linearOptions.resolver.observations).toHaveLength(57);
+    expect(observed).toEqual(
+      data.linearOptions.resolver.observations
+        .filter((row: { operation: string }) => row.operation !== "readFile")
+        .map((row: { operation: string; location: { scope: string; path: string } }) => ({
+          operation: row.operation,
+          path:
+            row.location.scope === "typescript-package" ? "typescript-package/" + row.location.path : row.location.path,
+        })),
+    );
+    expect(resolverRequests[1]).toEqual([
+      linearPath,
+      "../ir/analysis/linear-memory-plan.js",
+      "repository",
+      "src/ir/analysis/linear-memory-plan.ts",
+    ]);
+    expect(capture.observedCurrentPins.find((row) => row.path === booleanTypesPath)?.pin).toEqual(
+      booleanTypesCurrentPin,
+    );
+  });
 });

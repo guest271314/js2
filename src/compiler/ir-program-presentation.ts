@@ -16,7 +16,8 @@ import {
   emittedSupportFunctionReceipts,
 } from "../ir/program-consumer.js";
 import type { IrUnitId, IrBindingId } from "../shared/contracts/ir-identity.js";
-import type { ValType, TypeDef, Instr } from "../ir/types.js";
+import type { ValType, TypeDef, Instr, ExportSignature } from "../ir/types.js";
+import type { IrType } from "../ir/core/types.js";
 import { runIrProgramDriver } from "./ir-program-driver.js";
 import type { IrProgramDriverResult } from "./ir-program-result.js";
 
@@ -100,15 +101,41 @@ export type PreparedIrPipelinePresentationResult =
     }
   | Exclude<IrProgramPresentationResult, { kind: "prepared-presentation" }>;
 
+type PresentationSlot = "number" | "boolean";
 interface DeclarationCapture {
   readonly sourceFile: string;
   readonly start: number;
   readonly end: number;
-  readonly params: readonly string[];
-  readonly results: readonly string[];
+  readonly params: readonly PresentationSlot[];
+  readonly results: readonly PresentationSlot[];
   readonly synchronous: boolean;
 }
 const numeric = (type: ValType): boolean => ["i32", "i64", "f32", "f64"].includes(type.kind);
+function booleanCarrier(type: ValType): boolean {
+  return type.kind === "i32" && type.boolean === true && type.symbol === undefined && type.int32 === undefined;
+}
+function sourceSlotMatches(slot: PresentationSlot, type: IrType | undefined): boolean {
+  if (!type || type.kind !== "val") return false;
+  if (slot === "boolean") return type.typeRef === undefined && booleanCarrier(type.val);
+  return numeric(type.val) && (type.val.kind !== "i32" || type.val.boolean !== true);
+}
+function physicalSlotMatches(slot: PresentationSlot, physical: ValType, logical: IrType | undefined): boolean {
+  return (
+    sourceSlotMatches(slot, logical) &&
+    logical?.kind === "val" &&
+    physical.kind === logical.val.kind &&
+    (slot !== "boolean" || booleanCarrier(physical))
+  );
+}
+function booleanExportSignature(declaration: DeclarationCapture): ExportSignature | undefined {
+  if (![...declaration.params, ...declaration.results].includes("boolean")) return undefined;
+  const signature: ExportSignature = {
+    params: declaration.params.map((slot) => (slot === "boolean" ? "boolean" : "other")),
+    result: declaration.results[0] === "boolean" ? "boolean" : "other",
+  };
+  Object.freeze(signature.params);
+  return Object.freeze(signature);
+}
 function typeNeedsWidening(type: TypeDef): boolean {
   switch (type.kind) {
     case "func":
@@ -249,8 +276,9 @@ function capturePresentation(request: IrProgramPresentationRequest, gap: GapReco
     gap("codegenOptions.link", "option-association", "resolved link collection must agree with captured options");
   const declarations: DeclarationCapture[] = [];
   const globals: { sourceFile: string; start: number; end: number; name: string; numeric: boolean }[] = [];
-  function classify(type: ts.Type): string | undefined {
+  function classify(type: ts.Type): PresentationSlot | "void" | undefined {
     if ((type.flags & ts.TypeFlags.NumberLike) !== 0) return "number";
+    if ((type.flags & ts.TypeFlags.BooleanLike) !== 0) return "boolean";
     if ((type.flags & ts.TypeFlags.Void) !== 0) return "void";
     return undefined;
   }
@@ -277,15 +305,25 @@ function capturePresentation(request: IrProgramPresentationRequest, gap: GapReco
     const visit = (node: ts.Node): void => {
       if (ts.isFunctionDeclaration(node) && node.body) {
         const signature = input.checker.getSignatureFromDeclaration(node);
-        const params = node.parameters.map((param) => classify(input.checker.getTypeAtLocation(param)));
+        const params: PresentationSlot[] = [];
+        let unsupportedParam = false;
+        for (const param of node.parameters) {
+          const kind = classify(input.checker.getTypeAtLocation(param));
+          if (
+            kind === "number" ||
+            (kind === "boolean" && !param.questionToken && !param.dotDotDotToken && !param.initializer)
+          )
+            params.push(kind);
+          else unsupportedParam = true;
+        }
         const result = signature && classify(input.checker.getReturnTypeOfSignature(signature));
         const synchronous =
           !node.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword) && !node.asteriskToken;
-        if (!signature || params.some((param) => param !== "number") || !result || !synchronous)
+        if (!signature || unsupportedParam || !result || !synchronous)
           gap(
             "declaration",
             "non-numeric-boundary",
-            "complete synchronous numeric function declarations are required",
+            "complete synchronous numeric or Boolean function declarations are required",
             { sourceFile: source.fileName },
           );
         else
@@ -294,7 +332,7 @@ function capturePresentation(request: IrProgramPresentationRequest, gap: GapReco
               sourceFile: source.fileName,
               start: node.getStart(source),
               end: node.end,
-              params: Object.freeze(params as string[]),
+              params: Object.freeze(params),
               results: Object.freeze(result === "void" ? [] : [result]),
               synchronous,
             }),
@@ -344,6 +382,7 @@ function checkAbiExports(
   capture: PresentationCapture,
   captures: Map<IrUnitId, DeclarationCapture>,
   gap: GapRecorder,
+  signatures: Record<string, ExportSignature>,
 ): Set<string> {
   const mod = emission.module;
   const { globals } = capture;
@@ -373,9 +412,11 @@ function checkAbiExports(
         const declaration = captures.get(plan.intent.unitId)!;
         if (
           contract.params.length !== declaration.params.length ||
-          contract.results.length !== declaration.results.length
+          contract.results.length !== declaration.results.length ||
+          declaration.params.some((slot, index) => !sourceSlotMatches(slot, contract.params[index])) ||
+          declaration.results.some((slot, index) => !sourceSlotMatches(slot, contract.results[index]))
         )
-          gap("abi.callable", "signature-join", "source declaration and prepared callable arity disagree", {
+          gap("abi.callable", "signature-join", "source declaration and prepared callable slots disagree", {
             unitId: plan.intent.unitId,
             bindingId: plan.id,
           });
@@ -464,6 +505,7 @@ function checkAbiExports(
         { bindingId: plan.id, unitId },
       );
     else {
+      const callable = target.contract;
       const fn = mod.functions[slot.index]; // zero imported functions is proved below
       const signature = fn && mod.types[fn.typeIdx];
       if (
@@ -472,19 +514,26 @@ function checkAbiExports(
         signature.params.length !== declaration.params.length ||
         signature.results.length !== declaration.results.length ||
         [...signature.params, ...signature.results].some((type) => !numeric(type)) ||
-        signature.params.some((type, index) => {
-          const expected = target.contract.kind === "callable" && target.contract.params[index];
-          return !expected || expected.kind !== "val" || expected.val.kind !== type.kind;
-        }) ||
-        signature.results.some((type, index) => {
-          const expected = target.contract.kind === "callable" && target.contract.results[index];
-          return !expected || expected.kind !== "val" || expected.val.kind !== type.kind;
-        })
+        signature.params.some(
+          (type, index) => !physicalSlotMatches(declaration.params[index]!, type, callable.params[index]),
+        ) ||
+        signature.results.some(
+          (type, index) => !physicalSlotMatches(declaration.results[index]!, type, callable.results[index]),
+        )
       )
-        gap("exports", "physical-signature", "actual physical export signature disagrees with numeric source capture", {
-          bindingId: plan.id,
-          unitId,
-        });
+        gap(
+          "exports",
+          "physical-signature",
+          "actual physical export signature disagrees with primitive source capture",
+          {
+            bindingId: plan.id,
+            unitId,
+          },
+        );
+      else {
+        const signature = booleanExportSignature(declaration);
+        if (signature) signatures[contract.externalName] = signature;
+      }
     }
   }
   return joinedExports;
@@ -666,7 +715,8 @@ export function prepareIrProgramPresentation(request: IrProgramPresentationReque
   const mod = emission.module;
   emittedSupportFunctionReceipts(emission);
   const captures = joinDeclarations(program, capture, gap);
-  const joinedExports = checkAbiExports(program, emission, capture, captures, gap);
+  const signatures: Record<string, ExportSignature> = Object.create(null);
+  const joinedExports = checkAbiExports(program, emission, capture, captures, gap, signatures);
   checkResourceDemand(program, emission, capture.backend, gap);
   const startup = joinStartup(program, emission, capture.input, gap);
   if (!mod.functions.length || !program.inventory.terminalUnits.length)
@@ -693,6 +743,8 @@ export function prepareIrProgramPresentation(request: IrProgramPresentationReque
       );
   }
   if (gaps.length) return unsupported(gaps);
+  if (Object.keys(signatures).length) mod.exportSignatures = Object.freeze(signatures);
+  emittedSupportFunctionReceipts(emission);
   return Object.freeze({
     kind: "prepared-presentation",
     program,

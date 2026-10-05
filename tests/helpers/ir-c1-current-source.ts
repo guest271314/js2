@@ -30,7 +30,7 @@ import {
 
 import {
   captureLinearLayoutPredecessor,
-  captureLoweringLegalityPredecessor,
+  captureCurrentLoweringLegalityPredecessor,
 } from "./ir-lowering-analysis-relocation.js";
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -40,9 +40,9 @@ const loweringPlannerPath = "src/ir/analysis/linear-memory-plan.ts";
 const loweringAnalysisImplementationPath = "tests/helpers/ir-lowering-analysis-relocation.ts";
 // Independently supplied by root from the formatted, reviewed component implementation.
 const loweringAnalysisImplementationPin: C1Pin = {
-  bytes: 17637,
-  sha256: "4378d72f5b51148fa345f2544f1c43df12d4a967b369ef0be95d99c6f16c7ba4",
-  gitBlob: "832a2b1b88bd3eddbd89d78a3f23e917d7bff9ae",
+  bytes: 18956,
+  sha256: "253eda01462fad0ab84a940965a083eaf80b0ca8a3e10a4ca012fbafaaf30e99",
+  gitBlob: "c732f2eb22a127714373bc8fa363514bcf7a818b",
 };
 const loweringPlannerBeforePin: C1Pin = {
   bytes: 52704,
@@ -329,6 +329,29 @@ const canonicalInputEpochs = [
           "      '@vitest/expect': 3.2.4\n      '@vitest/mocker': 3.2.4(vite@6.4.1(@types/node@22.19.13)(terser@5.46.1)(tsx@4.23.1)(yaml@2.8.3))\n      '@vitest/pretty-format': 3.2.4\n      '@vitest/runner': 3.2.4\n      '@vitest/snapshot': 3.2.4\n      '@vitest/spy': 3.2.4\n      '@vitest/utils': 3.2.4\n",
         after:
           "      '@vitest/expect': 3.2.7\n      '@vitest/mocker': 3.2.7(vite@6.4.1(@types/node@22.19.13)(terser@5.46.1)(tsx@4.23.1)(yaml@2.8.3))\n      '@vitest/pretty-format': 3.2.7\n      '@vitest/runner': 3.2.7\n      '@vitest/snapshot': 3.2.7\n      '@vitest/spy': 3.2.7\n      '@vitest/utils': 3.2.7\n",
+      },
+    ],
+  },
+  {
+    path: "src/ir/types.ts",
+    beforePin: {
+      bytes: 7744,
+      sha256: "d82e92ee276dd9a57bd69d9dee16410d24225a028bd9dca53bc406f69b9623ac",
+      gitBlob: "f7717d7c70bb57bd73d799a1d26d1825aa0a41e8",
+    },
+    currentPin: {
+      bytes: 7756,
+      sha256: "0282ae61c6a43f837a9a3c7b12d879151e67ec155939c541cd9b5ea662979140",
+      gitBlob: "bdf9d6ace5f7f5530373cea6007a1ad7dfe905d0",
+    },
+    spans: [
+      {
+        beforeOffset: 6465,
+        afterOffset: 6465,
+        before:
+          'export type ExportBoundaryKind = TypedArrayKind | "string" | "symbol" | "promise" | "dynamic" | "aggregate";',
+        after:
+          'export type ExportBoundaryKind = TypedArrayKind | "boolean" | "string" | "symbol" | "promise" | "dynamic" | "aggregate";',
       },
     ],
   },
@@ -764,16 +787,20 @@ export function captureC1CurrentPopulation(
   const receipt = authenticateRuntimeProgramRelocationReceipt(receiptText);
   let validatorRelocation: ProgramValidatorRelocationCapture | undefined;
   let loweringLegalityPredecessor: string | undefined;
+  let typesPredecessor: string | undefined;
   const relocatedDependencies = ["src/ir/program-runtime-abi.ts", "src/ir/program-validation.ts"] as const;
   for (const record of [...receipt.current, ...receipt.dependencies]) {
     if (record.path === linearPath) continue;
     const rawSource = current.get(record.path)!;
-    if (record.path === loweringLegalityPath) {
+    if (record.path === "src/ir/types.ts") {
+      typesPredecessor = beforeCanonicalCurrentInput(record.path, rawSource);
+      assertRuntimeProgramRelocationSource(typesPredecessor, record, record.path);
+    } else if (record.path === loweringLegalityPath) {
       // Fresh implementation authentication precedes the first imported source-pair operation.
       const implementation = readAuthority(loweringAnalysisImplementationPath);
       primitive(implementation, loweringAnalysisImplementationPath);
       assertPin(implementation, loweringAnalysisImplementationPin, loweringAnalysisImplementationPath);
-      loweringLegalityPredecessor = captureLoweringLegalityPredecessor(rawSource, readAuthority);
+      loweringLegalityPredecessor = captureCurrentLoweringLegalityPredecessor(rawSource, readAuthority);
       assertRuntimeProgramRelocationSource(loweringLegalityPredecessor, record, record.path);
     } else if (relocatedDependencies.includes(record.path as (typeof relocatedDependencies)[number])) {
       validatorRelocation ??= captureProgramValidatorRelocation(readAuthority);
@@ -843,6 +870,8 @@ export function captureC1CurrentPopulation(
   checkBindings(oldFile, declaration(oldFile, contract), contract);
   const historicalPopulation = new Map(current);
   historicalPopulation.set(linearPath, historical);
+  if (typesPredecessor === undefined) fail("missing Boolean types predecessor");
+  historicalPopulation.set("src/ir/types.ts", typesPredecessor);
   if (loweringLegalityPredecessor === undefined) fail("missing lowering legality predecessor");
   historicalPopulation.set(loweringLegalityPath, loweringLegalityPredecessor);
   if (validatorRelocation === undefined) fail("missing validator relocation capture");
