@@ -222,7 +222,7 @@ function withAuthorityFault(path: string, kind: "mutation" | "missing", action: 
         : path === helperPath
           ? expected.helperPrefix
           : expected.predecessorReceipt;
-    const authenticated = path === helperPath ? original.subarray(0, 356816) : original;
+    const authenticated = path === helperPath ? independentHelperHistoricalPrefix(original) : original;
     expect(authenticated.length).toBe(pin.bytes);
     expect(sha(authenticated)).toBe(pin.sha256);
     const mode = initial.mode & 0o7777;
@@ -607,3 +607,102 @@ describe("fixed prepared presentation classification policy predecessor capture"
           check();
         });
 });
+
+// Root-fixed current-helper pin and reciprocal fragments; independent from production projection.
+const earlyReturnWholeHelperPin = {
+  bytes: 390466,
+  sha256: "bb2d3a7e6bcfb54237cb03fbe4bdc61f128a508ccfb7425bdde6a150d0add55c",
+  gitBlob: "c5a6659926bd635a4fe56d7459d120cffa9eeb58",
+} as const;
+const earlyReturnPrefixProof = {
+  before: {
+    bytes: 356816,
+    sha256: "f195d0c432429bfb43c3f8a65617c886ef176e24fa81c2c6539845575fc01a54",
+    gitBlob: "ea6cef6bbd168ab0f68f412ae3bc270184fd8e9c",
+  },
+  current: {
+    bytes: 357119,
+    sha256: "91f4c65528072df09092f47ac11f2a6d9d944ae90bd58aa4c29258d2aec71dd2",
+    gitBlob: "996123d86af1f162e19f37fff2c19339ce203440",
+  },
+  edits: [
+    {
+      beforeOffset: 332028,
+      afterOffset: 332028,
+      before: "  captureLoweringLegalityPredecessor as loweringAnalysisLegalityProof,\n",
+      after: "  captureCurrentLoweringLegalityPredecessor as loweringAnalysisLegalityProof,\n",
+    },
+    {
+      beforeOffset: 346469,
+      afterOffset: 346476,
+      before: "    loweringAnalysisPin(bytes, expected, path);\n",
+      after:
+        '    loweringAnalysisPin(\n      bytes,\n      path === "src/ir/analysis/backend-legality.ts" ? earlyReturnCurrentOwnerPin : expected,\n      path,\n    );\n',
+    },
+    {
+      beforeOffset: 348569,
+      afterOffset: 348679,
+      before:
+        "  loweringAnalysisPin(implementation, receipt.componentImplementation, receipt.componentImplementation.path);\n",
+      after:
+        '  loweringAnalysisPin(implementation, earlyReturnComponentPin, receipt.componentImplementation.path);\n  loweringAnalysisPin(\n    implementation.subarray(0, receipt.componentImplementation.bytes),\n    receipt.componentImplementation,\n    receipt.componentImplementation.path + " historical prefix",\n  );\n',
+    },
+  ],
+} as const;
+function independentHelperHistoricalPrefix(original: Buffer): Buffer {
+  const wholePin = earlyReturnWholeHelperPin;
+  const beforePin = earlyReturnPrefixProof.before;
+  const currentPin = earlyReturnPrefixProof.current;
+  const currentPrefixBytes = currentPin.bytes;
+  const edits = earlyReturnPrefixProof.edits;
+  const blob = (bytes: Buffer) =>
+    createHash("sha1")
+      .update(Buffer.from(`blob ${bytes.length}\0`))
+      .update(bytes)
+      .digest("hex");
+  expect(blob(original)).toBe(wholePin.gitBlob);
+  expect(original.length).toBe(wholePin.bytes);
+  expect(sha(original)).toBe(wholePin.sha256);
+  expect(Number.isSafeInteger(currentPrefixBytes)).toBe(true);
+  expect(currentPrefixBytes).toBeGreaterThan(0);
+  expect(currentPrefixBytes).toBeLessThanOrEqual(original.length);
+  const current = original.subarray(0, currentPrefixBytes);
+  expect(sha(current)).toBe(currentPin.sha256);
+  expect(blob(current)).toBe(currentPin.gitBlob);
+  const inverse: Buffer[] = [];
+  let beforeCursor = 0,
+    afterCursor = 0;
+  for (const edit of edits) {
+    expect(Number.isSafeInteger(edit.beforeOffset)).toBe(true);
+    expect(Number.isSafeInteger(edit.afterOffset)).toBe(true);
+    expect(edit.beforeOffset).toBeGreaterThanOrEqual(beforeCursor);
+    expect(edit.afterOffset).toBeGreaterThanOrEqual(afterCursor);
+    expect(edit.beforeOffset - beforeCursor).toBe(edit.afterOffset - afterCursor);
+    const before = Buffer.from(edit.before),
+      after = Buffer.from(edit.after);
+    expect(edit.beforeOffset + before.length).toBeLessThanOrEqual(beforePin.bytes);
+    expect(edit.afterOffset + after.length).toBeLessThanOrEqual(current.length);
+    expect(current.subarray(edit.afterOffset, edit.afterOffset + after.length)).toEqual(after);
+    inverse.push(current.subarray(afterCursor, edit.afterOffset), before);
+    beforeCursor = edit.beforeOffset + before.length;
+    afterCursor = edit.afterOffset + after.length;
+  }
+  expect(beforePin.bytes - beforeCursor).toBe(current.length - afterCursor);
+  inverse.push(current.subarray(afterCursor));
+  const historical = Buffer.concat(inverse);
+  expect(historical.length).toBe(beforePin.bytes);
+  expect(sha(historical)).toBe(beforePin.sha256);
+  expect(blob(historical)).toBe(beforePin.gitBlob);
+  const forward: Buffer[] = [];
+  beforeCursor = 0;
+  for (const edit of edits) {
+    const before = Buffer.from(edit.before),
+      after = Buffer.from(edit.after);
+    expect(historical.subarray(edit.beforeOffset, edit.beforeOffset + before.length)).toEqual(before);
+    forward.push(historical.subarray(beforeCursor, edit.beforeOffset), after);
+    beforeCursor = edit.beforeOffset + before.length;
+  }
+  forward.push(historical.subarray(beforeCursor));
+  expect(Buffer.concat(forward)).toEqual(current);
+  return historical;
+}
