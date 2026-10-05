@@ -96,6 +96,7 @@ import { profileCount, profilePhase } from "./compile-profile.js";
 import { resolveCompileTargetProfile } from "./target-profile.js";
 import { injectProcessStdinPrelude } from "./process-stdin-prelude.js";
 import { injectIteratorStaticsPrelude } from "./iterator-statics-prelude.js";
+import { applyIntlListFormatPrelude, applyIntlListFormatPreludeToFiles } from "./intl-listformat-prelude.js";
 import { normalizeScriptHtmlLikeComments } from "./compiler/html-like-comments.js";
 import * as irIds from "./compiler/ir-outcome-inventory.js";
 import { buildLinearOptions } from "./compiler/linear-options.js";
@@ -1648,7 +1649,9 @@ export function compileSourceSync(
     targetProfile.environment === "none" || targetProfile.environment === "wasi"
       ? injectIteratorStaticsPrelude(stdinInjectedSource)
       : { source: stdinInjectedSource, positionMap: PositionMap.identity(), injected: false };
-  const iterStaticsSource = iterStaticsResult.source;
+  // Step 0a.46: #6839 — Wasm-native `Intl.ListFormat` prelude (host-free targets only).
+  const listFormatResult = applyIntlListFormatPrelude(targetProfile.environment, iterStaticsResult.source, options);
+  const iterStaticsSource = listFormatResult.source;
 
   // Step 0a.5: Rewrite CommonJS `const X = require('Y')` patterns to ESM `import`
   // declarations (#1279). This must run before preprocessImports so the resulting
@@ -1678,10 +1681,11 @@ export function compileSourceSync(
   const { rawWasi: wasiRawImports, memAccessors: wasiMemAccessors } = detectRawWasiImports(cjsRewritten);
   const preprocessed = preprocessImports(cjsRewritten2, { wasi: targetProfile.target === "wasi" });
   let processedSource = preprocessed.source;
-  // Compose imports → eval/super → CJS → Iterator → stdin → define back to the original source.
+  // Compose imports → eval/super → CJS → ListFormat → Iterator → stdin → define back to the original source.
   const positionMap = preprocessed.positionMap
     .compose(evalResult.positionMap)
     .compose(cjsResult.positionMap)
+    .compose(listFormatResult.positionMap)
     .compose(iterStaticsResult.positionMap)
     .compose(stdinResult.positionMap)
     .compose(defineResult.positionMap);
@@ -1899,8 +1903,10 @@ export async function compileMultiSource(
       ]),
     ),
   );
+  // #6839 — per-file Wasm-native `Intl.ListFormat` prelude (host-free targets only).
+  const listFormatFiles = applyIntlListFormatPreludeToFiles(multiTargetProfile.environment, timerShimmedFiles);
   const processedFiles = profilePhase("ground-call-fold", () =>
-    foldGroundCallsInMulti(timerShimmedFiles, entryFile, options.optimize),
+    foldGroundCallsInMulti(listFormatFiles, entryFile, options.optimize),
   );
   profileCount("input-files", Object.keys(processedFiles).length);
 

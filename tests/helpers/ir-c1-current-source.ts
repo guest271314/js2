@@ -355,6 +355,27 @@ const canonicalInputEpochs = [
       },
     ],
   },
+  {
+    path: "src/shared/contracts/source-origin.ts",
+    beforePin: {
+      bytes: 689,
+      sha256: "cc8e05036afdaca04c3e7055ad22f82c57f6e2e31b7e49a69e9081823c2eacde",
+      gitBlob: "7d9e62164db0594b761ea88eac9a07ac2d142f73",
+    },
+    currentPin: {
+      bytes: 719,
+      sha256: "cb199a6040c361256dc244d4e4e8183490524a0ee9505920a660e34eea3cc9b4",
+      gitBlob: "d6d98de15c656d3ecb32653b447b31486d3b9f05",
+    },
+    spans: [
+      {
+        beforeOffset: 261,
+        afterOffset: 261,
+        before: '  | "iterator-statics-prelude";\n',
+        after: '  | "iterator-statics-prelude"\n  | "intl-listformat-prelude";\n',
+      },
+    ],
+  },
 ] as const;
 function beforeCanonicalCurrentInput(path: string, source: string): string {
   const record = canonicalInputEpochs.find((entry) => entry.path === path);
@@ -837,7 +858,8 @@ export function captureC1CurrentPopulation(
     if (
       record.path === "src/wasm/model/instructions.ts" ||
       record.path === "package.json" ||
-      record.path === "pnpm-lock.yaml"
+      record.path === "pnpm-lock.yaml" ||
+      record.path === "src/shared/contracts/source-origin.ts"
     ) {
       const predecessor = beforeCanonicalCurrentInput(record.path, source);
       if (record.path === "package.json") predecessorPackage = predecessor;
