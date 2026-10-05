@@ -1,10 +1,11 @@
 ---
 id: 6851
 title: "npm-compat: jsdom/webpack still show 'package entry did not produce a runnable Wasm module' — their measure job OOMs in the unbounded native-first lane, so the rows are carried forward stale"
-status: in-progress
+status: done
 sprint: current
 created: 2026-10-05
 updated: 2026-10-05
+completed: 2026-10-05
 priority: high
 horizon: s
 feasibility: easy
@@ -12,7 +13,7 @@ reasoning_effort: high
 task_type: bug
 area: tooling
 goal: standalone
-related: [6052, 6660, 6661, 3494, 4287, 4299]
+related: [6052, 6660, 6661, 6742, 5385, 4287, 4299]
 ---
 
 # #6851 — jsdom and webpack never got #6661's real diagnostics
@@ -80,3 +81,41 @@ gate already blocked).
 
 Acceptance: the next CI refresh writes fresh jsdom and webpack rows (no
 `refresh.status: "stale"`), each lane naming its own reason.
+
+## Resolution
+
+Implemented as planned, merged with #6742 (which landed meanwhile and names
+the phase of a lane-budget overrun): `perfLaneInChild` uses #6742's
+`laneBudgetOverrun` for a timed-out child of any lane, and
+`compileNpmCompatPerfLane` now marks `codegen` for every lane child (a no-op
+outside a child), so a js-host-native overrun reads `js-host-native lane
+exceeded the <budget>ms harness budget during codegen (...)`.
+
+Evidence and its limits:
+
+- **Timing** — the native-first lane (#5385) landed on main with PR #5728 at
+  2026-09-08T21:57Z; jsdom/webpack were last measured at 19:13/19:14Z that
+  day, the last refresh before it. Every refresh since carried them stale.
+- **Attribution is by elimination, not a local reproduction.** On a shared box
+  at load average 40-300 none of the local runs finished inside 2 h (webpack
+  `--lane js-host-native` in process at a 4 GB heap; webpack and jsdom
+  `--lane standalone-dynamic`). The package-entry probe, upstream-suite
+  compiles and standalone lanes all run in children with piped output, so the
+  printed OOM banner is the generator's own; the native-first compile is the
+  only package-graph compile left in it. The new phase log lines make the next
+  CI log confirm or refute this directly.
+
+Lane status, before → expected after the first CI refresh on this code
+(bounded child budget = the package's harness `timeoutMs`: webpack 120 s,
+jsdom 180 s):
+
+| package | lane | before (row of 2026-09-08, stale) | after |
+| --- | --- | --- | --- |
+| webpack | standaloneDynamic | `package entry did not produce a runnable Wasm module` | its own child result — locally the standalone compile has never finished inside 1500 s (#6661), so expect `standalone-dynamic lane exceeded the 120000ms harness budget during codegen` (#4287) |
+| webpack | jsHostNative | (absent) | bounded child: budget overrun or named heap exhaustion |
+| jsdom | standaloneDynamic | `package entry did not produce a runnable Wasm module` | its own child result (2026-09-23 local: dynamic-import refusal, since fixed by #3494 — the current blocker is whatever CI's child now reports) |
+| jsdom | jsHostNative | (absent) | bounded child: budget overrun or named heap exhaustion |
+
+Real blockers: webpack — package-graph compile time (#4287, open, ready);
+jsdom — no fresh measurement exists after #3494; #4299 tracks its package
+compile. Neither is a small fix.
