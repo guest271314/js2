@@ -5140,6 +5140,14 @@
       "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."
     },
     {
+      "path": "src/codegen/expressions/arraybuffer-isview-static-decision.ts",
+      "state": "unmigrated",
+      "layer": "mixed-needs-split",
+      "destination": "backend-wasmgc",
+      "owner": "3518-coordinator",
+      "nextBoundary": "Separate legacy class-metadata static decisions from frontend classification and backend lowering."
+    },
+    {
       "path": "src/codegen/expressions/assignment.ts",
       "state": "unmigrated",
       "layer": "mixed-needs-split",

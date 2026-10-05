@@ -22,6 +22,7 @@ import { describe, expect, it } from "vitest";
 import { createRequire } from "node:module";
 import { captureC1CurrentPopulation } from "./helpers/ir-c1-current-source.js";
 import {
+  captureArrayBufferIsViewMainPredecessorPolicySource,
   capturePresentationClassificationPredecessorPolicySource,
   captureLoweringAnalysisPredecessorPolicy,
   captureLoweringAnalysisPredecessorPolicySource,
@@ -694,7 +695,9 @@ function applicationInput(entry: ApplicationEntry): string | undefined {
   if (entry === "h2") return undefined;
   const bytes = Buffer.from(
     capturePresentationClassificationPredecessorPolicySource(
-      readFileSync(join(root, "scripts/compiler-boundaries.json"), "utf8"),
+      captureArrayBufferIsViewMainPredecessorPolicySource(
+        readFileSync(join(root, "scripts/compiler-boundaries.json"), "utf8"),
+      ),
     ),
   );
   pin(bytes, policyCurrentPin);

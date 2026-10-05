@@ -1,5 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import {
+  captureArrayBufferIsViewMainPredecessorPolicy,
   capturePresentationClassificationPredecessorPolicy,
   captureLoweringAnalysisPredecessorPolicy,
   captureWasmGcHelperPredecessorPolicy,
@@ -63,7 +64,9 @@ function actual(): MutablePolicy {
                           captureWasmGcHelperPredecessorPolicy(
                             captureLoweringAnalysisPredecessorPolicy(
                               capturePresentationClassificationPredecessorPolicy(
-                                JSON.parse(read("scripts/compiler-boundaries.json")),
+                                captureArrayBufferIsViewMainPredecessorPolicy(
+                                  JSON.parse(read("scripts/compiler-boundaries.json")),
+                                ),
                               ),
                             ),
                           ),

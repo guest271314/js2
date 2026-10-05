@@ -1,5 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import {
+  captureArrayBufferIsViewMainPredecessorPolicySource,
   capturePresentationClassificationPredecessorPolicySource,
   captureLoweringAnalysisPredecessorPolicySource,
   captureWasmGcHelperPredecessorPolicySource,
@@ -2663,7 +2664,9 @@ function fixtureCaptureInput(epoch: (typeof fixtureCaptureEpochs)[number]): stri
         captureWasmGcHelperPredecessorPolicySource(
           captureLoweringAnalysisPredecessorPolicySource(
             capturePresentationClassificationPredecessorPolicySource(
-              fixtureCaptureRead("scripts/compiler-boundaries.json"),
+              captureArrayBufferIsViewMainPredecessorPolicySource(
+                fixtureCaptureRead("scripts/compiler-boundaries.json"),
+              ),
             ),
           ),
         ),
@@ -3379,7 +3382,9 @@ function fourStageCaptureInput(epoch: (typeof fourStageCaptureEpochs)[number]): 
             captureWasmGcHelperPredecessorPolicySource(
               captureLoweringAnalysisPredecessorPolicySource(
                 capturePresentationClassificationPredecessorPolicySource(
-                  fixtureCaptureRead("scripts/compiler-boundaries.json"),
+                  captureArrayBufferIsViewMainPredecessorPolicySource(
+                    fixtureCaptureRead("scripts/compiler-boundaries.json"),
+                  ),
                 ),
               ),
             ),

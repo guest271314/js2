@@ -18,31 +18,37 @@ import { fileURLToPath } from "node:url";
 import { setImmediate } from "node:timers/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  captureArrayBufferIsViewMainPredecessorPolicy,
   captureArrayBufferIsViewMainPredecessorPolicySource,
-  capturePresentationClassificationPredecessorPolicy,
-  capturePresentationClassificationPredecessorPolicySource,
   type MutableIrRuntimeProgramPolicy as Policy,
 } from "./helpers/ir-runtime-program-policy-evolution.js";
 // Independent authority literals; no expected pin is derived from mutated bytes.
 const expected = {
   schema: 1,
-  kind: "fixed-prepared-presentation-classification-policy-evolution",
+  kind: "fixed-arraybuffer-isview-main-policy-evolution",
   provenance: {
-    preparationCommit: "5a633bf93ec0e7b9d2992334d00f1279c7bd2c25",
-    planSha256: "1d332bd357bb3867a187f8841308f82e3f0518e400eb684c2b7f71b5567d89b1",
+    preparationCommit: "d304a35aa9a318906bb7c5459a1cf9359f50e227",
+    canonicalMainCommit: "844398d2c773e631b8ca8e54141a53e11dd685d4",
+    remoteRefreshCommit: "3b4bc52137bbf8f7b86f9e659453f34b7ce29ad0",
+    canonicalPolicy: {
+      bytes: 584340,
+      sha256: "172cbb5c10a980cf4d1ddd70a24195a5f4c5536e3888e50da96a05e16d272189",
+      gitBlob: "546d0403813cfb67389fac728dd3e4a40c090bb0",
+    },
+    planSha256: "4e57afdffaa60df87273226917e08ac4ca3a07e22657a682b665bc6e6d342378",
     legacyRetained: true,
   },
   helperPrefix: {
     path: "tests/helpers/ir-runtime-program-policy-evolution.ts",
-    bytes: 356816,
-    sha256: "f195d0c432429bfb43c3f8a65617c886ef176e24fa81c2c6539845575fc01a54",
-    gitBlob: "ea6cef6bbd168ab0f68f412ae3bc270184fd8e9c",
+    bytes: 369345,
+    sha256: "3ccadadfcceb0134ba97816c4fa6dedada6248c183b37f9ad339e765c608730f",
+    gitBlob: "eeaaafffec963ce21dfbf27e76ae24beea86ae79",
   },
   predecessorReceipt: {
-    path: "tests/helpers/ir-runtime-program-policy-lowering-analysis.json",
-    bytes: 13393,
-    sha256: "72db51a0e892a4fa8a2d9762042eacc8d88609ccd0ae1ac80f9f548852e04f9b",
-    gitBlob: "3c7ce06a7075d66f786e01b79d44527e86ae0f3f",
+    path: "tests/helpers/ir-runtime-program-policy-presentation-classification.json",
+    bytes: 4227,
+    sha256: "dd0273b99eb2f96ed66e033bec6a4365b65137359d3a9b7fc2e3b0e7b4b80dee",
+    gitBlob: "c65ce4a7a6c60f6c28ac01977fca8f6262e9584b",
   },
   topLevelKeys: [
     "schema",
@@ -64,22 +70,6 @@ const expected = {
   ],
   before: {
     source: {
-      bytes: 583986,
-      sha256: "0cbff25993c92150c6c7cd45934b25552b315266833adc84301f49287d3982ee",
-      gitBlob: "37d83315305278b25047fa4ed6b38af24b3cf9ce",
-    },
-    dataSha256: "2d3c02197bd25875755aa64a0d7f9f8cdaba6f08f2394448e2e70870e327e738",
-    fileCount: 1824,
-    filesSha256: "04e5d8f08098f2f3f0d30813353c3521762c2f2f266b777083796549c3654156",
-    activationCount: 104,
-    activationHistorySha256: "27cbdad6be8299ff447e8407b2d04adbb44a28e11999c3dd56d75948f47b44ab",
-    layersSha256: "45c79ff9c27d08c74dfab859be8cec1ef6a85acbc1cae121e096c0ca35026eeb",
-    allowedEdgesSha256: "efe7e7ed8dee1a009d2bef3ff36dba80df1a805cd3f5b7b472e62ec6dcff64c7",
-    moveCount: 12,
-    movesSha256: "050fb62b7369179b0b3bd81193ec9bc275a77db1ebb45ac5fdef1a136ab037f2",
-  },
-  current: {
-    source: {
       bytes: 584358,
       sha256: "b1693461855cc60546bb29bee370c02ad3cf21e17e539d521c8f2b6598b0e411",
       gitBlob: "b77bcc4a76f1a959bc77db8c37cf8ef48ad2da0f",
@@ -94,9 +84,50 @@ const expected = {
     moveCount: 12,
     movesSha256: "050fb62b7369179b0b3bd81193ec9bc275a77db1ebb45ac5fdef1a136ab037f2",
   },
+  current: {
+    source: {
+      bytes: 584712,
+      sha256: "c71c9f9a61cebf84bff0f75f26fcd271265e53c83a66f59ed416e1cbc1675209",
+      gitBlob: "2a85037d2b4ffa2dd93aff1fa4080581e48a8c88",
+    },
+    dataSha256: "7975101a306d4746f3431244115981fa1824bc558a4b563c2a55288ab457591c",
+    fileCount: 1826,
+    filesSha256: "5e1616a98a054c70dcde26118598dbbd66eed02747f48c76e024cf64f9279e6b",
+    activationCount: 104,
+    activationHistorySha256: "27cbdad6be8299ff447e8407b2d04adbb44a28e11999c3dd56d75948f47b44ab",
+    layersSha256: "45c79ff9c27d08c74dfab859be8cec1ef6a85acbc1cae121e096c0ca35026eeb",
+    allowedEdgesSha256: "efe7e7ed8dee1a009d2bef3ff36dba80df1a805cd3f5b7b472e62ec6dcff64c7",
+    moveCount: 12,
+    movesSha256: "050fb62b7369179b0b3bd81193ec9bc275a77db1ebb45ac5fdef1a136ab037f2",
+  },
   delta: {
-    addedRowIndex: 1824,
+    addedRowIndex: 445,
     addedRow: {
+      path: "src/codegen/expressions/arraybuffer-isview-static-decision.ts",
+      state: "unmigrated",
+      layer: "mixed-needs-split",
+      destination: "backend-wasmgc",
+      owner: "3518-coordinator",
+      nextBoundary:
+        "Separate legacy class-metadata static decisions from frontend classification and backend lowering.",
+    },
+    previousRow: {
+      path: "src/codegen/expressions/array-constructor-carrier.ts",
+      state: "unmigrated",
+      layer: "mixed-needs-split",
+      destination: "backend-wasmgc",
+      owner: "3518-coordinator",
+      nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+    },
+    nextRow: {
+      path: "src/codegen/expressions/assignment.ts",
+      state: "unmigrated",
+      layer: "mixed-needs-split",
+      destination: "backend-wasmgc",
+      owner: "3518-coordinator",
+      nextBoundary: "Separate AST/context-driven generation, physical resources and generated native runtime.",
+    },
+    presentationRow: {
       path: "src/compiler/ir-program-presentation.ts",
       state: "unmigrated",
       layer: "mixed-needs-split",
@@ -105,35 +136,28 @@ const expected = {
       nextBoundary:
         "Separate AST declaration capture and finalizer presentation from prepared-program output association before compiler-layer activation.",
     },
-    previousRow: {
-      path: "src/ir/analysis/backend-legality.ts",
-      state: "clean",
-      layer: "ir-analysis",
-    },
+    presentationBeforeIndex: 1824,
+    presentationCurrentIndex: 1825,
     activationHistoryUnchanged: true,
     movesUnchanged: true,
   },
   rawSpans: [
     {
-      beforeOffset: 583862,
-      afterOffset: 583862,
-      before:
-        '    {\n      "path": "src/ir/analysis/backend-legality.ts",\n      "state": "clean",\n      "layer": "ir-analysis"\n    }\n',
+      beforeOffset: 190010,
+      afterOffset: 190010,
+      before: "",
       after:
-        '    {\n      "path": "src/ir/analysis/backend-legality.ts",\n      "state": "clean",\n      "layer": "ir-analysis"\n    },\n    {\n      "path": "src/compiler/ir-program-presentation.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "compiler",\n      "owner": "3525-prepared-presentation",\n      "nextBoundary": "Separate AST declaration capture and finalizer presentation from prepared-program output association before compiler-layer activation."\n    }\n',
+        '    {\n      "path": "src/codegen/expressions/arraybuffer-isview-static-decision.ts",\n      "state": "unmigrated",\n      "layer": "mixed-needs-split",\n      "destination": "backend-wasmgc",\n      "owner": "3518-coordinator",\n      "nextBoundary": "Separate legacy class-metadata static decisions from frontend classification and backend lowering."\n    },\n',
     },
   ],
 } as const;
-const receiptPath = "tests/helpers/ir-runtime-program-policy-presentation-classification.json";
+const receiptPath = "tests/helpers/ir-runtime-program-policy-arraybuffer-isview-main.json";
 const helperPath = "tests/helpers/ir-runtime-program-policy-evolution.ts";
-const receiptSha256 = "dd0273b99eb2f96ed66e033bec6a4365b65137359d3a9b7fc2e3b0e7b4b80dee";
+const receiptSha256 = "2d28278754fb99c4e6e7b51336ad9d37bd4a98fbbd952f9ddcb11208e9aba23c";
 const sha = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 const physical = (path: string) => fileURLToPath(new URL(`../${path}`, import.meta.url));
 const physicalFaultAuthorities = [receiptPath, helperPath, expected.predecessorReceipt.path];
-const raw = () =>
-  captureArrayBufferIsViewMainPredecessorPolicySource(
-    readFileSync(physical("scripts/compiler-boundaries.json"), "utf8"),
-  );
+const raw = () => readFileSync(physical("scripts/compiler-boundaries.json"), "utf8");
 const policy = () => JSON.parse(raw()) as Policy;
 afterEach(async () => {
   await setImmediate();
@@ -218,11 +242,11 @@ function withAuthorityFault(path: string, kind: "mutation" | "missing", action: 
     const original = readFileSync(target);
     const pin =
       path === receiptPath
-        ? { bytes: 4227, sha256: receiptSha256 }
+        ? { bytes: 5270, sha256: receiptSha256 }
         : path === helperPath
           ? expected.helperPrefix
           : expected.predecessorReceipt;
-    const authenticated = path === helperPath ? original.subarray(0, 356816) : original;
+    const authenticated = path === helperPath ? original.subarray(0, 369345) : original;
     expect(authenticated.length).toBe(pin.bytes);
     expect(sha(authenticated)).toBe(pin.sha256);
     const mode = initial.mode & 0o7777;
@@ -334,18 +358,27 @@ function withAuthorityFault(path: string, kind: "mutation" | "missing", action: 
   if (failures.length === 1) throw failures[0];
 }
 
-describe("fixed prepared presentation classification policy predecessor capture", () => {
+describe("fixed ArrayBuffer isView canonical main insertion policy predecessor capture", () => {
   it("authenticates independent receipt and full current domain", () => {
     const bytes = readFileSync(physical(receiptPath));
-    expect(bytes.length).toBe(4227);
+    expect(bytes.length).toBe(5270);
     expect(sha(bytes)).toBe(receiptSha256);
     expect(JSON.parse(bytes.toString())).toEqual(expected);
     const text = raw();
     expect(Buffer.byteLength(text)).toBe(expected.current.source.bytes);
     expect(sha(text)).toBe(expected.current.source.sha256);
     profile(JSON.parse(text), true);
-    const before = capturePresentationClassificationPredecessorPolicySource(text);
+    const current = JSON.parse(text) as Policy;
+    expect(current.files[expected.delta.addedRowIndex - 1]).toEqual(expected.delta.previousRow);
+    expect(current.files[expected.delta.addedRowIndex]).toEqual(expected.delta.addedRow);
+    expect(current.files[expected.delta.addedRowIndex + 1]).toEqual(expected.delta.nextRow);
+    expect(current.files[expected.delta.presentationCurrentIndex]).toEqual(expected.delta.presentationRow);
+    expect(Object.keys(current.files[expected.delta.addedRowIndex]!)).toEqual(Object.keys(expected.delta.addedRow));
+    const before = captureArrayBufferIsViewMainPredecessorPolicySource(text);
     profile(JSON.parse(before), false);
+    const predecessor = JSON.parse(before) as Policy;
+    expect(predecessor.files[expected.delta.addedRowIndex]).toEqual(expected.delta.nextRow);
+    expect(predecessor.files[expected.delta.presentationBeforeIndex]).toEqual(expected.delta.presentationRow);
     expect(sha(before)).toBe(expected.before.source.sha256);
     expect(before).toBe(reciprocal(text, false));
     expect(reciprocal(before, true)).toBe(text);
@@ -353,7 +386,7 @@ describe("fixed prepared presentation classification policy predecessor capture"
   it("detaches semantic input and replays exact row without retained-field changes", () => {
     const value = policy(),
       snapshot = JSON.stringify(value),
-      before = capturePresentationClassificationPredecessorPolicy(value);
+      before = captureArrayBufferIsViewMainPredecessorPolicy(value);
     profile(before, false);
     expect(JSON.stringify(value)).toBe(snapshot);
     expect(before).not.toBe(value);
@@ -362,45 +395,45 @@ describe("fixed prepared presentation classification policy predecessor capture"
     expect(before.moves).toEqual(value.moves);
     expect(before.layers).toEqual(value.layers);
     expect(before.allowedEdges).toEqual(value.allowedEdges);
-    before.files.splice(1824, 0, { ...expected.delta.addedRow });
+    before.files.splice(445, 0, { ...expected.delta.addedRow });
     expect(before).toEqual(value);
     profile(before, true);
   });
   it("refuses genuine predecessor raw domain", () => {
     const text = reciprocal(raw(), false);
     expect(sha(text)).toBe(expected.before.source.sha256);
-    expect(() => capturePresentationClassificationPredecessorPolicySource(text)).toThrow(
+    expect(() => captureArrayBufferIsViewMainPredecessorPolicySource(text)).toThrow(
       "complete raw source profile mismatch",
     );
   });
   it("refuses genuine predecessor semantic domain", () => {
     const value = JSON.parse(reciprocal(raw(), false));
     profile(value, false);
-    expect(() => capturePresentationClassificationPredecessorPolicy(value)).toThrow("complete policy profile mismatch");
+    expect(() => captureArrayBufferIsViewMainPredecessorPolicy(value)).toThrow("complete policy profile mismatch");
   });
   const mutations: readonly [string, (value: Policy) => void][] = [
     [
       "missing added row",
       (v) => {
-        v.files.splice(1824, 1);
+        v.files.splice(445, 1);
       },
     ],
     [
       "duplicate added row",
       (v) => {
-        v.files.push({ ...v.files[1824]! });
+        v.files.push({ ...v.files[445]! });
       },
     ],
     [
       "extra row schema",
       (v) => {
-        Object.assign(v.files[1824]!, { unexpected: true });
+        Object.assign(v.files[445]!, { unexpected: true });
       },
     ],
     [
       "wrong added row layer",
       (v) => {
-        v.files[1824]!.layer = "ir-program";
+        v.files[445]!.layer = "ir-program";
       },
     ],
     [
@@ -413,27 +446,27 @@ describe("fixed prepared presentation classification policy predecessor capture"
       (field): [string, (value: Policy) => void] => [
         "changed added row " + field,
         (v) => {
-          v.files[1824]![field] += "-changed";
+          v.files[445]![field] += "-changed";
         },
       ],
     ),
     [
       "reordered added row keys",
       (v) => {
-        const row = v.files[1824]!;
-        v.files[1824] = Object.fromEntries(Object.entries(row).reverse());
+        const row = v.files[445]!;
+        v.files[445] = Object.fromEntries(Object.entries(row).reverse());
       },
     ],
     [
       "reordered added row position",
       (v) => {
-        [v.files[1823], v.files[1824]] = [v.files[1824]!, v.files[1823]!];
+        [v.files[444], v.files[445]] = [v.files[445]!, v.files[444]!];
       },
     ],
     [
       "changed retained neighbor",
       (v) => {
-        v.files[1823]!.layer = "compiler";
+        v.files[444]!.layer = "compiler";
       },
     ],
     [
@@ -456,6 +489,56 @@ describe("fixed prepared presentation classification policy predecessor capture"
       },
     ],
     [
+      "changed retained following neighbor",
+      (v) => {
+        v.files[446]!.owner += "-changed";
+      },
+    ],
+    [
+      "missing presentation row",
+      (v) => {
+        v.files.splice(expected.delta.presentationCurrentIndex, 1);
+      },
+    ],
+    [
+      "duplicate presentation row",
+      (v) => {
+        v.files.push({ ...expected.delta.presentationRow });
+      },
+    ],
+    [
+      "changed presentation row",
+      (v) => {
+        v.files[expected.delta.presentationCurrentIndex]!.layer = "ir-program";
+      },
+    ],
+    [
+      "reordered presentation row",
+      (v) => {
+        const i = expected.delta.presentationCurrentIndex;
+        [v.files[i - 1], v.files[i]] = [v.files[i]!, v.files[i - 1]!];
+      },
+    ],
+    [
+      "reordered presentation keys",
+      (v) => {
+        const i = expected.delta.presentationCurrentIndex;
+        v.files[i] = Object.fromEntries(Object.entries(v.files[i]!).reverse());
+      },
+    ],
+    [
+      "changed unrelated original row",
+      (v) => {
+        v.files[0]!.owner += "-changed";
+      },
+    ],
+    [
+      "changed retained schema",
+      (v) => {
+        v.schema = "compiler-boundaries-v2";
+      },
+    ],
+    [
       "extra debt row",
       (v) => {
         v.files.push({ ...expected.delta.addedRow, path: "src/compiler/extra.ts" });
@@ -467,9 +550,7 @@ describe("fixed prepared presentation classification policy predecessor capture"
       const value = policy();
       mutate(value);
       expect(sha(JSON.stringify(value))).not.toBe(expected.current.dataSha256);
-      expect(() => capturePresentationClassificationPredecessorPolicy(value)).toThrow(
-        "complete policy profile mismatch",
-      );
+      expect(() => captureArrayBufferIsViewMainPredecessorPolicy(value)).toThrow("complete policy profile mismatch");
     });
   for (const [index, span] of expected.rawSpans.entries())
     for (const kind of ["missing", "duplicate", "relocated"] as const)
@@ -485,7 +566,7 @@ describe("fixed prepared presentation classification policy predecessor capture"
               ? text.slice(0, end) + span.after + text.slice(end)
               : span.after + text.slice(0, at) + text.slice(end);
         expect(mutant).not.toBe(text);
-        expect(() => capturePresentationClassificationPredecessorPolicySource(mutant)).toThrow(
+        expect(() => captureArrayBufferIsViewMainPredecessorPolicySource(mutant)).toThrow(
           "complete raw source profile mismatch",
         );
       });
@@ -493,18 +574,18 @@ describe("fixed prepared presentation classification policy predecessor capture"
     const text = raw(),
       mutant = " " + text;
     expect(JSON.parse(mutant)).toEqual(JSON.parse(text));
-    expect(() => capturePresentationClassificationPredecessorPolicySource(mutant)).toThrow(
+    expect(() => captureArrayBufferIsViewMainPredecessorPolicySource(mutant)).toThrow(
       "complete raw source profile mismatch",
     );
   });
   it("refuses a valid JSON same-length row field mutation", () => {
     const text = raw(),
-      token = '"owner": "3525-prepared-presentation"';
+      token = expected.rawSpans[0].after;
     expect(text.split(token)).toHaveLength(2);
-    const mutant = text.replace(token, '"owner": "3525-prepared-presentatioN"');
+    const mutant = text.replace(token, token.replace('"owner": "3518-coordinator"', '"owner": "3518-coordinatoR"'));
     expect(Buffer.byteLength(mutant)).toBe(Buffer.byteLength(text));
-    expect(JSON.parse(mutant).files[1824].owner).not.toBe(expected.delta.addedRow.owner);
-    expect(() => capturePresentationClassificationPredecessorPolicySource(mutant)).toThrow(
+    expect(JSON.parse(mutant).files[445].owner).not.toBe(expected.delta.addedRow.owner);
+    expect(() => captureArrayBufferIsViewMainPredecessorPolicySource(mutant)).toThrow(
       "complete raw source profile mismatch",
     );
   });
@@ -525,20 +606,16 @@ describe("fixed prepared presentation classification policy predecessor capture"
             throw new Error("unexpected coercion sentinel");
           },
         });
-        capturePresentationClassificationPredecessorPolicySource(value as unknown as string);
+        captureArrayBufferIsViewMainPredecessorPolicySource(value as unknown as string);
       },
       "raw input must be a primitive string",
     ],
     [
       "numeric raw",
-      () => capturePresentationClassificationPredecessorPolicySource(1 as unknown as string),
+      () => captureArrayBufferIsViewMainPredecessorPolicySource(1 as unknown as string),
       "raw input must be a primitive string",
     ],
-    [
-      "null semantic",
-      () => capturePresentationClassificationPredecessorPolicy(null),
-      "policy input must be a plain object",
-    ],
+    ["null semantic", () => captureArrayBufferIsViewMainPredecessorPolicy(null), "policy input must be a plain object"],
     [
       "accessor semantic",
       () => {
@@ -551,13 +628,13 @@ describe("fixed prepared presentation classification policy predecessor capture"
             throw new Error("unexpected getter side effect sentinel");
           },
         });
-        capturePresentationClassificationPredecessorPolicy(value);
+        captureArrayBufferIsViewMainPredecessorPolicy(value);
       },
       "accessor",
     ],
     [
       "symbol semantic",
-      () => capturePresentationClassificationPredecessorPolicy({ [Symbol("unexpected")]: 1 }),
+      () => captureArrayBufferIsViewMainPredecessorPolicy({ [Symbol("unexpected")]: 1 }),
       "symbol policy key",
     ],
     [
@@ -565,9 +642,28 @@ describe("fixed prepared presentation classification policy predecessor capture"
       () => {
         const value = {};
         Object.defineProperty(value, "files", { value: [], enumerable: false });
-        capturePresentationClassificationPredecessorPolicy(value);
+        captureArrayBufferIsViewMainPredecessorPolicy(value);
       },
       "hidden policy field",
+    ],
+    [
+      "foreign prototype semantic",
+      () => captureArrayBufferIsViewMainPredecessorPolicy(Object.create({})),
+      "foreign prototype",
+    ],
+    [
+      "fake array semantic",
+      () => captureArrayBufferIsViewMainPredecessorPolicy({ files: Object.create(Array.prototype) }),
+      "foreign prototype",
+    ],
+    [
+      "cyclic semantic",
+      () => {
+        const value: Record<string, unknown> = {};
+        value.self = value;
+        captureArrayBufferIsViewMainPredecessorPolicy(value);
+      },
+      "non-JSON or cyclic policy",
     ],
   ];
   for (const [name, action, message] of invalids)
@@ -577,7 +673,7 @@ describe("fixed prepared presentation classification policy predecessor capture"
         expect(action).toThrow(message);
         if (name === "accessor semantic") expect(getterInvocations).toBe(0);
         if (name === "boxed raw") expect(coercionInvocations).toBe(0);
-        expectMissingAuthority(() => capturePresentationClassificationPredecessorPolicySource(text), receiptPath);
+        expectMissingAuthority(() => captureArrayBufferIsViewMainPredecessorPolicySource(text), receiptPath);
       });
     });
   const diagnostic: Record<string, string> = {
@@ -593,8 +689,8 @@ describe("fixed prepared presentation classification policy predecessor capture"
             value = JSON.parse(text),
             action = () =>
               form === "raw"
-                ? capturePresentationClassificationPredecessorPolicySource(text)
-                : capturePresentationClassificationPredecessorPolicy(value);
+                ? captureArrayBufferIsViewMainPredecessorPolicySource(text)
+                : captureArrayBufferIsViewMainPredecessorPolicy(value);
           const check = () => {
             const result = action();
             profile(typeof result === "string" ? JSON.parse(result) : result, false);

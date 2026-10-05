@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import { setImmediate } from "node:timers/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  captureArrayBufferIsViewMainPredecessorPolicySource,
   capturePresentationClassificationPredecessorPolicySource,
   captureLoweringAnalysisPredecessorPolicySource,
   captureWasmGcHelperPredecessorPolicy,
@@ -1066,7 +1067,9 @@ const blob = (value: Buffer) => createHash("sha1").update(`blob ${value.length}\
 const raw = () =>
   captureLoweringAnalysisPredecessorPolicySource(
     capturePresentationClassificationPredecessorPolicySource(
-      readFileSync(new URL("../scripts/compiler-boundaries.json", import.meta.url), "utf8"),
+      captureArrayBufferIsViewMainPredecessorPolicySource(
+        readFileSync(new URL("../scripts/compiler-boundaries.json", import.meta.url), "utf8"),
+      ),
     ),
   );
 const policy = () => JSON.parse(raw()) as Policy;

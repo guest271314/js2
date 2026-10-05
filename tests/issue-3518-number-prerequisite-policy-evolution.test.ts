@@ -1,5 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import {
+  captureArrayBufferIsViewMainPredecessorPolicySource,
   capturePresentationClassificationPredecessorPolicySource,
   captureLoweringAnalysisPredecessorPolicySource,
   captureWasmGcHelperPredecessorPolicySource,
@@ -110,7 +111,7 @@ const raw = (): string =>
                     captureWasmGcHelperPredecessorPolicySource(
                       captureLoweringAnalysisPredecessorPolicySource(
                         capturePresentationClassificationPredecessorPolicySource(
-                          read("scripts/compiler-boundaries.json"),
+                          captureArrayBufferIsViewMainPredecessorPolicySource(read("scripts/compiler-boundaries.json")),
                         ),
                       ),
                     ),
@@ -942,7 +943,7 @@ describe("C2a exact runtime preparation policy successor", () => {
                     captureWasmGcHelperPredecessorPolicySource(
                       captureLoweringAnalysisPredecessorPolicySource(
                         capturePresentationClassificationPredecessorPolicySource(
-                          read("scripts/compiler-boundaries.json"),
+                          captureArrayBufferIsViewMainPredecessorPolicySource(read("scripts/compiler-boundaries.json")),
                         ),
                       ),
                     ),
@@ -1350,7 +1351,7 @@ describe("dynamic-code inventory successor preserves the C2a policy proof", () =
                   captureWasmGcHelperPredecessorPolicySource(
                     captureLoweringAnalysisPredecessorPolicySource(
                       capturePresentationClassificationPredecessorPolicySource(
-                        read("scripts/compiler-boundaries.json"),
+                        captureArrayBufferIsViewMainPredecessorPolicySource(read("scripts/compiler-boundaries.json")),
                       ),
                     ),
                   ),
@@ -1881,7 +1882,9 @@ describe("host-carrier current-main inventory successor", () => {
               captureProgramValidatorPredecessorPolicySource(
                 captureWasmGcHelperPredecessorPolicySource(
                   captureLoweringAnalysisPredecessorPolicySource(
-                    capturePresentationClassificationPredecessorPolicySource(read("scripts/compiler-boundaries.json")),
+                    capturePresentationClassificationPredecessorPolicySource(
+                      captureArrayBufferIsViewMainPredecessorPolicySource(read("scripts/compiler-boundaries.json")),
+                    ),
                   ),
                 ),
               ),
@@ -2240,7 +2243,9 @@ describe("generator eager-refusal current-main inventory successor", () => {
             captureProgramValidatorPredecessorPolicySource(
               captureWasmGcHelperPredecessorPolicySource(
                 captureLoweringAnalysisPredecessorPolicySource(
-                  capturePresentationClassificationPredecessorPolicySource(read("scripts/compiler-boundaries.json")),
+                  capturePresentationClassificationPredecessorPolicySource(
+                    captureArrayBufferIsViewMainPredecessorPolicySource(read("scripts/compiler-boundaries.json")),
+                  ),
                 ),
               ),
             ),

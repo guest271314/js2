@@ -1,5 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import {
+  captureArrayBufferIsViewMainPredecessorPolicySource,
   capturePresentationClassificationPredecessorPolicySource,
   captureLoweringAnalysisPredecessorPolicySource,
   captureWasmGcHelperPredecessorPolicySource,
@@ -47,7 +48,9 @@ const raw = (): string =>
         captureProgramValidatorPredecessorPolicySource(
           captureWasmGcHelperPredecessorPolicySource(
             captureLoweringAnalysisPredecessorPolicySource(
-              capturePresentationClassificationPredecessorPolicySource(read("scripts/compiler-boundaries.json")),
+              capturePresentationClassificationPredecessorPolicySource(
+                captureArrayBufferIsViewMainPredecessorPolicySource(read("scripts/compiler-boundaries.json")),
+              ),
             ),
           ),
         ),

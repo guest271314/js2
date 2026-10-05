@@ -1,5 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import {
+  captureArrayBufferIsViewMainPredecessorPolicySource,
   capturePresentationClassificationPredecessorPolicySource,
   captureLoweringAnalysisPredecessorPolicySource,
   captureWasmGcHelperPredecessorPolicySource,
@@ -706,7 +707,9 @@ const raw = () =>
   captureWasmGcHelperPredecessorPolicySource(
     captureLoweringAnalysisPredecessorPolicySource(
       capturePresentationClassificationPredecessorPolicySource(
-        readFileSync(new URL("../scripts/compiler-boundaries.json", import.meta.url), "utf8"),
+        captureArrayBufferIsViewMainPredecessorPolicySource(
+          readFileSync(new URL("../scripts/compiler-boundaries.json", import.meta.url), "utf8"),
+        ),
       ),
     ),
   );
