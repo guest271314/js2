@@ -21,7 +21,7 @@ branch: "issue-6844-prettier-error-subclass-fields"
 origin: "2026-10-05 — npm-compat dashboard: prettier 108/151 (2026-10-02 09:13Z refresh) → 75/151 (11:07Z refresh)"
 loc-budget-allow:
   # 2026-10-05 externref field-init: route + inject codegen ops into the leaf helper (+15);
-  # the emission itself lives in src/codegen/externref-class-fields.ts
+  # the emission itself lives in src/codegen/classes/externref-class-fields.ts
   - src/codegen/class-bodies.ts
 func-budget-allow:
   # 2026-10-05 externref field-init: the field-init closure routes externref-backed
@@ -96,7 +96,7 @@ exactly what real JS does, and node passes all 46 rows.
 
 ## Implementation Plan
 
-1. New leaf module `src/codegen/externref-class-fields.ts`,
+1. New leaf module `src/codegen/classes/externref-class-fields.ts`,
    `emitExternrefBackedFieldInitializers(ctx, fctx, decl, selfLocal)`: for each
    own, non-static, non-`declare`, non-`accessor` `PropertyDeclaration` with an
    initializer and a static key (identifier / string / numeric literal), emit

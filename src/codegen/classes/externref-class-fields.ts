@@ -36,10 +36,10 @@
  *   usually a type-only declaration, and defining `undefined` there would
  *   shadow the inherited `message`/`name`.
  */
-import { ts } from "../ts-api.js";
-import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { hasStaticModifier } from "./ast-modifiers.js";
-import type * as Shared from "./shared.js";
+import { ts } from "../../ts-api.js";
+import type { CodegenContext, FunctionContext } from "../context/types.js";
+import { hasStaticModifier } from "../ast-modifiers.js";
+import type * as Shared from "../shared.js";
 
 /**
  * The codegen entry points this leaf needs, INJECTED by the caller: a value

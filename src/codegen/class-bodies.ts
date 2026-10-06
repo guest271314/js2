@@ -156,7 +156,7 @@ import {
   valTypesMatch,
 } from "./shared.js";
 import { readEnv } from "../env.js";
-import { emitExternrefBackedFieldInitializers, type ExternrefFieldOps } from "./externref-class-fields.js"; // (#6844)
+import { emitExternrefBackedFieldInitializers, type ExternrefFieldOps } from "./classes/externref-class-fields.js"; // (#6844)
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 
 /**
