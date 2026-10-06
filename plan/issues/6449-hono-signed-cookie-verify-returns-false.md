@@ -97,7 +97,9 @@ function ran on the synchronous pass-through and `isVerified` bound the
 Promise (coerced to `false`). Fixed by
 [#6847](https://js2wasm.loopdive.com/dashboard/issue.html?slug=6847-async-for-of-continue-guard-and-destructured-binding)
 (continue guards, for-of-only bodies, destructured-head TDZ flags across a
-suspension). hono `cookie.test.ts` 27/35 → 35/35, including the two rows that
+suspension); permanent repro `tests/issue-6847-async-for-of-continue-destructuring.test.ts`
+(the `continueGuards` row is `parseSigned`'s loop, wrong-signature rows
+included). hono `cookie.test.ts` 27/35 → 35/35, including the two rows that
 legitimately expect `false` (AC2 — they answer `false` because verification
 returns `false`). AC5: hono `crypto.test.ts` is a separate defect
 ([#6450](https://js2wasm.loopdive.com/dashboard/issue.html?slug=6450-node-crypto-createhash-null-provider),
