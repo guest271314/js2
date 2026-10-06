@@ -150,7 +150,7 @@ import { tryCompileTemporalMethodCall } from "../temporal-native.js";
 import { ensureTextEncodingHelpers } from "../text-encoding-native.js";
 import { isArgumentsObjectIdentifier } from "../arguments-object-mop.js";
 import { emitSymbolArgToNumberThrow } from "../tonumber-symbol-throw.js"; // (#4779)
-import { defaultValueInstrs, emitGuardedRefCast, pushDefaultValue } from "../type-coercion.js";
+import { defaultValueInstrs, emitGuardedRefCast, getVecInfo, pushDefaultValue } from "../type-coercion.js";
 import { isDeclinedVecCallbackMethod } from "./vec-callback-method-host-delegation.js"; // (#6848)
 import { compileDateMethodCall } from "./builtins.js";
 // (#4479 slice 2) Annex B §B.2.2 legacy accessor methods on an ordinary receiver.
@@ -4901,7 +4901,7 @@ export function compileReceiverMethodCall(
     if (
       (recvWasm.kind === "ref" || recvWasm.kind === "ref_null") &&
       ((recvTsType.getProperty(propAccess.name.text) === undefined && !(recvTsType.isClass?.() ?? false)) ||
-        isDeclinedVecCallbackMethod(ctx, recvWasm.typeIdx, propAccess.name.text)) // (#6848)
+        isDeclinedVecCallbackMethod(ctx, () => getVecInfo(ctx, recvWasm.typeIdx) !== null, propAccess.name.text)) // (#6848)
     ) {
       // rawStructReceiver: the expando sidecar (`_wasmStructProps`) is keyed
       // by the RAW struct ref — an externref expected-type compile would

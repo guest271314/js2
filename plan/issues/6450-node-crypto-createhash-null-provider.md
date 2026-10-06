@@ -16,7 +16,7 @@ goal: correctness
 # (#6450, 2026-10-05) One guarded call in `compileBoundIdentifierCall`'s
 # resolution ladder — it has to run after `calleeBindingDecl` is known and
 # before the bare-name closureMap/funcMap arms. The lowering itself is in
-# expressions/node-builtin-member-call.ts.
+# host-method-args.ts.
 # The async-call repair's bare-name check in `isAsyncCallExpression`
 # (expressions.ts) gets one early return for the same import shape.
 loc-budget-allow:
@@ -110,7 +110,8 @@ Two distinct things are probably in play there and this issue covers both:
 
 Implemented as planned (the parked `issue-6450` worktree's work, ported onto
 upstream/main `c3e3fab33d`): `tryCompileNodeBuiltinMemberCall`
-(`src/codegen/expressions/node-builtin-member-call.ts`) lowers a direct call
+(`src/codegen/host-method-args.ts`; the predicate is the leaf module
+`src/codegen/expressions/node-builtin-named-import.ts`) lowers a direct call
 of a node-builtin NAMED import as
 `__extern_method_call(__node_<mod>(), "<name>", [args])`, gated on the
 checker's binding for the call site being an `ImportSpecifier` of a node

@@ -17,8 +17,8 @@ goal: dogfood
 # `lowerLinearStatements` that decline a non-canonical await (its segment
 # shape is the file-private `LowerState`); the #6847 for-of changes extend
 # `lowerRegionBody` / `analyzeTryCatchAsync` in place. The decision logic
-# itself lives in the new `async-leading-await-replay.ts` and
-# `async-for-of-region.ts`.
+# itself lives in the new `analysis/async-leading-await-replay.ts` and
+# `analysis/async-for-of-region.ts`.
 loc-budget-allow:
   - src/codegen/async-cps.ts
 ---
@@ -59,7 +59,7 @@ statement after the resumption is sound exactly when everything evaluated
 before the await is free of observable effects and reads only values the
 suspension cannot change.
 
-1. New module `src/codegen/async-leading-await-replay.ts`:
+1. New module `src/codegen/analysis/async-leading-await-replay.ts`:
    `isLeadingReplaySafeAwait(stmt, awaitNode, checker)`. Walk from the await to
    the statement root (return operand / expression / the single declarator's
    initializer — any binding pattern); at each ancestor collect the operands
@@ -88,7 +88,7 @@ passes; standalone test262 async scope flat.
 
 ## Resolution
 
-Implemented as planned (`src/codegen/async-leading-await-replay.ts`,
+Implemented as planned (`src/codegen/analysis/async-leading-await-replay.ts`,
 `replayLeadingAwait` in `async-cps.ts`). Every row of the table above now
 matches node, including the settled-operand row that used to be a hard
 compile error. The `f(count(), await p)` control still declines (count runs

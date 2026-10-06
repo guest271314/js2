@@ -14,7 +14,7 @@ task_type: bug
 area: codegen
 goal: dogfood
 # (#6847, 2026-10-05) One call each in the for-of `bindElement` step of
-# `planTryCatchCfg` / `buildBody` (the helper is in async-for-of-region.ts).
+# `planTryCatchCfg` / `buildBody` (the helper is in analysis/async-for-of-region.ts).
 func-budget-allow:
   - src/codegen/async-cps.ts::planTryCatchCfg
   - src/codegen/async-cps.ts::buildBody
@@ -81,7 +81,7 @@ test262 async scope flat.
 
 ## Resolution
 
-Implemented as planned (`src/codegen/async-for-of-region.ts`;
+Implemented as planned (`src/codegen/analysis/async-for-of-region.ts`;
 `lowerRegionBody(..., inLoopBody)`, the for-of admission in
 `analyzeTryCatchAsync`, `releaseForOfHeadTdzFlags` in the for-of
 `bindElement` step). All three reductions match node; regression test

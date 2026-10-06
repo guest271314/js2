@@ -29,8 +29,9 @@
  * step of `compileMethodCallOnReceiver`), so it cannot displace a working
  * native lowering; it converts a silent `undefined` into a real call.
  */
+// Leaf module on purpose (type-only imports), so it stays outside the codegen
+// import cycle (#6797 ratchet); the caller supplies the vec test.
 import type { CodegenContext } from "../context/types.js";
-import { getVecInfo } from "../type-coercion.js";
 
 /**
  * The callback-taking methods `compileArrayMethodCall` gates on
@@ -51,9 +52,12 @@ const NATIVE_GATED_CALLBACK_METHODS: ReadonlySet<string> = new Set([
   "every",
 ]);
 
-/** Is `typeIdx` a native vec carrier and `methodName` a declinable callback method? */
-export function isDeclinedVecCallbackMethod(ctx: CodegenContext, typeIdx: number, methodName: string): boolean {
+/**
+ * Is this a declinable callback method on a native vec carrier? `isVec` is the
+ * caller's `getVecInfo(ctx, typeIdx) !== null`, evaluated lazily.
+ */
+export function isDeclinedVecCallbackMethod(ctx: CodegenContext, isVec: () => boolean, methodName: string): boolean {
   if (ctx.standalone || ctx.wasi) return false;
   if (!NATIVE_GATED_CALLBACK_METHODS.has(methodName)) return false;
-  return getVecInfo(ctx, typeIdx) !== null;
+  return isVec();
 }

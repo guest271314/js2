@@ -14727,7 +14727,7 @@
       "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."
     },
     {
-      "path": "src/codegen/async-leading-await-replay.ts",
+      "path": "src/codegen/analysis/async-leading-await-replay.ts",
       "state": "unmigrated",
       "layer": "mixed-needs-split",
       "destination": "backend-wasmgc",
@@ -14735,7 +14735,7 @@
       "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."
     },
     {
-      "path": "src/codegen/async-for-of-region.ts",
+      "path": "src/codegen/analysis/async-for-of-region.ts",
       "state": "unmigrated",
       "layer": "mixed-needs-split",
       "destination": "backend-wasmgc",
@@ -14743,7 +14743,7 @@
       "nextBoundary": "Separate AST/context-driven generation, physical resources and generated native runtime."
     },
     {
-      "path": "src/codegen/expressions/node-builtin-member-call.ts",
+      "path": "src/codegen/expressions/node-builtin-named-import.ts",
       "state": "unmigrated",
       "layer": "mixed-needs-split",
       "destination": "backend-wasmgc",

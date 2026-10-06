@@ -137,7 +137,7 @@ import { prepareStandaloneEvalAliasCall } from "./eval-alias.js";
 import { ensureLateImport, flushLateImportShifts } from "./late-imports.js";
 import { buildUnmatchedClosureHostCall, reserveUnmatchedClosureHostCall } from "./unmatched-closure-host-call.js"; // (#1058)
 import { withDeclarationBoundCallee } from "./declaration-bound-callee.js"; // (#1058)
-import { tryCompileNodeBuiltinMemberCall } from "./node-builtin-member-call.js"; // (#6450)
+import { tryCompileNodeBuiltinMemberCall } from "../host-method-args.js"; // (#6450)
 import { isModuleInitChunkFunctionContext } from "../module-init-chunks.js";
 import { paramUndefinedTypeIsDefaultArtifact } from "../destructuring-params.js";
 import {

@@ -16,8 +16,8 @@ import {
 import type { Instr, ValType } from "../ir/types.js";
 import { forEachChild, ts } from "../ts-api.js";
 import { lowerAwaitingStatementByHoisting } from "./async-await-hoist.js";
-import { isLeadingReplaySafeAwait } from "./async-leading-await-replay.js";
-import { isLoopContinueGuard, releaseForOfHeadTdzFlags } from "./async-for-of-region.js";
+import { isLeadingReplaySafeAwait } from "./analysis/async-leading-await-replay.js";
+import { isLoopContinueGuard, releaseForOfHeadTdzFlags } from "./analysis/async-for-of-region.js";
 import { collectBindingPatternNames, collectReferencedIdentifiers } from "./closures.js";
 import { allocLocal, getLocalType } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";

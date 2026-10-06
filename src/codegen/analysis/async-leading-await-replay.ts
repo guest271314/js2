@@ -33,7 +33,7 @@
 // declined — it is not "first", it is conditional, and the CFG hoister owns
 // those shapes.
 
-import { ts } from "../ts-api.js";
+import { ts } from "../../ts-api.js";
 
 /**
  * Ambient bindings a program does not reassign in practice. Reading one before

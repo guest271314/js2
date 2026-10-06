@@ -122,7 +122,7 @@ import { notePromiseDynamicMemberRead } from "./promise-dynamic-member-read.js";
 import { compileTaggedTemplateExpression, compileTemplateExpression } from "./string-ops.js";
 import { compileDeleteExpression, compileRegExpLiteral, compileTypeofExpression } from "./typeof-delete.js";
 import { describeInternalError } from "./internal-error.js";
-import { isNodeBuiltinNamedImportCallee } from "./expressions/node-builtin-member-call.js"; // (#6450)
+import { isNodeBuiltinNamedImportCallee } from "./expressions/node-builtin-named-import.js"; // (#6450)
 
 // ── Public re-exports (preserves the external API) ────────────────────
 

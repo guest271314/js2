@@ -9,10 +9,19 @@
 //     out[key] = ok ? value : false;
 //   }
 
-import type { ts as TsNs } from "../ts-api.js";
-import { ts } from "../ts-api.js";
-import { collectBindingPatternNames } from "./closures.js";
-import type { FunctionContext } from "./context/types.js";
+// Leaf module on purpose: only `ts-api` and type imports, so it stays outside
+// the codegen import cycle (#6797 ratchet).
+import type { ts as TsNs } from "../../ts-api.js";
+import { ts } from "../../ts-api.js";
+import type { FunctionContext } from "../context/types.js";
+
+function forEachBoundName(pattern: TsNs.BindingPattern, visit: (name: string) => void): void {
+  for (const element of pattern.elements) {
+    if (ts.isOmittedExpression(element)) continue;
+    if (ts.isIdentifier(element.name)) visit(element.name.text);
+    else forEachBoundName(element.name, visit);
+  }
+}
 
 /**
  * `if (cond) continue;` / `if (cond) { continue; }` (unlabeled, no else) — the
@@ -35,7 +44,5 @@ export function isLoopContinueGuard(stmt: TsNs.Statement): stmt is TsNs.IfStatem
  * into a LATER state would throw "x is not defined" — drop them.
  */
 export function releaseForOfHeadTdzFlags(fctx: FunctionContext, binding: TsNs.BindingPattern): void {
-  const boundNames = new Set<string>();
-  collectBindingPatternNames(binding, boundNames);
-  for (const name of boundNames) fctx.tdzFlagLocals?.delete(name);
+  forEachBoundName(binding, (name) => fctx.tdzFlagLocals?.delete(name));
 }
