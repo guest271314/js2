@@ -540,7 +540,16 @@ const closureInputs = predecessorClosureInputs.map((entry) =>
               gitBlob: "bdf9d6ace5f7f5530373cea6007a1ad7dfe905d0",
             },
           }
-        : entry,
+        : entry.path === "src/shared/contracts/source-origin.ts"
+          ? {
+              path: entry.path,
+              pin: {
+                bytes: 719,
+                sha256: "cb199a6040c361256dc244d4e4e8183490524a0ee9505920a660e34eea3cc9b4",
+                gitBlob: "d6d98de15c656d3ecb32653b447b31486d3b9f05",
+              },
+            }
+          : entry,
 );
 const linearDeclarationPin = {
   bytes: 1633,
