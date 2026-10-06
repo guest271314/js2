@@ -1,7 +1,8 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import {
-  captureProgramValidatorRelocation,
-  type ProgramValidatorRelocationCapture,
+  captureSourceMapSchemaSourceEpoch,
+  captureSourceMapProgramValidatorRelocation,
+  type SourceMapProgramValidatorCapture,
   type ProgramValidatorDonorPath,
 } from "./ir-program-validator-relocation.js";
 import { createHash } from "node:crypto";
@@ -34,6 +35,19 @@ import {
 } from "./ir-lowering-analysis-relocation.js";
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+// Root independently bound the complete new component, including its appended APIs.
+const sourceMapComponentPath = "tests/helpers/ir-program-validator-relocation.ts";
+const sourceMapComponentPin: C1Pin = {
+  bytes: 46642,
+  sha256: "6e32ca208775e8eeae765bf3345cdd3cb1e0f40a1784f684afd9c4dff3a4cfe0",
+  gitBlob: "d82bdac04db23be88135f00a2b43bdb172cb5f89",
+};
+const sourceMapPopulationPaths = [
+  "src/ir/core/nodes.ts",
+  "src/ir/program/input-contracts.ts",
+  "src/ir/program/prepared-contracts.ts",
+  "src/shared/contracts/ir-unit-inventory.ts",
+] as const;
 const linearPath = "src/codegen-linear/index.ts";
 const loweringLegalityPath = "src/ir/backend/legality.ts";
 const loweringPlannerPath = "src/ir/analysis/linear-memory-plan.ts";
@@ -329,6 +343,50 @@ const canonicalInputEpochs = [
           "      '@vitest/expect': 3.2.4\n      '@vitest/mocker': 3.2.4(vite@6.4.1(@types/node@22.19.13)(terser@5.46.1)(tsx@4.23.1)(yaml@2.8.3))\n      '@vitest/pretty-format': 3.2.4\n      '@vitest/runner': 3.2.4\n      '@vitest/snapshot': 3.2.4\n      '@vitest/spy': 3.2.4\n      '@vitest/utils': 3.2.4\n",
         after:
           "      '@vitest/expect': 3.2.7\n      '@vitest/mocker': 3.2.7(vite@6.4.1(@types/node@22.19.13)(terser@5.46.1)(tsx@4.23.1)(yaml@2.8.3))\n      '@vitest/pretty-format': 3.2.7\n      '@vitest/runner': 3.2.7\n      '@vitest/snapshot': 3.2.7\n      '@vitest/spy': 3.2.7\n      '@vitest/utils': 3.2.7\n",
+      },
+    ],
+  },
+  {
+    path: "src/ir/types.ts",
+    beforePin: {
+      bytes: 7744,
+      sha256: "d82e92ee276dd9a57bd69d9dee16410d24225a028bd9dca53bc406f69b9623ac",
+      gitBlob: "f7717d7c70bb57bd73d799a1d26d1825aa0a41e8",
+    },
+    currentPin: {
+      bytes: 7756,
+      sha256: "0282ae61c6a43f837a9a3c7b12d879151e67ec155939c541cd9b5ea662979140",
+      gitBlob: "bdf9d6ace5f7f5530373cea6007a1ad7dfe905d0",
+    },
+    spans: [
+      {
+        beforeOffset: 6465,
+        afterOffset: 6465,
+        before:
+          'export type ExportBoundaryKind = TypedArrayKind | "string" | "symbol" | "promise" | "dynamic" | "aggregate";',
+        after:
+          'export type ExportBoundaryKind = TypedArrayKind | "boolean" | "string" | "symbol" | "promise" | "dynamic" | "aggregate";',
+      },
+    ],
+  },
+  {
+    path: "src/shared/contracts/source-origin.ts",
+    beforePin: {
+      bytes: 689,
+      sha256: "cc8e05036afdaca04c3e7055ad22f82c57f6e2e31b7e49a69e9081823c2eacde",
+      gitBlob: "7d9e62164db0594b761ea88eac9a07ac2d142f73",
+    },
+    currentPin: {
+      bytes: 719,
+      sha256: "cb199a6040c361256dc244d4e4e8183490524a0ee9505920a660e34eea3cc9b4",
+      gitBlob: "d6d98de15c656d3ecb32653b447b31486d3b9f05",
+    },
+    spans: [
+      {
+        beforeOffset: 261,
+        afterOffset: 261,
+        before: '  | "iterator-statics-prelude";\n',
+        after: '  | "iterator-statics-prelude"\n  | "intl-listformat-prelude";\n',
       },
     ],
   },
@@ -762,13 +820,26 @@ export function captureC1CurrentPopulation(
   // Retain the old receipt/source diagnostics before any narrower contract work.
   // No historical replacement is supplied to the old reconstruction until the live seam passes.
   const receipt = authenticateRuntimeProgramRelocationReceipt(receiptText);
-  let validatorRelocation: ProgramValidatorRelocationCapture | undefined;
+  const sourceMapComponent = readAuthority(sourceMapComponentPath);
+  primitive(sourceMapComponent, sourceMapComponentPath);
+  assertPin(sourceMapComponent, sourceMapComponentPin, sourceMapComponentPath);
+  const sourceMapEpoch = captureSourceMapSchemaSourceEpoch(readAuthority);
+  const sourceMapPredecessors = new Map<string, string>();
+  let validatorRelocation: SourceMapProgramValidatorCapture | undefined;
   let loweringLegalityPredecessor: string | undefined;
+  let typesPredecessor: string | undefined;
   const relocatedDependencies = ["src/ir/program-runtime-abi.ts", "src/ir/program-validation.ts"] as const;
   for (const record of [...receipt.current, ...receipt.dependencies]) {
     if (record.path === linearPath) continue;
     const rawSource = current.get(record.path)!;
-    if (record.path === loweringLegalityPath) {
+    if (sourceMapPopulationPaths.includes(record.path as (typeof sourceMapPopulationPaths)[number])) {
+      const predecessor = sourceMapEpoch.before(record.path, rawSource);
+      assertRuntimeProgramRelocationSource(predecessor, record, record.path);
+      sourceMapPredecessors.set(record.path, predecessor);
+    } else if (record.path === "src/ir/types.ts") {
+      typesPredecessor = beforeCanonicalCurrentInput(record.path, rawSource);
+      assertRuntimeProgramRelocationSource(typesPredecessor, record, record.path);
+    } else if (record.path === loweringLegalityPath) {
       // Fresh implementation authentication precedes the first imported source-pair operation.
       const implementation = readAuthority(loweringAnalysisImplementationPath);
       primitive(implementation, loweringAnalysisImplementationPath);
@@ -776,7 +847,7 @@ export function captureC1CurrentPopulation(
       loweringLegalityPredecessor = captureCurrentLoweringLegalityPredecessor(rawSource, readAuthority);
       assertRuntimeProgramRelocationSource(loweringLegalityPredecessor, record, record.path);
     } else if (relocatedDependencies.includes(record.path as (typeof relocatedDependencies)[number])) {
-      validatorRelocation ??= captureProgramValidatorRelocation(readAuthority);
+      validatorRelocation ??= captureSourceMapProgramValidatorRelocation(readAuthority);
       // Authenticate the already-read population operand against the independent physical authority channel.
       // A supplied mutant is refused, never replaced by the healthy authority copy.
       if (rawSource !== validatorRelocation.readCurrent(record.path as ProgramValidatorDonorPath))
@@ -799,6 +870,10 @@ export function captureC1CurrentPopulation(
       closure.set(record.path, source);
     }
     assertPin(source, record.pin, record.path);
+    if (record.path === "src/position-map.ts" || record.path === "src/shared/contracts/ir-unit-inventory.ts") {
+      // Validate the historical inverse while the native type host retains actual current text.
+      sourceMapEpoch.before(record.path, source);
+    }
     if (record.path === loweringPlannerPath) {
       // The actual current string stays in closure and therefore in real type resolution.
       assertPin(
@@ -810,7 +885,8 @@ export function captureC1CurrentPopulation(
     if (
       record.path === "src/wasm/model/instructions.ts" ||
       record.path === "package.json" ||
-      record.path === "pnpm-lock.yaml"
+      record.path === "pnpm-lock.yaml" ||
+      record.path === "src/shared/contracts/source-origin.ts"
     ) {
       const predecessor = beforeCanonicalCurrentInput(record.path, source);
       if (record.path === "package.json") predecessorPackage = predecessor;
@@ -842,7 +918,10 @@ export function captureC1CurrentPopulation(
   const oldFile = parse(linearPath, historical);
   checkBindings(oldFile, declaration(oldFile, contract), contract);
   const historicalPopulation = new Map(current);
+  for (const [path, predecessor] of sourceMapPredecessors) historicalPopulation.set(path, predecessor);
   historicalPopulation.set(linearPath, historical);
+  if (typesPredecessor === undefined) fail("missing Boolean types predecessor");
+  historicalPopulation.set("src/ir/types.ts", typesPredecessor);
   if (loweringLegalityPredecessor === undefined) fail("missing lowering legality predecessor");
   historicalPopulation.set(loweringLegalityPath, loweringLegalityPredecessor);
   if (validatorRelocation === undefined) fail("missing validator relocation capture");
