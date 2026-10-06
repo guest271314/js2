@@ -738,6 +738,7 @@ import {
 } from "./extern-declarations.js"; // (#3272) extracted verbatim
 import { buildLibDeclIndex } from "./lib-decl-index.js"; // (#4218) syntactic lib walk
 import { typeIsForeignReturnFnctorInstance } from "./fnctor-foreign-return.js"; // (#2071)
+import { typeIsRuntimeKeyedObjectLiteral } from "./object-model/runtime-key-open-object.js"; // (#4526)
 import { typeTakesToPrimitiveOpenPath } from "./to-primitive-open-object.js"; // (#5269 R3-2) the consumer-side twin of the literal gate
 import { readEnv } from "../env.js";
 // (#6770/#6797) The object-model leaves reach these core helpers through
@@ -12996,6 +12997,9 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
     if (ctx.standalone && typeTakesToPrimitiveOpenPath(tsType)) {
       return { kind: "externref" };
     }
+    // (#4526) A literal with a runtime computed key is an open object; a closed
+    // struct snapshot of it drops that key. See runtime-key-open-object.ts.
+    if (typeIsRuntimeKeyedObjectLiteral(ctx, tsType, omLiterals._hasRuntimeComputedKey)) return { kind: "externref" };
 
     let name = exactClassExpressionTypeName(ctx, tsType) ?? sym?.name;
     // Map class expression display names to their synthetic names only when
