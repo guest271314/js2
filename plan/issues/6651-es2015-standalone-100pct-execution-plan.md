@@ -169,6 +169,19 @@ assignee: "ttraenkler/fable-es2015-plan"
 #     `$__ta_ctor`, which the Int8Array `$Object` carrier is not). The first cut
 #     inlined the arm here and cost +68 / +65; extracting it left these 8.
 loc-budget-allow:
+  # 2026-10-05 — uncovered slice U3 (Proxy MOP residue, G4). Call sites only;
+  # the mechanisms live in leaves (`object-model/proxy-get-iterator.ts` NEW,
+  # `object-model/object-literal-reflective-escape.ts`). `object-ops.ts` +25:
+  # the evolving-`var` decline of the `Object.keys` nullish fold and its
+  # ToObject guard helper. `new-super.ts` +12: the realm-member `new
+  # other.Proxy(...)` admission predicate and its two call sites.
+  # `object-runtime-proxy.ts` +9: the `__object_keys_forin` proxy guard and the
+  # GetIterator arm hook. `statements/loops.ts` +8: the for-in proxy-receiver
+  # route around the vec index loop.
+  - src/codegen/object-ops.ts
+  - src/codegen/expressions/new-super.ts
+  - src/codegen/object-runtime-proxy.ts
+  - src/codegen/statements/loops.ts
   # 2026-09-29 — cluster H, slice H6 (record under the H6 claim).
   # `src/codegen/object-runtime-enumeration.ts` +4: one import and three
   # one-line `$Proxy` widenings of the array-like `$Object` arms of
@@ -1181,6 +1194,14 @@ loc-budget-allow:
   # `promise-subclass-cell-read.ts`; the hand-off cannot move, because it is the
   # arm that would otherwise emit the bare `global.get` of the cell.
 func-budget-allow:
+  # 2026-10-05 — uncovered slice U3 (see the loc-budget note): the four
+  # dispatch functions that have to name the new routes. `compileObjectKeysOrValues`
+  # +9, `ensureProxyRuntime` +7, `compileForInStatement` +7,
+  # `compileNewExpression` +1.
+  - src/codegen/object-ops.ts::compileObjectKeysOrValues
+  - src/codegen/object-runtime-proxy.ts::ensureProxyRuntime
+  - src/codegen/statements/loops.ts::compileForInStatement
+  - src/codegen/expressions/new-super.ts::compileNewExpression
   # 2026-09-29 — cluster H, slice H6. `buildObjectEnumerationHelpers` +2: the
   # `$Proxy` widening of the `__extern_get_idx` / `__extern_has_idx`
   # array-like arms (one line each; the predicate is `proxy-array-like.ts`).
@@ -1996,6 +2017,57 @@ readable (repo hygiene, #6796). Headings, in order:
 
 Owners still append new cluster records at the end of this file. The
 2026-09-28 session wrap-up handoff and everything after it stay below.
+
+### 2026-10-05 — Uncovered slice U3
+
+Slice U3 of the uncovered-residue census (G4, the seven Proxy MOP rows).
+Senior-dev lane, branch `issue-6651-u3-proxy-mop` off `origin/main` @ `4d42eec28e`.
+Base and branch were both measured locally (base = a copy of the fork-point
+`src/` in a side tree), standalone, QuickJS eval engine. The #5140/#5176
+nominal rows were NOT taken.
+
+**Root causes (several differ from the census guesses):**
+
+| Row | Census guess | Measured cause | Fix |
+|---|---|---|---|
+| `deleteProperty/trap-is-undefined-{strict,not-strict}` | dispatch does not forward | it does forward; the literal TARGET was a closed struct, so delete-then-`defineProperty(non-configurable)` left the delete marker and `Reflect.deleteProperty` answered `true` | a `new Proxy(o, …)` / `Proxy.revocable(o, …)` target joins #6770 S2's reflective-write reasons → open `$Object` (`object-literal-reflective-escape.ts`) |
+| `defineProperty/call-parameters` | desc arg not ordinary | `Object.keys(_desc)` where `var _desc;` is assigned in the trap: the checker's control-flow type is `undefined`, so the #2746 nullish fold threw at compile time | `compileObjectKeysOrValues` declines the fold for an evolving nullish-narrowed `var` (the #5197 predicate) and guards ToObject at run time |
+| `has/trap-is-undefined-using-with` | `__extern_has` length special case | `%Array.prototype%` had no `length` entry at all on the dynamic paths (has AND get) | seed own `length` 0 `{w:T,e:F,c:F}` into the Array companion (`native-proto.ts`); listed as a seeded own member |
+| `enumerate/removed-does-not-trigger` | GetIterator / for-in through traps | TS types `new Proxy(arr, h)` as `number[]`: for-in took the vec index loop (0 iterations); GetIterator read no `@@iterator` closure off the vec target | for-in over a direct Proxy binding goes dynamic, `__object_keys_forin` gets the `$Proxy` guard; NEW `object-model/proxy-get-iterator.ts`: a trapless-`get` proxy over an array re-enters `__iterator` with its target |
+| `setPrototypeOf/not-extensible-target-same-target-prototype` | F2 fold, widen to any `setPrototypeOf(binding)` | the write is on the trap's `t` parameter, not the binding | a Proxy TARGET is a dynamic-prototype receiver (`dynamicProtoReceiverNames`) |
+| `ownKeys/return-not-list-object-throws-realm` | member-callee admission | as specified | `new <realm global>.Proxy(…)` admitted in both construct gates via `tracesToProxyConstructorValue` |
+
+Both `__object_keys_forin` guard and GetIterator arm are gated on `ctx.proxyDirty`
+(the source names `Proxy`): ungated they changed the bytes of ~30 % of
+unrelated standalone rows.
+
+**Rows (standalone, `--isolate`):** the 7 G4 rows 0 → 7, plus
+`Array/prototype/length.js` and `Proxy/has/trap-is-undefined.js` (2 bonus).
+
+**Controls:**
+- 1,658-row in-process neighbourhood (every test262 file naming `Proxy`, every
+  `Object.{keys,values,entries}` row, `language/statements/for-in/**`,
+  `built-ins/{Reflect,Proxy}/**`, `Object/{get,set}PrototypeOf/**`, 36
+  `Array.prototype` own-`length` rows, a 1-in-20 `Array.prototype` sample):
+  base 477 non-pass, branch 468; **0 pass → non-pass**, 9 gained, 0 status
+  changes among non-pass rows.
+- standalone byte differential, 157-row random sample outside that set: 34
+  differ (the Array `length` seed in harness modules); all 34 re-run
+  `--isolate` on both trees: 0 lost.
+- gc lane byte differential, 150-row sample of the set: identical.
+- playground + examples (32 files, gc and standalone): byte-identical.
+- `node scripts/equivalence-gate.mjs`: no new failures.
+- Temporal, in-process with a linked standalone provider built FRESH per tree
+  (the shared cache key does not hash the compiler; the two providers differ by
+  76 B): `Duration/prototype/round/**` + every Temporal row naming `Proxy`,
+  134 rows — base 127 pass / 7 fail, branch identical, 0 `illegal cast`.
+- pins: `tests/issue-6651-u3-proxy-mop.test.ts`, 7 tests — 6 red on base, 1 guard.
+
+**Residuals:** for-in over a Proxy does not walk keys inherited through its
+`[[GetPrototypeOf]]`; `Array.prototype.values.call(p)` (static call path) and a
+dynamic `arr[Symbol.iterator]` read still do not yield
+`%Array.prototype.values%`; `String.prototype` / `Function.prototype` own
+`length`/`name` are still missing on the dynamic paths.
 
 ## Handoff — 2026-09-28, session wrap-up (D6, D7, H1 landed; I7 in this PR)
 
