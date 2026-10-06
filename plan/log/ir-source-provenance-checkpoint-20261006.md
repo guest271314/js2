@@ -6,7 +6,7 @@ This is a tested source-provenance checkpoint, not completion of the full IR mig
 
 Worktree: `worktrees/codex-3525-source-map-inline-origins-20261006`.
 Branch: `codex/3525-source-map-inline-origins-20261006`.
-Latest composed main base: `5f953c8e05919a304d5d3b8e3811e882962a9f33` (eight benchmark/budget paths). Resolve the published checkpoint with `git rev-parse codex/3525-source-map-inline-origins-20261006`; the PR records the exact remote head.
+Latest composed main base: `5f953c8e05919a304d5d3b8e3811e882962a9f33` (eight benchmark/budget paths). Implementation checkpoint: `3e137c4e00024c30b41ef3a52420b66b9b1c23aa` (signed Thomas commit). Resolve the final publication head with `git rev-parse codex/3525-source-map-inline-origins-20261006`; subsequent docs-only commits retain this tested code. The PR records the exact remote head.
 
 The fifteen production changes preserve requested source metadata through catalog/projection capture, immutable builder scopes, genuine frontend/startup provenance, typed preparation, validation, codec replay and small-function inlining. The multi-source `Math.abs(twice(x)) + x ** 2` failure exposed a missing caller ancestry after the callee body was cloned; the fix preserves the callee primary point and the actual removed callsite chain. Three genuine source-to-prepared-to-codec cases subsequently passed.
 
@@ -29,7 +29,7 @@ Preserved failures remain authoritative: the first affected twelve-file run regi
 
 **Final frozen cohort: 2,199/2,199 passed, direct exit0.** All 7,730 declared inputs remain exact across collection and execution, with zero ordinary error signatures or pending cases. Existing 1,835 affected names and 343 C1 names remain exact; the new successor has the original20 prefix plus one compatibility case. Evidence: `.tmp/inline-source-origins/final-policy-readers/final-review.json` and `registration-composition-review.json`. No timeout, kill, ignored-error flag or retry is authorized by this handoff.
 
-Root reports the whole-project native TS7 check and five configured gates passed. The old boundary's twenty focused diagnostics remain unchanged and are not green. Normal commit hooks, normal pre-push, ready PR creation, exact-head CI and protected queue/main delivery remain pending. Find the existing ready PR by head `ttraenkler:codex/3525-source-map-inline-origins-20261006`; confirm exact remote head and required checks before queue admission. No main delivery is certified by this document. The already delivered parser and recursive-recorder prerequisites do not establish this checkpoint's delivery.
+Root reports the whole-project native TS7 check and five configured gates passed. The old boundary's twenty focused diagnostics remain unchanged and are not green. The implementation commit passed all normal hooks and has its SSH signature and Thomas/agent/model attribution verified. The native changed-root runner applies its existing >20-file threshold (22 changed root files); direct 2,199 and 230 cohorts cover all changed root files. All 7,730 post-hook input bytes/digests/modes still match the tested epoch. Normal pre-push, ready PR creation, exact-head CI and protected queue/main delivery remain pending. Find the existing ready PR by head `ttraenkler:codex/3525-source-map-inline-origins-20261006`; confirm exact remote head and required checks before queue admission. No main delivery is certified by this document. The already delivered parser and recursive-recorder prerequisites do not establish this checkpoint's delivery.
 
 ## Resume in order
 
