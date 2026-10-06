@@ -171,3 +171,10 @@ normal inherited >32 changed-root lane self-skips. Actual canonical main and
 recorder parent were freshly verified: main4d, PR6507 still OPEN at exactf0.
 Dependency-first protected delivery remains pending; root does not claim a
 main merge or completed IR migration from this checkpoint.
+
+
+## Main composition and delivered recorder dependency (2026-10-06)
+
+Recorder PR6507 is delivered as 7e11e5d5ff916e9e48897d3daa695c51ccf5881b, ancestral to exact main76e559f46687617b8e103560818fbea2a9eadc46. Both binary recorder and its13-case test match the delivered90a source bytes and modes. This existing parser PR6509 merges that exact main without conflicts; its source and25-case regression test remain byte-identical to aa42e3b0df5dff214441ced5e2b5013affc3b6f2, and the old42-case parser cohort remains intact.
+
+Independent main-composed verification executes the same25 new +42 existing +13 recorder cases:80/80, collection and ordinary child exits0, full14887-input before/list/body custody equal, no ordinary errors or pending cases. Evidence is retained in source-capture-tests worktree .tmp/source-map-source-capture/6509-main-composed-verification/actual. This proves this cohort, not full conformance or full IR migration. Public legacy remains retained. Normal commit/pre-push checks and protected exact-head admission are still required; only verified main delivery completes the narrow claims.
