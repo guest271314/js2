@@ -34,7 +34,7 @@
  */
 import { ts } from "../../ts-api.js";
 import type { Instr } from "../../ir/types.js";
-import { allocLocal } from "../context/locals.js";
+import type { allocLocal } from "../context/locals.js";
 import type { FunctionContext } from "../context/types.js";
 
 type FinallyClones = {
@@ -81,9 +81,18 @@ function inAsyncFunction(node: ts.Node): boolean {
   return false;
 }
 
-export function createFinallyRanGuard(fctx: FunctionContext, tagIdx: number, stmt: ts.TryStatement): FinallyRanGuard {
+/**
+ * `alloc` is `allocLocal`, injected by the caller so this leaf stays out of the
+ * codegen import-cycle SCC (`check:import-cycles`).
+ */
+export function createFinallyRanGuard(
+  fctx: FunctionContext,
+  tagIdx: number,
+  stmt: ts.TryStatement,
+  alloc: typeof allocLocal,
+): FinallyRanGuard {
   if (inAsyncFunction(stmt)) return NO_GUARD;
-  const flag = allocLocal(fctx, `__finally_ran_${fctx.locals.length}`, { kind: "i32" });
+  const flag = alloc(fctx, `__finally_ran_${fctx.locals.length}`, { kind: "i32" });
   const set = (value: 0 | 1): Instr[] => [
     { op: "i32.const", value },
     { op: "local.set", index: flag },
@@ -110,7 +119,7 @@ export function createFinallyRanGuard(fctx: FunctionContext, tagIdx: number, stm
     }),
     rethrowIfRan,
     payloadPrologue: () => {
-      const pending = allocLocal(fctx, `__finally_exn_${fctx.locals.length}`, { kind: "externref" });
+      const pending = alloc(fctx, `__finally_exn_${fctx.locals.length}`, { kind: "externref" });
       return [{ op: "local.set", index: pending }, ...rethrowIfRan(pending), { op: "local.get", index: pending }];
     },
   };

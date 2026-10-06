@@ -432,7 +432,7 @@ export function compileTryStatement(ctx: CodegenContext, fctx: FunctionContext, 
   }
 
   // (#6651 U4) a throw BY the finally must not reach this statement's own handlers.
-  const ran = finallyInstrs ? createFinallyRanGuard(fctx, tagIdx, stmt) : undefined;
+  const ran = finallyInstrs ? createFinallyRanGuard(fctx, tagIdx, stmt, allocLocal) : undefined;
 
   // Compile the try block body
   const savedBody = pushBody(fctx);

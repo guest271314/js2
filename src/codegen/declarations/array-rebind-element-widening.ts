@@ -51,9 +51,7 @@
 import { jsTagOfFact, type JsTag } from "../../checker/oracle.js";
 import type { ValType } from "../../ir/types.js";
 import { ts } from "../../ts-api.js";
-import type { CodegenContext, FunctionContext } from "../context/types.js";
-import { compileArrayLiteral } from "../literals.js";
-import { localGlobalIdx } from "../registry/imports.js";
+import type { CodegenContext } from "../context/types.js";
 import { getOrRegisterVecType } from "../registry/types.js";
 import { descriptorArrayCarrierType } from "./descriptor-array-carrier.js";
 
@@ -211,24 +209,24 @@ export function descriptorValueWidenedArrayVecType(
  * (#6651 U4) Compile a rebind-widened binding's `[…]` initializer straight into
  * the widened `externref`-element vec. Left to the checker's element type, the
  * literal is built as e.g. `$__vec_i32` and then converted element-wise into the
- * slot, which re-boxes `true` as the NUMBER 1. Returns false (nothing emitted)
- * when the declaration is not a widened array-literal binding.
+ * slot, which re-boxes `true` as the NUMBER 1. Returns the literal the caller
+ * should compile with an `externref` element hint, or undefined when the
+ * declaration is not a widened array-literal binding. (The caller compiles it:
+ * importing `literals.js` here would pull this leaf into the import-cycle SCC.)
  */
-export function tryCompileRebindWidenedArrayInit(
+export function rebindWidenedArrayInit(
   ctx: CodegenContext,
-  fctx: FunctionContext,
   decl: ts.VariableDeclaration,
   slotType: ValType,
-): boolean {
+): ts.ArrayLiteralExpression | undefined {
   const init = decl.initializer;
-  if (init === undefined || !ts.isArrayLiteralExpression(init) || !ts.isIdentifier(decl.name)) return false;
-  if (!isModuleScoped(decl) || !widenedVarsOf(ctx, decl.getSourceFile()).has(decl.name.text)) return false;
-  if (init.elements.some((element) => ts.isSpreadElement(element) || ts.isOmittedExpression(element))) return false;
+  if (init === undefined || !ts.isArrayLiteralExpression(init) || !ts.isIdentifier(decl.name)) return undefined;
+  if (!isModuleScoped(decl) || !widenedVarsOf(ctx, decl.getSourceFile()).has(decl.name.text)) return undefined;
+  if (init.elements.some((element) => ts.isSpreadElement(element) || ts.isOmittedExpression(element))) return undefined;
   // Only when the slot really is the widened vec (an earlier arm may have chosen another).
   const widenedIdx = getOrRegisterVecType(ctx, "externref", { kind: "externref" });
-  if ((slotType.kind !== "ref" && slotType.kind !== "ref_null") || slotType.typeIdx !== widenedIdx) return false;
-  compileArrayLiteral(ctx, fctx, init, { kind: "externref" });
-  return true;
+  if ((slotType.kind !== "ref" && slotType.kind !== "ref_null") || slotType.typeIdx !== widenedIdx) return undefined;
+  return init;
 }
 
 /**
@@ -259,7 +257,7 @@ export function propertyValueWidenedArrayCarrier(ctx: CodegenContext, prop: ts.S
     // An earlier `moduleGlobalWasmType` arm may have chosen another slot; alias
     // only into the slot the binding really has.
     const globalIdx = ts.isIdentifier(decl.name) ? ctx.moduleGlobals.get(decl.name.text) : undefined;
-    const slot = globalIdx === undefined ? undefined : ctx.mod.globals[localGlobalIdx(ctx, globalIdx)]?.type;
+    const slot = globalIdx === undefined ? undefined : ctx.mod.globals[globalIdx - ctx.numImportGlobals]?.type; // = localGlobalIdx (inlined: registry/imports.js is inside the import-cycle SCC)
     if (slot !== undefined && (slot.kind !== carrier.kind || slot.typeIdx !== carrier.typeIdx)) continue;
     return carrier;
   }
